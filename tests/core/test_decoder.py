@@ -25,6 +25,7 @@ from sstv_app.core.decoder import (
     _decode_robot36_dispatch,
     decode_wav,
 )
+from sstv_app.core.dsp_utils import resample_to
 from sstv_app.core.encoder import encode
 from sstv_app.core.modes import MODE_TABLE, Mode
 
@@ -253,6 +254,37 @@ def test_decode_wav_returns_none_for_truncated_image() -> None:
     )
     truncated = samples[: samples.size // 2]
     assert decode_wav(truncated, fs) is None
+
+
+def test_decode_wav_robot36_clock_drift_round_trip() -> None:
+    """Simulate ~2000 ppm RX clock drift (47 900 Hz actual vs. 48 000 Hz
+    claimed) by resampling a clean Robot 36 encoding to 47 900 Hz and
+    handing it to ``decode_wav`` as if it were 48 000 Hz. The slant
+    correction in ``core/slant.py`` should recover the real per-line
+    period from the sync candidates and still produce an image within
+    the plan's 5 % luma bound.
+
+    Without slant correction the cumulative line drift over 240 lines
+    is about 45 ms — roughly 15 % of a line period — which pushes the
+    Y scans out of their nominal slots and produces a visible diagonal
+    slant in the decoded image.
+    """
+    fs_claimed = 48_000
+    fs_actual = 47_900  # ~2083 ppm slower
+    original = _make_gradient(320, 240)
+    clean = _to_float(encode(original, Mode.ROBOT_36, sample_rate=fs_claimed))
+
+    # Resample to the "actual" (slower) rate, then lie to the decoder.
+    drifted = resample_to(clean, fs_claimed, fs_actual)
+    result = decode_wav(drifted, fs_claimed)
+
+    assert result is not None, "clock-drifted Robot 36 returned None"
+    assert result.mode == Mode.ROBOT_36
+    err = _mean_abs_luma_error(result.image, original)
+    assert err < 12.75, (
+        f"Slant-corrected Robot 36 at ~2000 ppm drift: luma error "
+        f"{err:.2f} exceeds 5 % bound"
+    )
 
 
 def test_decode_wav_robot36_low_snr_still_decodes() -> None:
