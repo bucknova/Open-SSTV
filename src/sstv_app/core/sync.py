@@ -151,6 +151,13 @@ def find_sync_candidates(
 
     Indices are compensated for the boxcar smoother's leading-edge skew
     (half the smoother window), matching ``find_line_starts``.
+
+    This function is intentionally permissive — it can yield spurious
+    candidates such as VIS stop-bit residue (a 1200 Hz run that started
+    before ``start_idx`` and leaked past it, then got chopped to
+    length-valid by the ``arr[start_idx:]`` slice). ``walk_sync_grid``
+    filters those out by anchor selection rather than forcing every
+    caller to re-implement residue detection.
     """
     arr = np.asarray(freq_track)
     if arr.ndim != 1 or arr.size == 0:
@@ -185,10 +192,18 @@ def walk_sync_grid(
 ) -> list[int]:
     """Walk raw sync candidates into an evenly-spaced grid.
 
-    Anchors on the first candidate and walks forward, accepting any
-    subsequent candidate within ±25 % of the predicted next slot. Gaps
-    (missing or spurious candidates) are filled with the predicted index
-    so downstream decoders can still slice a plausible scan line there.
+    Finds the first candidate whose outgoing spacing matches the expected
+    line period within ±25 %, anchors the grid there, and walks forward.
+    Candidates before the anchor are discarded as spurious — this is how
+    we skip things like VIS stop-bit residue that ``find_sync_candidates``
+    intentionally lets through, or PySSTV's Scottie "initial" pre-line
+    sync that sits one partial line before the real line-0 sync. Falls
+    back to ``candidates[0]`` if no pair matches, so well-formed inputs
+    with only one candidate still produce a best-effort grid.
+
+    Gaps (missing or out-of-tolerance candidates) are filled with the
+    predicted index so downstream decoders can still slice a plausible
+    scan line there.
 
     Returns up to ``max_lines`` grid indices, or an empty list if
     ``candidates`` is empty.
@@ -197,8 +212,26 @@ def walk_sync_grid(
         return []
 
     tolerance = line_period_samples * _LINE_SPACING_TOLERANCE
-    line_starts: list[int] = [candidates[0]]
-    next_idx = 1
+
+    # Pick an anchor candidate whose distance to the next candidate
+    # matches the expected line period. This skips spurious leading
+    # candidates — the two we see in practice are (a) VIS stop-bit
+    # residue that leaked past ``start_idx`` and got chopped to a
+    # length-valid run, and (b) PySSTV's Scottie "initial" sync pulse,
+    # which precedes the line-0 mid-line sync by ~285 ms rather than a
+    # full 428 ms line period. Both confuse a naive ``[candidates[0]]``
+    # anchor, and both are trivially rejected by this pair-wise check.
+    anchor_idx = 0
+    for i in range(len(candidates) - 1):
+        if (
+            abs(candidates[i + 1] - candidates[i] - line_period_samples)
+            <= tolerance
+        ):
+            anchor_idx = i
+            break
+
+    line_starts: list[int] = [candidates[anchor_idx]]
+    next_idx = anchor_idx + 1
     while len(line_starts) < max_lines and next_idx < len(candidates):
         expected = line_starts[-1] + line_period_samples
         # Skip candidates that fall well before the expected slot (these
