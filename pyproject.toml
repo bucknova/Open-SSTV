@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sstv-app"
+version = "0.1.0"
+description = "Open-source cross-platform SSTV transceiver for amateur radio."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "GPL-3.0-or-later" }
+keywords = ["sstv", "amateur-radio", "ham-radio", "hamlib", "rigctld", "qt"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: X11 Applications :: Qt",
+    "Environment :: MacOS X",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications :: Ham Radio",
+    "Topic :: Multimedia :: Sound/Audio",
+]
+dependencies = [
+    "PySide6>=6.6,<7",       # Qt 6 bindings (LGPL-3) — official Qt project
+    "numpy>=1.26,<3",        # DSP arrays (1.26 = first wheel with py3.12 macOS arm64)
+    "scipy>=1.11,<2",        # signal.hilbert, butter, sosfiltfilt, resample_poly
+    "sounddevice>=0.4.6,<1", # PortAudio I/O (MIT) — wheels for Linux x86_64 + macOS
+    "PySSTV>=0.5.6,<1",      # TX encoder (MIT) — covers Martin/Scottie/Robot/PD
+    "Pillow>=10.0,<12",      # Image load/resize for TX, save for RX
+    "platformdirs>=4.0,<5",  # XDG-correct config and data dirs
+    "tomli-w>=1.0,<2",       # TOML write (stdlib tomllib only reads)
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-qt>=4.4",
+    "pytest-cov>=5.0",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "types-Pillow",
+]
+
+[project.scripts]
+sstv-app = "sstv_app.app:main"
+sstv-app-decode = "sstv_app.cli.decode:main"
+sstv-app-encode = "sstv_app.cli.encode:main"
+
+[project.urls]
+Homepage = "https://github.com/your-org/sstv-app"
+Issues = "https://github.com/your-org/sstv-app/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sstv_app"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/docs",
+    "/scripts",
+    "/README.md",
+    "/LICENSE",
+    "/pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gui: marks tests that require a Qt display (deselect with -m 'not gui')",
+    "integration: marks tests that require external services (e.g. rigctld)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src/sstv_app"]
