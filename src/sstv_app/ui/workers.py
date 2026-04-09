@@ -7,7 +7,7 @@ Qt signals (queued connections, which Qt makes thread-safe automatically).
 We deliberately avoid asyncio/qasync — no concurrent socket fan-out, so a
 worker-thread-per-task model is the right fit and ``pytest-qt`` Just Works.
 
-Phase 1 ships only ``TxWorker``. ``RxWorker`` lands in Phase 2.
+Phase 1 shipped ``TxWorker``; Phase 2 step 17 adds ``RxWorker``.
 
 TxWorker
 ========
@@ -44,6 +44,26 @@ is silent on the manual-PTT side.
 A failed ``play_blocking`` (lost audio device, etc.) is reported as an
 error but does not block the unkey: the ``finally`` clause always runs
 ``set_ptt(False)`` so we never leave the rig in a stuck-keyed state.
+
+RxWorker
+========
+
+The RX flow is the inverse of TX: chunks stream in from
+``InputStreamWorker.chunk_ready`` on a worker thread and the worker
+hands them to ``core.decoder.Decoder``. The decoder's ``feed`` call
+runs ``decode_wav`` over the accumulated buffer every time, which is
+O(buffer) and therefore prohibitive if called on every ~20 ms audio
+chunk. The worker absorbs that by accumulating chunks locally and
+only flushing to ``Decoder.feed`` every ``_RX_FLUSH_SAMPLES_DEFAULT``
+samples of audio (1 s at 48 kHz). This turns a 36 s Robot 36
+transmission from ~1800 decode attempts into ~36, each of which
+fails fast until the full image is present — leaving plenty of
+headroom on a Pi-class machine.
+
+``DecoderEvent`` values from ``Decoder.feed`` are translated into
+Qt signals (``image_started``, ``image_complete``, ``error``) so UI
+code can connect to them directly without importing the core
+dataclasses.
 """
 from __future__ import annotations
 
@@ -51,16 +71,24 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
+import numpy as np
 from PySide6.QtCore import QObject, Signal, Slot
 
 from sstv_app.audio import output_stream
 from sstv_app.audio.devices import AudioDevice
+from sstv_app.core.decoder import (
+    DecodeError,
+    Decoder,
+    ImageComplete,
+    ImageStarted,
+)
 from sstv_app.core.encoder import DEFAULT_SAMPLE_RATE, encode
 from sstv_app.core.modes import Mode
 from sstv_app.radio.base import ManualRig, Rig
 from sstv_app.radio.exceptions import RigError
 
 if TYPE_CHECKING:
+    from numpy.typing import NDArray
     from PIL.Image import Image as PILImage
 
 
@@ -69,6 +97,14 @@ if TYPE_CHECKING:
 #: open. 200 ms is on the safe side; advanced users can override per-rig
 #: in settings (Phase 3).
 DEFAULT_PTT_DELAY_S = 0.2
+
+#: How many samples to accumulate in ``RxWorker`` before flushing a
+#: batch to ``Decoder.feed``. 1 s at 48 kHz — see the module docstring
+#: for why we throttle at all. Lowering this makes RX more responsive
+#: to short-image modes but multiplies decode attempts; raising it
+#: delays the "image complete" signal by up to one flush interval
+#: past the actual end of the transmission.
+_RX_FLUSH_SAMPLES_DEFAULT: int = 48_000
 
 
 class TxWorker(QObject):
@@ -180,4 +216,133 @@ class TxWorker(QObject):
         output_stream.stop()
 
 
-__all__ = ["DEFAULT_PTT_DELAY_S", "TxWorker"]
+class RxWorker(QObject):
+    """Consume audio chunks and emit decoded SSTV images.
+
+    Lives on a worker thread (``moveToThread``). The GUI connects
+    ``InputStreamWorker.chunk_ready`` to ``feed_chunk`` and listens
+    for the image-event signals below.
+
+    Signals
+    -------
+    image_started(Mode, int):
+        Emitted when a full VIS header has been decoded. The second
+        argument is the raw 8-bit VIS code (handy for the status bar).
+    image_complete(object, Mode, int):
+        Emitted when a full image has been sliced out of the audio.
+        The first argument is a ``PIL.Image.Image`` — we pass it via
+        ``object`` rather than a ``QImage`` so the worker stays free
+        of GUI-side pixel format conversions.
+    error(str):
+        Emitted for any decode failure (malformed VIS, unsupported
+        mode, 2-D feed). The worker keeps running; callers surface
+        errors as non-modal status bar messages.
+    """
+
+    image_started = Signal(object, int)  # (Mode, vis_code)
+    image_complete = Signal(object, object, int)  # (PIL.Image, Mode, vis_code)
+    error = Signal(str)
+
+    def __init__(
+        self,
+        sample_rate: int = DEFAULT_SAMPLE_RATE,
+        flush_samples: int | None = None,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._sample_rate = sample_rate
+        self._decoder = Decoder(sample_rate)
+        self._scratch: list["NDArray[np.float64]"] = []
+        self._scratch_samples: int = 0
+        self._flush_samples: int = (
+            flush_samples
+            if flush_samples is not None
+            else _RX_FLUSH_SAMPLES_DEFAULT
+        )
+
+    @property
+    def sample_rate(self) -> int:
+        return self._sample_rate
+
+    # === slots ===
+
+    @Slot(object)
+    def feed_chunk(self, chunk: "NDArray") -> None:
+        """Buffer one audio chunk; flush to the decoder on a cadence.
+
+        Safe to invoke via queued connection from the audio worker
+        thread. The chunk is copied into float64 eagerly (the rest of
+        the DSP pipeline runs in float64) so the caller is free to
+        reuse its buffer after the signal returns.
+        """
+        try:
+            arr = np.asarray(chunk, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            self.error.emit(f"Bad chunk dtype: {exc}")
+            return
+        if arr.ndim != 1:
+            self.error.emit(f"Expected 1-D chunk, got {arr.ndim}-D")
+            return
+        if arr.size == 0:
+            return
+
+        self._scratch.append(arr)
+        self._scratch_samples += arr.size
+
+        if self._scratch_samples >= self._flush_samples:
+            self._flush()
+
+    @Slot()
+    def reset(self) -> None:
+        """Drop the scratch buffer and reset the decoder state.
+
+        Called when the user clicks "Clear" or switches input device.
+        After ``reset`` the next ``feed_chunk`` begins a fresh hunt
+        for a VIS header.
+        """
+        self._scratch.clear()
+        self._scratch_samples = 0
+        self._decoder.reset()
+
+    @Slot()
+    def flush(self) -> None:
+        """Force an immediate flush of any buffered audio to the decoder.
+
+        Exposed for the ``stopped`` signal path so the tail of an
+        in-flight transmission isn't discarded when the user stops
+        capture mid-image. Idempotent.
+        """
+        if self._scratch_samples > 0:
+            self._flush()
+
+    # === internal ===
+
+    def _flush(self) -> None:
+        if not self._scratch:
+            return
+        if len(self._scratch) == 1:
+            joined = self._scratch[0]
+        else:
+            joined = np.concatenate(self._scratch)
+        self._scratch.clear()
+        self._scratch_samples = 0
+
+        try:
+            events = self._decoder.feed(joined)
+        except Exception as exc:  # noqa: BLE001 — anything surfaces to UI
+            self.error.emit(f"Decoder exception: {exc}")
+            return
+
+        for event in events:
+            self._dispatch(event)
+
+    def _dispatch(self, event: object) -> None:
+        if isinstance(event, ImageStarted):
+            self.image_started.emit(event.mode, event.vis_code)
+        elif isinstance(event, ImageComplete):
+            self.image_complete.emit(event.image, event.mode, event.vis_code)
+        elif isinstance(event, DecodeError):
+            self.error.emit(event.message)
+
+
+__all__ = ["DEFAULT_PTT_DELAY_S", "RxWorker", "TxWorker"]

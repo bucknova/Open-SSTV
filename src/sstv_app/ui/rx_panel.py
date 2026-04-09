@@ -1,11 +1,175 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Receive panel widget.
 
-Composes the live waterfall (top), the in-progress decode preview that
-fills row-by-row as ``Decoder.LineDecoded`` events arrive (middle), and the
-``ImageGalleryWidget`` of recently decoded images (bottom). Listens to
-``RxWorker`` signals exclusively — no direct DSP imports.
+Composes a start/stop capture button, the in-progress / most-recent
+decoded image preview, a status label that shows the detected mode
+and VIS code, and an ``ImageGalleryWidget`` strip of recent decodes.
+Owns no threads, no audio, and no DSP — it just emits
+``capture_requested(bool)`` (True to start, False to stop) and exposes
+setters/slots the ``MainWindow`` calls in response to ``RxWorker``
+signals.
 
-Phase 0 stub. Implemented in Phase 2 step 17 of the v1 plan.
+The live FFT waterfall from the v1 plan is intentionally deferred to
+Phase 3 polish — it's a display-only nicety that doesn't gate the
+"images appearing from a live radio" milestone.
+
+Signals
+-------
+capture_requested(bool):
+    User clicked Start/Stop. ``True`` means "open the input stream and
+    begin decoding"; ``False`` means "close the stream and stop".
+clear_requested():
+    User clicked Clear. The MainWindow resets the ``RxWorker`` so the
+    decoder starts hunting for a fresh VIS.
+image_saved(PIL.Image.Image, Mode):
+    User double-clicked a gallery thumbnail. Phase 3 will wire this
+    to a ``QFileDialog`` save dialog; v1 just re-emits for the
+    MainWindow to display a status bar confirmation.
 """
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
+
+from sstv_app.core.modes import Mode
+from sstv_app.ui.image_gallery import ImageGalleryWidget, _pil_to_pixmap
+
+if TYPE_CHECKING:
+    from PIL.Image import Image as PILImage
+
+
+class RxPanel(QWidget):
+    """The receive half of the main window."""
+
+    capture_requested = Signal(bool)
+    clear_requested = Signal()
+    image_saved = Signal(object, object)  # (PIL.Image, Mode)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+
+        self._capturing: bool = False
+        self._current_mode: Mode | None = None
+
+        layout = QVBoxLayout(self)
+
+        # --- Start/Stop + Clear row ---
+        button_row = QHBoxLayout()
+        self._start_btn = QPushButton("Start Capture")
+        self._start_btn.clicked.connect(self._on_start_clicked)
+        button_row.addWidget(self._start_btn)
+
+        self._clear_btn = QPushButton("Clear")
+        self._clear_btn.clicked.connect(self.clear_requested.emit)
+        button_row.addWidget(self._clear_btn)
+        layout.addLayout(button_row)
+
+        # --- Current / most-recent decoded image ---
+        self._preview = QLabel("No image decoded yet")
+        self._preview.setMinimumSize(320, 240)
+        self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._preview.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        self._preview.setStyleSheet(
+            "QLabel { border: 1px solid palette(mid); }"
+        )
+        layout.addWidget(self._preview, stretch=1)
+
+        # --- Status line ---
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        layout.addWidget(self._status)
+
+        # --- Gallery strip ---
+        self._gallery = ImageGalleryWidget(self)
+        self._gallery.image_activated.connect(self.image_saved.emit)
+        layout.addWidget(self._gallery)
+
+    # === public API used by MainWindow ===
+
+    def set_capturing(self, capturing: bool) -> None:
+        """Toggle the Start/Stop button label and internal state.
+
+        Called by ``MainWindow`` in response to ``InputStreamWorker``'s
+        ``started``/``stopped`` signals so the UI reflects what the
+        audio thread is actually doing, not just what we asked it for.
+        """
+        self._capturing = capturing
+        self._start_btn.setText("Stop Capture" if capturing else "Start Capture")
+        if capturing:
+            self._status.setText("Capturing… waiting for VIS header.")
+
+    def set_status(self, text: str) -> None:
+        self._status.setText(text)
+
+    @Slot(object, int)
+    def show_image_started(self, mode: Mode, vis_code: int) -> None:
+        """Announce a detected VIS header in the status line."""
+        self._current_mode = mode
+        self._status.setText(
+            f"Decoding {mode.value} (VIS 0x{vis_code:02X})…"
+        )
+
+    @Slot(object, object, int)
+    def show_image_complete(
+        self, image: "PILImage", mode: Mode, vis_code: int
+    ) -> None:
+        """Update the preview and add the image to the gallery.
+
+        Called via queued connection from ``RxWorker.image_complete``,
+        so the ``image`` argument is already a ``PIL.Image.Image``
+        owned by this thread — safe to convert directly.
+        """
+        pix = _pil_to_pixmap(image).scaled(
+            self._preview.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._preview.setPixmap(pix)
+        self._preview.setText("")
+        self._gallery.add_image(image, mode)
+        self._status.setText(
+            f"Decoded {mode.value} ({image.width}×{image.height}, "
+            f"VIS 0x{vis_code:02X})"
+        )
+        self._current_mode = mode
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 — Qt API
+        """Rescale the current preview pixmap when the panel resizes.
+
+        Without this override the QLabel caches the pre-scaled pixmap
+        and the image stays its original size when the user enlarges
+        the window — jarring next to the decoded-line-by-line feel
+        users expect from an SSTV panel.
+        """
+        super().resizeEvent(event)
+        pixmap = self._preview.pixmap()
+        if pixmap is not None and not pixmap.isNull():
+            self._preview.setPixmap(
+                pixmap.scaled(
+                    self._preview.size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+
+    # === private slots ===
+
+    @Slot()
+    def _on_start_clicked(self) -> None:
+        # Toggle: if we're currently capturing, request stop; otherwise start.
+        self.capture_requested.emit(not self._capturing)
+
+
+__all__ = ["RxPanel"]
