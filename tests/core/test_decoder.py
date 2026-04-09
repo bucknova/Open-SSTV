@@ -22,10 +22,11 @@ from sstv_app.core.decoder import (
     Decoder,
     ImageComplete,
     ImageStarted,
+    _decode_robot36_dispatch,
     decode_wav,
 )
 from sstv_app.core.encoder import encode
-from sstv_app.core.modes import Mode
+from sstv_app.core.modes import MODE_TABLE, Mode
 
 # === helpers ===
 
@@ -116,6 +117,100 @@ def test_decode_wav_robot36_round_trip_at_44100() -> None:
     assert err < 12.75
 
 
+def _byte_to_freq(b: int) -> float:
+    """Inverse of decoder's freq→luma map (1500..2300 → 0..255)."""
+    return 1500.0 + (2300.0 - 1500.0) * b / 255.0
+
+
+def _synthesize_robot36_line_pair_track(
+    image: Image.Image, fs: int
+) -> np.ndarray:
+    """Fabricate the per-sample frequency track of a canonical broadcast
+    Robot 36 WAV (120 super-lines, no VIS preamble).
+
+    Each super-line encodes two image rows as::
+
+        SYNC (9 ms, 1200 Hz)
+        SYNC PORCH (3 ms, 1500 Hz)
+        Y_even (88 ms @ 0.275 ms/pixel)
+        EVEN SEP (4.5 ms, 1500 Hz)
+        COLOR PORCH (1.5 ms, 1900 Hz)
+        Cr (44 ms @ 0.1375 ms/pixel, averaged across the row pair)
+        SYNC PORCH (3 ms, 1500 Hz)
+        Y_odd (88 ms)
+        ODD SEP (4.5 ms, 2300 Hz)
+        COLOR PORCH (1.5 ms, 1900 Hz)
+        Cb (44 ms, averaged across the row pair)
+
+    Total 290.5 ms per super-line, 120 super-lines → ~34.86 s. Used by
+    the line-pair dispatch test; the production dispatcher should detect
+    this layout from the 290 ms inter-sync spacing and route it through
+    ``_decode_robot36_line_pair``.
+    """
+    ycbcr = np.asarray(image.convert("YCbCr"), dtype=np.int32)
+    height, width, _ = ycbcr.shape
+    assert height % 2 == 0, "Robot 36 needs an even number of rows"
+    y_pix_ms = 88.0 / width
+    c_pix_ms = 44.0 / width
+
+    segments: list[tuple[float, float]] = []
+
+    def push(freq_hz: float, dur_ms: float) -> None:
+        segments.append((freq_hz, dur_ms / 1000.0))
+
+    for row_even in range(0, height, 2):
+        row_odd = row_even + 1
+        push(1200.0, 9.0)  # sync
+        push(1500.0, 3.0)  # sync porch
+        for x in range(width):
+            push(_byte_to_freq(int(ycbcr[row_even, x, 0])), y_pix_ms)
+        push(1500.0, 4.5)  # even separator
+        push(1900.0, 1.5)  # color porch
+        for x in range(width):
+            cr_avg = (int(ycbcr[row_even, x, 2]) + int(ycbcr[row_odd, x, 2])) // 2
+            push(_byte_to_freq(cr_avg), c_pix_ms)
+        push(1500.0, 3.0)  # mid-pair sync porch (no sync)
+        for x in range(width):
+            push(_byte_to_freq(int(ycbcr[row_odd, x, 0])), y_pix_ms)
+        push(2300.0, 4.5)  # odd separator
+        push(1900.0, 1.5)  # color porch
+        for x in range(width):
+            cb_avg = (int(ycbcr[row_even, x, 1]) + int(ycbcr[row_odd, x, 1])) // 2
+            push(_byte_to_freq(cb_avg), c_pix_ms)
+
+    out: list[np.ndarray] = []
+    for freq, dur in segments:
+        n = int(round(dur * fs))
+        if n > 0:
+            out.append(np.full(n, freq, dtype=np.float64))
+    return np.concatenate(out)
+
+
+def test_decode_robot36_line_pair_round_trip_recovers_image() -> None:
+    """Canonical broadcast Robot 36 (120 super-lines, 290 ms spacing) —
+    the layout SimpleSSTV iOS and MMSSTV emit on air. The dispatcher
+    should auto-detect this from the raw sync spacing and route it to
+    ``_decode_robot36_line_pair``.
+    """
+    fs = 48_000
+    original = _make_gradient(320, 240)
+    spec = MODE_TABLE[Mode.ROBOT_36]
+
+    inst = _synthesize_robot36_line_pair_track(original, fs)
+    # No VIS preamble in the synthesized track — call the dispatcher
+    # directly with vis_end=0 to exercise the layout auto-detection.
+    image = _decode_robot36_dispatch(inst, fs, spec, vis_end=0)
+
+    assert image is not None, "line-pair dispatch returned None"
+    assert image.size == (320, 240)
+    assert image.mode == "RGB"
+
+    err = _mean_abs_luma_error(image, original)
+    assert err < 12.75, (
+        f"Robot 36 line-pair round-trip luma error {err:.2f} exceeds 5 % bound"
+    )
+
+
 def test_decode_wav_robot36_solid_color_recovers_color() -> None:
     """A solid 50% grey image should round-trip to a solid 50% grey
     image (within a luma unit or two of quantization noise)."""
@@ -160,19 +255,45 @@ def test_decode_wav_returns_none_for_truncated_image() -> None:
     assert decode_wav(truncated, fs) is None
 
 
-def test_decode_wav_returns_none_for_unsupported_mode_vis() -> None:
-    """Phase 2 step 13 only ships Robot 36 — Martin / Scottie are
-    locked out at the dispatcher level until step 14. We assert this
-    here so the next step's commit can flip the dict and immediately
-    pass these (currently expected-None) round-trips for the new modes.
-    """
+def test_decode_wav_martin_m1_round_trip_recovers_image() -> None:
+    """Phase 2 step 14 adds the Martin M1 per-mode decoder. Assert the
+    same 5 %-luma round-trip bound we use for Robot 36 — the DSP front
+    end is shared so any regression there shows up here too."""
     fs = 48_000
+    original = _make_gradient(320, 256)
     samples = _to_float(
-        encode(_make_gradient(320, 256), Mode.MARTIN_M1, sample_rate=fs)
+        encode(original, Mode.MARTIN_M1, sample_rate=fs)
     )
-    # decode_wav recognizes the VIS but the per-mode decoder dict
-    # doesn't have an entry yet, so it returns None.
-    assert decode_wav(samples, fs) is None
+
+    result = decode_wav(samples, fs)
+    assert result is not None, "Martin M1 round-trip returned None"
+    assert result.mode == Mode.MARTIN_M1
+    assert result.vis_code == 0x2C
+
+    error = _mean_abs_luma_error(result.image, original)
+    assert error < 12.75, (
+        f"Martin M1 round-trip luma error {error:.2f} exceeds 5 % bound"
+    )
+
+
+def test_decode_wav_scottie_s1_round_trip_recovers_image() -> None:
+    """Scottie S1 has the mid-line sync quirk (sync sits between blue
+    and red scans) — this is the per-mode decoder's acceptance test."""
+    fs = 48_000
+    original = _make_gradient(320, 256)
+    samples = _to_float(
+        encode(original, Mode.SCOTTIE_S1, sample_rate=fs)
+    )
+
+    result = decode_wav(samples, fs)
+    assert result is not None, "Scottie S1 round-trip returned None"
+    assert result.mode == Mode.SCOTTIE_S1
+    assert result.vis_code == 0x3C
+
+    error = _mean_abs_luma_error(result.image, original)
+    assert error < 12.75, (
+        f"Scottie S1 round-trip luma error {error:.2f} exceeds 5 % bound"
+    )
 
 
 # === Decoder streaming wrapper ===

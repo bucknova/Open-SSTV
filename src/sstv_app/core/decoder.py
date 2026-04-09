@@ -8,9 +8,23 @@ This module is the buffered front-end of the receive pipeline. It owns:
 * the high-level state machine (idle → searching for VIS → decoding image),
 * the dispatch into per-mode pixel decoders.
 
-Phase 2 step 13 ships the **Robot 36** decoder. Martin M1 and Scottie S1
-land in step 14, which only adds new ``_decode_*`` functions and a dict
-entry — the ``Decoder.feed`` plumbing is mode-agnostic.
+Phase 2 step 13 ships the **Robot 36** decoder. Step 14 adds Martin M1
+and Scottie S1 per-mode functions plus a dual-layout Robot 36 path (see
+below) — the ``Decoder.feed`` plumbing is mode-agnostic so each step
+only touches the dispatch table.
+
+Robot 36 has two wire formats in the wild:
+
+* PySSTV's per-line layout — 240 sync pulses at 150 ms intervals,
+  each followed by one Y and one chroma scan (Cr on even, Cb on odd).
+* The canonical broadcast "line-pair" layout — 120 sync pulses at
+  290 ms intervals, each followed by **two** Y scans and **two**
+  chroma scans (Cr then Cb) with no sync between them. This is what
+  SimpleSSTV iOS, MMSSTV, and most over-the-air encoders emit.
+
+``decode_wav`` auto-detects the layout by measuring the median spacing
+of raw sync candidates before walking the grid, then dispatches to
+``_decode_robot36`` (single-line) or ``_decode_robot36_line_pair``.
 
 Public API
 ----------
@@ -63,7 +77,11 @@ from sstv_app.core.demod import (
     instantaneous_frequency,
 )
 from sstv_app.core.modes import MODE_TABLE, Mode, ModeSpec, mode_from_vis
-from sstv_app.core.sync import find_line_starts
+from sstv_app.core.sync import (
+    find_line_starts,
+    find_sync_candidates,
+    walk_sync_grid,
+)
 from sstv_app.core.vis import detect_vis
 
 if TYPE_CHECKING:
@@ -112,18 +130,72 @@ def decode_wav(
 
     spec = MODE_TABLE[mode]
     inst = instantaneous_frequency(arr, fs)
-    line_starts = find_line_starts(inst, fs, spec, start_idx=vis_end)
-    if len(line_starts) < spec.height:
-        # Buffer didn't contain enough sync pulses for a full image.
-        return None
 
-    decoder = _PIXEL_DECODERS.get(mode)
-    if decoder is None:
-        return None
-    image = decoder(inst, fs, spec, line_starts)
+    # Robot 36 has two incompatible wire formats (see module docstring).
+    # Detect which one this WAV uses before walking a sync grid.
+    if mode == Mode.ROBOT_36:
+        image = _decode_robot36_dispatch(inst, fs, spec, vis_end)
+    else:
+        line_starts = find_line_starts(inst, fs, spec, start_idx=vis_end)
+        if len(line_starts) < spec.height:
+            return None
+        decoder = _PIXEL_DECODERS.get(mode)
+        if decoder is None:
+            return None
+        image = decoder(inst, fs, spec, line_starts)
+
     if image is None:
         return None
     return DecodedImage(image=image, mode=mode, vis_code=vis_code)
+
+
+def _decode_robot36_dispatch(
+    inst: NDArray,
+    fs: int,
+    spec: ModeSpec,
+    vis_end: int,
+) -> Image.Image | None:
+    """Auto-detect Robot 36 wire format and dispatch to the right decoder.
+
+    Uses the raw 1200 Hz sync candidates (length-filtered, no grid walk)
+    to estimate the actual inter-sync spacing. If it matches the
+    canonical per-line period within 25 %, the file is PySSTV-style and
+    we walk a ``spec.height`` grid. If it matches 2× that period, the
+    file is the canonical broadcast line-pair format and we walk a
+    ``spec.height // 2`` grid of super-lines. Anything else is rejected.
+    """
+    candidates = find_sync_candidates(
+        inst, fs, spec.sync_pulse_ms, start_idx=vis_end
+    )
+    if len(candidates) < 2:
+        return None
+
+    line_samples = spec.line_time_ms / 1000.0 * fs
+    pair_samples = 2.0 * line_samples
+    tolerance = 0.25  # ±25 %, matching walk_sync_grid's slack
+
+    # Median of consecutive diffs — resilient to an occasional missed
+    # or spurious candidate, unlike mean.
+    diffs = np.diff(np.asarray(candidates, dtype=np.float64))
+    if diffs.size == 0:
+        return None
+    median_diff = float(np.median(diffs))
+
+    if abs(median_diff - line_samples) <= line_samples * tolerance:
+        line_starts = walk_sync_grid(candidates, line_samples, spec.height)
+        if len(line_starts) < spec.height:
+            return None
+        return _decode_robot36(inst, fs, spec, line_starts)
+
+    if abs(median_diff - pair_samples) <= pair_samples * tolerance:
+        super_starts = walk_sync_grid(
+            candidates, pair_samples, spec.height // 2
+        )
+        if len(super_starts) < spec.height // 2:
+            return None
+        return _decode_robot36_line_pair(inst, fs, spec, super_starts)
+
+    return None
 
 
 # === per-mode pixel decoders ===
@@ -205,6 +277,198 @@ def _decode_robot36(
     )
 
 
+def _decode_robot36_line_pair(
+    inst: NDArray,
+    fs: int,
+    spec: ModeSpec,
+    super_starts: list[int],
+) -> Image.Image | None:
+    """Slice a canonical-broadcast Robot 36 frequency track into a YCbCr image.
+
+    In this layout (used by SimpleSSTV iOS, MMSSTV, and most over-the-air
+    encoders) one sync pulse covers two image rows. The per-super-line
+    layout, measured against the leading edge of the sync, is::
+
+        SYNC (9 ms)
+        SYNC PORCH (3 ms)
+        Y_even (88 ms)
+        EVEN SEP (4.5 ms)
+        COLOR PORCH (1.5 ms)
+        Cr (44 ms)              [shared by the two rows in this pair]
+        SYNC PORCH (3 ms)       [no sync — just a settling porch]
+        Y_odd (88 ms)
+        ODD SEP (4.5 ms)
+        COLOR PORCH (1.5 ms)
+        Cb (44 ms)              [shared by the two rows in this pair]
+
+    Total: 290.5 ms. ``super_starts`` contains ``spec.height // 2``
+    indices, one per pair; we produce two Y rows per super-line and
+    copy each chroma pair across both rows (nearest-neighbor subsampling,
+    matching ``_decode_robot36``).
+    """
+    width = spec.width
+    height = spec.height
+
+    sync_ms = 9.0
+    sync_porch_ms = 3.0
+    y_scan_ms = 88.0
+    inter_ch_gap_ms = 4.5
+    porch_ms = 1.5
+    c_scan_ms = 44.0
+
+    y0_offset_ms = sync_ms + sync_porch_ms
+    cr_offset_ms = y0_offset_ms + y_scan_ms + inter_ch_gap_ms + porch_ms
+    y1_offset_ms = cr_offset_ms + c_scan_ms + sync_porch_ms
+    cb_offset_ms = y1_offset_ms + y_scan_ms + inter_ch_gap_ms + porch_ms
+
+    y0_off = y0_offset_ms / 1000.0 * fs
+    cr_off = cr_offset_ms / 1000.0 * fs
+    y1_off = y1_offset_ms / 1000.0 * fs
+    cb_off = cb_offset_ms / 1000.0 * fs
+    y_span = y_scan_ms / 1000.0 * fs
+    c_span = c_scan_ms / 1000.0 * fs
+
+    y_plane = np.zeros((height, width), dtype=np.uint8)
+    cb_plane = np.zeros((height, width), dtype=np.uint8)
+    cr_plane = np.zeros((height, width), dtype=np.uint8)
+
+    n = inst.size
+    for pair_idx, sup in enumerate(super_starts):
+        row_even = pair_idx * 2
+        row_odd = row_even + 1
+        if row_odd >= height:
+            break
+        y_plane[row_even] = _sample_pixels(
+            inst, sup + y0_off, y_span, width, n
+        )
+        y_plane[row_odd] = _sample_pixels(
+            inst, sup + y1_off, y_span, width, n
+        )
+        cr_row = _sample_pixels(inst, sup + cr_off, c_span, width, n)
+        cb_row = _sample_pixels(inst, sup + cb_off, c_span, width, n)
+        # Both rows in the pair share the pair's chroma (nearest-neighbor
+        # upsample from the 320×(height/2) chroma grid).
+        cr_plane[row_even] = cr_row
+        cr_plane[row_odd] = cr_row
+        cb_plane[row_even] = cb_row
+        cb_plane[row_odd] = cb_row
+
+    ycbcr = np.stack([y_plane, cb_plane, cr_plane], axis=-1)
+    return Image.frombytes("YCbCr", (width, height), ycbcr.tobytes()).convert(
+        "RGB"
+    )
+
+
+def _decode_martin_m1(
+    inst: NDArray,
+    fs: int,
+    spec: ModeSpec,
+    line_starts: list[int],
+) -> Image.Image | None:
+    """Slice a frequency track into a Martin M1 RGB image.
+
+    PySSTV's Martin M1 emits each line as::
+
+        SYNC (4.862 ms) → BLACK porch (0.572 ms)
+        GREEN scan (146.432 ms) → BLACK porch
+        BLUE scan (146.432 ms)  → BLACK porch
+        RED scan (146.432 ms)   → BLACK porch
+
+    The line-start sample index from ``find_line_starts`` lands on the
+    leading edge of the SYNC pulse, so each channel's offset from
+    ``line_start`` is just (sync + porch) for green, plus a scan + porch
+    for each subsequent channel.
+    """
+    width = spec.width
+    height = spec.height
+
+    sync_ms = 4.862
+    porch_ms = 0.572
+    scan_ms = 146.432
+
+    # Channel-scan start offsets, in milliseconds from the line-start sync.
+    g_offset_ms = sync_ms + porch_ms
+    b_offset_ms = g_offset_ms + scan_ms + porch_ms
+    r_offset_ms = b_offset_ms + scan_ms + porch_ms
+
+    g_offset = g_offset_ms / 1000.0 * fs
+    b_offset = b_offset_ms / 1000.0 * fs
+    r_offset = r_offset_ms / 1000.0 * fs
+    scan_samples = scan_ms / 1000.0 * fs
+
+    rgb = np.zeros((height, width, 3), dtype=np.uint8)
+    n = inst.size
+    for row, line_start in enumerate(line_starts):
+        rgb[row, :, 1] = _sample_pixels(
+            inst, line_start + g_offset, scan_samples, width, n
+        )
+        rgb[row, :, 2] = _sample_pixels(
+            inst, line_start + b_offset, scan_samples, width, n
+        )
+        rgb[row, :, 0] = _sample_pixels(
+            inst, line_start + r_offset, scan_samples, width, n
+        )
+
+    return Image.fromarray(rgb)
+
+
+def _decode_scottie_s1(
+    inst: NDArray,
+    fs: int,
+    spec: ModeSpec,
+    sync_indices: list[int],
+) -> Image.Image | None:
+    """Slice a frequency track into a Scottie S1 RGB image.
+
+    Scottie's defining oddity: the SYNC pulse sits **between blue and
+    red** within each line, not at the line start. PySSTV's Scottie S1
+    emits each line as::
+
+        BLACK porch → GREEN scan → BLACK porch → BLACK porch
+        BLUE scan   → BLACK porch → SYNC (9 ms) → BLACK porch
+        RED scan    → BLACK porch
+
+    Each per-line index from ``find_line_starts`` lands on the leading
+    edge of the *between blue and red* sync pulse — i.e. partway into
+    the line. The decoder reaches green and blue by stepping
+    **backward** from the sync, and reaches red by stepping forward.
+    """
+    width = spec.width
+    height = spec.height
+
+    sync_ms = 9.0
+    porch_ms = 1.5
+    scan_ms = 138.24 - porch_ms  # PySSTV: SCAN = 138.24 - INTER_CH_GAP
+
+    # Offsets relative to the *detected sync* index.
+    #   Green scan starts (porch + scan + porch + porch + scan) ms before sync.
+    #   Blue scan starts (porch + scan) ms before sync (= 138.24 ms back).
+    #   Red scan starts (sync + porch) ms after sync.
+    g_offset_ms = -(porch_ms + scan_ms + porch_ms + porch_ms + scan_ms)
+    b_offset_ms = -(porch_ms + scan_ms)
+    r_offset_ms = sync_ms + porch_ms
+
+    g_offset = g_offset_ms / 1000.0 * fs
+    b_offset = b_offset_ms / 1000.0 * fs
+    r_offset = r_offset_ms / 1000.0 * fs
+    scan_samples = scan_ms / 1000.0 * fs
+
+    rgb = np.zeros((height, width, 3), dtype=np.uint8)
+    n = inst.size
+    for row, sync_idx in enumerate(sync_indices):
+        rgb[row, :, 1] = _sample_pixels(
+            inst, sync_idx + g_offset, scan_samples, width, n
+        )
+        rgb[row, :, 2] = _sample_pixels(
+            inst, sync_idx + b_offset, scan_samples, width, n
+        )
+        rgb[row, :, 0] = _sample_pixels(
+            inst, sync_idx + r_offset, scan_samples, width, n
+        )
+
+    return Image.fromarray(rgb)
+
+
 def _sample_pixels(
     inst: NDArray,
     start: float,
@@ -257,6 +521,8 @@ def _sample_pixels(
 
 _PIXEL_DECODERS: dict[Mode, callable] = {
     Mode.ROBOT_36: _decode_robot36,
+    Mode.MARTIN_M1: _decode_martin_m1,
+    Mode.SCOTTIE_S1: _decode_scottie_s1,
 }
 
 

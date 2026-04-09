@@ -43,11 +43,23 @@ find_leader(freq_track, fs) -> int | None
     Sample index of the VIS start bit's leading edge, or ``None`` if no
     leader was found.
 
+find_sync_candidates(freq_track, fs, sync_pulse_ms, start_idx=0) -> list[int]
+    All plausible per-line sync pulse start indices (length-filtered but
+    **not** spacing-filtered). Used by the decoder to detect whether a
+    Robot 36 WAV uses PySSTV's 150 ms per-line layout or the canonical
+    broadcast 290 ms line-pair layout before committing to a grid walk.
+
 find_line_starts(freq_track, fs, spec, start_idx=0) -> list[int]
     Sample indices (into the original ``freq_track``, not the slice) of
     each detected per-line sync pulse, anchored on the first valid
     candidate at or after ``start_idx``. Returns up to ``spec.height``
     indices.
+
+walk_sync_grid(candidates, line_period_samples, max_lines) -> list[int]
+    Walk a list of candidate sync indices into an evenly-spaced grid of
+    ``line_period_samples`` apart, filling missing slots with the
+    predicted next index. Shared between ``find_line_starts`` and the
+    Robot 36 line-pair path in the decoder.
 """
 from __future__ import annotations
 
@@ -90,7 +102,7 @@ _LINE_SPACING_TOLERANCE: float = 0.25
 
 
 def find_leader(
-    freq_track: "NDArray", fs: int
+    freq_track: NDArray, fs: int
 ) -> int | None:
     """Locate the end of the SSTV leader (= start of the VIS start bit).
 
@@ -123,10 +135,96 @@ def find_leader(
     return None
 
 
-def find_line_starts(
-    freq_track: "NDArray",
+def find_sync_candidates(
+    freq_track: NDArray,
     fs: int,
-    spec: "ModeSpec",
+    sync_pulse_ms: float,
+    start_idx: int = 0,
+) -> list[int]:
+    """Length-filtered sync pulse candidates, with no spacing filter.
+
+    Returns the sample indices (into the original ``freq_track``) of
+    every 1200 Hz run whose duration falls within 50–200 % of the given
+    ``sync_pulse_ms``. The caller typically feeds this into
+    ``walk_sync_grid`` after deciding on the expected line period — or
+    uses the raw list to auto-detect the period itself.
+
+    Indices are compensated for the boxcar smoother's leading-edge skew
+    (half the smoother window), matching ``find_line_starts``.
+    """
+    arr = np.asarray(freq_track)
+    if arr.ndim != 1 or arr.size == 0:
+        return []
+    if start_idx < 0 or start_idx >= arr.size:
+        return []
+
+    sync_samples = sync_pulse_ms / 1000.0 * fs
+    min_sync_run = max(1, int(round(_MIN_LINE_SYNC_RATIO * sync_samples)))
+    max_sync_run = max(
+        min_sync_run + 1, int(round(_MAX_LINE_SYNC_RATIO * sync_samples))
+    )
+
+    smooth_n = max(1, int(round(_LINE_SMOOTH_S * fs)))
+    sliced = arr[start_idx:]
+    smooth = _boxcar(sliced, smooth_n)
+
+    sync_mask = (smooth > 1100.0) & (smooth < 1300.0)
+    runs = _find_runs(sync_mask)
+
+    return [
+        start_idx + max(0, run_start - smooth_n // 2)
+        for run_start, run_end in runs
+        if min_sync_run <= run_end - run_start <= max_sync_run
+    ]
+
+
+def walk_sync_grid(
+    candidates: list[int],
+    line_period_samples: float,
+    max_lines: int,
+) -> list[int]:
+    """Walk raw sync candidates into an evenly-spaced grid.
+
+    Anchors on the first candidate and walks forward, accepting any
+    subsequent candidate within ±25 % of the predicted next slot. Gaps
+    (missing or spurious candidates) are filled with the predicted index
+    so downstream decoders can still slice a plausible scan line there.
+
+    Returns up to ``max_lines`` grid indices, or an empty list if
+    ``candidates`` is empty.
+    """
+    if not candidates or line_period_samples <= 0 or max_lines <= 0:
+        return []
+
+    tolerance = line_period_samples * _LINE_SPACING_TOLERANCE
+    line_starts: list[int] = [candidates[0]]
+    next_idx = 1
+    while len(line_starts) < max_lines and next_idx < len(candidates):
+        expected = line_starts[-1] + line_period_samples
+        # Skip candidates that fall well before the expected slot (these
+        # are spurious mid-line sync-band crossings).
+        while (
+            next_idx < len(candidates)
+            and candidates[next_idx] < expected - tolerance
+        ):
+            next_idx += 1
+        if next_idx >= len(candidates):
+            break
+        c = candidates[next_idx]
+        if abs(c - expected) <= tolerance:
+            line_starts.append(c)
+            next_idx += 1
+        else:
+            # Gap in the sync run (lost line) — advance the predicted slot
+            # by one full line and try again rather than abandoning.
+            line_starts.append(int(round(expected)))
+    return line_starts
+
+
+def find_line_starts(
+    freq_track: NDArray,
+    fs: int,
+    spec: ModeSpec,
     start_idx: int = 0,
 ) -> list[int]:
     """Find per-line sync pulse start indices.
@@ -156,66 +254,17 @@ def find_line_starts(
         ``freq_track`` (not into the post-``start_idx`` slice). Returns
         an empty list if no plausible line syncs were found.
     """
-    arr = np.asarray(freq_track)
-    if arr.ndim != 1 or arr.size == 0:
-        return []
-    if start_idx < 0 or start_idx >= arr.size:
-        return []
-
+    candidates = find_sync_candidates(
+        freq_track, fs, spec.sync_pulse_ms, start_idx=start_idx
+    )
     line_samples = spec.line_time_ms / 1000.0 * fs
-    sync_samples = spec.sync_pulse_ms / 1000.0 * fs
-    min_sync_run = max(1, int(round(_MIN_LINE_SYNC_RATIO * sync_samples)))
-    max_sync_run = max(min_sync_run + 1, int(round(_MAX_LINE_SYNC_RATIO * sync_samples)))
-
-    smooth_n = max(1, int(round(_LINE_SMOOTH_S * fs)))
-    sliced = arr[start_idx:]
-    smooth = _boxcar(sliced, smooth_n)
-
-    sync_mask = (smooth > 1100.0) & (smooth < 1300.0)
-    runs = _find_runs(sync_mask)
-
-    # Length-filter to plausible line syncs and translate back to indices
-    # in the *original* freq_track. ``run_start`` is offset by smooth_n//2
-    # to compensate for the boxcar leading-edge skew.
-    candidates: list[int] = []
-    for run_start, run_end in runs:
-        run_len = run_end - run_start
-        if min_sync_run <= run_len <= max_sync_run:
-            candidates.append(start_idx + max(0, run_start - smooth_n // 2))
-
-    if not candidates:
-        return []
-
-    # Anchor on the first candidate and walk forward, accepting any
-    # subsequent candidate that falls within ±tolerance of the predicted
-    # next slot. Stop after spec.height accepted lines (or when we run
-    # out of candidates).
-    tolerance = line_samples * _LINE_SPACING_TOLERANCE
-    line_starts: list[int] = [candidates[0]]
-    next_idx = 1
-    while len(line_starts) < spec.height and next_idx < len(candidates):
-        expected = line_starts[-1] + line_samples
-        # Skip candidates that fall well before the expected slot (these
-        # are spurious mid-line sync-band crossings).
-        while next_idx < len(candidates) and candidates[next_idx] < expected - tolerance:
-            next_idx += 1
-        if next_idx >= len(candidates):
-            break
-        c = candidates[next_idx]
-        if abs(c - expected) <= tolerance:
-            line_starts.append(c)
-            next_idx += 1
-        else:
-            # Gap in the sync run (lost line) — advance the predicted slot
-            # by one full line and try again rather than abandoning.
-            line_starts.append(int(round(expected)))
-    return line_starts
+    return walk_sync_grid(candidates, line_samples, spec.height)
 
 
 # === Internal helpers ===
 
 
-def _boxcar(x: "NDArray", n: int) -> "NDArray":
+def _boxcar(x: NDArray, n: int) -> NDArray:
     """Centered boxcar smooth. ``mode='same'`` so the output indexes 1:1
     with the input — important for keeping detected positions accurate."""
     if n <= 1:
@@ -224,7 +273,7 @@ def _boxcar(x: "NDArray", n: int) -> "NDArray":
     return np.convolve(x, kernel, mode="same")
 
 
-def _find_runs(mask: "NDArray[np.bool_]") -> list[tuple[int, int]]:
+def _find_runs(mask: NDArray[np.bool_]) -> list[tuple[int, int]]:
     """Return ``[(start, end), …]`` for each maximal True run in ``mask``.
 
     ``end`` is exclusive (slice-friendly). Empty input returns an empty list.
@@ -241,4 +290,9 @@ def _find_runs(mask: "NDArray[np.bool_]") -> list[tuple[int, int]]:
     return list(zip(starts, ends, strict=True))
 
 
-__all__ = ["find_leader", "find_line_starts"]
+__all__ = [
+    "find_leader",
+    "find_line_starts",
+    "find_sync_candidates",
+    "walk_sync_grid",
+]

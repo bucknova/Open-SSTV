@@ -25,7 +25,6 @@ from sstv_app.core.modes import MODE_TABLE, Mode
 from sstv_app.core.sync import find_leader, find_line_starts
 from sstv_app.core.vis import detect_vis
 
-
 # === helpers ===
 
 
