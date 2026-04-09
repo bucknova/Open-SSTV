@@ -60,6 +60,10 @@ class RxPanel(QWidget):
 
         self._capturing: bool = False
         self._current_mode: Mode | None = None
+        # Full-resolution source pixmap for the most recent decode.
+        # ``resizeEvent`` scales from here rather than from the label's
+        # already-scaled pixmap so the preview stays crisp on upscale.
+        self._preview_source: QPixmap | None = None
 
         layout = QVBoxLayout(self)
 
@@ -131,12 +135,8 @@ class RxPanel(QWidget):
         so the ``image`` argument is already a ``PIL.Image.Image``
         owned by this thread — safe to convert directly.
         """
-        pix = _pil_to_pixmap(image).scaled(
-            self._preview.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self._preview.setPixmap(pix)
+        self._preview_source = _pil_to_pixmap(image)
+        self._update_preview_pixmap()
         self._preview.setText("")
         self._gallery.add_image(image, mode)
         self._status.setText(
@@ -146,23 +146,25 @@ class RxPanel(QWidget):
         self._current_mode = mode
 
     def resizeEvent(self, event) -> None:  # noqa: N802 — Qt API
-        """Rescale the current preview pixmap when the panel resizes.
+        """Rescale the preview when the panel resizes.
 
-        Without this override the QLabel caches the pre-scaled pixmap
-        and the image stays its original size when the user enlarges
-        the window — jarring next to the decoded-line-by-line feel
-        users expect from an SSTV panel.
+        Always scales from ``_preview_source`` (the original full-res
+        pixmap) rather than from the label's already-scaled copy, so
+        repeated resizes don't accumulate blur on upscale.
         """
         super().resizeEvent(event)
-        pixmap = self._preview.pixmap()
-        if pixmap is not None and not pixmap.isNull():
-            self._preview.setPixmap(
-                pixmap.scaled(
-                    self._preview.size(),
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
+        self._update_preview_pixmap()
+
+    def _update_preview_pixmap(self) -> None:
+        if self._preview_source is None or self._preview_source.isNull():
+            return
+        self._preview.setPixmap(
+            self._preview_source.scaled(
+                self._preview.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
             )
+        )
 
     # === private slots ===
 

@@ -63,6 +63,10 @@ class TxPanel(QWidget):
 
         self._current_image: "PILImage | None" = None
         self._current_path: Path | None = None
+        # Full-resolution source pixmap kept so ``resizeEvent`` can
+        # rescale from the original instead of from the already-scaled
+        # label pixmap (which would progressively blur on upscale).
+        self._preview_source: QPixmap | None = None
 
         layout = QVBoxLayout(self)
 
@@ -129,16 +133,32 @@ class TxPanel(QWidget):
 
         pix = QPixmap(str(path))
         if not pix.isNull():
-            self._preview.setPixmap(
-                pix.scaled(
-                    self._preview.size(),
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
+            self._preview_source = pix
+            self._update_preview_pixmap()
             self._preview.setText("")
         self._transmit_btn.setEnabled(True)
         self._status.setText(f"Loaded: {path.name}  ({img.width}×{img.height})")
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 — Qt API
+        """Rescale the preview when the panel resizes.
+
+        Always scales from ``_preview_source`` (the original file
+        pixmap) so repeated resizes don't accumulate blur from
+        re-scaling an already-scaled copy.
+        """
+        super().resizeEvent(event)
+        self._update_preview_pixmap()
+
+    def _update_preview_pixmap(self) -> None:
+        if self._preview_source is None or self._preview_source.isNull():
+            return
+        self._preview.setPixmap(
+            self._preview_source.scaled(
+                self._preview.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
 
     def set_transmitting(self, transmitting: bool) -> None:
         """Toggle button state for the in-flight TX cycle."""
