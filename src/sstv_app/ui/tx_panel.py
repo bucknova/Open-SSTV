@@ -1,10 +1,177 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Transmit panel widget.
 
-Image preview with drag-and-drop loading (any format Pillow can open), mode
-picker combo, resize policy combo (crop / letterbox), Transmit and Stop
-buttons, and a progress bar driven by ``TxWorker.transmission_progress``.
+Pure presentation: an image preview, a "Load Image..." button, a mode
+picker, Transmit/Stop buttons, and a status label. Owns no threads, no
+audio, and no rig — it just emits two signals (``transmit_requested`` and
+``stop_requested``) and exposes a few UI-state setters that ``MainWindow``
+calls in response to ``TxWorker`` signals.
 
-Phase 0 stub. Implemented in Phase 1 step 9 of the v1 plan.
+Drag-and-drop loading is on the Phase 3 polish list; for Phase 1 the
+Load button (which opens a ``QFileDialog``) is enough to demonstrate
+end-to-end TX.
+
+Signals
+-------
+transmit_requested(PIL.Image.Image, Mode):
+    User clicked Transmit with a loaded image. The MainWindow forwards
+    this directly to ``TxWorker.transmit`` (Qt's auto-connect handles
+    the cross-thread queuing).
+stop_requested():
+    User clicked Stop. MainWindow calls ``TxWorker.request_stop``
+    (which is a plain method, not a slot, because the worker thread is
+    blocked in ``play_blocking``).
 """
 from __future__ import annotations
+
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from PIL import Image
+from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import (
+    QComboBox,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
+
+from sstv_app.core.modes import MODE_TABLE, Mode
+
+if TYPE_CHECKING:
+    from PIL.Image import Image as PILImage
+
+
+_IMAGE_FILE_FILTER = (
+    "Images (*.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff *.webp);;All files (*)"
+)
+
+
+class TxPanel(QWidget):
+    """The transmit half of the main window."""
+
+    transmit_requested = Signal(object, object)  # (PIL.Image.Image, Mode)
+    stop_requested = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+
+        self._current_image: "PILImage | None" = None
+        self._current_path: Path | None = None
+
+        layout = QVBoxLayout(self)
+
+        # --- Image preview ---
+        self._preview = QLabel("No image loaded")
+        self._preview.setMinimumSize(320, 240)
+        self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        # A subtle border so the empty preview area is visible.
+        self._preview.setStyleSheet("QLabel { border: 1px solid palette(mid); }")
+        layout.addWidget(self._preview, stretch=1)
+
+        # --- Mode picker ---
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Mode:"))
+        self._mode_combo = QComboBox()
+        for mode in Mode:
+            spec = MODE_TABLE[mode]
+            label = f"{mode.value}  ({spec.width}×{spec.height}, {spec.total_duration_s:.0f}s)"
+            self._mode_combo.addItem(label, mode)
+        mode_row.addWidget(self._mode_combo, stretch=1)
+        layout.addLayout(mode_row)
+
+        # --- Buttons ---
+        self._load_btn = QPushButton("Load Image…")
+        self._load_btn.clicked.connect(self._on_load_clicked)
+        layout.addWidget(self._load_btn)
+
+        button_row = QHBoxLayout()
+        self._transmit_btn = QPushButton("Transmit")
+        self._transmit_btn.setEnabled(False)
+        self._transmit_btn.clicked.connect(self._on_transmit_clicked)
+        button_row.addWidget(self._transmit_btn)
+
+        self._stop_btn = QPushButton("Stop")
+        self._stop_btn.setEnabled(False)
+        self._stop_btn.clicked.connect(self.stop_requested.emit)
+        button_row.addWidget(self._stop_btn)
+        layout.addLayout(button_row)
+
+        # --- Status line ---
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        layout.addWidget(self._status)
+
+    # === public API used by MainWindow ===
+
+    def load_image(self, path: Path) -> None:
+        """Load an image from disk into the preview.
+
+        Public so the main window can also wire it to a ``--image`` CLI
+        flag later. Failures are reported via the status label rather
+        than raised — TX panel is "GUI in, GUI out".
+        """
+        try:
+            img = Image.open(path)
+            img.load()  # force decode now so a corrupt file fails here, not on TX
+        except (OSError, ValueError) as exc:
+            self._status.setText(f"Failed to load: {exc}")
+            return
+
+        self._current_image = img
+        self._current_path = path
+
+        pix = QPixmap(str(path))
+        if not pix.isNull():
+            self._preview.setPixmap(
+                pix.scaled(
+                    self._preview.size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+            self._preview.setText("")
+        self._transmit_btn.setEnabled(True)
+        self._status.setText(f"Loaded: {path.name}  ({img.width}×{img.height})")
+
+    def set_transmitting(self, transmitting: bool) -> None:
+        """Toggle button state for the in-flight TX cycle."""
+        has_image = self._current_image is not None
+        self._transmit_btn.setEnabled(not transmitting and has_image)
+        self._stop_btn.setEnabled(transmitting)
+        self._load_btn.setEnabled(not transmitting)
+        self._mode_combo.setEnabled(not transmitting)
+
+    def set_status(self, text: str) -> None:
+        self._status.setText(text)
+
+    def selected_mode(self) -> Mode:
+        # Qt's QVariant unwraps a StrEnum back to a plain ``str`` when it
+        # comes out of ``currentData()``, so we have to re-wrap.
+        data = self._mode_combo.currentData()
+        return data if isinstance(data, Mode) else Mode(data)
+
+    # === private slots ===
+
+    @Slot()
+    def _on_load_clicked(self) -> None:
+        path_str, _ = QFileDialog.getOpenFileName(
+            self, "Load Image", "", _IMAGE_FILE_FILTER
+        )
+        if path_str:
+            self.load_image(Path(path_str))
+
+    @Slot()
+    def _on_transmit_clicked(self) -> None:
+        if self._current_image is None:
+            return
+        self.transmit_requested.emit(self._current_image, self.selected_mode())
+
+
+__all__ = ["TxPanel"]
