@@ -52,8 +52,8 @@ sstv-app-decode = "sstv_app.cli.decode:main"
 sstv-app-encode = "sstv_app.cli.encode:main"
 
 [project.urls]
-Homepage = "https://github.com/your-org/sstv-app"
-Issues = "https://github.com/your-org/sstv-app/issues"
+Homepage = "https://github.com/bucknova/Open-SSTV"
+Issues = "https://github.com/bucknova/Open-SSTV/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sstv_app"]
