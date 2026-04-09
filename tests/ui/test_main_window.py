@@ -82,8 +82,13 @@ def test_transmit_round_trip_through_worker(
         window._tx_panel._transmit_btn.click()
 
     patched_audio["play"].assert_called_once()
-    # After completion the panel should be back to ready state.
-    assert window._tx_panel._transmit_btn.isEnabled()
+    # ``transmission_complete`` is emitted from the worker thread and
+    # delivered to the panel via a queued connection, so the button
+    # state update is one event-loop spin behind the signal. Wait for
+    # the panel to actually re-enable rather than racing on it.
+    qtbot.waitUntil(
+        lambda: window._tx_panel._transmit_btn.isEnabled(), timeout=1000
+    )
     assert not window._tx_panel._stop_btn.isEnabled()
 
 
