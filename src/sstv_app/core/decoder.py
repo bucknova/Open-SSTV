@@ -70,12 +70,14 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from PIL import Image
+from scipy.signal import sosfiltfilt
 
 from sstv_app.core.demod import (
     SSTV_BLACK_HZ,
     SSTV_WHITE_HZ,
     instantaneous_frequency,
 )
+from sstv_app.core.dsp_utils import bandpass_sos
 from sstv_app.core.modes import MODE_TABLE, Mode, ModeSpec, mode_from_vis
 from sstv_app.core.sync import (
     find_line_starts,
@@ -83,6 +85,24 @@ from sstv_app.core.sync import (
     walk_sync_grid,
 )
 from sstv_app.core.vis import detect_vis
+
+# Bandpass edges for the pre-demod filter. The SSTV signalling frequencies
+# span 1100 Hz (VIS '1') through 2300 Hz (white luma); we push the edges
+# out to 1000–2500 Hz to leave ~100 Hz of margin for filter rolloff and
+# plausible TX/RX clock drift. Butterworth order 4 gives ~24 dB/octave
+# stopband attenuation, which — combined with ``sosfiltfilt``'s zero-phase
+# response — drops out-of-band noise variance enough to recover ~12 dB of
+# sync-detector margin vs. running the Hilbert transform on raw audio.
+# Measured in tests/core/test_decoder.py::test_decode_wav_robot36_low_snr.
+_BANDPASS_LOW_HZ: float = 1000.0
+_BANDPASS_HIGH_HZ: float = 2500.0
+_BANDPASS_ORDER: int = 4
+
+# ``sosfiltfilt`` forward/back filters with a default padlen ≈ 3 * filter
+# length; very short inputs (well below any plausible SSTV image) trip
+# that guard. Skip filtering for buffers under this threshold — the
+# downstream decode will return ``None`` for them anyway.
+_BANDPASS_MIN_SAMPLES: int = 256
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -119,7 +139,16 @@ def decode_wav(
     if arr.ndim != 1 or arr.size == 0:
         return None
 
-    vis_result = detect_vis(arr, fs)
+    # Bandpass-filter to the SSTV signalling band before demodulation.
+    # Without this the Hilbert transform sees noise from DC to Nyquist,
+    # which inflates FM-demod variance and makes the sync detector
+    # collapse around 12 dB SNR. Zero-phase (``sosfiltfilt``) is
+    # mandatory — any group delay would shift sync positions and corrupt
+    # the per-line pixel slicing downstream. See the module-level
+    # constants for the edge choices and the empirical measurements.
+    filtered = _bandpass(arr, fs)
+
+    vis_result = detect_vis(filtered, fs)
     if vis_result is None:
         return None
     vis_code, vis_end = vis_result
@@ -129,7 +158,7 @@ def decode_wav(
         return None
 
     spec = MODE_TABLE[mode]
-    inst = instantaneous_frequency(arr, fs)
+    inst = instantaneous_frequency(filtered, fs)
 
     # Robot 36 has two incompatible wire formats (see module docstring).
     # Detect which one this WAV uses before walking a sync grid.
@@ -467,6 +496,27 @@ def _decode_scottie_s1(
         )
 
     return Image.fromarray(rgb)
+
+
+def _bandpass(x: NDArray, fs: int) -> NDArray:
+    """Zero-phase bandpass to the SSTV signalling band.
+
+    Returns the input unchanged if ``fs`` is too low to support the
+    chosen band edges (guard against pathological test inputs), or if
+    the buffer is shorter than ``sosfiltfilt`` can stably pad. All
+    other cases run a Butterworth order-4 forward/back filter.
+    """
+    if x.size < _BANDPASS_MIN_SAMPLES:
+        return x
+    try:
+        sos = bandpass_sos(
+            _BANDPASS_LOW_HZ, _BANDPASS_HIGH_HZ, fs, order=_BANDPASS_ORDER
+        )
+    except ValueError:
+        # fs too low for the chosen band edges — skip filtering rather
+        # than blowing up the decode path with a construction error.
+        return x
+    return sosfiltfilt(sos, x)
 
 
 def _sample_pixels(

@@ -255,6 +255,32 @@ def test_decode_wav_returns_none_for_truncated_image() -> None:
     assert decode_wav(truncated, fs) is None
 
 
+def test_decode_wav_robot36_low_snr_still_decodes() -> None:
+    """Additive white-noise robustness: Robot 36 must still decode at
+    5 dB SNR. Without the bandpass prefilter in ``decode_wav`` the sync
+    detector collapses around 12 dB SNR (measured empirically: 39 of
+    240 expected sync candidates survive at 12 dB, 0 at 10 dB), so this
+    test is the regression guard for that prefilter. No luma-error
+    bound — at 5 dB the recovered image is noisy but recognizable, and
+    asserting the 12.75 luma bound would bake in a stricter requirement
+    than the plan calls for.
+    """
+    fs = 48_000
+    original = _make_gradient(320, 240)
+    clean = _to_float(encode(original, Mode.ROBOT_36, sample_rate=fs))
+
+    sig_pow = float(np.mean(clean**2))
+    snr_db = 5.0
+    noise_pow = sig_pow / (10.0 ** (snr_db / 10.0))
+    rng = np.random.default_rng(42)
+    noisy = clean + rng.normal(0.0, float(np.sqrt(noise_pow)), clean.size)
+
+    result = decode_wav(noisy, fs)
+    assert result is not None, "Robot 36 at 5 dB SNR returned None"
+    assert result.mode == Mode.ROBOT_36
+    assert result.image.size == (320, 240)
+
+
 def test_decode_wav_martin_m1_round_trip_recovers_image() -> None:
     """Phase 2 step 14 adds the Martin M1 per-mode decoder. Assert the
     same 5 %-luma round-trip bound we use for Robot 36 — the DSP front
