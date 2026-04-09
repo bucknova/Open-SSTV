@@ -26,10 +26,17 @@ the line start using its own per-channel layout.
 
 The detector treats the frequency track in two passes:
 
-1. A 2 ms (leader) / 1 ms (line) boxcar smooth flattens single-sample
-   noise without merging the 10 ms mid-leader break into the 30 ms VIS
-   start bit. The line-pass smoother is narrower because line sync pulses
-   can be as short as ~5 ms.
+1. A pre-smoother flattens high-frequency noise before thresholding.
+   The leader pass uses a 2 ms boxcar (wide enough to suppress
+   sample-level jitter, narrow enough to keep the 10 ms mid-leader
+   break distinct from the 30 ms VIS start bit). The line-sync pass
+   uses a **median filter** sized to half the mode's nominal sync
+   pulse width — median because additive noise on a narrow-band FM
+   signal produces occasional large phase-slip "clicks" in the IF
+   track, and a boxcar averages those clicks into the sync band while
+   a median rejects them outright. The line-sync pass doesn't care
+   about the 10 ms / 30 ms distinction the leader pass protects, so
+   the wider median window is safe here.
 2. The smoothed track is thresholded into a "1200 Hz sync band" mask
    (``> 1100 Hz & < 1300 Hz``). Maximal True runs are extracted; runs
    whose length sits within 50–200 % of the expected mode-specific sync
@@ -66,6 +73,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
+from scipy.ndimage import median_filter
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -80,10 +88,13 @@ if TYPE_CHECKING:
 #: 10 ms mid-leader break distinct from the 30 ms VIS start bit.
 _LEADER_SMOOTH_S: float = 0.002
 
-#: Boxcar smoothing window for per-line sync detection. Narrower than the
-#: leader smoother because line syncs can be as short as ~5 ms (Martin M1
-#: is 4.862 ms) and an over-wide boxcar would smear them.
-_LINE_SMOOTH_S: float = 0.001
+#: Fraction of the mode's nominal sync pulse width used as the median
+#: filter window for per-line sync detection. Half the sync width is
+#: the largest window that fully fits inside a legitimate sync pulse
+#: (so the pulse still dominates the median and survives), while being
+#: more than large enough to reject click-noise outliers that would
+#: otherwise corrupt a boxcar-smoothed track.
+_LINE_MEDIAN_FRAC: float = 0.5
 
 #: Lower bound on a "VIS start bit" candidate run, in seconds. The mid-leader
 #: break is 10 ms, so 20 ms cleanly rejects it.
@@ -149,8 +160,19 @@ def find_sync_candidates(
     ``walk_sync_grid`` after deciding on the expected line period — or
     uses the raw list to auto-detect the period itself.
 
-    Indices are compensated for the boxcar smoother's leading-edge skew
-    (half the smoother window), matching ``find_line_starts``.
+    The frequency track is pre-smoothed with a **median filter** sized
+    to half the sync pulse width. Median-instead-of-boxcar is the
+    Phase 2.5 robustness fix: additive white noise on a narrow-band FM
+    signal produces occasional large phase-slip "click" spikes in the
+    demodulated IF track, and a boxcar averages those clicks straight
+    into the 1100–1300 Hz sync band where they manufacture spurious
+    runs. The median filter rejects them outright as long as each
+    click is shorter than half the window.
+
+    Unlike a boxcar, the median filter is edge-preserving on a clean
+    step — the 1300 Hz crossing lands at the true transition sample
+    rather than somewhere inside a linear ramp — so no leading-edge
+    correction is applied to the reported indices.
 
     This function is intentionally permissive — it can yield spurious
     candidates such as VIS stop-bit residue (a 1200 Hz run that started
@@ -171,15 +193,22 @@ def find_sync_candidates(
         min_sync_run + 1, int(round(_MAX_LINE_SYNC_RATIO * sync_samples))
     )
 
-    smooth_n = max(1, int(round(_LINE_SMOOTH_S * fs)))
+    # Size the median window to half the sync pulse width, rounded to
+    # an odd integer (scipy's median_filter accepts even windows but
+    # the symmetry is cleaner with odd). At minimum 3 samples so
+    # degenerate high-fs / short-sync inputs still smooth *something*.
+    median_n = max(3, int(round(_LINE_MEDIAN_FRAC * sync_samples)))
+    if median_n % 2 == 0:
+        median_n += 1
+
     sliced = arr[start_idx:]
-    smooth = _boxcar(sliced, smooth_n)
+    smooth = _median_smooth(sliced, median_n)
 
     sync_mask = (smooth > 1100.0) & (smooth < 1300.0)
     runs = _find_runs(sync_mask)
 
     return [
-        start_idx + max(0, run_start - smooth_n // 2)
+        start_idx + run_start
         for run_start, run_end in runs
         if min_sync_run <= run_end - run_start <= max_sync_run
     ]
@@ -304,6 +333,22 @@ def _boxcar(x: NDArray, n: int) -> NDArray:
         return np.asarray(x, dtype=np.float64)
     kernel = np.ones(n, dtype=np.float64) / n
     return np.convolve(x, kernel, mode="same")
+
+
+def _median_smooth(x: NDArray, n: int) -> NDArray:
+    """Centered 1-D median filter. Edge-replicated so the output indexes
+    1:1 with the input (matching ``_boxcar``'s ``mode='same'`` contract).
+
+    Delegates to ``scipy.ndimage.median_filter`` which uses a histogram
+    / rank-based algorithm — ~45 ms on a 1.7 M-sample Robot 36 track
+    with a 217-sample window on a modern laptop, which is well under
+    our per-flush budget in ``RxWorker``.
+    """
+    if n <= 1:
+        return np.asarray(x, dtype=np.float64)
+    return median_filter(
+        np.asarray(x, dtype=np.float64), size=n, mode="nearest"
+    )
 
 
 def _find_runs(mask: NDArray[np.bool_]) -> list[tuple[int, int]]:

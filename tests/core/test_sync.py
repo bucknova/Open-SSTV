@@ -264,6 +264,38 @@ def test_find_line_starts_recovers_from_missing_line() -> None:
     assert abs(starts[4] - expected) < int(0.005 * fs)
 
 
+def test_find_line_starts_survives_click_noise_inside_syncs() -> None:
+    """Click noise inside sync pulses must not chop them into sub-threshold runs.
+
+    FM demodulation of a noisy narrow-band signal produces occasional
+    large phase-slip "click" spikes in the instantaneous-frequency track
+    — short (a handful of samples) but far outside the 1100–1300 Hz
+    sync band. A boxcar pre-smoother averages those spikes *into* the
+    sync band, dragging the smoothed track above the 1300 Hz threshold
+    at the click location and splitting one legitimate sync run into
+    two sub-threshold runs that the length filter then rejects.
+
+    The Phase 2.5 median pre-smoother rejects these spikes outright as
+    long as each click is shorter than half the window. This test
+    regresses that by injecting two 5-sample 3500 Hz spikes into every
+    sync pulse of a clean synthetic Robot 36 grid and asserting the
+    full line count still comes back.
+    """
+    fs = 48_000
+    spec = MODE_TABLE[Mode.ROBOT_36]
+    track = _synthesize_line_freq_track(spec, num_lines=spec.height, fs=fs)
+    line_samples = int(round(spec.line_time_ms / 1000.0 * fs))
+    sync_samples = int(round(spec.sync_pulse_ms / 1000.0 * fs))
+    click_len = 5
+    for line in range(spec.height):
+        sync_start = line * line_samples
+        for offset in (sync_samples // 3, 2 * sync_samples // 3):
+            track[sync_start + offset : sync_start + offset + click_len] = 3500.0
+
+    starts = find_line_starts(track, fs, spec)
+    assert len(starts) == spec.height
+
+
 # === integration tests against real PySSTV-encoded WAVs ===
 
 
