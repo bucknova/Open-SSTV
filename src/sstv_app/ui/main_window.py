@@ -70,7 +70,13 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QCloseEvent
-from PySide6.QtWidgets import QFileDialog, QLabel, QMainWindow, QSplitter
+from PySide6.QtWidgets import (
+    QFileDialog,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QSplitter,
+)
 
 from sstv_app.audio.devices import AudioDevice
 from sstv_app.audio.input_stream import (
@@ -241,6 +247,9 @@ class MainWindow(QMainWindow):
         file_menu = mb.addMenu("&File")
 
         settings_action = QAction("&Settings…", self)
+        # NoRole prevents macOS from moving this into the app menu and
+        # leaving File empty (which hides the entire menu).
+        settings_action.setMenuRole(QAction.MenuRole.NoRole)
         settings_action.triggered.connect(self._open_settings)
         file_menu.addAction(settings_action)
 
@@ -249,6 +258,25 @@ class MainWindow(QMainWindow):
         quit_action = QAction("&Quit", self)
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
+
+        help_menu = mb.addMenu("&Help")
+        about_action = QAction("&About Open SSTV", self)
+        about_action.setMenuRole(QAction.MenuRole.NoRole)
+        about_action.triggered.connect(self._show_about)
+        help_menu.addAction(about_action)
+
+    @Slot()
+    def _show_about(self) -> None:
+        QMessageBox.about(
+            self,
+            "About Open SSTV",
+            "<h3>Open SSTV v0.1.0</h3>"
+            "<p>Open-source SSTV transceiver for amateur radio.</p>"
+            "<p>Robot 36 · Martin M1 · Scottie S1</p>"
+            '<p><a href="https://github.com/bucknova/Open-SSTV">'
+            "github.com/bucknova/Open-SSTV</a></p>"
+            "<p>GPL-3.0-or-later</p>",
+        )
 
     @Slot()
     def _open_settings(self) -> None:
