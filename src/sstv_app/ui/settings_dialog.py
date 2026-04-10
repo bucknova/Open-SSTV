@@ -2,10 +2,203 @@
 """Modal settings dialog.
 
 Edits an ``AppConfig`` instance from ``sstv_app.config.schema``. On accept,
-calls ``sstv_app.config.store.save_config`` to persist the changes back to
-the platformdirs config path. Lays out fields by section: Audio, Radio,
-Images, About.
+the caller reads the updated config via ``result_config()`` and persists it.
+Lays out fields by section: Audio, Radio, Images.
 
-Phase 0 stub. Implemented in Phase 3 step 18 of the v1 plan.
+Uses ``QDialogButtonBox`` with OK/Cancel so the user can back out without
+saving. The caller (``MainWindow``) is responsible for calling
+``save_config`` and applying any live changes (e.g. toggling rig polling)
+after the dialog is accepted.
 """
 from __future__ import annotations
+
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QDoubleSpinBox,
+    QFileDialog,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QSpinBox,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
+
+from sstv_app.audio.devices import (
+    AudioDevice,
+    list_input_devices,
+    list_output_devices,
+)
+from sstv_app.config.schema import AppConfig
+from sstv_app.core.modes import Mode
+
+
+class SettingsDialog(QDialog):
+    """Modal dialog for editing ``AppConfig``."""
+
+    def __init__(
+        self, config: AppConfig, parent: QWidget | None = None
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Settings")
+        self.setMinimumWidth(480)
+        self._config = config
+
+        layout = QVBoxLayout(self)
+
+        tabs = QTabWidget()
+        tabs.addTab(self._build_audio_tab(), "Audio")
+        tabs.addTab(self._build_radio_tab(), "Radio")
+        tabs.addTab(self._build_images_tab(), "Images")
+        layout.addWidget(tabs)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    # === Tab builders ===
+
+    def _build_audio_tab(self) -> QWidget:
+        tab = QWidget()
+        form = QFormLayout(tab)
+
+        # Input device
+        self._input_combo = QComboBox()
+        self._input_combo.addItem("System default", None)
+        self._input_devices: list[AudioDevice] = []
+        for dev in list_input_devices():
+            label = f"{dev.name} ({dev.host_api})"
+            self._input_combo.addItem(label, dev.name)
+            self._input_devices.append(dev)
+            if dev.name == self._config.audio_input_device:
+                self._input_combo.setCurrentIndex(self._input_combo.count() - 1)
+        form.addRow("Input device:", self._input_combo)
+
+        # Output device
+        self._output_combo = QComboBox()
+        self._output_combo.addItem("System default", None)
+        self._output_devices: list[AudioDevice] = []
+        for dev in list_output_devices():
+            label = f"{dev.name} ({dev.host_api})"
+            self._output_combo.addItem(label, dev.name)
+            self._output_devices.append(dev)
+            if dev.name == self._config.audio_output_device:
+                self._output_combo.setCurrentIndex(
+                    self._output_combo.count() - 1
+                )
+        form.addRow("Output device:", self._output_combo)
+
+        # Sample rate
+        self._sample_rate = QComboBox()
+        for rate in (44_100, 48_000):
+            self._sample_rate.addItem(f"{rate} Hz", rate)
+        idx = self._sample_rate.findData(self._config.sample_rate)
+        if idx >= 0:
+            self._sample_rate.setCurrentIndex(idx)
+        form.addRow("Sample rate:", self._sample_rate)
+
+        return tab
+
+    def _build_radio_tab(self) -> QWidget:
+        tab = QWidget()
+        form = QFormLayout(tab)
+
+        self._rig_enabled = QCheckBox("Enable rig control (rigctld)")
+        self._rig_enabled.setChecked(self._config.rig_enabled)
+        form.addRow(self._rig_enabled)
+
+        self._rigctld_host = QLineEdit(self._config.rigctld_host)
+        form.addRow("rigctld host:", self._rigctld_host)
+
+        self._rigctld_port = QSpinBox()
+        self._rigctld_port.setRange(1, 65535)
+        self._rigctld_port.setValue(self._config.rigctld_port)
+        form.addRow("rigctld port:", self._rigctld_port)
+
+        self._ptt_delay = QDoubleSpinBox()
+        self._ptt_delay.setRange(0.0, 2.0)
+        self._ptt_delay.setSingleStep(0.05)
+        self._ptt_delay.setDecimals(2)
+        self._ptt_delay.setSuffix(" s")
+        self._ptt_delay.setValue(self._config.ptt_delay_s)
+        form.addRow("PTT delay:", self._ptt_delay)
+
+        self._callsign = QLineEdit(self._config.callsign)
+        self._callsign.setPlaceholderText("e.g. W0AEZ")
+        form.addRow("Callsign:", self._callsign)
+
+        return tab
+
+    def _build_images_tab(self) -> QWidget:
+        tab = QWidget()
+        form = QFormLayout(tab)
+
+        # Default TX mode
+        self._tx_mode = QComboBox()
+        for mode in Mode:
+            self._tx_mode.addItem(mode.value, mode.value)
+        idx = self._tx_mode.findData(self._config.default_tx_mode)
+        if idx >= 0:
+            self._tx_mode.setCurrentIndex(idx)
+        form.addRow("Default TX mode:", self._tx_mode)
+
+        # Auto-save
+        self._auto_save = QCheckBox("Auto-save decoded images")
+        self._auto_save.setChecked(self._config.auto_save)
+        form.addRow(self._auto_save)
+
+        # Save directory
+        dir_row = QHBoxLayout()
+        self._save_dir = QLineEdit(self._config.images_save_dir)
+        self._save_dir.setReadOnly(True)
+        dir_row.addWidget(self._save_dir)
+        browse_btn = QPushButton("Browse…")
+        browse_btn.clicked.connect(self._browse_save_dir)
+        dir_row.addWidget(browse_btn)
+        form.addRow("Save directory:", dir_row)
+
+        return tab
+
+    # === Private slots ===
+
+    def _browse_save_dir(self) -> None:
+        directory = QFileDialog.getExistingDirectory(
+            self, "Select save directory", self._save_dir.text()
+        )
+        if directory:
+            self._save_dir.setText(directory)
+
+    # === Public API ===
+
+    def result_config(self) -> AppConfig:
+        """Build a new ``AppConfig`` from the current dialog state.
+
+        Call after ``exec()`` returns ``QDialog.Accepted``.
+        """
+        return AppConfig(
+            audio_input_device=self._input_combo.currentData(),
+            audio_output_device=self._output_combo.currentData(),
+            sample_rate=self._sample_rate.currentData(),
+            default_tx_mode=self._tx_mode.currentData(),
+            rigctld_host=self._rigctld_host.text().strip(),
+            rigctld_port=self._rigctld_port.value(),
+            rig_enabled=self._rig_enabled.isChecked(),
+            ptt_delay_s=self._ptt_delay.value(),
+            callsign=self._callsign.text().strip().upper(),
+            last_image_dir=self._config.last_image_dir,
+            images_save_dir=self._save_dir.text(),
+            auto_save=self._auto_save.isChecked(),
+        )
+
+
+__all__ = ["SettingsDialog"]

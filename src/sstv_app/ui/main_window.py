@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Top-level Qt main window.
 
-Phase 2 step 17 wires up both halves of the app: the existing ``TxPanel``
-on the left, a new ``RxPanel`` on the right, and three worker threads —
-TX playback, RX audio capture, and RX decode. The radio status bar and
-settings dialog are still deferred to Phase 3.
+Composes the TX panel (left), RX panel (right), three worker threads
+(TX playback, RX audio capture, RX decode), a menu bar (File > Settings /
+Quit), optional rig polling on a 1 Hz QTimer, and auto-save of decoded
+images to the configured directory.
 
 Threading
 ---------
@@ -64,9 +64,13 @@ threads, and finally close the rig.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QThread, Signal, Slot
-from PySide6.QtGui import QCloseEvent
-from PySide6.QtWidgets import QMainWindow, QSplitter
+import datetime
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtGui import QAction, QCloseEvent
+from PySide6.QtWidgets import QFileDialog, QLabel, QMainWindow, QSplitter
 
 from sstv_app.audio.devices import AudioDevice
 from sstv_app.audio.input_stream import (
@@ -74,11 +78,19 @@ from sstv_app.audio.input_stream import (
     DEFAULT_SAMPLE_RATE,
     InputStreamWorker,
 )
+from sstv_app.config.schema import AppConfig
+from sstv_app.config.store import load_config, save_config
 from sstv_app.radio.base import ManualRig, Rig
 from sstv_app.radio.exceptions import RigError
 from sstv_app.ui.rx_panel import RxPanel
+from sstv_app.ui.settings_dialog import SettingsDialog
 from sstv_app.ui.tx_panel import TxPanel
 from sstv_app.ui.workers import RxWorker, TxWorker
+
+if TYPE_CHECKING:
+    from PIL.Image import Image as PILImage
+
+    from sstv_app.core.modes import Mode
 
 
 class MainWindow(QMainWindow):
@@ -98,11 +110,14 @@ class MainWindow(QMainWindow):
         rig: Rig | None = None,
         output_device: AudioDevice | int | None = None,
         input_device: AudioDevice | int | None = None,
+        config: AppConfig | None = None,
         parent: QMainWindow | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Open SSTV")
         self.resize(1100, 640)
+
+        self._config = config if config is not None else load_config()
 
         # Open the rig (no-op for ManualRig). We swallow connection
         # failures here so the window still launches with rig control
@@ -114,6 +129,9 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Rig: {exc}", 0)
 
         self._input_device = input_device
+
+        # --- Menu bar ---
+        self._build_menu_bar()
 
         # --- Panels inside a horizontal splitter ---
         self._tx_panel = TxPanel(self)
@@ -191,9 +209,54 @@ class MainWindow(QMainWindow):
         # RX worker -> UI.
         self._rx_worker.image_started.connect(self._rx_panel.show_image_started)
         self._rx_worker.image_complete.connect(self._rx_panel.show_image_complete)
+        self._rx_worker.image_complete.connect(self._on_rx_image_complete)
         self._rx_worker.error.connect(self._on_rx_error)
 
+        # --- Rig status widgets in the status bar ---
+        self._rig_freq_label = QLabel("")
+        self._rig_mode_label = QLabel("")
+        self._rig_strength_label = QLabel("")
+        self._rig_status_label = QLabel("")
+        for w in (
+            self._rig_freq_label,
+            self._rig_mode_label,
+            self._rig_strength_label,
+            self._rig_status_label,
+        ):
+            self.statusBar().addPermanentWidget(w)
+
+        # --- 1 Hz rig poll timer ---
+        self._rig_poll_timer = QTimer(self)
+        self._rig_poll_timer.setInterval(1000)
+        self._rig_poll_timer.timeout.connect(self._poll_rig)
+        if not isinstance(self._rig, ManualRig):
+            self._rig_poll_timer.start()
+
         self.statusBar().showMessage("Ready")
+
+    # === Menu bar ===
+
+    def _build_menu_bar(self) -> None:
+        mb = self.menuBar()
+        file_menu = mb.addMenu("&File")
+
+        settings_action = QAction("&Settings…", self)
+        settings_action.triggered.connect(self._open_settings)
+        file_menu.addAction(settings_action)
+
+        file_menu.addSeparator()
+
+        quit_action = QAction("&Quit", self)
+        quit_action.triggered.connect(self.close)
+        file_menu.addAction(quit_action)
+
+    @Slot()
+    def _open_settings(self) -> None:
+        dlg = SettingsDialog(self._config, parent=self)
+        if dlg.exec() == SettingsDialog.DialogCode.Accepted:
+            self._config = dlg.result_config()
+            save_config(self._config)
+            self.statusBar().showMessage("Settings saved.", 3000)
 
     # === TX slots ===
 
@@ -259,25 +322,111 @@ class MainWindow(QMainWindow):
         self._rx_worker.reset()
         self._rx_panel.set_status("Cleared — waiting for VIS header.")
 
+    @Slot(object, object, int)
+    def _on_rx_image_complete(
+        self, image: object, mode: object, vis_code: int
+    ) -> None:
+        """Auto-save a newly decoded image if the setting is enabled."""
+        if not self._config.auto_save:
+            return
+        pil_image: PILImage = image  # type: ignore[assignment]
+        sstv_mode: Mode = mode  # type: ignore[assignment]
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        save_dir = Path(self._config.images_save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        path = save_dir / f"sstv_{sstv_mode.value}_{stamp}.png"
+        pil_image.save(str(path))
+        self.statusBar().showMessage(f"Auto-saved {path.name}", 3000)
+
     @Slot(object, object)
     def _on_rx_image_saved(self, image: object, mode: object) -> None:
-        """Placeholder for Phase 3 save-to-disk dialog.
+        """Save a decoded image to disk.
 
-        For now we just acknowledge the double-click in the status bar
-        so the user gets feedback. The real ``QFileDialog`` hookup is
-        part of the settings/auto-save polish pass.
+        If auto-save is enabled, writes directly to the configured save
+        directory with a timestamped filename. Otherwise, opens a
+        ``QFileDialog`` so the user can choose where to save.
         """
-        del image, mode  # unused until Phase 3
-        self.statusBar().showMessage("Save dialog coming in Phase 3", 3000)
+        pil_image: PILImage = image  # type: ignore[assignment]
+        sstv_mode: Mode = mode  # type: ignore[assignment]
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = f"sstv_{sstv_mode.value}_{stamp}.png"
+
+        if self._config.auto_save:
+            save_dir = Path(self._config.images_save_dir)
+            save_dir.mkdir(parents=True, exist_ok=True)
+            path = save_dir / default_name
+            pil_image.save(str(path))
+            self.statusBar().showMessage(f"Saved {path.name}", 3000)
+        else:
+            start_dir = str(
+                Path(self._config.images_save_dir) / default_name
+            )
+            path_str, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save decoded image",
+                start_dir,
+                "PNG (*.png);;JPEG (*.jpg *.jpeg);;All files (*)",
+            )
+            if path_str:
+                pil_image.save(path_str)
+                self.statusBar().showMessage(
+                    f"Saved {Path(path_str).name}", 3000
+                )
 
     @Slot(str)
     def _on_rx_error(self, message: str) -> None:
         self._rx_panel.set_status(f"RX: {message}")
         self.statusBar().showMessage(message, 5000)
 
+    # === Rig polling ===
+
+    @Slot()
+    def _poll_rig(self) -> None:
+        """Read frequency, mode, and S-meter from the rig.
+
+        Called every 1 s by ``_rig_poll_timer``. If the rig connection
+        fails, we show "Rig: disconnected" in the status bar and keep
+        the timer running so reconnection attempts happen automatically
+        (the ``RigctldClient`` retries once per call internally). No
+        modal dialogs, no exceptions surfaced to the user.
+        """
+        try:
+            freq = self._rig.get_freq()
+            mode_name, _ = self._rig.get_mode()
+            strength = self._rig.get_strength()
+        except RigError:
+            self._rig_freq_label.setText("")
+            self._rig_mode_label.setText("")
+            self._rig_strength_label.setText("")
+            self._rig_status_label.setText("Rig: disconnected")
+            return
+
+        self._rig_freq_label.setText(self._format_freq(freq))
+        self._rig_mode_label.setText(mode_name)
+        self._rig_strength_label.setText(
+            f"S{min(9, max(0, (strength + 73) // 6))}"
+            if strength != 0
+            else ""
+        )
+        self._rig_status_label.setText("")
+
+    @staticmethod
+    def _format_freq(hz: int) -> str:
+        """Format a frequency in Hz as a friendly display string."""
+        if hz <= 0:
+            return ""
+        if hz >= 1_000_000:
+            return f"{hz / 1_000_000:.6f} MHz"
+        if hz >= 1_000:
+            return f"{hz / 1_000:.3f} kHz"
+        return f"{hz} Hz"
+
     # === lifecycle ===
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 — Qt API
+        # Stop rig polling first to avoid timer fires during teardown.
+        self._rig_poll_timer.stop()
+
         # Disconnect inbound user signals first so a click that races
         # with shutdown can't queue fresh work onto a thread we're about
         # to tear down. Qt raises RuntimeError / TypeError if the
