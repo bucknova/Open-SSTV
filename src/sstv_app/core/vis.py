@@ -127,9 +127,48 @@ def detect_vis(
     sync_mask = (smooth > 1100.0) & (smooth < 1300.0)
     runs = _find_runs(sync_mask)
 
+    # Merge runs separated by gaps shorter than 5 ms. At lower signal
+    # levels, brief noise spikes in the FM demod can split a 30 ms
+    # start bit into two halves that each fall below the minimum
+    # duration threshold. 5 ms is safely below the 10 ms mid-leader
+    # break (which is a standalone sync-band *run* at 1200 Hz, not a
+    # gap) and far below the 300 ms leader sections that bracket it.
+    merge_gap = max(1, int(round(0.005 * fs)))
+    merged: list[tuple[int, int]] = []
+    for start, end in runs:
+        if merged and start - merged[-1][1] <= merge_gap:
+            merged[-1] = (merged[-1][0], end)
+        else:
+            merged.append((start, end))
+    runs = merged
+
+    # Minimum number of samples of 1900 Hz leader we expect before the
+    # start bit. We check ~200 ms of the ~300 ms second leader half;
+    # being lenient avoids rejecting real signals where the first
+    # leader half was clipped by the recording start.
+    leader_check_samples = int(round(0.200 * fs))
+    # Require at least 40 % of those samples to be in the leader band
+    # (1800–2000 Hz). This threshold is low enough to tolerate noisy
+    # acoustic audio yet high enough to reject random noise.
+    leader_frac_threshold = 0.40
+
     for run_start, run_end in runs:
         if (run_end - run_start) < min_start_bit_samples:
             continue
+
+        # Leader validation: reject sync-band runs that aren't preceded
+        # by the 1900 Hz leader tone. Without this, noise bursts with
+        # valid-parity bit patterns (especially 0x00 — all zeros, even
+        # parity) create false VIS detections.
+        leader_end = max(0, run_start - int(round(0.005 * fs)))  # skip transition
+        leader_start = max(0, leader_end - leader_check_samples)
+        if leader_end > leader_start:
+            leader_region = smooth[leader_start:leader_end]
+            leader_in_band = float(np.mean(
+                (leader_region > 1800.0) & (leader_region < 2000.0)
+            ))
+            if leader_in_band < leader_frac_threshold:
+                continue
 
         # The first data bit follows the start bit by exactly bit_samples.
         # Aligning to ``run_start`` rather than ``run_end`` is more robust
@@ -149,6 +188,11 @@ def detect_vis(
             continue
 
         # Sample each 30 ms window's central 60% to dodge bit-edge ringing.
+        # Uses the 30th percentile rather than the median: for clean signals
+        # the two are identical (low intra-window variance), but for noisy
+        # over-the-air / acoustic coupling the 30th percentile correctly
+        # recovers "1" bits (1100 Hz) that the median would miss when
+        # brief 1100 Hz dips are surrounded by smeared 1300 Hz energy.
         margin = bit_samples // 5
         chunk_freqs: list[float] = []
         for i in range(VIS_DATA_BITS + 2):
@@ -157,7 +201,7 @@ def detect_vis(
             mid = smooth[chunk_start + margin : chunk_end - margin]
             if mid.size == 0:
                 mid = smooth[chunk_start:chunk_end]
-            chunk_freqs.append(float(np.median(mid)))
+            chunk_freqs.append(float(np.percentile(mid, 30)))
 
         data_freqs = chunk_freqs[:VIS_DATA_BITS]
         parity_freq = chunk_freqs[VIS_DATA_BITS]

@@ -257,8 +257,13 @@ class InputStreamWorker(QObject):
 
         # Flatten to 1-D mono. ``channels=1`` in ``InputStream`` gives
         # us shape (frames, 1); pull out the column and copy so the
-        # downstream consumer owns its buffer.
-        chunk = np.ascontiguousarray(indata[:, 0], dtype=np.float32)
+        # downstream consumer owns its buffer. ``.copy()`` is mandatory:
+        # ``np.ascontiguousarray`` skips the copy when the slice is
+        # already contiguous (which it is for a single-column array),
+        # leaving a view into PortAudio's recycled buffer that gets
+        # overwritten by the next callback before the consumer drains
+        # the queue.
+        chunk = indata[:, 0].copy()
 
         try:
             self._queue.put_nowait(chunk)

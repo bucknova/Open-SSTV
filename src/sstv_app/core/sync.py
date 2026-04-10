@@ -145,6 +145,17 @@ _ADAPTIVE_THR_FRAC: float = 0.1
 #: 1500 Hz porches that would otherwise get merged into sync runs.
 _HARD_SYNC_UPPER_HZ: float = 1450.0
 
+#: Hard lower bound on the adaptive threshold, in Hz. On noisy
+#: acoustic-coupled signals the rolling minimum can dip hundreds of Hz
+#: below the true 1200 Hz sync level (FM-demod phase-slip noise), pulling
+#: the adaptive threshold well below sync. Clamping at 1300 Hz ensures
+#: real sync pulses (median-smoothed to ~1200 Hz) always fall below the
+#: threshold. 1300 Hz is the same value the adaptive formula naturally
+#: produces on clean signals (1200 + 0.1 × 1100 ≈ 1310), so this floor
+#: doesn't change clean-signal behavior — it just prevents collapse on
+#: noisy input. The 200 Hz gap to the 1500 Hz porch level is comfortable.
+_HARD_SYNC_LOWER_HZ: float = 1300.0
+
 #: Lower bound on a "VIS start bit" candidate run, in seconds. The mid-leader
 #: break is 10 ms, so 20 ms cleanly rejects it.
 _MIN_LEADER_RUN_S: float = 0.020
@@ -286,7 +297,7 @@ def find_sync_candidates(
     local_min = minimum_filter1d(smooth, size=adapt_win, mode="nearest")
     local_max = maximum_filter1d(smooth, size=adapt_win, mode="nearest")
     adaptive_thr = local_min + _ADAPTIVE_THR_FRAC * (local_max - local_min)
-    threshold = np.minimum(adaptive_thr, _HARD_SYNC_UPPER_HZ)
+    threshold = np.clip(adaptive_thr, _HARD_SYNC_LOWER_HZ, _HARD_SYNC_UPPER_HZ)
 
     sync_mask = smooth < threshold
     runs = _find_runs(sync_mask)

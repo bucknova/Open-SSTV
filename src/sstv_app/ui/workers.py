@@ -80,6 +80,7 @@ from sstv_app.core.decoder import (
     DecodeError,
     Decoder,
     ImageComplete,
+    ImageProgress,
     ImageStarted,
 )
 from sstv_app.core.encoder import DEFAULT_SAMPLE_RATE, encode
@@ -244,6 +245,7 @@ class RxWorker(QObject):
     """
 
     image_started = Signal(object, int)  # (Mode, vis_code)
+    image_progress = Signal(object, object, int, int, int)  # (PIL.Image, Mode, vis_code, lines_decoded, lines_total)
     image_complete = Signal(object, object, int)  # (PIL.Image, Mode, vis_code)
     status_update = Signal(str)  # periodic progress text
     error = Signal(str)
@@ -260,6 +262,7 @@ class RxWorker(QObject):
         self._scratch: list["NDArray[np.float64]"] = []
         self._scratch_samples: int = 0
         self._total_samples: int = 0
+        self._decoding: bool = False
         self._flush_samples: int = (
             flush_samples
             if flush_samples is not None
@@ -310,6 +313,7 @@ class RxWorker(QObject):
         self._scratch.clear()
         self._scratch_samples = 0
         self._total_samples = 0
+        self._decoding = False
         self._decoder.reset()
 
     @Slot()
@@ -341,7 +345,7 @@ class RxWorker(QObject):
             self.error.emit(f"Decoder exception: {exc}")
             return
 
-        if not events:
+        if not events and not self._decoding:
             # No decode yet — show progress so the user knows we're alive.
             secs = self._total_samples / self._sample_rate
             self.status_update.emit(
@@ -351,7 +355,10 @@ class RxWorker(QObject):
         decoded = False
         for event in events:
             self._dispatch(event)
-            if isinstance(event, ImageComplete):
+            if isinstance(event, ImageStarted):
+                self._decoding = True
+            elif isinstance(event, ImageComplete):
+                self._decoding = False
                 decoded = True
         if decoded:
             self._total_samples = 0
@@ -359,6 +366,14 @@ class RxWorker(QObject):
     def _dispatch(self, event: object) -> None:
         if isinstance(event, ImageStarted):
             self.image_started.emit(event.mode, event.vis_code)
+        elif isinstance(event, ImageProgress):
+            self.image_progress.emit(
+                event.image,
+                event.mode,
+                event.vis_code,
+                event.lines_decoded,
+                event.lines_total,
+            )
         elif isinstance(event, ImageComplete):
             self.image_complete.emit(event.image, event.mode, event.vis_code)
         elif isinstance(event, DecodeError):

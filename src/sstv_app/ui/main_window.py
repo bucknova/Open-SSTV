@@ -226,6 +226,7 @@ class MainWindow(QMainWindow):
 
         # RX worker -> UI.
         self._rx_worker.image_started.connect(self._rx_panel.show_image_started)
+        self._rx_worker.image_progress.connect(self._rx_panel.show_image_progress)
         self._rx_worker.image_complete.connect(self._rx_panel.show_image_complete)
         self._rx_worker.image_complete.connect(self._on_rx_image_complete)
         self._rx_worker.status_update.connect(self._rx_panel.set_status)

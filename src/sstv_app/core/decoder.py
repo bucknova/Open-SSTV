@@ -66,6 +66,7 @@ from its neighbor, and converts YCbCr→RGB via Pillow.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -603,6 +604,120 @@ _PIXEL_DECODERS: dict[Mode, callable] = {
 }
 
 
+# === partial (progressive) decode helpers ===
+
+
+def _trim_to_buffer(line_starts: list[int], buf_size: int) -> list[int]:
+    """Keep only line starts that fall within the audio buffer.
+
+    ``slant_corrected_line_starts`` happily projects positions beyond the
+    end of the frequency track. For progressive decode we need to discard
+    those so the pixel decoders only touch samples that exist (out-of-range
+    pixel windows in ``_sample_pixels`` already return zeros, but counting
+    them as "decoded lines" would over-report progress).
+    """
+    return [ls for ls in line_starts if 0 <= ls < buf_size]
+
+
+def _partial_decode(
+    mode: Mode,
+    spec: ModeSpec,
+    inst: "NDArray",
+    fs: int,
+    vis_end: int,
+) -> tuple[Image.Image, int, int] | None:
+    """Decode as many lines as currently available from a frequency track.
+
+    Returns ``(image, lines_decoded, lines_total)`` or ``None`` if no
+    sync candidates are usable yet. The image is always full-size
+    (``spec.width × spec.height``) with black rows for undecoded lines.
+    """
+    if mode == Mode.ROBOT_36:
+        return _partial_decode_robot36(inst, fs, spec, vis_end)
+
+    line_samples = spec.line_time_ms / 1000.0 * fs
+    candidates = find_sync_candidates(
+        inst,
+        fs,
+        spec.sync_pulse_ms,
+        line_period_samples=line_samples,
+        start_idx=vis_end,
+    )
+    line_starts = slant_corrected_line_starts(
+        candidates, line_samples, spec.height
+    )
+    usable = _trim_to_buffer(line_starts, inst.size)
+    if not usable:
+        return None
+
+    decoder_fn = _PIXEL_DECODERS.get(mode)
+    if decoder_fn is None:
+        return None
+
+    image = decoder_fn(inst, fs, spec, usable)
+    if image is None:
+        return None
+    return (image, len(usable), spec.height)
+
+
+def _partial_decode_robot36(
+    inst: "NDArray",
+    fs: int,
+    spec: ModeSpec,
+    vis_end: int,
+) -> tuple[Image.Image, int, int] | None:
+    """Progressive Robot 36 decode with auto-format detection.
+
+    Mirrors ``_decode_robot36_dispatch`` but returns partial images
+    instead of ``None`` when fewer than ``spec.height`` lines are
+    available.
+    """
+    line_samples = spec.line_time_ms / 1000.0 * fs
+    candidates = find_sync_candidates(
+        inst,
+        fs,
+        spec.sync_pulse_ms,
+        line_period_samples=line_samples,
+        start_idx=vis_end,
+    )
+    if len(candidates) < 2:
+        return None
+
+    pair_samples = 2.0 * line_samples
+    tolerance = 0.25
+
+    diffs = np.diff(np.asarray(candidates, dtype=np.float64))
+    if diffs.size == 0:
+        return None
+    median_diff = float(np.median(diffs))
+    if abs(median_diff - line_samples) <= line_samples * tolerance:
+        line_starts = slant_corrected_line_starts(
+            candidates, line_samples, spec.height
+        )
+        usable = _trim_to_buffer(line_starts, inst.size)
+        if not usable:
+            return None
+        image = _decode_robot36(inst, fs, spec, usable)
+        if image is None:
+            return None
+        return (image, len(usable), spec.height)
+
+    if abs(median_diff - pair_samples) <= pair_samples * tolerance:
+        super_starts = slant_corrected_line_starts(
+            candidates, pair_samples, spec.height // 2
+        )
+        usable = _trim_to_buffer(super_starts, inst.size)
+        if not usable:
+            return None
+        image = _decode_robot36_line_pair(inst, fs, spec, usable)
+        if image is None:
+            return None
+        lines_decoded = min(len(usable) * 2, spec.height)
+        return (image, lines_decoded, spec.height)
+
+    return None
+
+
 # === streaming wrapper ===
 
 
@@ -612,6 +727,22 @@ class ImageStarted:
 
     mode: Mode
     vis_code: int
+
+
+@dataclass(frozen=True, slots=True)
+class ImageProgress:
+    """Emitted during progressive decode with a partial image.
+
+    The ``image`` is full-size (mode-native width × height) with black
+    rows for lines not yet decoded. ``lines_decoded / lines_total``
+    gives the completion fraction for progress display.
+    """
+
+    image: Image.Image
+    mode: Mode
+    vis_code: int
+    lines_decoded: int
+    lines_total: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -631,23 +762,36 @@ class DecodeError:
     message: str
 
 
-DecoderEvent = ImageStarted | ImageComplete | DecodeError
+DecoderEvent = ImageStarted | ImageProgress | ImageComplete | DecodeError
+
+
+class _DecoderState(Enum):
+    """Internal state machine for progressive decode."""
+
+    IDLE = "idle"  # Hunting for VIS header
+    DECODING = "decoding"  # VIS locked, accumulating lines
 
 
 class Decoder:
-    """Streaming SSTV decoder with a pull-model API.
+    """Streaming SSTV decoder with progressive image output.
 
     Buffers audio chunks via ``feed(samples)``; the UI worker calls
     ``feed`` from its own thread as audio arrives. Each ``feed`` call
     returns a (possibly empty) list of ``DecoderEvent`` objects so the
     caller can react without polling.
 
-    The Phase 2 implementation is intentionally simple: every ``feed``
-    triggers a single ``decode_wav`` over the entire accumulated buffer.
-    This wastes work for very long sessions (we re-detect the same VIS
-    over and over), but for typical SSTV transmissions (under 2 minutes)
-    it's well within budget. A streaming state-machine refactor is
-    explicitly post-v1.
+    The decoder is a two-state machine:
+
+    * **IDLE** — hunting for a VIS header. Each ``feed`` runs bandpass +
+      ``detect_vis`` on the growing buffer. On success, emits
+      ``ImageStarted`` and transitions to DECODING.
+    * **DECODING** — VIS is locked, accumulating scan lines. Each
+      ``feed`` runs bandpass + demod + sync + partial pixel decode on the
+      growing buffer. Emits ``ImageProgress`` as new lines become
+      decodable (the image is full-size with black rows for undecoded
+      lines). Emits ``ImageComplete`` when all lines are present, then
+      auto-resets to IDLE so the next transmission is picked up without
+      an explicit ``reset()`` call.
     """
 
     def __init__(self, fs: int) -> None:
@@ -655,20 +799,27 @@ class Decoder:
             raise ValueError(f"Sample rate must be positive (got {fs})")
         self._fs = fs
         self._buffer: list[np.ndarray] = []
-        self._last_emitted: int = 0  # number of images we've already yielded
+        self._state = _DecoderState.IDLE
+        # Set when VIS is detected (DECODING state):
+        self._vis_code: int = 0
+        self._mode: Mode | None = None
+        self._spec: ModeSpec | None = None
+        self._vis_end: int = 0
+        self._last_lines: int = 0
 
     @property
     def sample_rate(self) -> int:
         return self._fs
 
-    def feed(self, samples: NDArray) -> list[DecoderEvent]:
+    def feed(self, samples: "NDArray") -> list[DecoderEvent]:
         """Append a chunk of audio and return any decoder events it
         triggered. Safe to call from a worker thread.
 
-        After a successful decode, the buffer is automatically cleared
-        so the decoder is ready to hunt for the next VIS header without
-        an explicit ``reset()`` call. This means back-to-back images
-        on the same capture session Just Work.
+        In IDLE state, hunts for a VIS header and emits ``ImageStarted``
+        on success. In DECODING state, decodes available lines and emits
+        ``ImageProgress`` for each new batch of lines, followed by
+        ``ImageComplete`` when the image is fully decoded (which
+        auto-resets to IDLE).
         """
         arr = np.asarray(samples, dtype=np.float64)
         if arr.ndim != 1:
@@ -679,33 +830,98 @@ class Decoder:
         joined = self._joined()
         if joined.size == 0:
             return []
-        result = decode_wav(joined, self._fs)
-        if result is None:
+
+        if self._state == _DecoderState.IDLE:
+            return self._feed_idle(joined)
+        return self._feed_decoding(joined)
+
+    def _feed_idle(self, joined: "NDArray") -> list[DecoderEvent]:
+        """Hunt for a VIS header in the buffered audio."""
+        filtered = _bandpass(joined, self._fs)
+        vis_result = detect_vis(filtered, self._fs)
+        if vis_result is None:
             return []
-        if self._last_emitted >= 1:
-            # Already emitted this image; suppress duplicates.
-            return []
-        self._last_emitted += 1
+        vis_code, vis_end = vis_result
+        mode = mode_from_vis(vis_code)
+        if mode is None:
+            return [DecodeError(f"Unsupported VIS code 0x{vis_code:02X}")]
+
+        spec = MODE_TABLE[mode]
+        self._state = _DecoderState.DECODING
+        self._vis_code = vis_code
+        self._mode = mode
+        self._spec = spec
+        self._vis_end = vis_end
+        self._last_lines = 0
+
         events: list[DecoderEvent] = [
-            ImageStarted(mode=result.mode, vis_code=result.vis_code),
-            ImageComplete(
-                image=result.image, mode=result.mode, vis_code=result.vis_code
-            ),
+            ImageStarted(mode=mode, vis_code=vis_code)
         ]
-        # Auto-reset so the next feed() starts fresh — without this the
-        # buffer grows forever and decode_wav re-finds the same VIS on
-        # every subsequent call, blocking any second image from decoding.
-        self.reset()
+
+        # Try an immediate partial decode — the buffer may already
+        # contain a few scan lines (or even a full image if the caller
+        # fed a large chunk).
+        inst = instantaneous_frequency(filtered, self._fs)
+        progress_events = self._decode_progress(inst, mode, spec, vis_code)
+        events.extend(progress_events)
         return events
 
-    def reset(self) -> None:
-        """Drop the buffered audio and reset the duplicate-suppression
-        state. Useful between images or when the user changes input
-        device."""
-        self._buffer.clear()
-        self._last_emitted = 0
+    def _feed_decoding(self, joined: "NDArray") -> list[DecoderEvent]:
+        """Decode available lines from the growing audio buffer."""
+        filtered = _bandpass(joined, self._fs)
+        inst = instantaneous_frequency(filtered, self._fs)
+        return self._decode_progress(
+            inst, self._mode, self._spec, self._vis_code  # type: ignore[arg-type]
+        )
 
-    def _joined(self) -> NDArray:
+    def _decode_progress(
+        self,
+        inst: "NDArray",
+        mode: Mode,
+        spec: ModeSpec,
+        vis_code: int,
+    ) -> list[DecoderEvent]:
+        """Run partial decode and emit progress or completion events."""
+        partial = _partial_decode(mode, spec, inst, self._fs, self._vis_end)
+        if partial is None:
+            return []
+
+        image, lines, total = partial
+        if lines <= self._last_lines:
+            return []  # No new lines since last flush
+        self._last_lines = lines
+
+        if lines >= total:
+            events: list[DecoderEvent] = [
+                ImageComplete(image=image, mode=mode, vis_code=vis_code)
+            ]
+            self.reset()
+            return events
+        return [
+            ImageProgress(
+                image=image,
+                mode=mode,
+                vis_code=vis_code,
+                lines_decoded=lines,
+                lines_total=total,
+            )
+        ]
+
+    def reset(self) -> None:
+        """Drop the buffered audio and reset to IDLE.
+
+        Called automatically after a complete decode, or manually when
+        the user clicks "Clear" or changes input device.
+        """
+        self._buffer.clear()
+        self._state = _DecoderState.IDLE
+        self._vis_code = 0
+        self._mode = None
+        self._spec = None
+        self._vis_end = 0
+        self._last_lines = 0
+
+    def _joined(self) -> "NDArray":
         if not self._buffer:
             return np.array([], dtype=np.float64)
         if len(self._buffer) == 1:
@@ -719,6 +935,7 @@ __all__ = [
     "Decoder",
     "DecoderEvent",
     "ImageComplete",
+    "ImageProgress",
     "ImageStarted",
     "decode_wav",
 ]

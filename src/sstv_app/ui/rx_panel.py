@@ -125,6 +125,30 @@ class RxPanel(QWidget):
             f"Decoding {mode.value} (VIS 0x{vis_code:02X})…"
         )
 
+    @Slot(object, object, int, int, int)
+    def show_image_progress(
+        self,
+        image: "PILImage",
+        mode: Mode,
+        vis_code: int,
+        lines_decoded: int,
+        lines_total: int,
+    ) -> None:
+        """Update the preview with a partial in-progress image.
+
+        Called each time the decoder produces new scan lines. The image
+        is full-size with black rows for lines not yet decoded — the
+        preview scales it down so partial decodes look natural.
+        """
+        self._preview_source = _pil_to_pixmap(image)
+        self._update_preview_pixmap()
+        self._preview.setText("")
+        pct = lines_decoded * 100 // lines_total if lines_total else 0
+        self._status.setText(
+            f"Decoding {mode.value}… {lines_decoded}/{lines_total} lines ({pct}%)"
+        )
+        self._current_mode = mode
+
     @Slot(object, object, int)
     def show_image_complete(
         self, image: "PILImage", mode: Mode, vis_code: int
