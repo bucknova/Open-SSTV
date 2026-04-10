@@ -663,7 +663,13 @@ class Decoder:
 
     def feed(self, samples: NDArray) -> list[DecoderEvent]:
         """Append a chunk of audio and return any decoder events it
-        triggered. Safe to call from a worker thread."""
+        triggered. Safe to call from a worker thread.
+
+        After a successful decode, the buffer is automatically cleared
+        so the decoder is ready to hunt for the next VIS header without
+        an explicit ``reset()`` call. This means back-to-back images
+        on the same capture session Just Work.
+        """
         arr = np.asarray(samples, dtype=np.float64)
         if arr.ndim != 1:
             return [DecodeError(f"feed expected 1-D, got {arr.ndim}-D")]
@@ -680,12 +686,17 @@ class Decoder:
             # Already emitted this image; suppress duplicates.
             return []
         self._last_emitted += 1
-        return [
+        events: list[DecoderEvent] = [
             ImageStarted(mode=result.mode, vis_code=result.vis_code),
             ImageComplete(
                 image=result.image, mode=result.mode, vis_code=result.vis_code
             ),
         ]
+        # Auto-reset so the next feed() starts fresh — without this the
+        # buffer grows forever and decode_wav re-finds the same VIS on
+        # every subsequent call, blocking any second image from decoding.
+        self.reset()
+        return events
 
     def reset(self) -> None:
         """Drop the buffered audio and reset the duplicate-suppression

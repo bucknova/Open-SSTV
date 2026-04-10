@@ -245,6 +245,7 @@ class RxWorker(QObject):
 
     image_started = Signal(object, int)  # (Mode, vis_code)
     image_complete = Signal(object, object, int)  # (PIL.Image, Mode, vis_code)
+    status_update = Signal(str)  # periodic progress text
     error = Signal(str)
 
     def __init__(
@@ -258,6 +259,7 @@ class RxWorker(QObject):
         self._decoder = Decoder(sample_rate)
         self._scratch: list["NDArray[np.float64]"] = []
         self._scratch_samples: int = 0
+        self._total_samples: int = 0
         self._flush_samples: int = (
             flush_samples
             if flush_samples is not None
@@ -292,6 +294,7 @@ class RxWorker(QObject):
 
         self._scratch.append(arr)
         self._scratch_samples += arr.size
+        self._total_samples += arr.size
 
         if self._scratch_samples >= self._flush_samples:
             self._flush()
@@ -306,6 +309,7 @@ class RxWorker(QObject):
         """
         self._scratch.clear()
         self._scratch_samples = 0
+        self._total_samples = 0
         self._decoder.reset()
 
     @Slot()
@@ -337,8 +341,20 @@ class RxWorker(QObject):
             self.error.emit(f"Decoder exception: {exc}")
             return
 
+        if not events:
+            # No decode yet — show progress so the user knows we're alive.
+            secs = self._total_samples / self._sample_rate
+            self.status_update.emit(
+                f"Listening… {secs:.0f}s buffered, waiting for signal."
+            )
+
+        decoded = False
         for event in events:
             self._dispatch(event)
+            if isinstance(event, ImageComplete):
+                decoded = True
+        if decoded:
+            self._total_samples = 0
 
     def _dispatch(self, event: object) -> None:
         if isinstance(event, ImageStarted):
