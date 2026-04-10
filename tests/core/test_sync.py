@@ -296,6 +296,41 @@ def test_find_line_starts_survives_click_noise_inside_syncs() -> None:
     assert len(starts) == spec.height
 
 
+def test_find_line_starts_survives_upward_frequency_offset() -> None:
+    """A DC shift of the whole frequency track must not defeat sync detection.
+
+    RX LO drift, Doppler, a deliberate FM offset between TX and RX, or a
+    heavy-noise bias in the Hilbert demodulator can all shift the entire
+    instantaneous-frequency track upward (or downward) by 100–200 Hz
+    without changing the *relative* spacing between sync level and body
+    level. The old hard ``1100 < f < 1300`` band collapsed completely at
+    ~100 Hz of upward shift, because every sync pulse would land at
+    1300+ Hz and fall out of the window.
+
+    The Phase 2.5 adaptive threshold tracks the local sync floor inside
+    a rolling window and applies a 1450 Hz hard cap as the back-stop, so
+    up to ~250 Hz of upward shift is tolerated before the cap pins the
+    threshold below the shifted sync level. This test constructs a
+    Robot 36 track with every frequency bumped by +150 Hz (syncs at
+    1350 Hz, body at 2050 Hz) and asserts the detector still finds all
+    240 line starts.
+    """
+    fs = 48_000
+    spec = MODE_TABLE[Mode.ROBOT_36]
+    track = _synthesize_line_freq_track(spec, num_lines=spec.height, fs=fs)
+    # Shift the whole track upward by 150 Hz. Sync pulses that used to
+    # sit at 1200 Hz now sit at 1350 Hz — outside the old hard band but
+    # still below the 1450 Hz adaptive cap.
+    track = track + 150.0
+    starts = find_line_starts(track, fs, spec)
+    assert len(starts) == spec.height
+    diffs = np.diff(np.asarray(starts, dtype=np.float64))
+    expected_spacing = spec.line_time_ms / 1000.0 * fs
+    np.testing.assert_allclose(diffs.mean(), expected_spacing, rtol=0.001)
+    # Grid should still be tight — the shift doesn't affect relative timing.
+    assert diffs.std() < 1.0
+
+
 # === integration tests against real PySSTV-encoded WAVs ===
 
 

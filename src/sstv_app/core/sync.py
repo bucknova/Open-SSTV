@@ -24,24 +24,37 @@ returned sync indices *are* line starts. For Scottie family modes
 and red scans; the per-mode decoder is responsible for offsetting back to
 the line start using its own per-channel layout.
 
-The detector treats the frequency track in two passes:
+The line-sync detector treats the frequency track in three passes:
 
-1. A pre-smoother flattens high-frequency noise before thresholding.
-   The leader pass uses a 2 ms boxcar (wide enough to suppress
-   sample-level jitter, narrow enough to keep the 10 ms mid-leader
-   break distinct from the 30 ms VIS start bit). The line-sync pass
-   uses a **median filter** sized to half the mode's nominal sync
-   pulse width — median because additive noise on a narrow-band FM
-   signal produces occasional large phase-slip "clicks" in the IF
-   track, and a boxcar averages those clicks into the sync band while
-   a median rejects them outright. The line-sync pass doesn't care
-   about the 10 ms / 30 ms distinction the leader pass protects, so
-   the wider median window is safe here.
-2. The smoothed track is thresholded into a "1200 Hz sync band" mask
-   (``> 1100 Hz & < 1300 Hz``). Maximal True runs are extracted; runs
-   whose length sits within 50–200 % of the expected mode-specific sync
-   length are kept as candidate line syncs. Runs much longer than that
-   (the 30 ms VIS start/stop bits) and much shorter (transient ringing
+1. A **median pre-smoother** sized to half the mode's nominal sync
+   pulse width flattens high-frequency noise. Median because additive
+   noise on a narrow-band FM signal produces occasional large
+   phase-slip "clicks" in the IF track, and a boxcar averages those
+   clicks into the sync band while a median rejects them outright.
+   (The leader pass uses a different, narrower 2 ms boxcar — wide
+   enough to suppress sample-level jitter, narrow enough to keep the
+   10 ms mid-leader break distinct from the 30 ms VIS start bit.)
+2. An **adaptive threshold** is computed by rolling ``minimum_filter1d``
+   and ``maximum_filter1d`` over ~2 line periods. At every sample,
+   the threshold is ``local_min + 0.1 * (local_max - local_min)``, then
+   clamped above at 1450 Hz. This replaces the hard ``1100 < f < 1300``
+   band we originally used — a band is too brittle when RX LO drift,
+   Doppler, or heavy noise shifts the whole track's sync level by more
+   than ~100 Hz, because the old detector simply stopped seeing sync
+   at all. The rolling min tracks local sync level; the 0.1 fraction
+   keeps the threshold close to that floor (important because PySSTV's
+   phase-continuous audio has ~10–15 sample *ramps* at every tone
+   transition, and a threshold higher up the ramp produces inconsistent
+   start positions). The 1450 Hz hard cap is what actually buys the
+   shift-tolerance win: once the whole track moves upward by more than
+   ~100 Hz the adaptive midpoint would track with it, but the cap pins
+   the ceiling, giving ~250 Hz of upward headroom from the 1200 Hz
+   nominal sync level while staying 50 Hz clear of the 1500 Hz porches.
+3. The smoothed track is masked as ``smooth < threshold``. Maximal
+   True runs are extracted; runs whose length sits within 50–200 % of
+   the expected mode-specific sync length are kept. Runs much longer
+   than that (the 30 ms VIS start/stop bits, dark image regions) and
+   much shorter (the 0.5–1.5 ms 1500 Hz porches, transient ringing
    between adjacent VIS data bits) are rejected.
 
 Public API
@@ -50,11 +63,15 @@ find_leader(freq_track, fs) -> int | None
     Sample index of the VIS start bit's leading edge, or ``None`` if no
     leader was found.
 
-find_sync_candidates(freq_track, fs, sync_pulse_ms, start_idx=0) -> list[int]
+find_sync_candidates(freq_track, fs, sync_pulse_ms, line_period_samples, start_idx=0) -> list[int]
     All plausible per-line sync pulse start indices (length-filtered but
-    **not** spacing-filtered). Used by the decoder to detect whether a
-    Robot 36 WAV uses PySSTV's 150 ms per-line layout or the canonical
-    broadcast 290 ms line-pair layout before committing to a grid walk.
+    **not** spacing-filtered). ``line_period_samples`` sizes the rolling
+    min/max window that drives the adaptive threshold; both callers
+    (``find_line_starts`` and the Robot 36 line-pair dispatcher in the
+    decoder) already have it on hand. Used by the decoder to detect
+    whether a Robot 36 WAV uses PySSTV's 150 ms per-line layout or the
+    canonical broadcast 290 ms line-pair layout before committing to a
+    grid walk.
 
 find_line_starts(freq_track, fs, spec, start_idx=0) -> list[int]
     Sample indices (into the original ``freq_track``, not the slice) of
@@ -73,7 +90,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
-from scipy.ndimage import median_filter
+from scipy.ndimage import maximum_filter1d, median_filter, minimum_filter1d
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -95,6 +112,38 @@ _LEADER_SMOOTH_S: float = 0.002
 #: more than large enough to reject click-noise outliers that would
 #: otherwise corrupt a boxcar-smoothed track.
 _LINE_MEDIAN_FRAC: float = 0.5
+
+#: Width of the rolling min/max window used by the adaptive threshold,
+#: expressed in multiples of the line period. Two line periods guarantees
+#: the window covers at least one sync pulse at every position (modulo a
+#: couple of edge samples handled by scipy's ``mode='nearest'`` padding),
+#: so the rolling min tracks sync level and the rolling max tracks
+#: mid-luma — the midpoint between them is a stable sync/body divider.
+_ADAPTIVE_WIN_LINES: float = 2.0
+
+#: Fraction of the ``(local_max - local_min)`` range, added back to
+#: ``local_min``, used as the adaptive threshold. A small value puts
+#: the typical-case threshold close to the sync floor, which matters
+#: because PySSTV-generated audio has ~10–15 sample *ramps* at every
+#: sync boundary (phase-continuous tone transitions, not sharp steps),
+#: and a threshold too far above the sync floor lands partway up the
+#: ramp and produces inconsistent start positions (Martin M1 lines end
+#: up with ~6 samples of std-dev jitter vs ~1.3 samples for a near-floor
+#: threshold). At 0.1 the typical-case threshold is ~1310 Hz for a
+#: 1200 Hz sync / 2300 Hz body track, effectively matching the old hard
+#: ``< 1300`` upper bound. The 1450 Hz hard cap still kicks in once the
+#: whole track shifts upward — that's where the adaptive detector
+#: actually buys us over the old hard threshold.
+_ADAPTIVE_THR_FRAC: float = 0.1
+
+#: Hard upper bound on the adaptive threshold, in Hz. Without this cap
+#: the threshold would climb above the 1500 Hz porch level in the corner
+#: case of a dark, low-contrast image body (because ``local_max`` there
+#: sits close to 1500 Hz and the midpoint to a sync-level ``local_min``
+#: lands just below the porches). 1450 Hz gives sync 250 Hz of upward
+#: headroom from its 1200 Hz nominal while staying 50 Hz clear of
+#: 1500 Hz porches that would otherwise get merged into sync runs.
+_HARD_SYNC_UPPER_HZ: float = 1450.0
 
 #: Lower bound on a "VIS start bit" candidate run, in seconds. The mid-leader
 #: break is 10 ms, so 20 ms cleanly rejects it.
@@ -150,34 +199,54 @@ def find_sync_candidates(
     freq_track: NDArray,
     fs: int,
     sync_pulse_ms: float,
+    line_period_samples: float,
     start_idx: int = 0,
 ) -> list[int]:
     """Length-filtered sync pulse candidates, with no spacing filter.
 
     Returns the sample indices (into the original ``freq_track``) of
-    every 1200 Hz run whose duration falls within 50–200 % of the given
-    ``sync_pulse_ms``. The caller typically feeds this into
-    ``walk_sync_grid`` after deciding on the expected line period — or
-    uses the raw list to auto-detect the period itself.
+    every sync-band run whose duration falls within 50–200 % of the
+    given ``sync_pulse_ms``. ``line_period_samples`` sizes the adaptive
+    threshold's rolling window (2 × line period); the caller typically
+    feeds the return value into ``walk_sync_grid`` after deciding on
+    the expected line period — or uses the raw list to auto-detect
+    the period itself.
 
     The frequency track is pre-smoothed with a **median filter** sized
-    to half the sync pulse width. Median-instead-of-boxcar is the
-    Phase 2.5 robustness fix: additive white noise on a narrow-band FM
-    signal produces occasional large phase-slip "click" spikes in the
-    demodulated IF track, and a boxcar averages those clicks straight
-    into the 1100–1300 Hz sync band where they manufacture spurious
-    runs. The median filter rejects them outright as long as each
-    click is shorter than half the window.
+    to half the sync pulse width. Median-instead-of-boxcar is a
+    Phase 2.5 robustness fix: additive white noise on a narrow-band
+    FM signal produces occasional large phase-slip "click" spikes in
+    the demodulated IF track, and a boxcar averages those clicks
+    straight into the sync band where they manufacture spurious runs.
+    The median filter rejects them outright as long as each click is
+    shorter than half the window. Unlike a boxcar, median is
+    edge-preserving on a clean step — the sync-band crossing lands at
+    the true transition sample rather than somewhere inside a linear
+    ramp — so no leading-edge correction is applied to the reported
+    indices.
 
-    Unlike a boxcar, the median filter is edge-preserving on a clean
-    step — the 1300 Hz crossing lands at the true transition sample
-    rather than somewhere inside a linear ramp — so no leading-edge
-    correction is applied to the reported indices.
+    The smoothed track is compared against a **rolling adaptive
+    threshold**: at every sample, ``threshold = local_min + 0.1 *
+    (local_max - local_min)``, where ``local_min`` and ``local_max``
+    are taken over a 2-line-period window, then capped above at
+    1450 Hz. The adaptive floor-tracking replaces the old hard
+    ``1100 < f < 1300`` band, which collapsed the moment noise or LO
+    drift shifted the whole track's sync level by more than ~100 Hz.
+    The 0.1 fraction (see ``_ADAPTIVE_THR_FRAC``) keeps the typical
+    threshold near the sync floor — about 1310 Hz on a 1200/2300 Hz
+    track — which matters because PySSTV's tone transitions are
+    linear ramps, not sharp steps, and a higher threshold lands
+    partway up the ramp and jitters the detected start positions.
+    The 1450 Hz hard cap is what gives the shift-tolerance win: it
+    pins the ceiling independently of the adaptive arithmetic, so the
+    detector still sees sync even when LO drift/Doppler shifts the
+    whole track by up to ~250 Hz. The cap is still below the 1500 Hz
+    porch level, so Martin/Scottie porches never merge into sync runs.
 
     This function is intentionally permissive — it can yield spurious
-    candidates such as VIS stop-bit residue (a 1200 Hz run that started
-    before ``start_idx`` and leaked past it, then got chopped to
-    length-valid by the ``arr[start_idx:]`` slice). ``walk_sync_grid``
+    candidates such as VIS stop-bit residue (a 1200 Hz run that
+    started before ``start_idx`` and leaked past it, then got chopped
+    to length-valid by the ``arr[start_idx:]`` slice). ``walk_sync_grid``
     filters those out by anchor selection rather than forcing every
     caller to re-implement residue detection.
     """
@@ -204,7 +273,22 @@ def find_sync_candidates(
     sliced = arr[start_idx:]
     smooth = _median_smooth(sliced, median_n)
 
-    sync_mask = (smooth > 1100.0) & (smooth < 1300.0)
+    # Adaptive threshold: rolling min/max over ~2 line periods, then
+    # their midpoint (with a hard 1450 Hz cap for the dark-body corner
+    # case). Window clamped to the slice size so scipy's filter still
+    # behaves on short synthetic test tracks; ``mode='nearest'`` pads
+    # edges with replicated values, which matches the boxcar/median
+    # helpers' ``mode='same'`` contract.
+    adapt_win = max(3, int(round(_ADAPTIVE_WIN_LINES * line_period_samples)))
+    if adapt_win % 2 == 0:
+        adapt_win += 1
+    adapt_win = min(adapt_win, max(3, smooth.size))
+    local_min = minimum_filter1d(smooth, size=adapt_win, mode="nearest")
+    local_max = maximum_filter1d(smooth, size=adapt_win, mode="nearest")
+    adaptive_thr = local_min + _ADAPTIVE_THR_FRAC * (local_max - local_min)
+    threshold = np.minimum(adaptive_thr, _HARD_SYNC_UPPER_HZ)
+
+    sync_mask = smooth < threshold
     runs = _find_runs(sync_mask)
 
     return [
@@ -316,10 +400,14 @@ def find_line_starts(
         ``freq_track`` (not into the post-``start_idx`` slice). Returns
         an empty list if no plausible line syncs were found.
     """
-    candidates = find_sync_candidates(
-        freq_track, fs, spec.sync_pulse_ms, start_idx=start_idx
-    )
     line_samples = spec.line_time_ms / 1000.0 * fs
+    candidates = find_sync_candidates(
+        freq_track,
+        fs,
+        spec.sync_pulse_ms,
+        line_period_samples=line_samples,
+        start_idx=start_idx,
+    )
     return walk_sync_grid(candidates, line_samples, spec.height)
 
 

@@ -162,10 +162,14 @@ def decode_wav(
     if mode == Mode.ROBOT_36:
         image = _decode_robot36_dispatch(inst, fs, spec, vis_end)
     else:
-        candidates = find_sync_candidates(
-            inst, fs, spec.sync_pulse_ms, start_idx=vis_end
-        )
         line_samples = spec.line_time_ms / 1000.0 * fs
+        candidates = find_sync_candidates(
+            inst,
+            fs,
+            spec.sync_pulse_ms,
+            line_period_samples=line_samples,
+            start_idx=vis_end,
+        )
         line_starts = slant_corrected_line_starts(
             candidates, line_samples, spec.height
         )
@@ -205,13 +209,17 @@ def _decode_robot36_dispatch(
     file is the canonical broadcast line-pair format and we walk a
     ``spec.height // 2`` grid of super-lines. Anything else is rejected.
     """
+    line_samples = spec.line_time_ms / 1000.0 * fs
     candidates = find_sync_candidates(
-        inst, fs, spec.sync_pulse_ms, start_idx=vis_end
+        inst,
+        fs,
+        spec.sync_pulse_ms,
+        line_period_samples=line_samples,
+        start_idx=vis_end,
     )
     if len(candidates) < 2:
         return None
 
-    line_samples = spec.line_time_ms / 1000.0 * fs
     pair_samples = 2.0 * line_samples
     tolerance = 0.25  # ±25 %, matching walk_sync_grid's slack
 
