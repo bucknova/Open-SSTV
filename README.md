@@ -1,4 +1,4 @@
-# sstv-app
+# Open-SSTV
 
 An open-source, cross-platform SSTV (Slow Scan Television) transceiver for amateur
 radio. Receives and decodes SSTV images live off your radio, and encodes and
