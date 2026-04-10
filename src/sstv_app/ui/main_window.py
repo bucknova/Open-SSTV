@@ -72,10 +72,11 @@ from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QCloseEvent
 from PySide6.QtWidgets import (
     QFileDialog,
-    QLabel,
     QMainWindow,
     QMessageBox,
     QSplitter,
+    QVBoxLayout,
+    QWidget,
 )
 
 from sstv_app.audio.devices import AudioDevice
@@ -88,6 +89,8 @@ from sstv_app.config.schema import AppConfig
 from sstv_app.config.store import load_config, save_config
 from sstv_app.radio.base import ManualRig, Rig
 from sstv_app.radio.exceptions import RigError
+from sstv_app.radio.rigctld import RigctldClient
+from sstv_app.ui.radio_panel import RadioPanel
 from sstv_app.ui.rx_panel import RxPanel
 from sstv_app.ui.settings_dialog import SettingsDialog
 from sstv_app.ui.tx_panel import TxPanel
@@ -125,19 +128,20 @@ class MainWindow(QMainWindow):
 
         self._config = config if config is not None else load_config()
 
-        # Open the rig (no-op for ManualRig). We swallow connection
-        # failures here so the window still launches with rig control
-        # disabled — the user can fix their config and click around.
+        # Rig starts as ManualRig (no-op). The user clicks "Connect Rig"
+        # in the radio panel to establish a live rigctld link; the settings
+        # dialog configures host/port.
         self._rig: Rig = rig if rig is not None else ManualRig()
-        try:
-            self._rig.open()
-        except RigError as exc:
-            self.statusBar().showMessage(f"Rig: {exc}", 0)
-
         self._input_device = input_device
 
         # --- Menu bar ---
         self._build_menu_bar()
+
+        # --- Radio panel (toolbar strip above TX/RX) ---
+        self._radio_panel = RadioPanel(self)
+        self._radio_panel.set_callsign(self._config.callsign)
+        self._radio_panel.connect_requested.connect(self._on_rig_connect)
+        self._radio_panel.disconnect_requested.connect(self._on_rig_disconnect)
 
         # --- Panels inside a horizontal splitter ---
         self._tx_panel = TxPanel(self)
@@ -147,7 +151,15 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self._rx_panel)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
-        self.setCentralWidget(splitter)
+
+        # Stack radio panel + splitter into the central widget.
+        central = QWidget(self)
+        central_layout = QVBoxLayout(central)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+        central_layout.addWidget(self._radio_panel)
+        central_layout.addWidget(splitter, stretch=1)
+        self.setCentralWidget(central)
 
         # --- TX worker on its own thread ---
         self._tx_thread = QThread(self)
@@ -218,25 +230,10 @@ class MainWindow(QMainWindow):
         self._rx_worker.image_complete.connect(self._on_rx_image_complete)
         self._rx_worker.error.connect(self._on_rx_error)
 
-        # --- Rig status widgets in the status bar ---
-        self._rig_freq_label = QLabel("")
-        self._rig_mode_label = QLabel("")
-        self._rig_strength_label = QLabel("")
-        self._rig_status_label = QLabel("")
-        for w in (
-            self._rig_freq_label,
-            self._rig_mode_label,
-            self._rig_strength_label,
-            self._rig_status_label,
-        ):
-            self.statusBar().addPermanentWidget(w)
-
-        # --- 1 Hz rig poll timer ---
+        # --- 1 Hz rig poll timer (started on connect, stopped on disconnect) ---
         self._rig_poll_timer = QTimer(self)
         self._rig_poll_timer.setInterval(1000)
         self._rig_poll_timer.timeout.connect(self._poll_rig)
-        if not isinstance(self._rig, ManualRig):
-            self._rig_poll_timer.start()
 
         self.statusBar().showMessage("Ready")
 
@@ -284,6 +281,7 @@ class MainWindow(QMainWindow):
         if dlg.exec() == SettingsDialog.DialogCode.Accepted:
             self._config = dlg.result_config()
             save_config(self._config)
+            self._radio_panel.set_callsign(self._config.callsign)
             self.statusBar().showMessage("Settings saved.", 3000)
 
     # === TX slots ===
@@ -406,48 +404,64 @@ class MainWindow(QMainWindow):
         self._rx_panel.set_status(f"RX: {message}")
         self.statusBar().showMessage(message, 5000)
 
-    # === Rig polling ===
+    # === Rig connect / disconnect / poll ===
+
+    @Slot()
+    def _on_rig_connect(self) -> None:
+        """Create a RigctldClient from the current config and start polling."""
+        host = self._config.rigctld_host
+        port = self._config.rigctld_port
+        try:
+            client = RigctldClient(host=host, port=port)
+            client.open()
+            client.ping()
+        except RigError as exc:
+            self._radio_panel.set_connection_error()
+            self.statusBar().showMessage(
+                f"Could not connect to rigctld at {host}:{port} — {exc}",
+                5000,
+            )
+            return
+
+        self._rig = client
+        self._tx_worker.set_rig(client)
+        self._radio_panel.set_connected(True)
+        self._rig_poll_timer.start()
+        self.statusBar().showMessage(
+            f"Connected to rigctld at {host}:{port}", 3000
+        )
+
+    @Slot()
+    def _on_rig_disconnect(self) -> None:
+        """Stop polling and tear down the rig link."""
+        self._rig_poll_timer.stop()
+        try:
+            self._rig.close()
+        except RigError:
+            pass
+        self._rig = ManualRig()
+        self._tx_worker.set_rig(self._rig)
+        self._radio_panel.set_connected(False)
+        self.statusBar().showMessage("Rig disconnected.", 3000)
 
     @Slot()
     def _poll_rig(self) -> None:
         """Read frequency, mode, and S-meter from the rig.
 
         Called every 1 s by ``_rig_poll_timer``. If the rig connection
-        fails, we show "Rig: disconnected" in the status bar and keep
+        fails, show "Connection lost" in the radio panel and keep
         the timer running so reconnection attempts happen automatically
-        (the ``RigctldClient`` retries once per call internally). No
-        modal dialogs, no exceptions surfaced to the user.
+        (the ``RigctldClient`` retries once per call internally).
         """
         try:
             freq = self._rig.get_freq()
             mode_name, _ = self._rig.get_mode()
             strength = self._rig.get_strength()
         except RigError:
-            self._rig_freq_label.setText("")
-            self._rig_mode_label.setText("")
-            self._rig_strength_label.setText("")
-            self._rig_status_label.setText("Rig: disconnected")
+            self._radio_panel.set_connection_error()
             return
 
-        self._rig_freq_label.setText(self._format_freq(freq))
-        self._rig_mode_label.setText(mode_name)
-        self._rig_strength_label.setText(
-            f"S{min(9, max(0, (strength + 73) // 6))}"
-            if strength != 0
-            else ""
-        )
-        self._rig_status_label.setText("")
-
-    @staticmethod
-    def _format_freq(hz: int) -> str:
-        """Format a frequency in Hz as a friendly display string."""
-        if hz <= 0:
-            return ""
-        if hz >= 1_000_000:
-            return f"{hz / 1_000_000:.6f} MHz"
-        if hz >= 1_000:
-            return f"{hz / 1_000:.3f} kHz"
-        return f"{hz} Hz"
+        self._radio_panel.update_rig_status(freq, mode_name, strength)
 
     # === lifecycle ===
 

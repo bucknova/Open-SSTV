@@ -148,6 +148,10 @@ class TxWorker(QObject):
         self._ptt_delay_s = ptt_delay_s
         self._stop_event = threading.Event()
 
+    def set_rig(self, rig: Rig) -> None:
+        """Swap the rig backend at runtime (e.g. after connect/disconnect)."""
+        self._rig = rig
+
     @Slot(object, object)
     def transmit(self, image: "PILImage", mode: Mode) -> None:
         """Encode and transmit one image. Worker-thread entry point.

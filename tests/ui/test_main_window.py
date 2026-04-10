@@ -57,18 +57,23 @@ def test_window_constructs_and_shows(window: MainWindow, qtbot) -> None:
 
 
 def test_central_widget_hosts_tx_and_rx_panels(window: MainWindow) -> None:
-    """Phase 2: the central widget is a QSplitter containing both a
-    TxPanel and an RxPanel, replacing the Phase 1 single-panel layout."""
+    """The central widget contains a RadioPanel and a QSplitter hosting
+    both a TxPanel and an RxPanel."""
     from PySide6.QtWidgets import QSplitter
 
+    from sstv_app.ui.radio_panel import RadioPanel
     from sstv_app.ui.rx_panel import RxPanel
     from sstv_app.ui.tx_panel import TxPanel
 
     central = window.centralWidget()
-    assert isinstance(central, QSplitter)
-    panels = [central.widget(i) for i in range(central.count())]
+    # The central widget is now a QWidget wrapping the radio panel and splitter.
+    children = central.findChildren(QSplitter)
+    assert len(children) >= 1
+    splitter = children[0]
+    panels = [splitter.widget(i) for i in range(splitter.count())]
     assert any(isinstance(p, TxPanel) for p in panels)
     assert any(isinstance(p, RxPanel) for p in panels)
+    assert central.findChild(RadioPanel) is not None
 
 
 def test_transmit_round_trip_through_worker(

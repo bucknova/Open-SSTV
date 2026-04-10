@@ -12,6 +12,7 @@ after the dialog is accepted.
 """
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -23,12 +24,16 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
+
+from sstv_app.radio.exceptions import RigError
+from sstv_app.radio.rigctld import RigctldClient
 
 from sstv_app.audio.devices import (
     AudioDevice,
@@ -113,6 +118,19 @@ class SettingsDialog(QDialog):
         tab = QWidget()
         form = QFormLayout(tab)
 
+        # Explanatory note
+        help_label = QLabel(
+            "Open SSTV controls your radio through Hamlib's "
+            "<b>rigctld</b> daemon.\n"
+            "Start rigctld in a terminal first, e.g.:\n"
+            "<code>rigctld -m 1035 -r /dev/ttyUSB0 -s 38400</code>\n\n"
+            "Then enter the host and port below and use the "
+            "<b>Connect Rig</b> button in the main window."
+        )
+        help_label.setWordWrap(True)
+        help_label.setTextFormat(Qt.TextFormat.RichText)
+        form.addRow(help_label)
+
         self._rig_enabled = QCheckBox("Enable rig control (rigctld)")
         self._rig_enabled.setChecked(self._config.rig_enabled)
         form.addRow(self._rig_enabled)
@@ -124,6 +142,11 @@ class SettingsDialog(QDialog):
         self._rigctld_port.setRange(1, 65535)
         self._rigctld_port.setValue(self._config.rigctld_port)
         form.addRow("rigctld port:", self._rigctld_port)
+
+        # Test connection button
+        self._test_btn = QPushButton("Test Connection")
+        self._test_btn.clicked.connect(self._test_connection)
+        form.addRow("", self._test_btn)
 
         self._ptt_delay = QDoubleSpinBox()
         self._ptt_delay.setRange(0.0, 2.0)
@@ -170,6 +193,34 @@ class SettingsDialog(QDialog):
         return tab
 
     # === Private slots ===
+
+    def _test_connection(self) -> None:
+        """Try to connect and ping the rigctld daemon at the current settings."""
+        host = self._rigctld_host.text().strip()
+        port = self._rigctld_port.value()
+        try:
+            client = RigctldClient(host=host, port=port)
+            client.open()
+            client.ping()
+            freq = client.get_freq()
+            mode, _ = client.get_mode()
+            client.close()
+            QMessageBox.information(
+                self,
+                "Connection successful",
+                f"Connected to rigctld at {host}:{port}.\n\n"
+                f"Frequency: {freq / 1_000_000:.6f} MHz\n"
+                f"Mode: {mode}",
+            )
+        except RigError as exc:
+            QMessageBox.warning(
+                self,
+                "Connection failed",
+                f"Could not connect to rigctld at {host}:{port}.\n\n"
+                f"Error: {exc}\n\n"
+                "Make sure rigctld is running. Example:\n"
+                "  rigctld -m 1035 -r /dev/ttyUSB0 -s 38400",
+            )
 
     def _browse_save_dir(self) -> None:
         directory = QFileDialog.getExistingDirectory(

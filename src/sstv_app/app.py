@@ -23,7 +23,6 @@ def main(argv: list[str] | None = None) -> int:
     # they share a package with the GUI.
     from PySide6.QtWidgets import QApplication
 
-    from sstv_app.radio.base import ManualRig
     from sstv_app.ui.main_window import MainWindow
 
     qt_argv = list(argv) if argv is not None else sys.argv
@@ -34,11 +33,9 @@ def main(argv: list[str] | None = None) -> int:
     app.setOrganizationName("bucknova")
     app.setOrganizationDomain("github.com/bucknova")
 
-    # ManualRig is the zero-config default for v1. Hooking up rigctld is
-    # a Phase 3 settings-dialog item — for Phase 1 the user is on VOX or
-    # hand PTT, which is exactly what ManualRig models.
-    rig = ManualRig()
-    window = MainWindow(rig=rig)
+    # Start with ManualRig (no-op). The user clicks "Connect Rig" in
+    # the radio panel to establish a live rigctld link at runtime.
+    window = MainWindow()
     window.show()
 
     # Belt-and-braces cleanup: even if the event loop quits via something
