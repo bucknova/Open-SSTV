@@ -4,7 +4,9 @@ An open-source, cross-platform SSTV (Slow Scan Television) transceiver for amate
 radio. Receives and decodes SSTV images live off your radio, and encodes and
 transmits images back, with optional Hamlib-based PTT and frequency control.
 
-**Status:** Pre-alpha. Active development. Nothing is wired up yet.
+**Status:** Alpha (v0.1.0). TX and RX paths work end-to-end. Settings persist.
+Rig control via rigctld is functional. Weak-signal decode is usable down to
+roughly 0 dB SNR on Robot 36.
 
 ## Goals
 
@@ -18,6 +20,27 @@ transmits images back, with optional Hamlib-based PTT and frequency control.
   bindings — so any of the hundreds of radios Hamlib supports works out of the box.
 - **Decoder written from scratch** because no maintained Python SSTV decoder exists
   on PyPI today. Algorithms mirror the well-known C reference `slowrx`.
+
+## Features (v0.1)
+
+- **Live RX decode** — start capturing, and decoded images appear in a scrollable
+  gallery strip as they arrive. Supports Robot 36, Martin M1, and Scottie S1.
+- **TX with PTT sequencing** — load an image, pick a mode, click Transmit. The
+  app keys your rig via rigctld, plays the SSTV audio, and de-keys automatically.
+- **Settings dialog** — audio device selection, sample rate, rigctld host/port,
+  PTT delay, callsign, default TX mode, auto-save directory.
+- **Auto-save** — decoded images can be saved automatically to a configured
+  directory with timestamped filenames, or saved manually via a Save-As dialog.
+- **Rig status bar** — frequency, mode, and S-meter polled at 1 Hz when
+  connected to rigctld. Graceful disconnect: non-modal status bar message,
+  auto-reconnect on next poll cycle.
+- **Slant correction** — least-squares clock-drift compensation so images from
+  slightly off-frequency TX stations don't skew.
+- **Weak-signal robustness** — bandpass prefilter, median-filter click rejection,
+  and adaptive rolling-threshold sync detection. Usable decode down to ~0 dB SNR
+  on Robot 36; partial decode at −5 dB.
+- **CLI tools** — `sstv-app-encode` and `sstv-app-decode` work without Qt for
+  headless or scripted use.
 
 ## v1 mode coverage
 
@@ -49,8 +72,8 @@ different front-end (TUI, web, CLI) without modification.
 ## Install (development)
 
 ```bash
-git clone <repo-url> sstv-app
-cd sstv-app
+git clone https://github.com/bucknova/Open-SSTV.git
+cd Open-SSTV
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
