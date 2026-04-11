@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QIcon, QImage, QPixmap, QStandardItem, QStandardItemModel
-from PySide6.QtWidgets import QListView
+from PySide6.QtWidgets import QApplication, QListView, QMenu
 
 from sstv_app.core.modes import Mode
 
@@ -60,10 +60,12 @@ class ImageGalleryWidget(QListView):
         # label Qt auto-renders underneath it.
         self.setMinimumHeight(_THUMB_SIZE.height() + 40)
         self.setUniformItemSizes(True)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
 
         self._model = QStandardItemModel(self)
         self.setModel(self._model)
         self.doubleClicked.connect(self._on_double_clicked)
+        self.customContextMenuRequested.connect(self._on_context_menu)
 
     def add_image(self, image: "PILImage", mode: Mode) -> None:
         """Prepend a freshly decoded image to the gallery strip.
@@ -99,6 +101,29 @@ class ImageGalleryWidget(QListView):
         mode = item.data(_MODE_ROLE)
         if image is not None and mode is not None:
             self.image_activated.emit(image, mode)
+
+    def _on_context_menu(self, pos) -> None:
+        index = self.indexAt(pos)
+        if not index.isValid():
+            return
+        item = self._model.itemFromIndex(index)
+        if item is None:
+            return
+        image = item.data(_PIL_IMAGE_ROLE)
+        mode = item.data(_MODE_ROLE)
+        if image is None or mode is None:
+            return
+
+        menu = QMenu(self)
+        save_action = menu.addAction("Save As\u2026")
+        copy_action = menu.addAction("Copy to Clipboard")
+        action = menu.exec(self.mapToGlobal(pos))
+
+        if action == save_action:
+            self.image_activated.emit(image, mode)
+        elif action == copy_action:
+            pixmap = _pil_to_pixmap(image)
+            QApplication.clipboard().setPixmap(pixmap)
 
 
 def _pil_to_pixmap(image: "PILImage") -> QPixmap:

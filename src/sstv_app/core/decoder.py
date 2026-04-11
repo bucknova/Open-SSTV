@@ -292,20 +292,22 @@ def _decode_robot36(
     c_offset = y_offset + y_scan_samples + inter_ch_gap_samples + porch_samples
 
     y_plane = np.zeros((height, width), dtype=np.uint8)
-    cb_plane = np.zeros((height, width), dtype=np.uint8)
-    cr_plane = np.zeros((height, width), dtype=np.uint8)
+    # Cb/Cr neutral midpoint is 128 — initializing to 0 would produce a
+    # green tint on any unsampled pixels after YCbCr→RGB conversion.
+    cb_plane = np.full((height, width), 128, dtype=np.uint8)
+    cr_plane = np.full((height, width), 128, dtype=np.uint8)
 
     n = inst.size
     for row, line_start in enumerate(line_starts):
         y_start = line_start + y_offset
         c_start = line_start + c_offset
         y_row = _sample_pixels(inst, y_start, y_scan_samples, width, n)
-        c_row = _sample_pixels(inst, c_start, c_scan_samples, width, n)
+        c_row = _sample_pixels(inst, c_start, c_scan_samples, width, n, chroma=True)
         y_plane[row] = y_row
         # PySSTV: even lines (row%2 == 0) carry Cr, odd lines carry Cb.
         # We fill the matching plane on the line that sent the chroma; the
-        # other plane stays zero for now and is filled in by the
-        # neighbor-pair pass below.
+        # other plane keeps its neutral-128 default and is filled in by
+        # the neighbor-pair pass below.
         if row % 2 == 0:
             cr_plane[row] = c_row
         else:
@@ -386,8 +388,8 @@ def _decode_robot36_line_pair(
     c_span = c_scan_ms / 1000.0 * fs
 
     y_plane = np.zeros((height, width), dtype=np.uint8)
-    cb_plane = np.zeros((height, width), dtype=np.uint8)
-    cr_plane = np.zeros((height, width), dtype=np.uint8)
+    cb_plane = np.full((height, width), 128, dtype=np.uint8)
+    cr_plane = np.full((height, width), 128, dtype=np.uint8)
 
     n = inst.size
     for pair_idx, sup in enumerate(super_starts):
@@ -401,8 +403,8 @@ def _decode_robot36_line_pair(
         y_plane[row_odd] = _sample_pixels(
             inst, sup + y1_off, y_span, width, n
         )
-        cr_row = _sample_pixels(inst, sup + cr_off, c_span, width, n)
-        cb_row = _sample_pixels(inst, sup + cb_off, c_span, width, n)
+        cr_row = _sample_pixels(inst, sup + cr_off, c_span, width, n, chroma=True)
+        cb_row = _sample_pixels(inst, sup + cb_off, c_span, width, n, chroma=True)
         # Both rows in the pair share the pair's chroma (nearest-neighbor
         # upsample from the 320×(height/2) chroma grid).
         cr_plane[row_even] = cr_row
@@ -553,6 +555,8 @@ def _sample_pixels(
     span_samples: float,
     width: int,
     track_len: int,
+    *,
+    chroma: bool = False,
 ) -> NDArray[np.uint8]:
     """Slice a span of the frequency track into ``width`` pixel medians.
 
@@ -561,11 +565,17 @@ def _sample_pixels(
     bit-window dodging trick from ``vis.detect_vis``), and maps to a uint8
     luma. Returns zeros for pixel windows that fall outside the buffer.
 
+    When ``chroma=True`` the default and sub-black-level value is 128
+    (the neutral YCbCr midpoint) instead of 0, preventing the bright-green
+    fringe that Robot 36 produces when edge pixels sample from the
+    sync/porch region at ~1200-1500 Hz.
+
     Median is more robust to filter ringing at sub-window boundaries than
     a plain mean, and dramatically faster than the per-sample interpolation
     slowrx uses (which we don't need until we add slant correction).
     """
-    out = np.zeros(width, dtype=np.uint8)
+    neutral: int = 128 if chroma else 0
+    out = np.full(width, neutral, dtype=np.uint8)
     if width <= 0 or span_samples <= 0:
         return out
     pixel_span = span_samples / width
@@ -573,7 +583,20 @@ def _sample_pixels(
     span_lo = SSTV_BLACK_HZ
     span_hi = SSTV_WHITE_HZ
     span_range = span_hi - span_lo
-    for col in range(width):
+    # Chroma guard: two defences against the green fringe that Robot 36's
+    # YCbCr→RGB conversion produces when edge chroma pixels sample from
+    # the adjacent porch/sync region.
+    #
+    # 1. Right-edge pixel guard — the last 1 % of columns (≈3 px at
+    #    width 320) are left at neutral-128 rather than sampled, because
+    #    their windows inevitably straddle the scan/porch boundary.
+    # 2. Frequency floor — any sampled frequency below ~1620 Hz is
+    #    replaced with neutral. The 0.15 threshold maps to chroma value
+    #    38/255, which is nearly indistinguishable from grey.
+    chroma_floor = 0.15 if chroma else 0.0
+    guard_pixels = max(3, width // 80) if chroma else 0  # ~1.25 %
+    max_col = width - guard_pixels
+    for col in range(max_col):
         center_lo = start + col * pixel_span + margin
         center_hi = start + (col + 1) * pixel_span - margin
         lo = int(round(center_lo))
@@ -589,8 +612,9 @@ def _sample_pixels(
         # Linear map 1500..2300 → 0..255 with clipping. Inlined to keep
         # this hot loop a single pass over the array.
         norm = (freq - span_lo) / span_range
-        if norm < 0.0:
-            norm = 0.0
+        if norm < chroma_floor:
+            out[col] = neutral
+            continue
         elif norm > 1.0:
             norm = 1.0
         out[col] = int(round(norm * 255.0))
@@ -806,10 +830,20 @@ class Decoder:
         self._spec: ModeSpec | None = None
         self._vis_end: int = 0
         self._last_lines: int = 0
+        # Retained after a complete decode for a high-quality re-decode pass.
+        self._last_complete_buffer: np.ndarray | None = None
 
     @property
     def sample_rate(self) -> int:
         return self._fs
+
+    def last_complete_buffer(self) -> np.ndarray | None:
+        """Return the raw audio that produced the most recent ``ImageComplete``.
+
+        Survives ``reset()`` so the caller can grab it after the event.
+        Returns ``None`` before any image has been fully decoded.
+        """
+        return self._last_complete_buffer
 
     def feed(self, samples: "NDArray") -> list[DecoderEvent]:
         """Append a chunk of audio and return any decoder events it
@@ -892,6 +926,9 @@ class Decoder:
         self._last_lines = lines
 
         if lines >= total:
+            # Retain the raw buffer so callers can run a full-quality
+            # single-pass re-decode via ``last_complete_buffer()``.
+            self._last_complete_buffer = self._joined()
             events: list[DecoderEvent] = [
                 ImageComplete(image=image, mode=mode, vis_code=vis_code)
             ]

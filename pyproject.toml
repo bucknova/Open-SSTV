@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sstv-app"
-version = "0.1.0"
+version = "0.1.1"
 description = "Open-source cross-platform SSTV transceiver for amateur radio."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -34,6 +34,7 @@ dependencies = [
     "Pillow>=10.0,<12",      # Image load/resize for TX, save for RX
     "platformdirs>=4.0,<5",  # XDG-correct config and data dirs
     "tomli-w>=1.0,<2",       # TOML write (stdlib tomllib only reads)
+    "pyserial>=3.5,<4",      # Direct serial CAT/PTT without external daemons
 ]
 
 [project.optional-dependencies]

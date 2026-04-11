@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QProgressBar,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
@@ -42,6 +43,7 @@ from PySide6.QtWidgets import (
 )
 
 from sstv_app.core.modes import MODE_TABLE, Mode
+from sstv_app.ui.image_editor import ImageEditorDialog
 
 if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
@@ -63,6 +65,7 @@ class TxPanel(QWidget):
 
         self._current_image: "PILImage | None" = None
         self._current_path: Path | None = None
+        self._callsign: str = ""
         # Full-resolution source pixmap kept so ``resizeEvent`` can
         # rescale from the original instead of from the already-scaled
         # label pixmap (which would progressively blur on upscale).
@@ -83,29 +86,60 @@ class TxPanel(QWidget):
         mode_row = QHBoxLayout()
         mode_row.addWidget(QLabel("Mode:"))
         self._mode_combo = QComboBox()
+        self._mode_combo.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
         for mode in Mode:
             spec = MODE_TABLE[mode]
-            label = f"{mode.value}  ({spec.width}×{spec.height}, {spec.total_duration_s:.0f}s)"
+            label = f"{mode.value}  ({spec.width}\u00d7{spec.height}, {spec.total_duration_s:.0f}s)"
             self._mode_combo.addItem(label, mode)
         mode_row.addWidget(self._mode_combo, stretch=1)
         layout.addLayout(mode_row)
 
         # --- Buttons ---
-        self._load_btn = QPushButton("Load Image…")
+        load_row = QHBoxLayout()
+        self._load_btn = QPushButton("Load Image\u2026")
+        self._load_btn.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
         self._load_btn.clicked.connect(self._on_load_clicked)
-        layout.addWidget(self._load_btn)
+        load_row.addWidget(self._load_btn)
+
+        self._edit_btn = QPushButton("Edit Image\u2026")
+        self._edit_btn.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self._edit_btn.setEnabled(False)
+        self._edit_btn.clicked.connect(self._on_edit_clicked)
+        load_row.addWidget(self._edit_btn)
+        layout.addLayout(load_row)
 
         button_row = QHBoxLayout()
         self._transmit_btn = QPushButton("Transmit")
+        self._transmit_btn.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
         self._transmit_btn.setEnabled(False)
         self._transmit_btn.clicked.connect(self._on_transmit_clicked)
         button_row.addWidget(self._transmit_btn)
 
         self._stop_btn = QPushButton("Stop")
+        self._stop_btn.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
         self._stop_btn.setEnabled(False)
         self._stop_btn.clicked.connect(self.stop_requested.emit)
         button_row.addWidget(self._stop_btn)
         layout.addLayout(button_row)
+
+        # --- TX progress bar ---
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setRange(0, 100)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setTextVisible(True)
+        self._progress_bar.setFormat("%p% — %vs elapsed")
+        self._progress_bar.setVisible(False)
+        layout.addWidget(self._progress_bar)
 
         # --- Status line ---
         self._status = QLabel("")
@@ -137,6 +171,7 @@ class TxPanel(QWidget):
             self._update_preview_pixmap()
             self._preview.setText("")
         self._transmit_btn.setEnabled(True)
+        self._edit_btn.setEnabled(True)
         self._status.setText(f"Loaded: {path.name}  ({img.width}×{img.height})")
 
     def resizeEvent(self, event) -> None:  # noqa: N802 — Qt API
@@ -166,10 +201,32 @@ class TxPanel(QWidget):
         self._transmit_btn.setEnabled(not transmitting and has_image)
         self._stop_btn.setEnabled(transmitting)
         self._load_btn.setEnabled(not transmitting)
+        self._edit_btn.setEnabled(not transmitting and has_image)
         self._mode_combo.setEnabled(not transmitting)
+        if transmitting:
+            self._progress_bar.setValue(0)
+            self._progress_bar.setVisible(True)
+        else:
+            self._progress_bar.setVisible(False)
+
+    @Slot(int, int)
+    def show_tx_progress(self, samples_played: int, samples_total: int) -> None:
+        """Update the progress bar during transmission."""
+        if samples_total > 0:
+            pct = int(samples_played * 100 / samples_total)
+            elapsed_s = int(samples_played / 48000)
+            total_s = int(samples_total / 48000)
+            self._progress_bar.setValue(pct)
+            self._progress_bar.setFormat(
+                f"{pct}% — {elapsed_s}s / {total_s}s"
+            )
 
     def set_status(self, text: str) -> None:
         self._status.setText(text)
+
+    def set_callsign(self, callsign: str) -> None:
+        """Update the callsign pre-populated in the image editor."""
+        self._callsign = callsign
 
     def selected_mode(self) -> Mode:
         # Qt's QVariant unwraps a StrEnum back to a plain ``str`` when it
@@ -188,10 +245,37 @@ class TxPanel(QWidget):
             self.load_image(Path(path_str))
 
     @Slot()
+    def _on_edit_clicked(self) -> None:
+        if self._current_image is None:
+            return
+        dlg = ImageEditorDialog(
+            self._current_image,
+            self.selected_mode(),
+            callsign=self._callsign,
+            parent=self,
+        )
+        if dlg.exec() == ImageEditorDialog.DialogCode.Accepted:
+            result = dlg.result_image()
+            if result is not None:
+                self._current_image = result
+                self._preview_source = _pil_to_pixmap(result)
+                self._update_preview_pixmap()
+                self._preview.setText("")
+                self._status.setText(
+                    f"Edited: {result.width}x{result.height}"
+                )
+
+    @Slot()
     def _on_transmit_clicked(self) -> None:
         if self._current_image is None:
             return
         self.transmit_requested.emit(self._current_image, self.selected_mode())
+
+
+def _pil_to_pixmap(image: "PILImage") -> QPixmap:
+    """Convert a PIL Image to a QPixmap."""
+    from sstv_app.ui.image_gallery import _pil_to_pixmap as _gallery_pil_to_pixmap
+    return _gallery_pil_to_pixmap(image)
 
 
 __all__ = ["TxPanel"]

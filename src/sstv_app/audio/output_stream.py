@@ -23,6 +23,9 @@ Public API:
 """
 from __future__ import annotations
 
+import threading
+from typing import TYPE_CHECKING, Callable
+
 import numpy as np
 import sounddevice as sd
 
@@ -33,6 +36,8 @@ def play_blocking(
     samples: np.ndarray,
     sample_rate: int,
     device: AudioDevice | int | None = None,
+    progress_callback: "Callable[[int, int], None] | None" = None,
+    stop_event: "threading.Event | None" = None,
 ) -> None:
     """Play a buffer of samples and block until playback finishes.
 
@@ -49,6 +54,11 @@ def play_blocking(
         Output device to play through. ``None`` uses the system default.
         Accepts either an ``AudioDevice`` (we pull ``.index`` off it) or
         a raw PortAudio index, since the TX worker may have either.
+    progress_callback:
+        If provided, called as ``progress_callback(samples_written, total)``
+        after each chunk write. Runs on the calling thread.
+    stop_event:
+        If provided and set, playback aborts early.
 
     Raises
     ------
@@ -67,11 +77,33 @@ def play_blocking(
 
     device_index = device.index if isinstance(device, AudioDevice) else device
 
-    sd.play(samples, samplerate=sample_rate, device=device_index, blocking=True)
-    # ``blocking=True`` already drains the stream, but ``sd.wait`` re-raises
-    # any underlying PortAudio error from the callback thread, which would
-    # otherwise be swallowed silently.
-    sd.wait()
+    if progress_callback is None and stop_event is None:
+        # Fast path: no progress reporting needed
+        sd.play(samples, samplerate=sample_rate, device=device_index, blocking=True)
+        sd.wait()
+        return
+
+    # Chunked write path: ~0.5 s chunks give smooth progress updates
+    # without starving the audio buffer on slower machines.
+    chunk_size = int(sample_rate * 0.5)
+    total = samples.size
+
+    with sd.OutputStream(
+        samplerate=sample_rate,
+        channels=1,
+        dtype=samples.dtype,
+        device=device_index,
+    ) as stream:
+        written = 0
+        while written < total:
+            if stop_event is not None and stop_event.is_set():
+                break
+            end = min(written + chunk_size, total)
+            chunk = samples[written:end]
+            stream.write(chunk.reshape(-1, 1))
+            written = end
+            if progress_callback is not None:
+                progress_callback(written, total)
 
 
 def stop() -> None:

@@ -82,6 +82,7 @@ from sstv_app.core.decoder import (
     ImageComplete,
     ImageProgress,
     ImageStarted,
+    decode_wav,
 )
 from sstv_app.core.encoder import DEFAULT_SAMPLE_RATE, encode
 from sstv_app.core.modes import Mode
@@ -130,6 +131,7 @@ class TxWorker(QObject):
     """
 
     transmission_started = Signal()
+    transmission_progress = Signal(int, int)  # (samples_played, samples_total)
     transmission_complete = Signal()
     transmission_aborted = Signal()
     error = Signal(str)
@@ -147,7 +149,16 @@ class TxWorker(QObject):
         self._output_device = output_device
         self._sample_rate = sample_rate
         self._ptt_delay_s = ptt_delay_s
+        self._output_gain: float = 1.0
         self._stop_event = threading.Event()
+
+    def set_output_device(self, device: AudioDevice | int | None) -> None:
+        """Change the output device at runtime (e.g. after settings save)."""
+        self._output_device = device
+
+    def set_output_gain(self, gain: float) -> None:
+        """Set the software output gain (1.0 = unity). Thread-safe."""
+        self._output_gain = gain
 
     def set_rig(self, rig: Rig) -> None:
         """Swap the rig backend at runtime (e.g. after connect/disconnect)."""
@@ -170,6 +181,13 @@ class TxWorker(QObject):
             self.error.emit(f"Encode failed: {exc}")
             return
 
+        # Apply software output gain
+        if self._output_gain != 1.0:
+            samples = np.clip(
+                samples.astype(np.float64) * self._output_gain,
+                -32768, 32767,
+            ).astype(samples.dtype)
+
         # --- Key the rig ---
         try:
             self._rig.set_ptt(True)
@@ -191,9 +209,13 @@ class TxWorker(QObject):
                 pass
             else:
                 output_stream.play_blocking(
-                    samples, self._sample_rate, device=self._output_device
+                    samples,
+                    self._sample_rate,
+                    device=self._output_device,
+                    progress_callback=lambda played, total: self.transmission_progress.emit(played, total),
+                    stop_event=self._stop_event,
                 )
-                playback_succeeded = True
+                playback_succeeded = not self._stop_event.is_set()
         except Exception as exc:  # noqa: BLE001
             self.error.emit(f"Playback failed: {exc}")
         finally:
@@ -263,11 +285,16 @@ class RxWorker(QObject):
         self._scratch_samples: int = 0
         self._total_samples: int = 0
         self._decoding: bool = False
+        self._input_gain: float = 1.0
         self._flush_samples: int = (
             flush_samples
             if flush_samples is not None
             else _RX_FLUSH_SAMPLES_DEFAULT
         )
+
+    def set_input_gain(self, gain: float) -> None:
+        """Set the software input gain (1.0 = unity). Thread-safe."""
+        self._input_gain = gain
 
     @property
     def sample_rate(self) -> int:
@@ -295,6 +322,8 @@ class RxWorker(QObject):
         if arr.size == 0:
             return
 
+        if self._input_gain != 1.0:
+            arr = arr * self._input_gain
         self._scratch.append(arr)
         self._scratch_samples += arr.size
         self._total_samples += arr.size
@@ -375,7 +404,20 @@ class RxWorker(QObject):
                 event.lines_total,
             )
         elif isinstance(event, ImageComplete):
-            self.image_complete.emit(event.image, event.mode, event.vis_code)
+            # Try a full-quality single-pass re-decode from the retained
+            # raw audio buffer. The progressive decode is good but the
+            # one-shot path has better bandpass edge behavior and a
+            # consistent sync grid across all lines.
+            final_image = event.image
+            try:
+                raw = self._decoder.last_complete_buffer()
+                if raw is not None and isinstance(raw, np.ndarray) and raw.size > 0:
+                    result = decode_wav(raw, self._sample_rate)
+                    if result is not None and result.mode == event.mode:
+                        final_image = result.image
+            except Exception:  # noqa: BLE001
+                pass  # fall back to progressive result
+            self.image_complete.emit(final_image, event.mode, event.vis_code)
         elif isinstance(event, DecodeError):
             self.error.emit(event.message)
 

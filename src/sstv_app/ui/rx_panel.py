@@ -60,6 +60,7 @@ class RxPanel(QWidget):
 
         self._capturing: bool = False
         self._current_mode: Mode | None = None
+        self._current_pil_image: "PILImage | None" = None
         # Full-resolution source pixmap for the most recent decode.
         # ``resizeEvent`` scales from here rather than from the label's
         # already-scaled pixmap so the preview stays crisp on upscale.
@@ -70,12 +71,26 @@ class RxPanel(QWidget):
         # --- Start/Stop + Clear row ---
         button_row = QHBoxLayout()
         self._start_btn = QPushButton("Start Capture")
+        self._start_btn.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
         self._start_btn.clicked.connect(self._on_start_clicked)
         button_row.addWidget(self._start_btn)
 
         self._clear_btn = QPushButton("Clear")
+        self._clear_btn.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
         self._clear_btn.clicked.connect(self.clear_requested.emit)
         button_row.addWidget(self._clear_btn)
+
+        self._save_btn = QPushButton("Save Image")
+        self._save_btn.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self._save_btn.setEnabled(False)
+        self._save_btn.clicked.connect(self._on_save_clicked)
+        button_row.addWidget(self._save_btn)
         layout.addLayout(button_row)
 
         # --- Current / most-recent decoded image ---
@@ -101,6 +116,11 @@ class RxPanel(QWidget):
         layout.addWidget(self._gallery)
 
     # === public API used by MainWindow ===
+
+    def save_current_image(self) -> None:
+        """Trigger a save of the most recent decoded image (Ctrl+S)."""
+        if self._current_pil_image is not None and self._current_mode is not None:
+            self.image_saved.emit(self._current_pil_image, self._current_mode)
 
     def set_capturing(self, capturing: bool) -> None:
         """Toggle the Start/Stop button label and internal state.
@@ -168,6 +188,8 @@ class RxPanel(QWidget):
             f"VIS 0x{vis_code:02X})"
         )
         self._current_mode = mode
+        self._current_pil_image = image
+        self._save_btn.setEnabled(True)
 
     def resizeEvent(self, event) -> None:  # noqa: N802 — Qt API
         """Rescale the preview when the panel resizes.
@@ -196,6 +218,11 @@ class RxPanel(QWidget):
     def _on_start_clicked(self) -> None:
         # Toggle: if we're currently capturing, request stop; otherwise start.
         self.capture_requested.emit(not self._capturing)
+
+    @Slot()
+    def _on_save_clicked(self) -> None:
+        if self._current_pil_image is not None and self._current_mode is not None:
+            self.image_saved.emit(self._current_pil_image, self._current_mode)
 
 
 __all__ = ["RxPanel"]

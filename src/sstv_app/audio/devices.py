@@ -128,10 +128,39 @@ def _default_for_direction(direction: int) -> AudioDevice | None:
     return None
 
 
+def find_output_device_by_name(name: str | None) -> AudioDevice | None:
+    """Look up an output device by its saved name string.
+
+    Returns the first output device whose ``name`` matches, or ``None``
+    if no match is found (e.g. the device was unplugged since the config
+    was saved). Used by ``MainWindow`` to resolve the config's
+    ``audio_output_device`` (a string) into an ``AudioDevice`` with a
+    usable PortAudio ``index``.
+    """
+    if not name:
+        return None
+    for dev in list_output_devices():
+        if dev.name == name:
+            return dev
+    return None
+
+
+def find_input_device_by_name(name: str | None) -> AudioDevice | None:
+    """Look up an input device by its saved name string."""
+    if not name:
+        return None
+    for dev in list_input_devices():
+        if dev.name == name:
+            return dev
+    return None
+
+
 __all__ = [
     "AudioDevice",
     "default_input_device",
     "default_output_device",
+    "find_input_device_by_name",
+    "find_output_device_by_name",
     "list_input_devices",
     "list_output_devices",
 ]

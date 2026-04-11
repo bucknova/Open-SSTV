@@ -45,3 +45,5 @@ tests/fixtures/wavs_noisy/
 # Decoded image output dir (when run from a checkout)
 out/
 *.wav.tmp
+# Decoded SSTV images saved to the repo root (user decode output)
+sstv_*.png

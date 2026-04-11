@@ -1,12 +1,19 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """SSTV encoder — thin facade over PySSTV.
 
-PySSTV (MIT) already implements the encoder for every mode we care about.
-This module exists so the rest of the app never imports ``pysstv`` directly:
-it gives us one place to (a) translate from our ``Mode`` enum to PySSTV's
-class objects, (b) preprocess images (resize to mode-native dimensions,
-convert to RGB) before handing them off, and (c) return a single NumPy
-array for the audio output layer instead of PySSTV's per-sample generator.
+PySSTV (MIT) already implements the encoder for every mode we care about
+*except* Robot 36, whose upstream class emits a "single-line" format that
+virtually no real-world decoder can understand. This module patches that
+one mode with ``Robot36LinePair``, a subclass that emits the canonical
+line-pair format used by MMSSTV, SimpleSSTV (iOS), and over-the-air
+transmissions — where one sync pulse covers two image rows.
+
+For all other modes, the PySSTV class is used as-is. This module exists
+so the rest of the app never imports ``pysstv`` directly: it gives us one
+place to (a) translate from our ``Mode`` enum to PySSTV's class objects,
+(b) preprocess images (resize to mode-native dimensions, convert to RGB)
+before handing them off, and (c) return a single NumPy array for the
+audio output layer instead of PySSTV's per-sample generator.
 
 PySSTV does **not** auto-resize input images — it calls ``image.getpixel``
 at integer coordinates up to ``WIDTH × HEIGHT`` and crashes (or wraps) if
@@ -25,17 +32,129 @@ from typing import TYPE_CHECKING
 import numpy as np
 from PIL import Image
 from pysstv.color import MartinM1, Robot36, ScottieS1
-from pysstv.sstv import SSTV
+from pysstv.sstv import (
+    SSTV,
+    FREQ_BLACK,
+    FREQ_SYNC,
+    FREQ_VIS_START,
+    FREQ_WHITE,
+    byte_to_freq,
+)
 
 from sstv_app.core.modes import MODE_TABLE, Mode
 
 if TYPE_CHECKING:
     from os import PathLike
 
+
+# ---------------------------------------------------------------------------
+# Robot 36 line-pair encoder
+# ---------------------------------------------------------------------------
+
+class Robot36LinePair(Robot36):
+    """Robot 36 encoder that emits the canonical *line-pair* format.
+
+    PySSTV's ``Robot36`` produces a single-line format (one sync per image
+    row, alternating Cr / Cb on consecutive lines). Real-world decoders —
+    MMSSTV, SimpleSSTV iOS, slowrx, QSSTV — expect the ITU line-pair
+    layout where one sync pulse covers *two* image rows.
+
+    Super-line layout (300 ms, 120 total for a 320×240 image)::
+
+        ── even half (150 ms) ──
+        SYNC          9.0 ms  @ 1200 Hz
+        SYNC PORCH    3.0 ms  @ 1500 Hz
+        Y_even       88.0 ms  (320 pixels, luminance of even row)
+        EVEN SEP      4.5 ms  @ 1500 Hz
+        COLOR PORCH   1.5 ms  @ 1900 Hz
+        Cr           44.0 ms  (320 pixels, averaged from even + odd rows)
+        ── odd half (150 ms) ──
+        SYNC          9.0 ms  @ 1200 Hz
+        SYNC PORCH    3.0 ms  @ 1500 Hz
+        Y_odd        88.0 ms  (320 pixels, luminance of odd row)
+        ODD SEP       4.5 ms  @ 2300 Hz
+        COLOR PORCH   1.5 ms  @ 1900 Hz
+        Cb           44.0 ms  (320 pixels, averaged from even + odd rows)
+
+    Each half is a complete 150 ms line with its own sync pulse — decoders
+    like MMSSTV and slowrx detect the 1200 Hz sync at the start of *each*
+    half to stay locked. Total: 2 × 150 ms × 120 pairs = 36 000 ms = 36 s
+    (matching the mode name).
+
+    Chroma is averaged between the two rows in each pair, which is what
+    every reference decoder assumes (the 4:2:0-ish subsampling inherent
+    in Robot 36's design).
+    """
+
+    def gen_image_tuples(self):
+        """Yield ``(freq_hz, duration_ms)`` tuples for the image payload."""
+        yuv = self.image.convert("YCbCr").load()
+        y_pixel_ms = self.Y_SCAN / self.WIDTH       # 88 / 320 = 0.275 ms
+        c_pixel_ms = self.C_SCAN / self.WIDTH       # 44 / 320 = 0.1375 ms
+
+        for row in range(0, self.HEIGHT, 2):
+            # Collect pixel data for both rows in the pair.
+            even_pixels = [yuv[col, row] for col in range(self.WIDTH)]
+            odd_pixels = [yuv[col, row + 1] for col in range(self.WIDTH)]
+
+            # ============ EVEN HALF (150 ms) ============
+
+            # ---- SYNC (9 ms @ 1200 Hz) ----
+            yield FREQ_SYNC, self.SYNC
+
+            # ---- SYNC PORCH (3 ms @ 1500 Hz) ----
+            yield FREQ_BLACK, self.SYNC_PORCH
+
+            # ---- Y_even (88 ms) ----
+            for p in even_pixels:
+                yield byte_to_freq(p[0]), y_pixel_ms
+
+            # ---- EVEN SEPARATOR (4.5 ms @ 1500 Hz) ----
+            yield FREQ_BLACK, self.INTER_CH_GAP
+
+            # ---- COLOR PORCH (1.5 ms @ 1900 Hz) ----
+            yield FREQ_VIS_START, self.PORCH
+
+            # ---- Cr channel (44 ms, averaged from both rows) ----
+            for ep, op in zip(even_pixels, odd_pixels):
+                cr = (ep[2] + op[2]) / 2
+                yield byte_to_freq(cr), c_pixel_ms
+
+            # ============ ODD HALF (150 ms) ============
+
+            # ---- SYNC (9 ms @ 1200 Hz) ----
+            yield FREQ_SYNC, self.SYNC
+
+            # ---- SYNC PORCH (3 ms @ 1500 Hz) ----
+            yield FREQ_BLACK, self.SYNC_PORCH
+
+            # ---- Y_odd (88 ms) ----
+            for p in odd_pixels:
+                yield byte_to_freq(p[0]), y_pixel_ms
+
+            # ---- ODD SEPARATOR (4.5 ms @ 2300 Hz) ----
+            yield FREQ_WHITE, self.INTER_CH_GAP
+
+            # ---- COLOR PORCH (1.5 ms @ 1900 Hz) ----
+            yield FREQ_VIS_START, self.PORCH
+
+            # ---- Cb channel (44 ms, averaged from both rows) ----
+            for ep, op in zip(even_pixels, odd_pixels):
+                cb = (ep[1] + op[1]) / 2
+                yield byte_to_freq(cb), c_pixel_ms
+
+
+# ---------------------------------------------------------------------------
+# Mode → PySSTV class mapping
+# ---------------------------------------------------------------------------
+
 #: PySSTV class for each ``Mode`` we ship in v1. Adding a new mode is one
 #: line here plus one ``MODE_TABLE`` entry in ``core/modes.py``.
+#: Robot 36 uses our custom line-pair subclass instead of upstream's
+#: single-line ``Robot36`` so that transmitted images decode correctly in
+#: MMSSTV, SimpleSSTV, and other real-world receivers.
 _PYSSTV_CLASSES: dict[Mode, type[SSTV]] = {
-    Mode.ROBOT_36: Robot36,
+    Mode.ROBOT_36: Robot36LinePair,
     Mode.MARTIN_M1: MartinM1,
     Mode.SCOTTIE_S1: ScottieS1,
 }

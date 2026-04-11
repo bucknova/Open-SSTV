@@ -27,8 +27,8 @@ def main(argv: list[str] | None = None) -> int:
 
     qt_argv = list(argv) if argv is not None else sys.argv
     app = QApplication(qt_argv)
-    app.setApplicationName("Open SSTV")
-    app.setApplicationDisplayName("Open SSTV")
+    app.setApplicationName("Open-SSTV")
+    app.setApplicationDisplayName("Open-SSTV")
     app.setApplicationVersion(__version__)
     app.setOrganizationName("bucknova")
     app.setOrganizationDomain("github.com/bucknova")

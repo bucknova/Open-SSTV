@@ -39,11 +39,27 @@ class AppConfig:
     # --- TX ---
     default_tx_mode: str = "martin_m1"
 
-    # --- Radio (rigctld) ---
+    # --- Radio ---
+    # Connection mode: "manual", "rigctld", "serial"
+    rig_connection_mode: str = "manual"
     rigctld_host: str = "127.0.0.1"
     rigctld_port: int = 4532
     rig_enabled: bool = False
     ptt_delay_s: float = 0.2
+    rig_model_id: int = 0
+    rig_serial_port: str = ""
+    rig_baud_rate: int = 9600
+    auto_launch_rigctld: bool = False
+
+    # --- Direct serial rig control ---
+    # Protocol: "PTT Only (DTR/RTS)", "Icom CI-V", "Kenwood / Elecraft", "Yaesu CAT"
+    rig_serial_protocol: str = "PTT Only (DTR/RTS)"
+    rig_civ_address: int = 0x94
+    rig_ptt_line: str = "DTR"
+
+    # --- Audio gain ---
+    audio_input_gain: float = 1.0
+    audio_output_gain: float = 1.0
 
     # --- Identity ---
     callsign: str = ""
