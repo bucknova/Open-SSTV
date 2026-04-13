@@ -92,6 +92,7 @@ from sstv_app.audio.input_stream import (
 )
 from sstv_app.config.schema import AppConfig
 from sstv_app.config.store import load_config, save_config
+from sstv_app.config.templates import load_templates
 from sstv_app.radio.base import ManualRig, Rig
 from sstv_app.radio.exceptions import RigError
 from sstv_app.radio.rigctld import RigctldClient
@@ -162,7 +163,7 @@ class MainWindow(QMainWindow):
         self._radio_panel.disconnect_requested.connect(self._on_rig_disconnect)
 
         # Push callsign to TX panel for the image editor's text overlay
-        self._tx_panel = TxPanel(self)
+        self._tx_panel = TxPanel(templates=load_templates(), parent=self)
         self._tx_panel.set_callsign(self._config.callsign)
 
         # --- Panels inside a horizontal splitter ---
@@ -295,7 +296,7 @@ class MainWindow(QMainWindow):
         QMessageBox.about(
             self,
             "About Open-SSTV",
-            "<h3>Open-SSTV v0.1.1</h3>"
+            "<h3>Open-SSTV v0.1.2</h3>"
             "<p>Open-source SSTV transceiver for amateur radio.</p>"
             "<p>Robot 36 · Martin M1 · Scottie S1</p>"
             '<p><a href="https://github.com/bucknova/Open-SSTV">'

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 from PySide6.QtCore import QRectF, Qt, Signal, Slot
 from PySide6.QtGui import (
     QBrush,
@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
 )
 
 from sstv_app.core.modes import MODE_TABLE, Mode
+from sstv_app.ui.draw_text import draw_text_overlay
 
 if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
@@ -366,39 +367,14 @@ class ImageEditorDialog(QDialog):
         overlay: dict,
     ) -> None:
         """Render a single text overlay onto the draw context."""
-        text = overlay["text"]
-        size = overlay["size"]
-        color = overlay["color"]
-        position = overlay["position"]
-
-        try:
-            font = ImageFont.load_default(size=size)
-        except TypeError:
-            # Pillow < 10.1 doesn't support size= on load_default
-            font = ImageFont.load_default()
-
-        bbox = draw.textbbox((0, 0), text, font=font)
-        tw = bbox[2] - bbox[0]
-        th = bbox[3] - bbox[1]
-        iw, ih = image_size
-        margin = 8
-
-        pos_map = {
-            "Top Left": (margin, margin),
-            "Top Center": ((iw - tw) // 2, margin),
-            "Top Right": (iw - tw - margin, margin),
-            "Center": ((iw - tw) // 2, (ih - th) // 2),
-            "Bottom Left": (margin, ih - th - margin),
-            "Bottom Center": ((iw - tw) // 2, ih - th - margin),
-            "Bottom Right": (iw - tw - margin, ih - th - margin),
-        }
-        x, y = pos_map.get(position, (margin, margin))
-
-        # Draw shadow for readability
-        shadow_color = (0, 0, 0)
-        for dx, dy in [(1, 1), (-1, -1), (1, -1), (-1, 1)]:
-            draw.text((x + dx, y + dy), text, fill=shadow_color, font=font)
-        draw.text((x, y), text, fill=color, font=font)
+        draw_text_overlay(
+            draw,
+            image_size,
+            text=overlay["text"],
+            position=overlay["position"],
+            size=overlay["size"],
+            color=overlay["color"],
+        )
 
     # === Crop ===
 

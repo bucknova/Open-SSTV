@@ -27,7 +27,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PIL import Image
+from PIL import Image, ImageDraw
 from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
@@ -42,8 +42,19 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from sstv_app.config.templates import (
+    QSOTemplate,
+    load_templates,
+    needs_user_input,
+    resolve_placeholders,
+    save_templates,
+)
 from sstv_app.core.modes import MODE_TABLE, Mode
+from sstv_app.ui.draw_text import draw_text_overlay
 from sstv_app.ui.image_editor import ImageEditorDialog
+from sstv_app.ui.qso_template_bar import QSOTemplateBar
+from sstv_app.ui.quick_fill_dialog import QuickFillDialog
+from sstv_app.ui.template_editor_dialog import TemplateEditorDialog
 
 if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
@@ -60,12 +71,21 @@ class TxPanel(QWidget):
     transmit_requested = Signal(object, object)  # (PIL.Image.Image, Mode)
     stop_requested = Signal()
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        templates: list[QSOTemplate] | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
 
         self._current_image: "PILImage | None" = None
+        # The "clean" image before any template text was burned on.
+        # Clicking a template always draws on this, so re-applying
+        # auto-clears the previous template's text.
+        self._base_image: "PILImage | None" = None
         self._current_path: Path | None = None
         self._callsign: str = ""
+        self._templates: list[QSOTemplate] = templates or load_templates()
         # Full-resolution source pixmap kept so ``resizeEvent`` can
         # rescale from the original instead of from the already-scaled
         # label pixmap (which would progressively blur on upscale).
@@ -81,6 +101,13 @@ class TxPanel(QWidget):
         # A subtle border so the empty preview area is visible.
         self._preview.setStyleSheet("QLabel { border: 1px solid palette(mid); }")
         layout.addWidget(self._preview, stretch=1)
+
+        # --- QSO template bar ---
+        self._template_bar = QSOTemplateBar(self._templates, self)
+        self._template_bar.template_activated.connect(self._on_template_activated)
+        self._template_bar.clear_text_requested.connect(self._on_clear_text)
+        self._template_bar.edit_templates_requested.connect(self._on_edit_templates)
+        layout.addWidget(self._template_bar)
 
         # --- Mode picker ---
         mode_row = QHBoxLayout()
@@ -163,6 +190,7 @@ class TxPanel(QWidget):
             return
 
         self._current_image = img
+        self._base_image = img.copy()
         self._current_path = path
 
         pix = QPixmap(str(path))
@@ -258,6 +286,7 @@ class TxPanel(QWidget):
             result = dlg.result_image()
             if result is not None:
                 self._current_image = result
+                self._base_image = result.copy()
                 self._preview_source = _pil_to_pixmap(result)
                 self._update_preview_pixmap()
                 self._preview.setText("")
@@ -270,6 +299,88 @@ class TxPanel(QWidget):
         if self._current_image is None:
             return
         self.transmit_requested.emit(self._current_image, self.selected_mode())
+
+    # === template slots ===
+
+    @Slot(object)
+    def _on_template_activated(self, tpl: QSOTemplate) -> None:
+        """Handle a template button click from the bar."""
+        if self._current_image is None:
+            self._status.setText("Load an image first before applying a template.")
+            return
+
+        needed = needs_user_input(tpl)
+        if needed:
+            dlg = QuickFillDialog(tpl, mycall=self._callsign, parent=self)
+            if dlg.exec() != QuickFillDialog.DialogCode.Accepted:
+                return
+            overlays = dlg.resolved_overlays()
+        else:
+            # No user input needed — resolve automatically
+            overlays = []
+            for ov in tpl.overlays:
+                overlays.append({
+                    "text": resolve_placeholders(
+                        ov.text, mycall=self._callsign,
+                    ),
+                    "position": ov.position,
+                    "size": ov.size,
+                    "color": ov.color,
+                })
+
+        self._apply_overlays(overlays)
+
+    def _apply_overlays(self, overlays: list[dict]) -> None:
+        """Draw resolved text overlays onto the base (clean) TX image.
+
+        Always starts from ``_base_image`` so re-applying a template
+        auto-clears the previous one's text.
+        """
+        if self._base_image is None:
+            return
+        img = self._base_image.copy()
+        draw = ImageDraw.Draw(img)
+        for ov in overlays:
+            draw_text_overlay(
+                draw,
+                img.size,
+                text=ov["text"],
+                position=ov["position"],
+                size=ov["size"],
+                color=ov["color"],
+            )
+        self._current_image = img
+        self._preview_source = _pil_to_pixmap(img)
+        self._update_preview_pixmap()
+        self._preview.setText("")
+        self._status.setText("Template applied.")
+
+    @Slot()
+    def _on_clear_text(self) -> None:
+        """Restore the base (clean) image, removing all template text."""
+        if self._base_image is None:
+            return
+        self._current_image = self._base_image.copy()
+        self._preview_source = _pil_to_pixmap(self._current_image)
+        self._update_preview_pixmap()
+        self._preview.setText("")
+        self._status.setText("Template text cleared.")
+
+    @Slot()
+    def _on_edit_templates(self) -> None:
+        """Open the template editor dialog."""
+        dlg = TemplateEditorDialog(
+            self._templates, mycall=self._callsign, parent=self
+        )
+        if dlg.exec() == TemplateEditorDialog.DialogCode.Accepted:
+            self._templates = dlg.result_templates()
+            save_templates(self._templates)
+            self._template_bar.set_templates(self._templates)
+
+    def set_templates(self, templates: list[QSOTemplate]) -> None:
+        """Replace the current template list and refresh the bar."""
+        self._templates = templates
+        self._template_bar.set_templates(templates)
 
 
 def _pil_to_pixmap(image: "PILImage") -> QPixmap:

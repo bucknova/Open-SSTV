@@ -4,10 +4,10 @@ An open-source, cross-platform SSTV (Slow Scan Television) transceiver for amate
 radio. Receives and decodes SSTV images live off your radio, and encodes and
 transmits images back, with optional Hamlib or direct serial PTT and frequency control.
 
-**Status:** Alpha (v0.1.1). TX and RX paths work end-to-end. Robot 36, Martin M1,
+**Status:** Alpha (v0.1.2). TX and RX paths work end-to-end. Robot 36, Martin M1,
 and Scottie S1 are fully supported for both transmit and receive. Settings persist.
 Rig control via rigctld or direct serial CAT is functional. Weak-signal decode is
-usable down to roughly 0 dB SNR on Robot 36.
+usable down to roughly 0 dB SNR on Robot 36. QSO templates for rapid image exchange.
 
 ## Goals
 
@@ -28,6 +28,11 @@ usable down to roughly 0 dB SNR on Robot 36.
 ### Transmit (TX)
 - **Image editor** -- crop, rotate, flip, and add text overlays (callsign, labels)
   before transmitting. Crop is locked to the target mode's aspect ratio.
+- **QSO templates** -- one-click text overlays for common QSO phases (CQ, Exchange,
+  73). Placeholder variables (`{mycall}`, `{theircall}`, `{rst}`, `{date}`, `{time}`)
+  auto-fill from settings or prompt only for what's needed. Custom templates can be
+  created, edited, and saved. Re-clicking a template auto-clears the previous text;
+  a dedicated Clear Text button restores the clean image.
 - **Correct Robot 36 encoding** -- custom line-pair encoder emits the canonical
   format that all real-world decoders (MMSSTV, SimpleSSTV, QSSTV, slowrx) expect.
   PySSTV's upstream Robot 36 produces a single-line format that most decoders cannot
@@ -131,6 +136,21 @@ sstv-app-decode in.wav -o out.png                    # CLI decoder
 ```
 
 ## Changelog
+
+### v0.1.2
+
+- **Added QSO template system** -- preconfigured text layouts (CQ, Exchange, 73)
+  that burn onto the TX image with one click. Placeholder variables like `{mycall}`,
+  `{theircall}`, `{rst}`, `{date}`, and `{time}` auto-fill from settings or prompt
+  the operator only for values that require input. Templates are saved in a separate
+  `templates.toml` file and can be created/edited/deleted via the gear icon editor.
+- **Auto-clear on template re-apply** -- switching templates replaces the previous
+  text rather than stacking on top. A "Clear Text" button restores the original image.
+- **Extracted text rendering** -- `draw_text_overlay()` is now a shared utility used
+  by both the image editor and the template system, ensuring consistent shadow
+  rendering and positioning.
+- **Fixed template editor save** -- the OK/Cancel buttons were invisible due to a
+  layout bug (layout set twice on the dialog); edits are now saved correctly.
 
 ### v0.1.1
 
