@@ -923,6 +923,12 @@ def _partial_decode_robot36(
 
 # === streaming wrapper ===
 
+#: Maximum audio retained while hunting for a VIS header (IDLE state).
+#: The complete VIS sequence (300 ms leader + 10 ms break + 300 ms
+#: calibration + ~86 ms header bits) totals < 700 ms; 3 s is triple
+#: headroom while keeping the rolling window under ~1.1 MB at 48 kHz.
+_IDLE_WINDOW_S: float = 3.0
+
 
 @dataclass(frozen=True, slots=True)
 class ImageStarted:
@@ -1053,7 +1059,14 @@ class Decoder:
         filtered = _bandpass(joined, self._fs)
         vis_result = detect_vis(filtered, self._fs)
         if vis_result is None:
+            # No VIS found yet. Trim the buffer to a rolling window so
+            # that long listening sessions don't exhaust memory. The full
+            # VIS sequence is < 700 ms; 3 s is ample headroom.
+            max_samples = int(_IDLE_WINDOW_S * self._fs)
+            if joined.size > max_samples:
+                self._buffer = [joined[-max_samples:]]
             return []
+
         vis_code, vis_end = vis_result
         mode = mode_from_vis(vis_code)
         if mode is None:
@@ -1064,8 +1077,14 @@ class Decoder:
         self._vis_code = vis_code
         self._mode = mode
         self._spec = spec
-        self._vis_end = vis_end
         self._last_lines = 0
+
+        # Discard all audio before vis_end: it cannot contain scan data
+        # and re-bandpassing it on every DECODING flush would waste CPU.
+        # After this trim, vis_end within the new buffer is 0.
+        audio_from_vis = joined[vis_end:]
+        self._buffer = [audio_from_vis]
+        self._vis_end = 0
 
         events: list[DecoderEvent] = [
             ImageStarted(mode=mode, vis_code=vis_code)
@@ -1074,7 +1093,8 @@ class Decoder:
         # Try an immediate partial decode — the buffer may already
         # contain a few scan lines (or even a full image if the caller
         # fed a large chunk).
-        inst = instantaneous_frequency(filtered, self._fs)
+        filtered_from_vis = _bandpass(audio_from_vis, self._fs)
+        inst = instantaneous_frequency(filtered_from_vis, self._fs)
         progress_events = self._decode_progress(inst, mode, spec, vis_code)
         events.extend(progress_events)
         return events

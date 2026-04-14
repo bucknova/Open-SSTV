@@ -52,7 +52,7 @@ def gradient_path(tmp_path: Path) -> Path:
 def test_window_constructs_and_shows(window: MainWindow, qtbot) -> None:
     window.show()
     qtbot.waitExposed(window)
-    assert window.windowTitle() == "Open SSTV"
+    assert window.windowTitle() == "Open-SSTV"
     assert window._tx_thread.isRunning()
 
 
