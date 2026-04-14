@@ -92,6 +92,19 @@ usable down to roughly 0 dB SNR on Robot 36. QSO templates for rapid image excha
 
 These three cover the large majority of SSTV QSOs on the air today.
 
+## Screenshots
+
+![Open-SSTV main window](docs/screenshots/main-window.png)
+
+*Main window: radio status toolbar (top), Transmit panel (left), Receive panel (right)*
+
+| | |
+|---|---|
+| ![Audio settings](docs/screenshots/settings-audio.png) | ![Radio settings](docs/screenshots/settings-radio.png) |
+| *Audio tab — device and gain settings* | *Radio tab — rig control, protocol, and PTT* |
+| ![Images settings](docs/screenshots/settings-images.png) | ![QSO templates](docs/screenshots/qso-templates.png) |
+| *Images tab — default TX mode and auto-save* | *QSO templates — one-click callsign and exchange overlays* |
+
 ## Architecture
 
 ```
