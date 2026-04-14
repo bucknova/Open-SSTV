@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Unit tests for ``sstv_app.audio.input_stream``.
+"""Unit tests for ``open_sstv.audio.input_stream``.
 
 We never open a real PortAudio input stream — that would need a physical
 microphone on every CI runner and flake constantly. Instead we patch
@@ -21,8 +21,8 @@ import numpy as np
 import pytest
 import sounddevice as sd
 
-from sstv_app.audio.devices import AudioDevice
-from sstv_app.audio.input_stream import (
+from open_sstv.audio.devices import AudioDevice
+from open_sstv.audio.input_stream import (
     DEFAULT_BLOCKSIZE,
     DEFAULT_SAMPLE_RATE,
     InputStreamWorker,
@@ -81,7 +81,7 @@ def fake_stream_cls(
 ) -> Iterator[type[_FakeStream]]:
     _FakeStream.last_instance = None
     monkeypatch.setattr(
-        "sstv_app.audio.input_stream.sd.InputStream", _FakeStream
+        "open_sstv.audio.input_stream.sd.InputStream", _FakeStream
     )
     yield _FakeStream
 
@@ -180,7 +180,7 @@ def test_start_stream_construction_failure_emits_error(
     def boom(**_kwargs: Any) -> None:
         raise RuntimeError("no such device")
 
-    monkeypatch.setattr("sstv_app.audio.input_stream.sd.InputStream", boom)
+    monkeypatch.setattr("open_sstv.audio.input_stream.sd.InputStream", boom)
     worker = InputStreamWorker()
     log = _record_signals(worker)
 
@@ -251,7 +251,7 @@ def test_queue_overflow_drops_and_reports_on_stop(
     the count via the ``error`` signal."""
     # Shrink the queue to make overflow cheap to exercise.
     monkeypatch.setattr(
-        "sstv_app.audio.input_stream._QUEUE_MAXSIZE", 2
+        "open_sstv.audio.input_stream._QUEUE_MAXSIZE", 2
     )
     worker = InputStreamWorker()
     log = _record_signals(worker)

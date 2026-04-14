@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""pytest-qt smoke tests for ``sstv_app.ui.tx_panel.TxPanel``.
+"""pytest-qt smoke tests for ``open_sstv.ui.tx_panel.TxPanel``.
 
 These exercise widget state transitions (button enable/disable, status
 text, signal emission) without launching the full main window.
@@ -11,8 +11,8 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from sstv_app.core.modes import Mode
-from sstv_app.ui.tx_panel import TxPanel
+from open_sstv.core.modes import Mode
+from open_sstv.ui.tx_panel import TxPanel
 
 pytestmark = pytest.mark.gui
 

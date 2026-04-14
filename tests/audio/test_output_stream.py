@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Unit tests for ``sstv_app.audio.output_stream``.
+"""Unit tests for ``open_sstv.audio.output_stream``.
 
 The happy path here would mean opening a real PortAudio output stream,
 which is hardware-dependent and flaky in CI. Instead we cover only the
@@ -15,8 +15,8 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from sstv_app.audio import output_stream
-from sstv_app.audio.devices import AudioDevice
+from open_sstv.audio import output_stream
+from open_sstv.audio.devices import AudioDevice
 
 
 def test_play_blocking_rejects_empty_buffer() -> None:
@@ -41,8 +41,8 @@ def test_play_blocking_passes_device_index_through() -> None:
     )
 
     with (
-        patch("sstv_app.audio.output_stream.sd.play") as mock_play,
-        patch("sstv_app.audio.output_stream.sd.wait") as mock_wait,
+        patch("open_sstv.audio.output_stream.sd.play") as mock_play,
+        patch("open_sstv.audio.output_stream.sd.wait") as mock_wait,
     ):
         output_stream.play_blocking(samples, 48000, device=device)
 
@@ -57,8 +57,8 @@ def test_play_blocking_passes_device_index_through() -> None:
 def test_play_blocking_accepts_raw_int_device() -> None:
     samples = np.zeros(100, dtype=np.int16)
     with (
-        patch("sstv_app.audio.output_stream.sd.play") as mock_play,
-        patch("sstv_app.audio.output_stream.sd.wait"),
+        patch("open_sstv.audio.output_stream.sd.play") as mock_play,
+        patch("open_sstv.audio.output_stream.sd.wait"),
     ):
         output_stream.play_blocking(samples, 48000, device=3)
     assert mock_play.call_args.kwargs["device"] == 3
@@ -67,14 +67,14 @@ def test_play_blocking_accepts_raw_int_device() -> None:
 def test_play_blocking_accepts_none_device() -> None:
     samples = np.zeros(100, dtype=np.int16)
     with (
-        patch("sstv_app.audio.output_stream.sd.play") as mock_play,
-        patch("sstv_app.audio.output_stream.sd.wait"),
+        patch("open_sstv.audio.output_stream.sd.play") as mock_play,
+        patch("open_sstv.audio.output_stream.sd.wait"),
     ):
         output_stream.play_blocking(samples, 48000)
     assert mock_play.call_args.kwargs["device"] is None
 
 
 def test_stop_calls_sd_stop() -> None:
-    with patch("sstv_app.audio.output_stream.sd.stop") as mock_stop:
+    with patch("open_sstv.audio.output_stream.sd.stop") as mock_stop:
         output_stream.stop()
     mock_stop.assert_called_once()

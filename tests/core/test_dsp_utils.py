@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Unit tests for ``sstv_app.core.dsp_utils``.
+"""Unit tests for ``open_sstv.core.dsp_utils``.
 
 These exercise the three primitives the decoder pipeline depends on:
 audio format conversion, sample-rate conversion, and bandpass filter
@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from scipy.signal import sosfiltfilt
 
-from sstv_app.core.dsp_utils import bandpass_sos, resample_to, to_mono_float32
+from open_sstv.core.dsp_utils import bandpass_sos, resample_to, to_mono_float32
 
 
 # === to_mono_float32 ===

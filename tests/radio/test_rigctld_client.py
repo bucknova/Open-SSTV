@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Unit tests for ``sstv_app.radio.rigctld``.
+"""Unit tests for ``open_sstv.radio.rigctld``.
 
 These run against ``tests.radio.fake_rigctld.FakeRigctld``, an in-process
 asyncio TCP server that speaks just enough of the rigctld extended
@@ -17,8 +17,8 @@ from collections.abc import Iterator
 
 import pytest
 
-from sstv_app.radio.exceptions import RigCommandError, RigConnectionError
-from sstv_app.radio.rigctld import RigctldClient
+from open_sstv.radio.exceptions import RigCommandError, RigConnectionError
+from open_sstv.radio.rigctld import RigctldClient
 from tests.radio.fake_rigctld import FakeRigctld
 
 

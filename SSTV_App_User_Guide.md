@@ -133,7 +133,7 @@ sstv-app
 Or run as a Python module:
 
 ```bash
-python -m sstv_app
+python -m open_sstv
 ```
 
 ### 3.3 Command-Line Tools
@@ -263,7 +263,7 @@ There are several ways to save a decoded image:
 - Right-click a gallery thumbnail and choose "Save As..."
 - Enable **auto-save** in Settings (Images tab). When auto-save is on, every completed decode is saved automatically to your configured save directory. Files are named with the mode and a timestamp, for example `sstv_robot_36_20260413_143022.png`.
 
-The default save directory is `~/Pictures/sstv_app`. You can change this in **File > Settings > Images**.
+The default save directory is `~/Pictures/open_sstv`. You can change this in **File > Settings > Images**.
 
 ---
 
@@ -439,9 +439,11 @@ Choose between **48,000 Hz** (48 kHz) and **44,100 Hz** (44.1 kHz). The default 
 
 ### 11.3 Input and Output Gain
 
-Two sliders let you adjust software gain for input (receive) and output (transmit), ranging from 0% to 200%. The default is 100% (unity gain — no change). These are digital gain controls applied before decoding (input) and after encoding (output). They do not change your sound card's hardware volume.
+Two sliders let you adjust software gain for input (receive) and output (transmit). The default is 100% (unity gain — no change). These are digital gain controls applied before decoding (input) and after encoding (output). They do not change your sound card's hardware volume.
 
-Increase input gain if the received signal is too quiet for reliable decoding. Decrease it if the audio is clipping. For output, adjust gain to set an appropriate drive level to your radio — too much gain causes distortion and splatter; too little causes a weak signal.
+The **RX input gain** slider ranges from 0–200%. Increase it if the received signal is too quiet for reliable decoding; decrease it if audio is clipping.
+
+The **TX output gain** slider defaults to **0–100%**. Most USB-audio rigs (IC-7300, FT-991A, etc.) only need 10–15% for correct ALC. Enable **overdrive** (checkbox below the slider) to extend the ceiling to 200% if your setup needs more digital drive.
 
 ### 11.4 Audio Routing Tips
 
@@ -465,12 +467,18 @@ Open the settings dialog via **File > Settings** (or the menu shortcut). It has 
 | Output Device | Audio output for TX (list of detected devices, or "System default") | System default |
 | Sample Rate | 44100 Hz or 48000 Hz | 48000 Hz |
 | Input Gain | Digital gain for received audio, 0–200% | 100% |
-| Output Gain | Digital gain for transmitted audio, 0–200% | 100% |
+| Output Gain | Digital gain for transmitted audio, 0–100% (extend to 200% with overdrive) | 100% |
+| Enable overdrive | Expands TX Output Gain ceiling from 100% to 200% | Off |
 | Test Tone | Transmit a 700 Hz + 1900 Hz two-tone signal for 5 s (enabled when a rig is connected) | — |
+| Weak-signal mode | Relaxes VIS leader detection (40% → 25%) and start-bit minimum (20 ms → 15 ms) | Off |
 
-**TX gain calibration workflow:** With a rig connected, raise Output Gain → click Test Tone → watch your radio's ALC meter → adjust Output Gain up or down → repeat until ALC just barely flickers on peaks. The gain slider remains live while the tone is playing so you can tune without stopping.
+**TX gain calibration workflow:** With a rig connected, raise Output Gain → click Test Tone → watch your radio's ALC meter → adjust Output Gain up or down → repeat until ALC just barely flickers on peaks. The gain slider remains live while the tone is playing so you can tune without stopping. For typical IC-7300 / USB-audio setups, ~10–15% is the sweet spot.
+
+> **Enable overdrive** only if ALC won't move at 100%. Most setups don't need it. When you tick the checkbox, the slider ceiling expands from 100% to 200%.
 
 > **IC-7300 note:** The radio has its own audio input level control at **Menu → SET → Connectors → USB MOD Level**. The factory default (around 50%) is fine for most setups — you generally don't need to change it. Adjust the app's Output Gain slider and your computer's system output volume first; only touch USB MOD Level if you are recalibrating from scratch.
+
+**Weak-signal RX mode:** Tick "Weak-signal mode" if you can hear an SSTV signal in the static but VIS decoding never triggers. This relaxes two internal detection thresholds (leader presence fraction 40% → 25%, minimum start-bit duration 20 ms → 15 ms) so faint or intermittently fading signals can lock on. The trade-off is slightly more false-positive VIS detections; these reset cleanly to IDLE and don't produce decode errors.
 
 ![Audio settings tab](docs/screenshots/settings-audio.png)
 
@@ -501,7 +509,7 @@ Open the settings dialog via **File > Settings** (or the menu shortcut). It has 
 |---------|-------------|---------|
 | Default TX Mode | SSTV mode pre-selected in the Transmit panel mode dropdown | Martin M1 |
 | Auto-save | Automatically save every decoded image to the save directory | Off |
-| Save Directory | Folder for saved and auto-saved images (browse button to pick) | ~/Pictures/sstv_app |
+| Save Directory | Folder for saved and auto-saved images (browse button to pick) | ~/Pictures/open_sstv |
 
 ![Images settings tab](docs/screenshots/settings-images.png)
 
@@ -622,11 +630,11 @@ The decoder auto-detects the SSTV mode from the VIS header. If no valid VIS head
 
 Open-SSTV stores its configuration in platform-appropriate directories using the XDG Base Directory Specification on Linux and equivalent paths on macOS and Windows.
 
-**Settings file**: `~/.config/sstv_app/config.toml` (Linux). Contains all settings from the Settings dialog in TOML format. You can edit this file manually if desired, but it is easier to use the GUI.
+**Settings file**: `~/.config/open_sstv/config.toml` (Linux). Contains all settings from the Settings dialog in TOML format. You can edit this file manually if desired, but it is easier to use the GUI.
 
-**Templates file**: `~/.config/sstv_app/templates.toml`. Contains your QSO template definitions. Manually editing this file is supported but the template editor is recommended.
+**Templates file**: `~/.config/open_sstv/templates.toml`. Contains your QSO template definitions. Manually editing this file is supported but the template editor is recommended.
 
-On macOS, these files are typically at `~/Library/Application Support/sstv_app/`. On Windows, they are at `%APPDATA%\sstv_app\`.
+On macOS, these files are typically at `~/Library/Application Support/open_sstv/`. On Windows, they are at `%APPDATA%\open_sstv\`.
 
 If either file is missing or empty, the app creates it with default values on first launch.
 
@@ -681,10 +689,16 @@ If either file is missing or empty, the app creates it with default values on fi
 
 **ALC doesn't move during Test Tone or transmission**
 
-- Raise the Output Gain slider in **Settings → Audio**. Values above 100% (up to 500%) apply digital gain before the samples reach the sound card — push it up until ALC just starts to flicker on peaks, then back off slightly.
+- Raise the Output Gain slider in **Settings → Audio**. The default ceiling is 0–100%; for typical USB-audio rigs (IC-7300, FT-991A, etc.) the sweet spot is around 10–15%. If 100% still isn't enough, tick **Enable overdrive** to extend the ceiling to 200%.
 - Check the **macOS system output volume for the USB audio device**. macOS stores a per-device volume that can default below 100% and is separate from the master volume. Go to **System Settings → Sound → Output**, select your USB audio interface, and set the volume to 100%.
 - Make sure the correct output device is selected in Settings → Audio. If "System default" is chosen but your radio interface is not the macOS default, the audio goes to the wrong device.
 - For reference, the IC-7300's radio-side input level is at **Menu → SET → Connectors → USB MOD Level**. The factory default (~50%) works for most setups and you shouldn't need to change it if the steps above resolve the issue.
+
+**Signal audible but VIS never triggers (no decode starts)**
+
+- Tick **Weak-signal mode** in **Settings → Audio → Receive**. This relaxes the VIS leader detection threshold from 40% to 25% and the start-bit minimum from 20 ms to 15 ms — useful for marginal QSOs, strong multipath, or acoustic coupling through a speaker. The trade-off is occasional false-positive VIS detections that reset cleanly.
+- Confirm your audio input device and input gain are set correctly (audio levels are visible in the OS sound meter).
+- Make sure the signal is in the SSTV audio passband: SSTV uses roughly 1100–2300 Hz. If the radio is in LSB, the signal may be inverted — try USB instead.
 
 **Application crashes or freezes**
 

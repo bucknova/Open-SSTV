@@ -16,8 +16,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from sstv_app.cli.decode import main as decode_main
-from sstv_app.cli.encode import main as encode_main
+from open_sstv.cli.decode import main as decode_main
+from open_sstv.cli.encode import main as encode_main
 
 
 @pytest.fixture

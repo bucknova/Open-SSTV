@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Unit tests for ``sstv_app.core.vis.detect_vis``.
+"""Unit tests for ``open_sstv.core.vis.detect_vis``.
 
 Two test layers:
 
@@ -18,9 +18,9 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from sstv_app.core.encoder import encode
-from sstv_app.core.modes import MODE_TABLE, Mode
-from sstv_app.core.vis import (
+from open_sstv.core.encoder import encode
+from open_sstv.core.modes import MODE_TABLE, Mode
+from open_sstv.core.vis import (
     VIS_BIT0_HZ,
     VIS_BIT1_HZ,
     VIS_BIT_DURATION_S,

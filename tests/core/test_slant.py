@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Unit tests for ``sstv_app.core.slant``.
+"""Unit tests for ``open_sstv.core.slant``.
 
 The round-trip "resample at 47900 Hz, decode at 48000 Hz" drift test
 lives in ``test_decoder.py`` so it can share the gradient fixture and
@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from sstv_app.core.slant import fit_line_timing, slant_corrected_line_starts
-from sstv_app.core.sync import walk_sync_grid
+from open_sstv.core.slant import fit_line_timing, slant_corrected_line_starts
+from open_sstv.core.sync import walk_sync_grid
 
 
 def test_fit_line_timing_recovers_nominal_period() -> None:

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Unit tests for ``sstv_app.core.encoder``.
+"""Unit tests for ``open_sstv.core.encoder``.
 
 These run without any audio hardware: the encoder is pure-Python and returns
 a NumPy array. We test against a tiny synthetic gradient image (no on-disk
@@ -16,8 +16,8 @@ from PIL import Image
 
 import numpy as np
 
-from sstv_app.core.encoder import DEFAULT_SAMPLE_RATE, encode
-from sstv_app.core.modes import MODE_TABLE, Mode
+from open_sstv.core.encoder import DEFAULT_SAMPLE_RATE, encode
+from open_sstv.core.modes import MODE_TABLE, Mode
 
 # 5% tolerance is comfortably above the VIS-leader overhead (~0.9 s) on the
 # longest mode (Martin M1, ~114 s body) where 0.9/114 ≈ 0.8%.

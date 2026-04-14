@@ -15,8 +15,8 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from sstv_app.cli.encode import main
-from sstv_app.core.modes import MODE_TABLE, Mode
+from open_sstv.cli.encode import main
+from open_sstv.core.modes import MODE_TABLE, Mode
 
 
 @pytest.fixture

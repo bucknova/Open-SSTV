@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Unit tests for ``sstv_app.ui.workers.RxWorker``.
+"""Unit tests for ``open_sstv.ui.workers.RxWorker``.
 
 Covers the batching / flushing logic plus DecoderEvent → Qt signal
 translation. Uses a real ``Decoder`` with a tiny flush interval so
@@ -14,13 +14,13 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from sstv_app.core.decoder import (
+from open_sstv.core.decoder import (
     DecodeError,
     ImageComplete,
     ImageStarted,
 )
-from sstv_app.core.modes import Mode
-from sstv_app.ui.workers import RxWorker
+from open_sstv.core.modes import Mode
+from open_sstv.ui.workers import RxWorker
 
 pytestmark = pytest.mark.gui
 
@@ -214,8 +214,8 @@ def test_end_to_end_with_real_encoded_image(qapp) -> None:
     """Feed a real Robot 36 encoded buffer in chunks and assert the
     worker emits ImageComplete. This is the sanity check that the
     batching plumbing actually produces a decode."""
-    from sstv_app.core.encoder import encode
-    from sstv_app.core.modes import MODE_TABLE
+    from open_sstv.core.encoder import encode
+    from open_sstv.core.modes import MODE_TABLE
 
     fs = 48_000
     # 32x24 gradient (tiny, still decodes — encoder resizes up).

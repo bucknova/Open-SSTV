@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Unit tests for ``sstv_app.audio.devices``.
+"""Unit tests for ``open_sstv.audio.devices``.
 
 We mock out ``sounddevice.query_devices`` and ``sounddevice.query_hostapis``
 so this suite runs in headless CI without a real PortAudio backend. Tests
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from sstv_app.audio import devices
+from open_sstv.audio import devices
 
 
 # Two-device fixture: one input-only mic, one output-only speaker, plus
@@ -47,7 +47,7 @@ _FAKE_DEVICES = [
 
 def _patch_sd(default_device=(0, 1)):
     return patch.multiple(
-        "sstv_app.audio.devices.sd",
+        "open_sstv.audio.devices.sd",
         query_devices=lambda: list(_FAKE_DEVICES),
         query_hostapis=lambda: list(_FAKE_HOSTAPIS),
         default=type("D", (), {"device": default_device})(),

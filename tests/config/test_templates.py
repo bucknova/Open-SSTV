@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from sstv_app.config.templates import (
+from open_sstv.config.templates import (
     QSOTemplate,
     QSOTemplateOverlay,
     default_templates,

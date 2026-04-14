@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Unit tests for ``sstv_app.core.sync``.
+"""Unit tests for ``open_sstv.core.sync``.
 
 Two layers, mirroring ``test_vis.py``:
 
@@ -19,11 +19,11 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from sstv_app.core.demod import instantaneous_frequency
-from sstv_app.core.encoder import encode
-from sstv_app.core.modes import MODE_TABLE, Mode
-from sstv_app.core.sync import find_leader, find_line_starts
-from sstv_app.core.vis import detect_vis
+from open_sstv.core.demod import instantaneous_frequency
+from open_sstv.core.encoder import encode
+from open_sstv.core.modes import MODE_TABLE, Mode
+from open_sstv.core.sync import find_leader, find_line_starts
+from open_sstv.core.vis import detect_vis
 
 # === helpers ===
 

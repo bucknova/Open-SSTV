@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""pytest-qt smoke tests for ``sstv_app.ui.main_window.MainWindow``.
+"""pytest-qt smoke tests for ``open_sstv.ui.main_window.MainWindow``.
 
 These verify the window can be constructed, the worker thread starts,
 and the basic signal wiring fires through to the panel — without
@@ -17,8 +17,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from sstv_app.radio.base import ManualRig
-from sstv_app.ui.main_window import MainWindow
+from open_sstv.radio.base import ManualRig
+from open_sstv.ui.main_window import MainWindow
 
 pytestmark = pytest.mark.gui
 
@@ -28,9 +28,9 @@ def patched_audio(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, MagicMo
     encode_mock = MagicMock(return_value=np.zeros(100, dtype=np.int16))
     play_mock = MagicMock()
     stop_mock = MagicMock()
-    monkeypatch.setattr("sstv_app.ui.workers.encode", encode_mock)
-    monkeypatch.setattr("sstv_app.ui.workers.output_stream.play_blocking", play_mock)
-    monkeypatch.setattr("sstv_app.ui.workers.output_stream.stop", stop_mock)
+    monkeypatch.setattr("open_sstv.ui.workers.encode", encode_mock)
+    monkeypatch.setattr("open_sstv.ui.workers.output_stream.play_blocking", play_mock)
+    monkeypatch.setattr("open_sstv.ui.workers.output_stream.stop", stop_mock)
     yield {"encode": encode_mock, "play": play_mock, "stop": stop_mock}
 
 
@@ -61,9 +61,9 @@ def test_central_widget_hosts_tx_and_rx_panels(window: MainWindow) -> None:
     both a TxPanel and an RxPanel."""
     from PySide6.QtWidgets import QSplitter
 
-    from sstv_app.ui.radio_panel import RadioPanel
-    from sstv_app.ui.rx_panel import RxPanel
-    from sstv_app.ui.tx_panel import TxPanel
+    from open_sstv.ui.radio_panel import RadioPanel
+    from open_sstv.ui.rx_panel import RxPanel
+    from open_sstv.ui.tx_panel import TxPanel
 
     central = window.centralWidget()
     # The central widget is now a QWidget wrapping the radio panel and splitter.

@@ -4,8 +4,8 @@ requires = ["hatchling>=1.21"]
 build-backend = "hatchling.build"
 
 [project]
-name = "sstv-app"
-version = "0.1.12"
+name = "open-sstv"
+version = "0.1.13"
 description = "Open-source cross-platform SSTV transceiver for amateur radio."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -48,16 +48,16 @@ dev = [
 ]
 
 [project.scripts]
-open-sstv = "sstv_app.app:main"
-open-sstv-decode = "sstv_app.cli.decode:main"
-open-sstv-encode = "sstv_app.cli.encode:main"
+open-sstv = "open_sstv.app:main"
+open-sstv-decode = "open_sstv.cli.decode:main"
+open-sstv-encode = "open_sstv.cli.encode:main"
 
 [project.urls]
 Homepage = "https://github.com/bucknova/Open-SSTV"
 Issues = "https://github.com/bucknova/Open-SSTV/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/sstv_app"]
+packages = ["src/open_sstv"]
 
 [tool.hatch.build.targets.sdist]
 include = [
@@ -87,4 +87,4 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-files = ["src/sstv_app"]
+files = ["src/open_sstv"]

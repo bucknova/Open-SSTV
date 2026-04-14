@@ -11,6 +11,38 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.13] — 2026-04-14
+
+### Added
+- **Package renamed `sstv_app` → `open_sstv`** — all source files, imports, entry
+  points (`open-sstv`, `open-sstv-encode`, `open-sstv-decode`), config dirs
+  (`~/.config/open_sstv/`, `~/Library/Application Support/open_sstv/`), and docs
+  updated. PyPI package name: `open-sstv` (unchanged from v0.1.12).
+- **TX output gain overdrive toggle** — default slider ceiling is now **0–100%**
+  (matches a typical USB-audio rig at ~10–15% for correct ALC). An "Enable
+  overdrive" checkbox below the slider expands the ceiling to 200% for setups that
+  need more digital drive. Tooltip: "Most setups don't need above 100%. Enable only
+  if ALC won't move at max gain." Config field: `tx_output_overdrive: bool = False`.
+  Migration: configs with `audio_output_gain > 100%` auto-enable overdrive on first
+  load so calibrated values are preserved, not silently clamped.
+- **Weak-signal RX mode** — new "Weak-signal mode" checkbox in Settings → Audio →
+  Receive. When enabled, relaxes two VIS detection thresholds: leader presence
+  fraction (0.40 → 0.25) and minimum start-bit duration (20 ms → 15 ms). Use when
+  a signal is audible in the static but VIS isn't triggering. Config field:
+  `rx_weak_signal_mode: bool = False`. False positives remain graceful (D-1).
+
+### Changed
+- **Live TX gain slider** — TX Output Gain slider changes in Settings are now
+  immediately pushed to `TxWorker` on every tick (no disk write), so adjustments
+  take effect during a running Test Tone without closing the dialog. Cancelling the
+  dialog reverts the gain to the previously saved value.
+
+### Docs
+- **User guide §12.1** — Output Gain updated: default ceiling 0–100%, overdrive
+  toggle documented. Weak-signal mode toggle documented under Receive options.
+
+---
+
 ## [0.1.12] — 2026-04-14
 
 ### Added

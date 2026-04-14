@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Unit tests for ``sstv_app.core.demod``.
+"""Unit tests for ``open_sstv.core.demod``.
 
 Drives the FM demodulation primitives with synthetic 1500 / 1900 / 2300 Hz
 tones (the canonical SSTV black / mid / white frequencies). The tone tests
@@ -12,7 +12,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from sstv_app.core.demod import (
+from open_sstv.core.demod import (
     SSTV_BLACK_HZ,
     SSTV_SYNC_HZ,
     SSTV_WHITE_HZ,

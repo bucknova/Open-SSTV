@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Regression tests for ``sstv_app.radio.serial_rig.IcomCIVRig``.
+"""Regression tests for ``open_sstv.radio.serial_rig.IcomCIVRig``.
 
 All tests mock ``_command()`` so no serial port is required.  They guard
 specifically against the CI-V command-echo-byte bug (C-1 through C-4)
@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from sstv_app.radio.serial_rig import IcomCIVRig
+from open_sstv.radio.serial_rig import IcomCIVRig
 
 
 @pytest.fixture

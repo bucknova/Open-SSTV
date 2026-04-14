@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sstv_app.config.schema import AppConfig
-from sstv_app.config.store import load_config, save_config
+from open_sstv.config.schema import AppConfig
+from open_sstv.config.store import load_config, save_config
 
 
 def test_round_trip_defaults(tmp_path: Path) -> None:

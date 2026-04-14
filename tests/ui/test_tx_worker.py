@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Unit tests for ``sstv_app.ui.workers.TxWorker``.
+"""Unit tests for ``open_sstv.ui.workers.TxWorker``.
 
 Run on the test thread, with ``encode`` and ``play_blocking`` patched out
 so the worker completes in milliseconds rather than the ~115 s a real
@@ -19,10 +19,10 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from sstv_app.core.modes import Mode
-from sstv_app.radio.base import ManualRig
-from sstv_app.radio.exceptions import RigConnectionError
-from sstv_app.ui.workers import TxWorker, _make_two_tone, _TEST_TONE_DURATION_S
+from open_sstv.core.modes import Mode
+from open_sstv.radio.base import ManualRig
+from open_sstv.radio.exceptions import RigConnectionError
+from open_sstv.ui.workers import TxWorker, _make_two_tone, _TEST_TONE_DURATION_S
 
 pytestmark = pytest.mark.gui
 
@@ -42,9 +42,9 @@ def patch_encode_and_playback(
     encode_mock = MagicMock(return_value=fake_samples)
     play_mock = MagicMock()
     stop_mock = MagicMock()
-    monkeypatch.setattr("sstv_app.ui.workers.encode", encode_mock)
-    monkeypatch.setattr("sstv_app.ui.workers.output_stream.play_blocking", play_mock)
-    monkeypatch.setattr("sstv_app.ui.workers.output_stream.stop", stop_mock)
+    monkeypatch.setattr("open_sstv.ui.workers.encode", encode_mock)
+    monkeypatch.setattr("open_sstv.ui.workers.output_stream.play_blocking", play_mock)
+    monkeypatch.setattr("open_sstv.ui.workers.output_stream.stop", stop_mock)
     yield {"encode": encode_mock, "play": play_mock, "stop": stop_mock}
 
 
@@ -147,7 +147,7 @@ def test_stop_during_ptt_delay_aborts_before_audio(
     def stop_during_sleep(_secs: float) -> None:
         worker._stop_event.set()
 
-    monkeypatch.setattr("sstv_app.ui.workers.time.sleep", stop_during_sleep)
+    monkeypatch.setattr("open_sstv.ui.workers.time.sleep", stop_during_sleep)
 
     worker.transmit(gradient_image, Mode.ROBOT_36)
 

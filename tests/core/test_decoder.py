@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Round-trip and unit tests for ``sstv_app.core.decoder``.
+"""Round-trip and unit tests for ``open_sstv.core.decoder``.
 
 The marquee test here is the v1-plan acceptance bound for Robot 36:
 encode→decode a 320×240 fixture, assert per-pixel mean absolute luma
@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from sstv_app.core.decoder import (
+from open_sstv.core.decoder import (
     DecodedImage,
     Decoder,
     ImageComplete,
@@ -25,9 +25,9 @@ from sstv_app.core.decoder import (
     _decode_robot36_dispatch,
     decode_wav,
 )
-from sstv_app.core.dsp_utils import resample_to
-from sstv_app.core.encoder import encode
-from sstv_app.core.modes import MODE_TABLE, Mode
+from open_sstv.core.dsp_utils import resample_to
+from open_sstv.core.encoder import encode
+from open_sstv.core.modes import MODE_TABLE, Mode
 
 # === helpers ===
 
