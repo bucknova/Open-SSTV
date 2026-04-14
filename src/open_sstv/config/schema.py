@@ -97,6 +97,14 @@ class AppConfig:
     cw_id_wpm: int = 20     # valid range 15–30
     cw_id_tone_hz: int = 800  # valid range 400–1200
 
+    # --- Experimental ---
+    # v0.1.17 (experimental/incremental-decode branch): streaming O(1-per-line)
+    # Scottie S1 decoder instead of the O(N²) batch flush path.  Off by
+    # default; flip to True in settings or TOML to test the PoC.  Only
+    # Scottie S1 is accelerated; all other modes fall through to the batch
+    # decoder unchanged.
+    experimental_incremental_decode: bool = False
+
     # --- Identity ---
     callsign: str = ""
 

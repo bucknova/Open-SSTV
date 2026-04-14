@@ -106,6 +106,8 @@ _BANDPASS_MIN_SAMPLES: int = 256
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
+    from open_sstv.core.incremental_decoder import ScottieS1IncrementalDecoder
+
 
 @dataclass(frozen=True, slots=True)
 class DecodedImage:
@@ -1067,11 +1069,18 @@ class Decoder:
       an explicit ``reset()`` call.
     """
 
-    def __init__(self, fs: int, *, weak_signal: bool = False) -> None:
+    def __init__(
+        self,
+        fs: int,
+        *,
+        weak_signal: bool = False,
+        experimental_incremental_decode: bool = False,
+    ) -> None:
         if fs <= 0:
             raise ValueError(f"Sample rate must be positive (got {fs})")
         self._fs = fs
         self._weak_signal = weak_signal
+        self._exp_incremental = experimental_incremental_decode
         self._buffer: list[np.ndarray] = []
         self._state = _DecoderState.IDLE
         # Set when VIS is detected (DECODING state):
@@ -1085,6 +1094,11 @@ class Decoder:
         # Optional cancellation event — set from the GUI thread to interrupt
         # an in-flight decode.  The RxWorker owns the Event and wires it here.
         self._cancel: threading.Event | None = None
+        # Incremental decoder instance — used when experimental_incremental_decode
+        # is True and mode is SCOTTIE_S1 (or another BEFORE_RED mode).
+        self._incremental_dec: ScottieS1IncrementalDecoder | None = None
+        # How many samples of joined[] have been fed to the incremental decoder.
+        self._incremental_total_fed: int = 0
 
     @property
     def sample_rate(self) -> int:
@@ -1189,7 +1203,27 @@ class Decoder:
             ImageStarted(mode=mode, vis_code=vis_code)
         ]
 
-        # Try an immediate partial decode — the buffer may already
+        # Experimental incremental decode path — Scottie-family BEFORE_RED modes.
+        if self._exp_incremental and spec.sync_position.value == "before_red":
+            # Lazy import avoids a circular dependency at module load time.
+            from open_sstv.core.incremental_decoder import (  # noqa: PLC0415
+                ScottieS1IncrementalDecoder,
+            )
+            self._incremental_dec = ScottieS1IncrementalDecoder(
+                spec,
+                self._fs,
+                vis_end_abs=vis_end,
+                start_abs=0,
+            )
+            # Pre-feed audio before VIS so line 0's G-channel window has the
+            # full FILTER_MARGIN of sosfiltfilt padding from the start.
+            pre_vis = joined[:vis_end]
+            if pre_vis.size > 0:
+                self._incremental_dec.feed(pre_vis)
+            self._incremental_total_fed = vis_end
+            return events  # immediate decode deferred to _feed_decoding
+
+        # Batch path: try an immediate partial decode — the buffer may already
         # contain a few scan lines (or even a full image if the caller
         # fed a large chunk).
         inst = instantaneous_frequency(filtered, self._fs)
@@ -1199,6 +1233,9 @@ class Decoder:
 
     def _feed_decoding(self, joined: "NDArray") -> list[DecoderEvent]:
         """Decode available lines from the growing audio buffer."""
+        if self._exp_incremental and self._incremental_dec is not None:
+            return self._feed_decoding_incremental(joined)
+
         filtered = _bandpass(joined, self._fs)
         if self._is_cancelled():
             return []
@@ -1208,6 +1245,48 @@ class Decoder:
         return self._decode_progress(
             inst, self._mode, self._spec, self._vis_code  # type: ignore[arg-type]
         )
+
+    def _feed_decoding_incremental(self, joined: "NDArray") -> list[DecoderEvent]:
+        """Incremental decode: feed only the new audio chunk to the streaming decoder.
+
+        ``joined`` is the full accumulated buffer. We track how much of it has
+        already been fed via ``_incremental_total_fed`` and pass only the tail.
+        """
+        if self._is_cancelled():
+            return []
+        assert self._incremental_dec is not None  # guarded by caller
+        assert self._mode is not None
+        assert self._spec is not None
+
+        new_audio = joined[self._incremental_total_fed:]
+        if new_audio.size == 0:
+            return []
+        self._incremental_total_fed = joined.size
+
+        line_tuples = self._incremental_dec.feed(new_audio)
+
+        events: list[DecoderEvent] = []
+        for row_idx, _rgb in line_tuples:
+            img = self._incremental_dec.get_image()
+            events.append(
+                ImageProgress(
+                    image=img.copy(),
+                    mode=self._mode,
+                    vis_code=self._vis_code,
+                    lines_decoded=row_idx + 1,
+                    lines_total=self._spec.height,
+                )
+            )
+
+        if self._incremental_dec.complete:
+            img = self._incremental_dec.get_image()
+            self._last_complete_buffer = self._joined()
+            events.append(
+                ImageComplete(image=img, mode=self._mode, vis_code=self._vis_code)
+            )
+            self.reset()
+
+        return events
 
     def _decode_progress(
         self,
@@ -1262,6 +1341,8 @@ class Decoder:
         self._spec = None
         self._vis_end = 0
         self._last_lines = 0
+        self._incremental_dec = None
+        self._incremental_total_fed = 0
 
     def _joined(self) -> "NDArray":
         if not self._buffer:
