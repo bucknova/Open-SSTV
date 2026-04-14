@@ -83,9 +83,9 @@ def play_blocking(
         sd.wait()
         return
 
-    # Chunked write path: ~0.5 s chunks give smooth progress updates
-    # without starving the audio buffer on slower machines.
-    chunk_size = int(sample_rate * 0.5)
+    # Chunked write path: ~0.1 s chunks keep stop-button latency below
+    # 100 ms and give smooth progress updates.
+    chunk_size = int(sample_rate * 0.1)
     total = samples.size
 
     with sd.OutputStream(

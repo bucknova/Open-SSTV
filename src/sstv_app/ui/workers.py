@@ -25,9 +25,9 @@ inside ``play_blocking`` when "Stop" is clicked, so a queued slot call to
 Python method that's safe to call from any thread:
 
 * ``threading.Event.set()`` is thread-safe.
-* ``output_stream.stop()`` calls ``sounddevice.sd.stop()``, which is
-  documented as thread-safe and unblocks the playback thread out of
-  ``sd.wait()`` immediately.
+* ``output_stream.stop()`` calls ``sounddevice.sd.stop()``, which
+  unblocks ``sd.wait()`` on the fast path.  On the chunked OutputStream
+  path the stop_event check fires at every 0.1 s chunk boundary.
 
 When playback unwinds, the worker checks the stop flag, drops PTT, and
 emits ``transmission_aborted`` instead of ``transmission_complete``.

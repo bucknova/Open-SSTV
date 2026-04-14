@@ -78,23 +78,30 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
         samples = encode(args.image, Mode(args.mode), sample_rate=args.sample_rate)
-    except (OSError, ValueError) as exc:
-        print(f"sstv-app-encode: {exc}", file=sys.stderr)
+    except OSError as exc:
+        print(f"open-sstv-encode: {exc}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"open-sstv-encode: {exc}", file=sys.stderr)
         return 1
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
     # ``wave`` expects bytes; int16 little-endian is the SSTV-standard format
     # and matches what PySSTV's gen_samples quantizes to.
-    with wave.open(str(args.output), "wb") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)  # 16-bit
-        wav.setframerate(args.sample_rate)
-        wav.writeframes(samples.tobytes())
+    try:
+        with wave.open(str(args.output), "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)  # 16-bit
+            wav.setframerate(args.sample_rate)
+            wav.writeframes(samples.tobytes())
+    except OSError as exc:
+        print(f"open-sstv-encode: {exc}", file=sys.stderr)
+        return 1
 
     duration_s = samples.size / args.sample_rate
     print(
-        f"sstv-app-encode: wrote {args.output} "
+        f"open-sstv-encode: wrote {args.output} "
         f"({samples.size} samples, {duration_s:.2f}s, {args.mode})"
     )
     return 0

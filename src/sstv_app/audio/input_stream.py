@@ -83,6 +83,13 @@ _QUEUE_MAXSIZE: int = 256
 _POLL_INTERVAL_MS: int = 50
 
 
+#: How long the device watchdog waits for fresh audio before declaring the
+#: input device lost.  3 s gives ample slack for a brief system-level stall
+#: (suspend/resume, driver reset) while still catching a genuine unplug
+#: within a few seconds of the event.
+_DEVICE_WATCHDOG_MS: int = 3000
+
+
 class InputStreamWorker(QObject):
     """Run a PortAudio input stream on a Qt worker thread.
 
@@ -113,6 +120,7 @@ class InputStreamWorker(QObject):
     started = Signal()
     stopped = Signal()
     error = Signal(str)
+    stream_error = Signal(str)  # emitted on device-loss; triggers clean stop
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -121,6 +129,7 @@ class InputStreamWorker(QObject):
         )
         self._stream: sd.InputStream | None = None
         self._timer: QTimer | None = None
+        self._watchdog: QTimer | None = None
         self._sample_rate: int = DEFAULT_SAMPLE_RATE
         self._dropped_chunks: int = 0
 
@@ -192,6 +201,17 @@ class InputStreamWorker(QObject):
         self._timer.timeout.connect(self._drain_queue)
         self._timer.start()
 
+        # Device-loss watchdog: if no audio chunks arrive within
+        # _DEVICE_WATCHDOG_MS the input device has likely been unplugged or
+        # stopped by the OS. The timer is reset on every non-empty drain;
+        # on expiry it emits stream_error and calls stop() so the UI returns
+        # to the idle state instead of hanging in "Capturing" forever.
+        self._watchdog = QTimer()
+        self._watchdog.setSingleShot(True)
+        self._watchdog.setInterval(_DEVICE_WATCHDOG_MS)
+        self._watchdog.timeout.connect(self._on_watchdog_timeout)
+        self._watchdog.start()
+
         self.started.emit()
 
     @Slot()
@@ -208,6 +228,11 @@ class InputStreamWorker(QObject):
             self._timer.stop()
             self._timer.deleteLater()
             self._timer = None
+
+        if self._watchdog is not None:
+            self._watchdog.stop()
+            self._watchdog.deleteLater()
+            self._watchdog = None
 
         try:
             self._stream.stop()
@@ -282,12 +307,24 @@ class InputStreamWorker(QObject):
         queue faster than the timer fires is still bounded: every
         drain empties the queue completely.
         """
+        drained_any = False
         while True:
             try:
                 chunk = self._queue.get_nowait()
             except queue.Empty:
                 break
             self.chunk_ready.emit(chunk)
+            drained_any = True
+
+        # Reset the device watchdog whenever we got real audio data.
+        if drained_any and self._watchdog is not None:
+            self._watchdog.start()
+
+    @Slot()
+    def _on_watchdog_timeout(self) -> None:
+        """No audio for _DEVICE_WATCHDOG_MS ms — treat the device as lost."""
+        self.stream_error.emit("Audio input device lost")
+        self.stop()
 
 
 __all__ = [

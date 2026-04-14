@@ -297,6 +297,7 @@ class MainWindow(QMainWindow):
         self._audio_worker.started.connect(self._on_rx_started)
         self._audio_worker.stopped.connect(self._on_rx_stopped)
         self._audio_worker.error.connect(self._on_rx_error)
+        self._audio_worker.stream_error.connect(self._on_rx_error)
 
         # RX worker -> UI.
         self._rx_worker.image_started.connect(self._rx_panel.show_image_started)
