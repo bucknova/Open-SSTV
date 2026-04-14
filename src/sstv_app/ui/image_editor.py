@@ -25,7 +25,6 @@ from PySide6.QtGui import (
     QBrush,
     QColor,
     QFont,
-    QImage,
     QPen,
     QPixmap,
 )
@@ -53,23 +52,10 @@ from PySide6.QtWidgets import (
 
 from sstv_app.core.modes import MODE_TABLE, Mode
 from sstv_app.ui.draw_text import draw_text_overlay
+from sstv_app.ui.utils import pil_to_pixmap as _pil_to_pixmap
 
 if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
-
-
-def _pil_to_pixmap(image: "PILImage") -> QPixmap:
-    """Convert a PIL Image to a QPixmap."""
-    rgb = image.convert("RGB")
-    data = rgb.tobytes("raw", "RGB")
-    qimage = QImage(
-        data,
-        rgb.width,
-        rgb.height,
-        rgb.width * 3,
-        QImage.Format.Format_RGB888,
-    ).copy()
-    return QPixmap.fromImage(qimage)
 
 
 class _CropRect(QGraphicsRectItem):

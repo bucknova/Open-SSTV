@@ -55,6 +55,7 @@ from sstv_app.ui.image_editor import ImageEditorDialog
 from sstv_app.ui.qso_template_bar import QSOTemplateBar
 from sstv_app.ui.quick_fill_dialog import QuickFillDialog
 from sstv_app.ui.template_editor_dialog import TemplateEditorDialog
+from sstv_app.ui.utils import pil_to_pixmap as _pil_to_pixmap
 
 if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
@@ -74,6 +75,7 @@ class TxPanel(QWidget):
     def __init__(
         self,
         templates: list[QSOTemplate] | None = None,
+        default_mode: str | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -120,6 +122,13 @@ class TxPanel(QWidget):
             spec = MODE_TABLE[mode]
             label = f"{mode.value}  ({spec.width}\u00d7{spec.height}, {spec.total_duration_s:.0f}s)"
             self._mode_combo.addItem(label, mode)
+        if default_mode:
+            # Find the combo entry whose Mode.value matches the config string.
+            for i in range(self._mode_combo.count()):
+                if self._mode_combo.itemData(i) is not None:
+                    if self._mode_combo.itemData(i).value == default_mode:
+                        self._mode_combo.setCurrentIndex(i)
+                        break
         mode_row.addWidget(self._mode_combo, stretch=1)
         layout.addLayout(mode_row)
 
@@ -256,6 +265,19 @@ class TxPanel(QWidget):
         """Update the callsign pre-populated in the image editor."""
         self._callsign = callsign
 
+    def set_default_mode(self, mode_value: str) -> None:
+        """Select the combo entry matching ``mode_value`` (a Mode.value string).
+
+        Called from MainWindow when settings are saved so the mode picker
+        reflects any change the user made in the Settings dialog.
+        Does nothing if the value doesn't match any known mode.
+        """
+        for i in range(self._mode_combo.count()):
+            item_mode = self._mode_combo.itemData(i)
+            if item_mode is not None and item_mode.value == mode_value:
+                self._mode_combo.setCurrentIndex(i)
+                break
+
     def selected_mode(self) -> Mode:
         # Qt's QVariant unwraps a StrEnum back to a plain ``str`` when it
         # comes out of ``currentData()``, so we have to re-wrap.
@@ -381,12 +403,6 @@ class TxPanel(QWidget):
         """Replace the current template list and refresh the bar."""
         self._templates = templates
         self._template_bar.set_templates(templates)
-
-
-def _pil_to_pixmap(image: "PILImage") -> QPixmap:
-    """Convert a PIL Image to a QPixmap."""
-    from sstv_app.ui.image_gallery import _pil_to_pixmap as _gallery_pil_to_pixmap
-    return _gallery_pil_to_pixmap(image)
 
 
 __all__ = ["TxPanel"]

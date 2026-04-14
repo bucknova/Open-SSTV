@@ -12,8 +12,9 @@ after the dialog is accepted.
 """
 from __future__ import annotations
 
-import glob
 import subprocess
+
+import serial.tools.list_ports
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -235,10 +236,8 @@ class SettingsDialog(QDialog):
         self._serial_port_combo = QComboBox()
         self._serial_port_combo.setEditable(True)
         self._serial_port_combo.addItem("")
-        for port_path in sorted(
-            glob.glob("/dev/cu.*") + glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*")
-        ):
-            self._serial_port_combo.addItem(port_path)
+        for port_info in sorted(serial.tools.list_ports.comports(), key=lambda p: p.device):
+            self._serial_port_combo.addItem(port_info.device)
         if self._config.rig_serial_port:
             self._serial_port_combo.setCurrentText(self._config.rig_serial_port)
         serial_form.addRow("Serial port:", self._serial_port_combo)
@@ -340,10 +339,8 @@ class SettingsDialog(QDialog):
         self._rigctld_serial_combo = QComboBox()
         self._rigctld_serial_combo.setEditable(True)
         self._rigctld_serial_combo.addItem("")
-        for port_path in sorted(
-            glob.glob("/dev/cu.*") + glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*")
-        ):
-            self._rigctld_serial_combo.addItem(port_path)
+        for port_info in sorted(serial.tools.list_ports.comports(), key=lambda p: p.device):
+            self._rigctld_serial_combo.addItem(port_info.device)
         if self._config.rig_serial_port:
             self._rigctld_serial_combo.setCurrentText(self._config.rig_serial_port)
         rigctld_form.addRow("Serial port:", self._rigctld_serial_combo)

@@ -202,7 +202,11 @@ class MainWindow(QMainWindow):
         self._radio_panel.disconnect_requested.connect(self._on_rig_disconnect)
 
         # Push callsign to TX panel for the image editor's text overlay
-        self._tx_panel = TxPanel(templates=load_templates(), parent=self)
+        self._tx_panel = TxPanel(
+            templates=load_templates(),
+            default_mode=self._config.default_tx_mode,
+            parent=self,
+        )
         self._tx_panel.set_callsign(self._config.callsign)
 
         # --- Panels inside a horizontal splitter ---
@@ -367,6 +371,7 @@ class MainWindow(QMainWindow):
             save_config(self._config)
             self._radio_panel.set_callsign(self._config.callsign)
             self._tx_panel.set_callsign(self._config.callsign)
+            self._tx_panel.set_default_mode(self._config.default_tx_mode)
             # Apply audio device + gain settings to workers
             new_output = find_output_device_by_name(
                 self._config.audio_output_device
@@ -717,6 +722,12 @@ class MainWindow(QMainWindow):
         # request_stop is explicitly thread-safe (threading.Event +
         # sounddevice.stop), so calling it from the UI thread is fine.
         self._tx_worker.request_stop()
+        # Give the TX worker up to 1 s to unwind out of play_blocking
+        # (chunked-write path checks stop_event only between 0.5 s chunks).
+        # thread.wait(3000) below would handle it anyway, but waiting here
+        # first makes the shutdown ordering explicit and avoids the edge case
+        # where the thread.quit() drains queued events before the worker exits.
+        self._tx_worker._stop_event.wait(timeout=1.0)
 
         # Stop RX audio capture via the queued signal so the actual
         # PortAudio/QTimer teardown runs on the audio worker thread

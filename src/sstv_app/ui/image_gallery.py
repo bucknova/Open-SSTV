@@ -21,10 +21,11 @@ from typing import TYPE_CHECKING
 
 from PIL import Image as PILImageModule
 from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QIcon, QImage, QPixmap, QStandardItem, QStandardItemModel
+from PySide6.QtGui import QIcon, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import QApplication, QListView, QMenu
 
 from sstv_app.core.modes import Mode
+from sstv_app.ui.utils import pil_to_pixmap as _pil_to_pixmap
 
 if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
@@ -162,30 +163,6 @@ def _load_item_image(item: QStandardItem) -> "PILImage | None":
     if not path.exists():
         return None
     return PILImageModule.open(path).copy()  # .copy() detaches from the file handle
-
-
-def _pil_to_pixmap(image: "PILImage") -> QPixmap:
-    """Convert a PIL ``Image`` to a ``QPixmap`` without leaking buffers.
-
-    Going via ``Image.tobytes`` + ``QImage`` is the portable way to do
-    this — ``PIL.ImageQt`` is deprecated in newer Pillow releases and
-    depends on Qt bindings being installed at Pillow import time, which
-    we don't want to force on users running just the CLI decoder.
-
-    ``QImage.copy()`` is mandatory: the raw-data ``QImage`` constructor
-    keeps a pointer into the Python bytes object, which gets freed when
-    we return. Copying gives Qt its own buffer.
-    """
-    rgb = image.convert("RGB")
-    data = rgb.tobytes("raw", "RGB")
-    qimage = QImage(
-        data,
-        rgb.width,
-        rgb.height,
-        rgb.width * 3,
-        QImage.Format.Format_RGB888,
-    ).copy()
-    return QPixmap.fromImage(qimage)
 
 
 __all__ = ["ImageGalleryWidget"]

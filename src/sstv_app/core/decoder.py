@@ -67,7 +67,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import numpy as np
 from PIL import Image
@@ -778,7 +778,7 @@ def _sample_pixels(
     return out
 
 
-_PIXEL_DECODERS: dict[Mode, callable] = {
+_PIXEL_DECODERS: dict[Mode, Callable[..., Image.Image | None]] = {
     # Robot 36 is dispatched separately in decode_wav/_partial_decode
     # (auto-detects single-line vs line-pair wire format), but register
     # the per-line decoder here so the dict stays complete.

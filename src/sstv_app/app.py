@@ -21,9 +21,26 @@ def main(argv: list[str] | None = None) -> int:
     # Qt is imported lazily so the encode/decode CLIs (which never
     # construct a QApplication) don't pay the import cost just because
     # they share a package with the GUI.
-    from PySide6.QtWidgets import QApplication
+    try:
+        from PySide6.QtWidgets import QApplication  # noqa: PLC0415
+    except ImportError:
+        print(
+            "Error: PySide6 is not installed.\n"
+            "Install it with:  pip install 'sstv-app[dev]'  or  pip install PySide6",
+            file=sys.stderr,
+        )
+        return 1
 
-    from sstv_app.ui.main_window import MainWindow
+    try:
+        from sstv_app.ui.main_window import MainWindow  # noqa: PLC0415
+    except ImportError as exc:
+        missing = str(exc).replace("No module named ", "").strip("'\"")
+        print(
+            f"Error: required dependency '{missing}' is not installed.\n"
+            f"Install all dependencies with:  pip install sstv-app",
+            file=sys.stderr,
+        )
+        return 1
 
     qt_argv = list(argv) if argv is not None else sys.argv
     app = QApplication(qt_argv)
