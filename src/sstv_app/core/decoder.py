@@ -1077,14 +1077,13 @@ class Decoder:
         self._vis_code = vis_code
         self._mode = mode
         self._spec = spec
+        self._vis_end = vis_end
         self._last_lines = 0
 
-        # Discard all audio before vis_end: it cannot contain scan data
-        # and re-bandpassing it on every DECODING flush would waste CPU.
-        # After this trim, vis_end within the new buffer is 0.
-        audio_from_vis = joined[vis_end:]
-        self._buffer = [audio_from_vis]
-        self._vis_end = 0
+        # Keep the full buffer including the VIS header so that the
+        # high-quality single-pass re-decode in RxWorker._dispatch can
+        # call decode_wav() on last_complete_buffer() and find the VIS.
+        # (The IDLE rolling-window trim already caps pre-VIS audio at 3 s.)
 
         events: list[DecoderEvent] = [
             ImageStarted(mode=mode, vis_code=vis_code)
@@ -1093,8 +1092,7 @@ class Decoder:
         # Try an immediate partial decode — the buffer may already
         # contain a few scan lines (or even a full image if the caller
         # fed a large chunk).
-        filtered_from_vis = _bandpass(audio_from_vis, self._fs)
-        inst = instantaneous_frequency(filtered_from_vis, self._fs)
+        inst = instantaneous_frequency(filtered, self._fs)
         progress_events = self._decode_progress(inst, mode, spec, vis_code)
         events.extend(progress_events)
         return events
