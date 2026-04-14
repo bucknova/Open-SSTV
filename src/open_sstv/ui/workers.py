@@ -533,7 +533,9 @@ class RxWorker(QObject):
         super().__init__(parent)
         self._sample_rate = sample_rate
         self._weak_signal = weak_signal
+        self._cancel_event = threading.Event()
         self._decoder = Decoder(sample_rate, weak_signal=weak_signal)
+        self._decoder.set_cancel_event(self._cancel_event)
         self._scratch: list["NDArray[np.float64]"] = []
         self._scratch_samples: int = 0
         self._total_samples: int = 0
@@ -554,6 +556,7 @@ class RxWorker(QObject):
         """Enable or disable weak-signal VIS detection mode. Thread-safe."""
         self._weak_signal = enabled
         self._decoder = Decoder(self._sample_rate, weak_signal=enabled)
+        self._decoder.set_cancel_event(self._cancel_event)
 
     @Slot(bool)
     def set_tx_active(self, active: bool) -> None:
@@ -585,6 +588,7 @@ class RxWorker(QObject):
         """
         self._sample_rate = sample_rate
         self._decoder = Decoder(sample_rate, weak_signal=self._weak_signal)
+        self._decoder.set_cancel_event(self._cancel_event)
         self._scratch.clear()
         self._scratch_samples = 0
 
@@ -630,6 +634,21 @@ class RxWorker(QObject):
         if self._scratch_samples >= self._flush_samples:
             self._flush()
 
+    def request_cancel(self) -> None:
+        """Interrupt any in-flight decode. Safe to call from any thread.
+
+        Sets the cancel event so the decoder bails at the next checkpoint
+        (after bandpass, after Hilbert transform, after sync detection, or
+        between pixel-decoder rows). The queued ``reset()`` slot clears
+        the event once it executes, re-arming the decoder for the next
+        transmission.
+
+        This mirrors ``TxWorker.request_stop()``: a plain Python method
+        (not a slot) that touches only a ``threading.Event``, making it
+        safe to call from the GUI thread while the worker thread is busy.
+        """
+        self._cancel_event.set()
+
     @Slot()
     def reset(self) -> None:
         """Drop the scratch buffer and reset the decoder state.
@@ -643,6 +662,9 @@ class RxWorker(QObject):
         self._total_samples = 0
         self._decoding = False
         self._decoder.reset()
+        # Re-arm after any cancel that was in flight.  This runs on the
+        # worker thread so it's sequentially after _flush() has returned.
+        self._cancel_event.clear()
 
     @Slot()
     def flush(self) -> None:

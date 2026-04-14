@@ -65,6 +65,7 @@ from its neighbor, and converts YCbCr→RGB via Pillow.
 """
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Callable
@@ -263,6 +264,8 @@ def _decode_robot36(
     fs: int,
     spec: ModeSpec,
     line_starts: list[int],
+    *,
+    cancel: threading.Event | None = None,
 ) -> Image.Image | None:
     """Slice a frequency track into a Robot 36 YCbCr image.
 
@@ -299,6 +302,8 @@ def _decode_robot36(
 
     n = inst.size
     for row, line_start in enumerate(line_starts):
+        if cancel is not None and cancel.is_set():
+            return None
         y_start = line_start + y_offset
         c_start = line_start + c_offset
         y_row = _sample_pixels(inst, y_start, y_scan_samples, width, n)
@@ -341,6 +346,8 @@ def _decode_robot36_line_pair(
     fs: int,
     spec: ModeSpec,
     super_starts: list[int],
+    *,
+    cancel: threading.Event | None = None,
 ) -> Image.Image | None:
     """Slice a canonical-broadcast Robot 36 frequency track into a YCbCr image.
 
@@ -393,6 +400,8 @@ def _decode_robot36_line_pair(
 
     n = inst.size
     for pair_idx, sup in enumerate(super_starts):
+        if cancel is not None and cancel.is_set():
+            return None
         row_even = pair_idx * 2
         row_odd = row_even + 1
         if row_odd >= height:
@@ -423,6 +432,8 @@ def _decode_martin_rgb(
     fs: int,
     spec: ModeSpec,
     line_starts: list[int],
+    *,
+    cancel: threading.Event | None = None,
 ) -> Image.Image | None:
     """Slice a frequency track into a Martin-family RGB image.
 
@@ -456,6 +467,8 @@ def _decode_martin_rgb(
     rgb = np.zeros((height, width, 3), dtype=np.uint8)
     n = inst.size
     for row, line_start in enumerate(line_starts):
+        if cancel is not None and cancel.is_set():
+            return None
         rgb[row, :, 1] = _sample_pixels(
             inst, line_start + g_offset, scan_samples, width, n
         )
@@ -474,6 +487,8 @@ def _decode_scottie_rgb(
     fs: int,
     spec: ModeSpec,
     sync_indices: list[int],
+    *,
+    cancel: threading.Event | None = None,
 ) -> Image.Image | None:
     """Slice a frequency track into a Scottie-family RGB image.
 
@@ -509,6 +524,8 @@ def _decode_scottie_rgb(
     rgb = np.zeros((height, width, 3), dtype=np.uint8)
     n = inst.size
     for row, sync_idx in enumerate(sync_indices):
+        if cancel is not None and cancel.is_set():
+            return None
         rgb[row, :, 1] = _sample_pixels(
             inst, sync_idx + g_offset, scan_samples, width, n
         )
@@ -527,6 +544,8 @@ def _decode_wraase_rgb(
     fs: int,
     spec: ModeSpec,
     line_starts: list[int],
+    *,
+    cancel: threading.Event | None = None,
 ) -> Image.Image | None:
     """Slice a frequency track into a Wraase SC2-family RGB image.
 
@@ -558,6 +577,8 @@ def _decode_wraase_rgb(
     rgb = np.zeros((height, width, 3), dtype=np.uint8)
     n = inst.size
     for row, line_start in enumerate(line_starts):
+        if cancel is not None and cancel.is_set():
+            return None
         rgb[row, :, 0] = _sample_pixels(
             inst, line_start + r_offset, scan_samples, width, n
         )
@@ -576,6 +597,8 @@ def _decode_pasokon_rgb(
     fs: int,
     spec: ModeSpec,
     line_starts: list[int],
+    *,
+    cancel: threading.Event | None = None,
 ) -> Image.Image | None:
     """Slice a frequency track into a Pasokon-family RGB image.
 
@@ -608,6 +631,8 @@ def _decode_pasokon_rgb(
     rgb = np.zeros((height, width, 3), dtype=np.uint8)
     n = inst.size
     for row, line_start in enumerate(line_starts):
+        if cancel is not None and cancel.is_set():
+            return None
         rgb[row, :, 0] = _sample_pixels(
             inst, line_start + r_offset, scan_samples, width, n
         )
@@ -626,6 +651,8 @@ def _decode_pd(
     fs: int,
     spec: ModeSpec,
     super_starts: list[int],
+    *,
+    cancel: threading.Event | None = None,
 ) -> Image.Image | None:
     """Slice a frequency track into a PD-family YCbCr image.
 
@@ -667,6 +694,8 @@ def _decode_pd(
 
     n = inst.size
     for pair_idx, sup in enumerate(super_starts):
+        if cancel is not None and cancel.is_set():
+            return None
         row_even = pair_idx * 2
         row_odd = row_even + 1
         if row_odd >= height:
@@ -840,15 +869,18 @@ def _partial_decode(
     inst: "NDArray",
     fs: int,
     vis_end: int,
+    *,
+    cancel: threading.Event | None = None,
 ) -> tuple[Image.Image, int, int] | None:
     """Decode as many lines as currently available from a frequency track.
 
     Returns ``(image, lines_decoded, lines_total)`` or ``None`` if no
-    sync candidates are usable yet. The image is always full-size
-    (``spec.width × spec.height``) with black rows for undecoded lines.
+    sync candidates are usable yet or if ``cancel`` is set. The image is
+    always full-size (``spec.width × spec.height``) with black rows for
+    undecoded lines.
     """
     if mode == Mode.ROBOT_36:
-        return _partial_decode_robot36(inst, fs, spec, vis_end)
+        return _partial_decode_robot36(inst, fs, spec, vis_end, cancel=cancel)
 
     line_samples = spec.line_time_ms / 1000.0 * fs
     candidates = find_sync_candidates(
@@ -858,6 +890,8 @@ def _partial_decode(
         line_period_samples=line_samples,
         start_idx=vis_end,
     )
+    if cancel is not None and cancel.is_set():
+        return None
     line_starts = slant_corrected_line_starts(
         candidates, line_samples, spec.height
     )
@@ -869,7 +903,7 @@ def _partial_decode(
     if decoder_fn is None:
         return None
 
-    image = decoder_fn(inst, fs, spec, usable)
+    image = decoder_fn(inst, fs, spec, usable, cancel=cancel)
     if image is None:
         return None
     return (image, len(usable), spec.height)
@@ -880,6 +914,8 @@ def _partial_decode_robot36(
     fs: int,
     spec: ModeSpec,
     vis_end: int,
+    *,
+    cancel: threading.Event | None = None,
 ) -> tuple[Image.Image, int, int] | None:
     """Progressive Robot 36 decode with auto-format detection.
 
@@ -912,7 +948,7 @@ def _partial_decode_robot36(
         usable = _trim_to_buffer(line_starts, inst.size)
         if not usable:
             return None
-        image = _decode_robot36(inst, fs, spec, usable)
+        image = _decode_robot36(inst, fs, spec, usable, cancel=cancel)
         if image is None:
             return None
         return (image, len(usable), spec.height)
@@ -924,7 +960,7 @@ def _partial_decode_robot36(
         usable = _trim_to_buffer(super_starts, inst.size)
         if not usable:
             return None
-        image = _decode_robot36_line_pair(inst, fs, spec, usable)
+        image = _decode_robot36_line_pair(inst, fs, spec, usable, cancel=cancel)
         if image is None:
             return None
         lines_decoded = min(len(usable) * 2, spec.height)
@@ -1030,6 +1066,9 @@ class Decoder:
         self._last_lines: int = 0
         # Retained after a complete decode for a high-quality re-decode pass.
         self._last_complete_buffer: np.ndarray | None = None
+        # Optional cancellation event — set from the GUI thread to interrupt
+        # an in-flight decode.  The RxWorker owns the Event and wires it here.
+        self._cancel: threading.Event | None = None
 
     @property
     def sample_rate(self) -> int:
@@ -1052,6 +1091,21 @@ class Decoder:
         buf = self._last_complete_buffer
         self._last_complete_buffer = None
         return buf
+
+    def set_cancel_event(self, event: threading.Event | None) -> None:
+        """Register a ``threading.Event`` that can interrupt in-flight decodes.
+
+        Thread-safe: the event can be set from the GUI thread while ``feed``
+        is executing on the worker thread.  When the event is set the decoder
+        aborts at the next checkpoint (after bandpass, after Hilbert transform,
+        after sync detection, or between pixel-decoder rows) and returns an
+        empty event list.  Pass ``None`` to detach the event.
+        """
+        self._cancel = event
+
+    def _is_cancelled(self) -> bool:
+        """Return True if the registered cancel event has been set."""
+        return self._cancel is not None and self._cancel.is_set()
 
     def feed(self, samples: "NDArray") -> list[DecoderEvent]:
         """Append a chunk of audio and return any decoder events it
@@ -1130,7 +1184,11 @@ class Decoder:
     def _feed_decoding(self, joined: "NDArray") -> list[DecoderEvent]:
         """Decode available lines from the growing audio buffer."""
         filtered = _bandpass(joined, self._fs)
+        if self._is_cancelled():
+            return []
         inst = instantaneous_frequency(filtered, self._fs)
+        if self._is_cancelled():
+            return []
         return self._decode_progress(
             inst, self._mode, self._spec, self._vis_code  # type: ignore[arg-type]
         )
@@ -1143,7 +1201,11 @@ class Decoder:
         vis_code: int,
     ) -> list[DecoderEvent]:
         """Run partial decode and emit progress or completion events."""
-        partial = _partial_decode(mode, spec, inst, self._fs, self._vis_end)
+        if self._is_cancelled():
+            return []
+        partial = _partial_decode(
+            mode, spec, inst, self._fs, self._vis_end, cancel=self._cancel
+        )
         if partial is None:
             return []
 

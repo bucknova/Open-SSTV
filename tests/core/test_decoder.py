@@ -425,3 +425,111 @@ def test_decoder_rejects_non_positive_sample_rate() -> None:
         Decoder(0)
     with pytest.raises(ValueError, match="positive"):
         Decoder(-1)
+
+
+# === cancel event tests ===
+
+
+def test_set_cancel_event_accepted() -> None:
+    """set_cancel_event() should accept a threading.Event without raising."""
+    import threading
+
+    decoder = Decoder(48_000)
+    ev = threading.Event()
+    decoder.set_cancel_event(ev)   # no exception
+    decoder.set_cancel_event(None)  # detach is also valid
+
+
+def test_cancel_event_not_set_does_not_abort() -> None:
+    """A cancel event that is never set must not suppress decode output."""
+    import threading
+
+    fs = 48_000
+    img = _make_gradient(320, 240)
+    samples_int16 = encode(img, Mode.ROBOT_36, sample_rate=fs)
+    samples = _to_float(samples_int16)
+
+    ev = threading.Event()
+    decoder = Decoder(fs)
+    decoder.set_cancel_event(ev)
+
+    all_events: list = []
+    for chunk in np.array_split(samples, 20):
+        all_events.extend(decoder.feed(chunk))
+
+    types = [e.__class__.__name__ for e in all_events]
+    assert "ImageStarted" in types, "Expected ImageStarted when cancel is clear"
+    assert "ImageComplete" in types, "Expected ImageComplete when cancel is clear"
+
+
+def test_cancel_during_decoding_returns_no_events() -> None:
+    """Setting the cancel event during DECODING state must produce no
+    ImageProgress or ImageComplete events from that flush."""
+    import threading
+
+    fs = 48_000
+    img = _make_gradient(320, 240)
+    samples_int16 = encode(img, Mode.ROBOT_36, sample_rate=fs)
+    samples = _to_float(samples_int16)
+
+    ev = threading.Event()
+    decoder = Decoder(fs)
+    decoder.set_cancel_event(ev)
+
+    # Feed until VIS is detected (state → DECODING), collect ImageStarted.
+    chunks = np.array_split(samples, 40)
+    started = False
+    for chunk in chunks:
+        for event in decoder.feed(chunk):
+            if event.__class__.__name__ == "ImageStarted":
+                started = True
+        if started:
+            break
+
+    assert started, "Need to reach DECODING state for this test"
+
+    # Set the cancel event and feed one more chunk — must produce no events.
+    ev.set()
+    events_after_cancel = decoder.feed(chunks[-1] if len(chunks) > 1 else samples[:1000])
+    assert events_after_cancel == [], (
+        f"Expected no events after cancel, got {events_after_cancel}"
+    )
+
+
+def test_cancel_event_cleared_by_reset() -> None:
+    """After reset() the cancel event is clear so future decodes proceed."""
+    import threading
+
+    decoder = Decoder(48_000)
+    ev = threading.Event()
+    decoder.set_cancel_event(ev)
+
+    ev.set()
+    assert decoder._is_cancelled()
+
+    decoder.reset()
+    # reset() on the Decoder just clears buffer state; the RxWorker's
+    # reset() slot is responsible for clearing the threading.Event.
+    # Simulate that here.
+    ev.clear()
+    assert not decoder._is_cancelled()
+
+
+def test_is_cancelled_without_event() -> None:
+    """_is_cancelled() must return False when no event is registered."""
+    decoder = Decoder(48_000)
+    assert not decoder._is_cancelled()
+
+
+def test_detach_cancel_event() -> None:
+    """After set_cancel_event(None) a set event no longer cancels decoding."""
+    import threading
+
+    decoder = Decoder(48_000)
+    ev = threading.Event()
+    decoder.set_cancel_event(ev)
+    ev.set()
+    assert decoder._is_cancelled()
+
+    decoder.set_cancel_event(None)
+    assert not decoder._is_cancelled()

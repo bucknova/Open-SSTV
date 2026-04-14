@@ -611,6 +611,10 @@ class MainWindow(QMainWindow):
                 self._input_device, self._config.sample_rate, DEFAULT_BLOCKSIZE
             )
         else:
+            # Cancel any in-flight decode before stopping audio so the tail
+            # flush triggered by audio_worker.stopped doesn't block the worker
+            # thread for several seconds on a large buffer.
+            self._rx_worker.request_cancel()
             self._request_stop_capture.emit()
 
     @Slot()
@@ -628,6 +632,9 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_rx_clear(self) -> None:
+        # Cancel any in-flight decode immediately (thread-safe flag set)
+        # before the queued reset() slot clears the buffer on the worker thread.
+        self._rx_worker.request_cancel()
         self._request_rx_reset.emit()
         self._rx_panel.set_status("Cleared — waiting for VIS header.")
 

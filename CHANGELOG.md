@@ -11,6 +11,33 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.15] — 2026-04-14
+
+### Fixed
+- **Stop Capture and Clear buttons unresponsive during long decodes** (bug R-2).
+  `RxWorker._flush()` calls `Decoder.feed()` synchronously on the worker thread,
+  blocking for 3–8 seconds on a full Scottie S1 or Martin M1 buffer.  Both the
+  "Clear" and "Stop Capture" actions are queued `@Slot` calls on the same thread,
+  so they wait for the decode to finish before executing — making the UI appear
+  frozen.
+
+  Fix: added a `threading.Event` cancel mechanism mirroring `TxWorker.request_stop()`.
+  - `RxWorker.request_cancel()` — thread-safe method (sets a `threading.Event`),
+    callable directly from the GUI thread without going through Qt's queued
+    connection.
+  - `Decoder.set_cancel_event(event)` — wires the event into the decode pipeline.
+    Checked at five points: after bandpass filter, after Hilbert/IF demodulation,
+    after sync candidate detection, and at the start of every row in each of the
+    seven per-mode pixel decoders (Robot 36, Robot 36 line-pair, Martin, Scottie,
+    Wraase, Pasokon, PD).
+  - `MainWindow._on_rx_clear()` and the Stop Capture path now call
+    `request_cancel()` before emitting the queued reset signal, so the running
+    decode exits at the next checkpoint rather than completing in full.
+  - `RxWorker.reset()` clears the event after resetting state, re-arming the
+    decoder for the next transmission.
+
+---
+
 ## [0.1.14] — 2026-04-14
 
 ### Added
