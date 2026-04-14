@@ -55,8 +55,8 @@ runs ``decode_wav`` over the accumulated buffer every time, which is
 O(buffer) and therefore prohibitive if called on every ~20 ms audio
 chunk. The worker absorbs that by accumulating chunks locally and
 only flushing to ``Decoder.feed`` every ``_RX_FLUSH_SAMPLES_DEFAULT``
-samples of audio (1 s at 48 kHz). This turns a 36 s Robot 36
-transmission from ~1800 decode attempts into ~36, each of which
+samples of audio (2 s at 48 kHz). This turns a 36 s Robot 36
+transmission from ~1800 decode attempts into ~18, each of which
 fails fast until the full image is present — leaving plenty of
 headroom on a Pi-class machine.
 
@@ -109,13 +109,20 @@ _CW_GAP_S: float = 0.500
 #: in settings (Phase 3).
 DEFAULT_PTT_DELAY_S = 0.2
 
-#: How many samples to accumulate in ``RxWorker`` before flushing a
-#: batch to ``Decoder.feed``. 1 s at 48 kHz — see the module docstring
-#: for why we throttle at all. Lowering this makes RX more responsive
-#: to short-image modes but multiplies decode attempts; raising it
-#: delays the "image complete" signal by up to one flush interval
-#: past the actual end of the transmission.
-_RX_FLUSH_SAMPLES_DEFAULT: int = 48_000
+#: How long to accumulate audio in ``RxWorker`` before flushing a
+#: batch to ``Decoder.feed``.  The batch decoder reprocesses the entire
+#: growing buffer on every flush (O(N) per flush → O(N²) total), so a
+#: longer interval trades responsiveness for lower CPU load.  2 s is the
+#: sweet spot: it halves the decode-attempt count vs. 1 s without
+#: delaying the "image complete" signal by more than one extra second.
+#: Tune this constant rather than hunting for the magic number in tests.
+_DECODE_FLUSH_INTERVAL_S: float = 2.0
+
+#: Derived flush threshold in samples at the default 48 kHz sample rate.
+#: ``RxWorker`` recomputes a per-instance value from the constructor's
+#: ``sample_rate`` parameter, so this default is only used when
+#: ``flush_samples`` is not passed explicitly.
+_RX_FLUSH_SAMPLES_DEFAULT: int = int(_DECODE_FLUSH_INTERVAL_S * DEFAULT_SAMPLE_RATE)
 
 #: Hard upper bound on a single transmission. If encode + playback have
 #: not finished within this many seconds the watchdog fires, forcing PTT

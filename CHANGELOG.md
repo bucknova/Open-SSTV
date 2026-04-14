@@ -11,6 +11,20 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.17] — 2026-04-14
+
+### Changed
+- **Decode flush interval doubled from 1 s to 2 s.**
+  `RxWorker` now accumulates 2 s of audio (96 000 samples at 48 kHz) between
+  progressive-decode flushes instead of 1 s.  Each flush reprocesses the entire
+  growing buffer (O(buffer²) cost), so halving the flush count cuts CPU load by
+  roughly half during a long RX — from ~36 flushes on a Scottie S1 to ~18.
+  The constant `_DECODE_FLUSH_INTERVAL_S = 2.0` in `ui/workers.py` now controls
+  the interval; `_RX_FLUSH_SAMPLES_DEFAULT` is derived from it so a single edit
+  keeps everything in sync.
+
+---
+
 ## [0.1.16] — 2026-04-14
 
 ### Fixed
