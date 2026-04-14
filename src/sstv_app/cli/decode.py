@@ -120,10 +120,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
     try:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
         result.image.save(args.output)
-    except (OSError, ValueError) as exc:
+    except OSError as exc:
+        print(f"sstv-app-decode: failed to write image: {exc}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
         print(f"sstv-app-decode: failed to write image: {exc}", file=sys.stderr)
         return 1
 

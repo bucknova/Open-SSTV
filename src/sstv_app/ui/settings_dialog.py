@@ -685,19 +685,35 @@ class SettingsDialog(QDialog):
         return self._rigctld_proc
 
 
-def _list_serial_ports() -> list:
-    """Return available serial ports, or an empty list on enumeration failure.
+_ports_cache: list = []
+_ports_cache_time: float = 0.0
+_PORTS_CACHE_TTL_S: float = 5.0
 
-    ``serial.tools.list_ports.comports()`` can raise on some platforms
-    (permission denied, USB sub-system errors). We treat any failure as
-    "no ports available" and log a warning so the Settings dialog still
-    opens cleanly.
+
+def _list_serial_ports() -> list:
+    """Return available serial ports, cached for ``_PORTS_CACHE_TTL_S`` seconds.
+
+    Calling ``comports()`` on every Settings open can take 100–200 ms on
+    Linux with many USB devices and runs on the GUI thread. The 5-second
+    TTL is short enough to pick up a device plugged in while the dialog is
+    open (user closes, plugs in cable, reopens), while avoiding repeated
+    enumeration when the dialog is quickly dismissed and re-opened.
+
+    Falls back to an empty list (and logs a warning) if enumeration fails.
     """
+    import time as _time
+
+    global _ports_cache, _ports_cache_time
+    now = _time.monotonic()
+    if now - _ports_cache_time < _PORTS_CACHE_TTL_S:
+        return _ports_cache
     try:
-        return list(serial.tools.list_ports.comports())
+        _ports_cache = list(serial.tools.list_ports.comports())
     except Exception:  # noqa: BLE001
         _log.warning("Could not enumerate serial ports", exc_info=True)
-        return []
+        _ports_cache = []
+    _ports_cache_time = now
+    return _ports_cache
 
 
 __all__ = ["SettingsDialog"]

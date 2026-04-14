@@ -67,6 +67,7 @@ dataclasses.
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from typing import TYPE_CHECKING
@@ -74,6 +75,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 import sounddevice as sd
 from PySide6.QtCore import QObject, Signal, Slot
+
+_log = logging.getLogger(__name__)
 
 from sstv_app.audio import output_stream
 from sstv_app.audio.devices import AudioDevice
@@ -470,8 +473,8 @@ class RxWorker(QObject):
                     result = decode_wav(raw, self._sample_rate)
                     if result is not None and result.mode == event.mode:
                         final_image = result.image
-            except Exception:  # noqa: BLE001
-                pass  # fall back to progressive result
+            except Exception as exc:  # noqa: BLE001
+                _log.debug("re-decode failed, using progressive result: %s", exc, exc_info=True)
             self.image_complete.emit(final_image, event.mode, event.vis_code)
         elif isinstance(event, DecodeError):
             self.error.emit(event.message)

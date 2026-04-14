@@ -733,6 +733,7 @@ class MainWindow(QMainWindow):
         # request_stop is explicitly thread-safe (threading.Event +
         # sounddevice.stop), so calling it from the UI thread is fine.
         self._tx_worker.request_stop()
+        self.statusBar().showMessage("Closing…")
         # Give the TX worker up to 1 s to unwind out of play_blocking
         # (chunked-write path checks stop_event only between 0.5 s chunks).
         # thread.wait(3000) below would handle it anyway, but waiting here

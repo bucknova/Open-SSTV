@@ -345,6 +345,8 @@ class IcomCIVRig:
     @staticmethod
     def _freq_to_bcd(hz: int) -> bytes:
         """Convert Hz to CI-V BCD-encoded frequency (5 bytes, little-endian)."""
+        if hz < 0:
+            raise ValueError(f"Frequency must be non-negative, got {hz}")
         result = bytearray(5)
         for i in range(5):
             lo = hz % 10
