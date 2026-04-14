@@ -207,10 +207,6 @@ open-sstv-decode in.wav -o out.png                    # CLI decoder
 - Plugin/macro system.
 - Internationalization.
 
-## Changelog
-
-See [CHANGELOG.md](CHANGELOG.md) for the full version history.
-
 ## License
 
 GPL-3.0-or-later. See [LICENSE](./LICENSE).
