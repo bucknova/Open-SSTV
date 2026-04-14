@@ -108,6 +108,13 @@ DEFAULT_PTT_DELAY_S = 0.2
 #: past the actual end of the transmission.
 _RX_FLUSH_SAMPLES_DEFAULT: int = 48_000
 
+#: Hard upper bound on a single transmission. If encode + playback have
+#: not finished within this many seconds the watchdog fires, forcing PTT
+#: off and aborting playback. The longest SSTV mode we ship (Martin M1)
+#: takes ~114 s; 300 s gives plenty of headroom while still protecting
+#: against a stuck encoder or hung audio driver.
+_MAX_TX_DURATION_S: float = 300.0
+
 
 class TxWorker(QObject):
     """Render an image to SSTV audio and play it on a worker thread.
@@ -174,57 +181,68 @@ class TxWorker(QObject):
         """
         self._stop_event.clear()
 
-        # --- Encode (CPU-bound, ~100 ms for the modes we ship) ---
+        # Start the watchdog before any blocking work. If encode + playback
+        # haven't finished within _MAX_TX_DURATION_S, the timer fires on its
+        # own thread, emits an error, and calls request_stop() to force unkey.
+        watchdog = threading.Timer(_MAX_TX_DURATION_S, self._watchdog_fire)
+        watchdog.start()
+
         try:
-            samples = encode(image, mode, sample_rate=self._sample_rate)
-        except Exception as exc:  # noqa: BLE001 — surface anything to UI
-            self.error.emit(f"Encode failed: {exc}")
-            return
-
-        # Apply software output gain
-        if self._output_gain != 1.0:
-            samples = np.clip(
-                samples.astype(np.float64) * self._output_gain,
-                -32768, 32767,
-            ).astype(samples.dtype)
-
-        # --- Key the rig ---
-        try:
-            self._rig.set_ptt(True)
-        except RigError as exc:
-            # User explicitly wanted rig control and it failed — abort
-            # before any audio leaves the soundcard. ManualRig never
-            # raises so this only fires for real backends.
-            self.error.emit(f"Could not key rig: {exc}")
-            return
-
-        self.transmission_started.emit()
-
-        # --- Play the buffer ---
-        playback_succeeded = False
-        try:
-            time.sleep(self._ptt_delay_s)
-            if self._stop_event.is_set():
-                # Stop pressed during the PTT delay window, before any audio.
-                pass
-            else:
-                output_stream.play_blocking(
-                    samples,
-                    self._sample_rate,
-                    device=self._output_device,
-                    progress_callback=lambda played, total: self.transmission_progress.emit(played, total),
-                    stop_event=self._stop_event,
-                )
-                playback_succeeded = not self._stop_event.is_set()
-        except Exception as exc:  # noqa: BLE001
-            self.error.emit(f"Playback failed: {exc}")
-        finally:
-            # ALWAYS unkey, even on error or stop, so the rig never gets
-            # left in a stuck-keyed state.
+            # --- Encode (CPU-bound, ~100 ms for the modes we ship) ---
             try:
-                self._rig.set_ptt(False)
+                samples = encode(image, mode, sample_rate=self._sample_rate)
+            except Exception as exc:  # noqa: BLE001 — surface anything to UI
+                self.error.emit(f"Encode failed: {exc}")
+                return
+
+            # Apply software output gain
+            if self._output_gain != 1.0:
+                samples = np.clip(
+                    samples.astype(np.float64) * self._output_gain,
+                    -32768, 32767,
+                ).astype(samples.dtype)
+
+            # --- Key the rig ---
+            try:
+                self._rig.set_ptt(True)
             except RigError as exc:
-                self.error.emit(f"Could not unkey rig: {exc}")
+                # User explicitly wanted rig control and it failed — abort
+                # before any audio leaves the soundcard. ManualRig never
+                # raises so this only fires for real backends.
+                self.error.emit(f"Could not key rig: {exc}")
+                return
+
+            self.transmission_started.emit()
+
+            # --- Play the buffer ---
+            playback_succeeded = False
+            try:
+                time.sleep(self._ptt_delay_s)
+                if self._stop_event.is_set():
+                    # Stop pressed during the PTT delay window, before any audio.
+                    pass
+                else:
+                    output_stream.play_blocking(
+                        samples,
+                        self._sample_rate,
+                        device=self._output_device,
+                        progress_callback=lambda played, total: self.transmission_progress.emit(played, total),
+                        stop_event=self._stop_event,
+                    )
+                    playback_succeeded = not self._stop_event.is_set()
+            except Exception as exc:  # noqa: BLE001
+                self.error.emit(f"Playback failed: {exc}")
+            finally:
+                # ALWAYS unkey, even on error or stop, so the rig never gets
+                # left in a stuck-keyed state.
+                try:
+                    self._rig.set_ptt(False)
+                except RigError as exc:
+                    self.error.emit(f"Could not unkey rig: {exc}")
+        finally:
+            # Cancel the watchdog whether we finished cleanly, were stopped,
+            # or hit an error — it must not fire after transmit() returns.
+            watchdog.cancel()
 
         if self._stop_event.is_set():
             self.transmission_aborted.emit()
@@ -241,6 +259,19 @@ class TxWorker(QObject):
         """
         self._stop_event.set()
         output_stream.stop()
+
+    def _watchdog_fire(self) -> None:
+        """Called by the watchdog timer when TX exceeds ``_MAX_TX_DURATION_S``.
+
+        Safe to call from the timer's background thread: ``error`` is a
+        Qt signal (queued to the GUI thread) and ``request_stop`` is
+        explicitly thread-safe.
+        """
+        self.error.emit(
+            f"TX watchdog: transmission exceeded {_MAX_TX_DURATION_S:.0f} s "
+            "— rig unkeyed automatically"
+        )
+        self.request_stop()
 
 
 class RxWorker(QObject):

@@ -418,34 +418,32 @@ def _decode_robot36_line_pair(
     )
 
 
-def _decode_martin_m1(
+def _decode_martin_rgb(
     inst: NDArray,
     fs: int,
     spec: ModeSpec,
     line_starts: list[int],
 ) -> Image.Image | None:
-    """Slice a frequency track into a Martin M1 RGB image.
+    """Slice a frequency track into a Martin-family RGB image.
 
-    PySSTV's Martin M1 emits each line as::
+    Martin layout (LINE_START, ``color_layout=("G","B","R")``):
+    one sync pulse at the line start, followed by four equal porches
+    interleaved with three channel scans in G→B→R order::
 
-        SYNC (4.862 ms) → BLACK porch (0.572 ms)
-        GREEN scan (146.432 ms) → BLACK porch
-        BLUE scan (146.432 ms)  → BLACK porch
-        RED scan (146.432 ms)   → BLACK porch
+        SYNC → PORCH → G_scan → PORCH → B_scan → PORCH → R_scan → PORCH
 
-    The line-start sample index from ``find_line_starts`` lands on the
-    leading edge of the SYNC pulse, so each channel's offset from
-    ``line_start`` is just (sync + porch) for green, plus a scan + porch
-    for each subsequent channel.
+    Scan time is derived from the spec:
+    ``scan_ms = (line_time − sync − 4×porch) / 3``
+
+    Handles M1 (320×256, ~114 s) and M2 (160×256, ~57 s) — any Martin
+    variant whose ModeSpec is structured this way.
     """
     width = spec.width
     height = spec.height
+    sync_ms = spec.sync_pulse_ms
+    porch_ms = spec.sync_porch_ms
+    scan_ms = (spec.line_time_ms - sync_ms - 4 * porch_ms) / 3
 
-    sync_ms = 4.862
-    porch_ms = 0.572
-    scan_ms = 146.432
-
-    # Channel-scan start offsets, in milliseconds from the line-start sync.
     g_offset_ms = sync_ms + porch_ms
     b_offset_ms = g_offset_ms + scan_ms + porch_ms
     r_offset_ms = b_offset_ms + scan_ms + porch_ms
@@ -471,38 +469,34 @@ def _decode_martin_m1(
     return Image.fromarray(rgb)
 
 
-def _decode_scottie_s1(
+def _decode_scottie_rgb(
     inst: NDArray,
     fs: int,
     spec: ModeSpec,
     sync_indices: list[int],
 ) -> Image.Image | None:
-    """Slice a frequency track into a Scottie S1 RGB image.
+    """Slice a frequency track into a Scottie-family RGB image.
 
     Scottie's defining oddity: the SYNC pulse sits **between blue and
-    red** within each line, not at the line start. PySSTV's Scottie S1
-    emits each line as::
+    red** within each line (``BEFORE_RED``). Layout::
 
-        BLACK porch → GREEN scan → BLACK porch → BLACK porch
-        BLUE scan   → BLACK porch → SYNC (9 ms) → BLACK porch
-        RED scan    → BLACK porch
+        PORCH → G_scan → PORCH → PORCH → B_scan → PORCH → SYNC → PORCH → R_scan → PORCH
 
-    Each per-line index from ``find_line_starts`` lands on the leading
-    edge of the *between blue and red* sync pulse — i.e. partway into
-    the line. The decoder reaches green and blue by stepping
-    **backward** from the sync, and reaches red by stepping forward.
+    Each per-line index lands on the leading edge of the between-B-and-R
+    sync. The decoder steps backward to reach G and B, forward for R.
+
+    Scan time: ``scan_ms = (line_time − sync − 6×porch) / 3``
+
+    Handles S1 (320×256, ~110 s), S2 (160×256, ~71 s), and DX
+    (320×256, ~269 s).
     """
     width = spec.width
     height = spec.height
+    sync_ms = spec.sync_pulse_ms
+    porch_ms = spec.sync_porch_ms
+    scan_ms = (spec.line_time_ms - sync_ms - 6 * porch_ms) / 3
 
-    sync_ms = 9.0
-    porch_ms = 1.5
-    scan_ms = 138.24 - porch_ms  # PySSTV: SCAN = 138.24 - INTER_CH_GAP
-
-    # Offsets relative to the *detected sync* index.
-    #   Green scan starts (porch + scan + porch + porch + scan) ms before sync.
-    #   Blue scan starts (porch + scan) ms before sync (= 138.24 ms back).
-    #   Red scan starts (sync + porch) ms after sync.
+    # Offsets relative to the detected SYNC position.
     g_offset_ms = -(porch_ms + scan_ms + porch_ms + porch_ms + scan_ms)
     b_offset_ms = -(porch_ms + scan_ms)
     r_offset_ms = sync_ms + porch_ms
@@ -526,6 +520,169 @@ def _decode_scottie_s1(
         )
 
     return Image.fromarray(rgb)
+
+
+def _decode_wraase_rgb(
+    inst: NDArray,
+    fs: int,
+    spec: ModeSpec,
+    line_starts: list[int],
+) -> Image.Image | None:
+    """Slice a frequency track into a Wraase SC2-family RGB image.
+
+    Wraase SC2 layout (LINE_START, ``color_layout=("R","G","B")``):
+    one sync pulse, a single porch before the first channel only, then
+    three back-to-back channel scans with no inter-channel gaps::
+
+        SYNC → PORCH → R_scan → G_scan → B_scan
+
+    Scan time: ``scan_ms = (line_time − sync − porch) / 3``
+
+    Handles SC2-120 (320×256, ~122 s) and SC2-180 (320×256, ~183 s).
+    """
+    width = spec.width
+    height = spec.height
+    sync_ms = spec.sync_pulse_ms
+    porch_ms = spec.sync_porch_ms
+    scan_ms = (spec.line_time_ms - sync_ms - porch_ms) / 3
+
+    r_offset_ms = sync_ms + porch_ms
+    g_offset_ms = r_offset_ms + scan_ms
+    b_offset_ms = g_offset_ms + scan_ms
+
+    r_offset = r_offset_ms / 1000.0 * fs
+    g_offset = g_offset_ms / 1000.0 * fs
+    b_offset = b_offset_ms / 1000.0 * fs
+    scan_samples = scan_ms / 1000.0 * fs
+
+    rgb = np.zeros((height, width, 3), dtype=np.uint8)
+    n = inst.size
+    for row, line_start in enumerate(line_starts):
+        rgb[row, :, 0] = _sample_pixels(
+            inst, line_start + r_offset, scan_samples, width, n
+        )
+        rgb[row, :, 1] = _sample_pixels(
+            inst, line_start + g_offset, scan_samples, width, n
+        )
+        rgb[row, :, 2] = _sample_pixels(
+            inst, line_start + b_offset, scan_samples, width, n
+        )
+
+    return Image.fromarray(rgb)
+
+
+def _decode_pasokon_rgb(
+    inst: NDArray,
+    fs: int,
+    spec: ModeSpec,
+    line_starts: list[int],
+) -> Image.Image | None:
+    """Slice a frequency track into a Pasokon-family RGB image.
+
+    Pasokon layout (LINE_START, ``color_layout=("R","G","B")``):
+    one sync pulse followed by four equal inter-channel gaps (one before
+    each channel and one trailing)::
+
+        SYNC → GAP → R_scan → GAP → G_scan → GAP → B_scan → GAP
+
+    ``spec.sync_porch_ms`` holds the inter-channel gap value.
+    Scan time: ``scan_ms = (line_time − sync − 4×gap) / 3``
+
+    Handles P3 (~203 s), P5 (~304 s), and P7 (~456 s), all 640×496.
+    """
+    width = spec.width
+    height = spec.height
+    sync_ms = spec.sync_pulse_ms
+    gap_ms = spec.sync_porch_ms   # stored as sync_porch_ms per modes.py convention
+    scan_ms = (spec.line_time_ms - sync_ms - 4 * gap_ms) / 3
+
+    r_offset_ms = sync_ms + gap_ms
+    g_offset_ms = r_offset_ms + scan_ms + gap_ms
+    b_offset_ms = g_offset_ms + scan_ms + gap_ms
+
+    r_offset = r_offset_ms / 1000.0 * fs
+    g_offset = g_offset_ms / 1000.0 * fs
+    b_offset = b_offset_ms / 1000.0 * fs
+    scan_samples = scan_ms / 1000.0 * fs
+
+    rgb = np.zeros((height, width, 3), dtype=np.uint8)
+    n = inst.size
+    for row, line_start in enumerate(line_starts):
+        rgb[row, :, 0] = _sample_pixels(
+            inst, line_start + r_offset, scan_samples, width, n
+        )
+        rgb[row, :, 1] = _sample_pixels(
+            inst, line_start + g_offset, scan_samples, width, n
+        )
+        rgb[row, :, 2] = _sample_pixels(
+            inst, line_start + b_offset, scan_samples, width, n
+        )
+
+    return Image.fromarray(rgb)
+
+
+def _decode_pd(
+    inst: NDArray,
+    fs: int,
+    spec: ModeSpec,
+    super_starts: list[int],
+) -> Image.Image | None:
+    """Slice a frequency track into a PD-family YCbCr image.
+
+    PD layout (LINE_START, ``color_layout=("Y0","Cr","Cb","Y1")``):
+    one sync pulse covers **two** image rows (line-pair format). Each
+    super-line contains four equal-length channel scans::
+
+        SYNC → PORCH → Y0_scan → Cr_scan → Cb_scan → Y1_scan
+
+    ``spec.height`` is ``actual_image_height // 2`` (number of sync pulses).
+    The output image is ``spec.width × (spec.height * 2)`` pixels.
+
+    Channel scan time: ``ch_ms = (line_time − sync − porch) / 4``
+
+    Handles PD 90/120/160/180/240/290.
+    """
+    width = spec.width
+    n_pairs = spec.height            # stored as actual_height // 2
+    height = n_pairs * 2             # true image height
+
+    sync_ms = spec.sync_pulse_ms
+    porch_ms = spec.sync_porch_ms
+    ch_ms = (spec.line_time_ms - sync_ms - porch_ms) / 4
+
+    y0_off_ms = sync_ms + porch_ms
+    cr_off_ms = y0_off_ms + ch_ms
+    cb_off_ms = cr_off_ms + ch_ms
+    y1_off_ms = cb_off_ms + ch_ms
+
+    y0_off = y0_off_ms / 1000.0 * fs
+    cr_off = cr_off_ms / 1000.0 * fs
+    cb_off = cb_off_ms / 1000.0 * fs
+    y1_off = y1_off_ms / 1000.0 * fs
+    ch_span = ch_ms / 1000.0 * fs
+
+    y_plane = np.zeros((height, width), dtype=np.uint8)
+    cr_plane = np.full((height, width), 128, dtype=np.uint8)
+    cb_plane = np.full((height, width), 128, dtype=np.uint8)
+
+    n = inst.size
+    for pair_idx, sup in enumerate(super_starts):
+        row_even = pair_idx * 2
+        row_odd = row_even + 1
+        if row_odd >= height:
+            break
+        y_plane[row_even] = _sample_pixels(inst, sup + y0_off, ch_span, width, n)
+        y_plane[row_odd] = _sample_pixels(inst, sup + y1_off, ch_span, width, n)
+        cr_row = _sample_pixels(inst, sup + cr_off, ch_span, width, n, chroma=True)
+        cb_row = _sample_pixels(inst, sup + cb_off, ch_span, width, n, chroma=True)
+        # Both rows in the pair share the pair's chroma (nearest-neighbour upsample).
+        cr_plane[row_even] = cr_row
+        cr_plane[row_odd] = cr_row
+        cb_plane[row_even] = cb_row
+        cb_plane[row_odd] = cb_row
+
+    ycbcr = np.stack([y_plane, cb_plane, cr_plane], axis=-1)
+    return Image.frombytes("YCbCr", (width, height), ycbcr.tobytes()).convert("RGB")
 
 
 def _bandpass(x: NDArray, fs: int) -> NDArray:
@@ -622,9 +779,31 @@ def _sample_pixels(
 
 
 _PIXEL_DECODERS: dict[Mode, callable] = {
+    # Robot 36 is dispatched separately in decode_wav/_partial_decode
+    # (auto-detects single-line vs line-pair wire format), but register
+    # the per-line decoder here so the dict stays complete.
     Mode.ROBOT_36: _decode_robot36,
-    Mode.MARTIN_M1: _decode_martin_m1,
-    Mode.SCOTTIE_S1: _decode_scottie_s1,
+    # Martin family
+    Mode.MARTIN_M1: _decode_martin_rgb,
+    Mode.MARTIN_M2: _decode_martin_rgb,
+    # Scottie family
+    Mode.SCOTTIE_S1: _decode_scottie_rgb,
+    Mode.SCOTTIE_S2: _decode_scottie_rgb,
+    Mode.SCOTTIE_DX: _decode_scottie_rgb,
+    # PD family (YCbCr line-pair)
+    Mode.PD_90: _decode_pd,
+    Mode.PD_120: _decode_pd,
+    Mode.PD_160: _decode_pd,
+    Mode.PD_180: _decode_pd,
+    Mode.PD_240: _decode_pd,
+    Mode.PD_290: _decode_pd,
+    # Wraase SC2 family
+    Mode.WRAASE_SC2_120: _decode_wraase_rgb,
+    Mode.WRAASE_SC2_180: _decode_wraase_rgb,
+    # Pasokon family
+    Mode.PASOKON_P3: _decode_pasokon_rgb,
+    Mode.PASOKON_P5: _decode_pasokon_rgb,
+    Mode.PASOKON_P7: _decode_pasokon_rgb,
 }
 
 

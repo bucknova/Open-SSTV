@@ -48,9 +48,9 @@ dev = [
 ]
 
 [project.scripts]
-sstv-app = "sstv_app.app:main"
-sstv-app-decode = "sstv_app.cli.decode:main"
-sstv-app-encode = "sstv_app.cli.encode:main"
+open-sstv = "sstv_app.app:main"
+open-sstv-decode = "sstv_app.cli.decode:main"
+open-sstv-encode = "sstv_app.cli.encode:main"
 
 [project.urls]
 Homepage = "https://github.com/bucknova/Open-SSTV"

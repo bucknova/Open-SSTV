@@ -278,6 +278,8 @@ class MainWindow(QMainWindow):
         settings_action.setMenuRole(QAction.MenuRole.NoRole)
         settings_action.triggered.connect(self._open_settings)
         file_menu.addAction(settings_action)
+        # Keep a reference so TX start/stop can enable/disable it.
+        self._settings_action = settings_action
 
         file_menu.addSeparator()
 
@@ -340,24 +342,36 @@ class MainWindow(QMainWindow):
         self._tx_panel.set_transmitting(True)
         self._tx_panel.set_status("Transmitting…")
         self.statusBar().showMessage("Transmitting")
+        # Lock rig controls for the duration of the transmission so the user
+        # can't swap or disconnect the rig while PTT is keyed.
+        self._radio_panel.set_tx_active(True)
+        self._settings_action.setEnabled(False)
+
+    def _unlock_rig_controls(self) -> None:
+        """Re-enable rig UI after TX completes, aborts, or errors."""
+        self._radio_panel.set_tx_active(False)
+        self._settings_action.setEnabled(True)
 
     @Slot()
     def _on_tx_complete(self) -> None:
         self._tx_panel.set_transmitting(False)
         self._tx_panel.set_status("Transmission complete.")
         self.statusBar().showMessage("Ready")
+        self._unlock_rig_controls()
 
     @Slot()
     def _on_tx_aborted(self) -> None:
         self._tx_panel.set_transmitting(False)
         self._tx_panel.set_status("Transmission aborted.")
         self.statusBar().showMessage("Ready")
+        self._unlock_rig_controls()
 
     @Slot(str)
     def _on_tx_error(self, message: str) -> None:
         self._tx_panel.set_transmitting(False)
         self._tx_panel.set_status(f"Error: {message}")
         self.statusBar().showMessage(message, 5000)
+        self._unlock_rig_controls()
 
     # === RX slots ===
 

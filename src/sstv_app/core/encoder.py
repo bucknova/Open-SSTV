@@ -31,7 +31,25 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from PIL import Image
-from pysstv.color import MartinM1, Robot36, ScottieS1
+from pysstv.color import (
+    MartinM1,
+    MartinM2,
+    PD90,
+    PD120,
+    PD160,
+    PD180,
+    PD240,
+    PD290,
+    PasokonP3,
+    PasokonP5,
+    PasokonP7,
+    Robot36,
+    ScottieDX,
+    ScottieS1,
+    ScottieS2,
+    WraaseSC2120,
+    WraaseSC2180,
+)
 from pysstv.sstv import (
     SSTV,
     FREQ_BLACK,
@@ -156,7 +174,21 @@ class Robot36LinePair(Robot36):
 _PYSSTV_CLASSES: dict[Mode, type[SSTV]] = {
     Mode.ROBOT_36: Robot36LinePair,
     Mode.MARTIN_M1: MartinM1,
+    Mode.MARTIN_M2: MartinM2,
     Mode.SCOTTIE_S1: ScottieS1,
+    Mode.SCOTTIE_S2: ScottieS2,
+    Mode.SCOTTIE_DX: ScottieDX,
+    Mode.PD_90: PD90,
+    Mode.PD_120: PD120,
+    Mode.PD_160: PD160,
+    Mode.PD_180: PD180,
+    Mode.PD_240: PD240,
+    Mode.PD_290: PD290,
+    Mode.WRAASE_SC2_120: WraaseSC2120,
+    Mode.WRAASE_SC2_180: WraaseSC2180,
+    Mode.PASOKON_P3: PasokonP3,
+    Mode.PASOKON_P5: PasokonP5,
+    Mode.PASOKON_P7: PasokonP7,
 }
 
 #: Default sound card sample rate. 48 kHz is the lowest rate every modern
@@ -201,10 +233,13 @@ def encode(
         raise ValueError(msg)
 
     pil_image = image if isinstance(image, Image.Image) else Image.open(image)
-    spec = MODE_TABLE[mode]
-    prepared = _prepare_image(pil_image, spec.width, spec.height)
-
     sstv_cls = _PYSSTV_CLASSES[mode]
+    # Use the PySSTV class's own WIDTH/HEIGHT for image preparation rather than
+    # spec.width/spec.height: PD modes store height = actual_height // 2 in the
+    # spec (one entry per sync pulse / super-line) so the decoder finds the right
+    # number of sync pulses, but PySSTV's PD classes expect the full image height.
+    prepared = _prepare_image(pil_image, sstv_cls.WIDTH, sstv_cls.HEIGHT)
+
     sstv = sstv_cls(prepared, sample_rate, _BITS_PER_SAMPLE)
     # ``gen_samples`` yields Python ints quantized to ``_BITS_PER_SAMPLE``;
     # ``np.fromiter`` with an explicit count would require pre-computing the

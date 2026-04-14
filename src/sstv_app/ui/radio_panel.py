@@ -124,6 +124,14 @@ class RadioPanel(QWidget):
         self._status_label.setText("Connection lost")
         self._status_label.setStyleSheet("color: red;")
 
+    def set_tx_active(self, active: bool) -> None:
+        """Disable the connect/disconnect button while a transmission is active.
+
+        Prevents the user from swapping or disconnecting the rig mid-transmit,
+        which could leave the radio stuck keyed on the wrong backend.
+        """
+        self._connect_btn.setEnabled(not active)
+
     def set_callsign(self, callsign: str) -> None:
         self._callsign_label.setText(callsign)
 

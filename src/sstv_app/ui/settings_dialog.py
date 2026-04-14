@@ -397,8 +397,12 @@ class SettingsDialog(QDialog):
         # rigctld process handle (managed by this dialog instance)
         self._rigctld_proc: subprocess.Popen | None = None
 
-        # Set initial visibility based on current connection mode
+        # Set initial visibility based on current connection mode.
+        # _protocol_init_done gates baud auto-suggest so it only fires on
+        # user-initiated protocol changes, not during dialog construction.
+        self._protocol_init_done = False
         self._on_conn_mode_changed()
+        self._protocol_init_done = True
 
         return tab
 
@@ -421,6 +425,31 @@ class SettingsDialog(QDialog):
         self._civ_preset_combo.setVisible(is_icom)
         self._ptt_line_row_label.setVisible(is_ptt_only)
         self._ptt_line_combo.setVisible(is_ptt_only)
+        # Auto-suggest the typical baud rate for this protocol, but only on
+        # user-initiated changes (not during initial dialog construction).
+        if getattr(self, "_protocol_init_done", False):
+            self._suggest_baud_for_protocol(proto)
+
+    # Typical baud rates for each serial protocol. Exposed as a class-level
+    # constant so tests and the "Test Connection" path can reference them.
+    _PROTOCOL_DEFAULT_BAUD: dict[str, int] = {
+        "PTT Only (DTR/RTS)": 9600,
+        "Icom CI-V": 19200,
+        "Kenwood / Elecraft": 9600,
+        "Yaesu CAT": 38400,
+    }
+
+    def _suggest_baud_for_protocol(self, proto: str) -> None:
+        """Update the baud rate combo to the protocol's typical default.
+
+        Called only when the user actively changes the protocol selector.
+        Silently ignores unknown protocols so future additions don't break.
+        """
+        suggested = self._PROTOCOL_DEFAULT_BAUD.get(proto)
+        if suggested is not None:
+            idx = self._baud_rate_combo.findData(suggested)
+            if idx >= 0:
+                self._baud_rate_combo.setCurrentIndex(idx)
 
     def _on_civ_preset_changed(self, index: int) -> None:
         """Set the CI-V address spinbox when a preset radio is selected."""
