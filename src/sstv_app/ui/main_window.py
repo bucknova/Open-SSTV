@@ -155,6 +155,9 @@ class MainWindow(QMainWindow):
     #: slot executes on the worker thread's event loop.
     _request_start_capture = Signal(object, int, int)
     _request_stop_capture = Signal()
+    #: Routes the "Clear" action to RxWorker.reset() via a queued connection
+    #: so the reset runs on the RX decode thread, not the GUI thread.
+    _request_rx_reset = Signal()
 
     def __init__(
         self,
@@ -263,6 +266,7 @@ class MainWindow(QMainWindow):
         # and the PortAudio open runs on the audio worker thread.
         self._request_start_capture.connect(self._audio_worker.start)
         self._request_stop_capture.connect(self._audio_worker.stop)
+        self._request_rx_reset.connect(self._rx_worker.reset)
 
         # Panel -> window (we translate capture_requested into the
         # dispatch signals above, because ``start`` needs the device
@@ -369,6 +373,7 @@ class MainWindow(QMainWindow):
             )
             self._tx_worker.set_output_device(new_output)
             self._tx_worker.set_output_gain(self._config.audio_output_gain)
+            self._tx_worker.set_ptt_delay(self._config.ptt_delay_s)
 
             new_input = find_input_device_by_name(
                 self._config.audio_input_device
@@ -453,7 +458,7 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_rx_clear(self) -> None:
-        self._rx_worker.reset()
+        self._request_rx_reset.emit()
         self._rx_panel.set_status("Cleared — waiting for VIS header.")
 
     @Slot(object, object, int)

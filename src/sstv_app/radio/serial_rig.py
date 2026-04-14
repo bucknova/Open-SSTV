@@ -290,7 +290,8 @@ class IcomCIVRig:
 
     def _read_response(self) -> bytes:
         """Read and parse a CI-V response frame."""
-        assert self._ser is not None
+        if self._ser is None:
+            raise RigConnectionError("Serial port not open")
         buf = bytearray()
         deadline = time.monotonic() + 1.0
         while time.monotonic() < deadline:
@@ -480,21 +481,32 @@ class KenwoodRig:
                 raise RigConnectionError("Serial port not open")
             self._ser.reset_input_buffer()
             self._ser.write(f"{cmd};".encode("ascii"))
-            return self._read_response()
+            return self._read_response(expected_prefix=cmd[:2])
 
-    def _read_response(self) -> str:
-        """Read until ``;`` terminator or timeout."""
-        assert self._ser is not None
+    def _read_response(self, expected_prefix: str = "") -> str:
+        """Read until a ``;``-terminated response matching *expected_prefix*.
+
+        Discards unsolicited status messages (common when the operator
+        turns knobs during polling) and keeps reading until a response
+        whose first characters match *expected_prefix* arrives, or until
+        the 1 s deadline expires.
+        """
+        if self._ser is None:
+            raise RigConnectionError("Serial port not open")
         buf = bytearray()
         deadline = time.monotonic() + 1.0
         while time.monotonic() < deadline:
             avail = self._ser.in_waiting
             if avail:
                 buf.extend(self._ser.read(avail))
-                if b";" in buf:
-                    # Return first complete response
-                    text = buf.decode("ascii", errors="replace")
-                    return text.split(";")[0]
+                # Consume all complete (;-terminated) responses in the buffer.
+                while b";" in buf:
+                    idx = buf.index(b";")
+                    text = buf[:idx].decode("ascii", errors="replace")
+                    del buf[:idx + 1]
+                    if not expected_prefix or text.startswith(expected_prefix):
+                        return text
+                    # Unsolicited message — discard and keep reading.
             else:
                 time.sleep(0.01)
         raise RigConnectionError("Kenwood command timeout")
@@ -626,20 +638,30 @@ class YaesuRig:
                 raise RigConnectionError("Serial port not open")
             self._ser.reset_input_buffer()
             self._ser.write(f"{cmd};".encode("ascii"))
-            return self._read_response()
+            return self._read_response(expected_prefix=cmd[:2])
 
-    def _read_response(self) -> str:
-        """Read until ``;`` terminator or timeout."""
-        assert self._ser is not None
+    def _read_response(self, expected_prefix: str = "") -> str:
+        """Read until a ``;``-terminated response matching *expected_prefix*.
+
+        Discards unsolicited status messages and keeps reading until a
+        response starting with *expected_prefix* arrives or the deadline
+        expires.
+        """
+        if self._ser is None:
+            raise RigConnectionError("Serial port not open")
         buf = bytearray()
         deadline = time.monotonic() + 1.0
         while time.monotonic() < deadline:
             avail = self._ser.in_waiting
             if avail:
                 buf.extend(self._ser.read(avail))
-                if b";" in buf:
-                    text = buf.decode("ascii", errors="replace")
-                    return text.split(";")[0]
+                while b";" in buf:
+                    idx = buf.index(b";")
+                    text = buf[:idx].decode("ascii", errors="replace")
+                    del buf[:idx + 1]
+                    if not expected_prefix or text.startswith(expected_prefix):
+                        return text
+                    # Unsolicited message — discard and keep reading.
             else:
                 time.sleep(0.01)
         raise RigConnectionError("Yaesu command timeout")

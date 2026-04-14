@@ -72,6 +72,7 @@ import time
 from typing import TYPE_CHECKING
 
 import numpy as np
+import sounddevice as sd
 from PySide6.QtCore import QObject, Signal, Slot
 
 from sstv_app.audio import output_stream
@@ -167,6 +168,10 @@ class TxWorker(QObject):
         """Set the software output gain (1.0 = unity). Thread-safe."""
         self._output_gain = gain
 
+    def set_ptt_delay(self, delay_s: float) -> None:
+        """Update the PTT-to-audio delay at runtime (e.g. after settings save)."""
+        self._ptt_delay_s = delay_s
+
     def set_rig(self, rig: Rig) -> None:
         """Swap the rig backend at runtime (e.g. after connect/disconnect)."""
         self._rig = rig
@@ -180,6 +185,12 @@ class TxWorker(QObject):
         failure, only ``error``).
         """
         self._stop_event.clear()
+
+        # Snapshot the rig reference once so a mid-TX call to set_rig()
+        # (e.g. user disconnects the radio) cannot swap the backend between
+        # set_ptt(True) and set_ptt(False), which would leave the real rig
+        # stuck keyed via a no-op ManualRig.set_ptt(False).
+        rig = self._rig
 
         # Start the watchdog before any blocking work. If encode + playback
         # haven't finished within _MAX_TX_DURATION_S, the timer fires on its
@@ -204,7 +215,7 @@ class TxWorker(QObject):
 
             # --- Key the rig ---
             try:
-                self._rig.set_ptt(True)
+                rig.set_ptt(True)
             except RigError as exc:
                 # User explicitly wanted rig control and it failed — abort
                 # before any audio leaves the soundcard. ManualRig never
@@ -230,13 +241,15 @@ class TxWorker(QObject):
                         stop_event=self._stop_event,
                     )
                     playback_succeeded = not self._stop_event.is_set()
+            except sd.PortAudioError:
+                self.error.emit("Audio device disconnected during transmission.")
             except Exception as exc:  # noqa: BLE001
                 self.error.emit(f"Playback failed: {exc}")
             finally:
                 # ALWAYS unkey, even on error or stop, so the rig never gets
                 # left in a stuck-keyed state.
                 try:
-                    self._rig.set_ptt(False)
+                    rig.set_ptt(False)
                 except RigError as exc:
                     self.error.emit(f"Could not unkey rig: {exc}")
         finally:
@@ -441,7 +454,7 @@ class RxWorker(QObject):
             # consistent sync grid across all lines.
             final_image = event.image
             try:
-                raw = self._decoder.last_complete_buffer()
+                raw = self._decoder.consume_last_buffer()
                 if raw is not None and isinstance(raw, np.ndarray) and raw.size > 0:
                     result = decode_wav(raw, self._sample_rate)
                     if result is not None and result.mode == event.mode:

@@ -13,8 +13,13 @@ in a save dialog. Auto-save-to-disk is a Phase 3 setting.
 """
 from __future__ import annotations
 
+import atexit
+import shutil
+import tempfile
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+from PIL import Image as PILImageModule
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QIcon, QImage, QPixmap, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import QApplication, QListView, QMenu
@@ -35,11 +40,15 @@ _THUMB_SIZE = QSize(160, 120)
 #: forever when an auto-decode loop runs overnight.
 _MAX_IMAGES: int = 20
 
-#: Qt user-data role for stashing the original PIL image on the model
-#: item. We can't just keep the QPixmap — the ``image_activated`` signal
-#: needs to hand the parent a ``PIL.Image`` for save-to-disk.
-_PIL_IMAGE_ROLE = Qt.ItemDataRole.UserRole + 1
+#: Qt user-data role for the on-disk path (str) of the saved image.
+#: Storing a Path keeps the PIL Image out of memory between activations.
+_IMAGE_PATH_ROLE = Qt.ItemDataRole.UserRole + 1
 _MODE_ROLE = Qt.ItemDataRole.UserRole + 2
+
+#: Module-level temp directory; all gallery images are saved here.
+#: Cleaned up automatically when the process exits.
+_GALLERY_TMPDIR: str = tempfile.mkdtemp(prefix="open-sstv-gallery-")
+atexit.register(shutil.rmtree, _GALLERY_TMPDIR, ignore_errors=True)
 
 
 class ImageGalleryWidget(QListView):
@@ -70,22 +79,38 @@ class ImageGalleryWidget(QListView):
     def add_image(self, image: "PILImage", mode: Mode) -> None:
         """Prepend a freshly decoded image to the gallery strip.
 
-        Oldest images beyond ``_MAX_IMAGES`` are dropped from the tail
-        so memory stays bounded across long listening sessions.
+        The PIL image is written to a temp file immediately so the
+        in-memory object can be released by the caller. Thumbnails are
+        rendered from the original before it is saved so we never need
+        to reload just for the strip. Oldest entries beyond ``_MAX_IMAGES``
+        have their temp files deleted before the item is removed from the
+        model.
         """
         pixmap = _pil_to_pixmap(image).scaled(
             _THUMB_SIZE,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
+        # Save image to the gallery temp dir; use row count to make a
+        # unique-ish name (timestamp would work too, but monotonic count
+        # is simpler and avoids the strftime dependency).
+        img_path = Path(_GALLERY_TMPDIR) / f"img_{id(image)}.png"
+        image.save(str(img_path))
+
         item = QStandardItem(QIcon(pixmap), mode.value)
         item.setEditable(False)
-        item.setData(image, _PIL_IMAGE_ROLE)
+        item.setData(str(img_path), _IMAGE_PATH_ROLE)
         item.setData(mode, _MODE_ROLE)
         self._model.insertRow(0, item)
 
         while self._model.rowCount() > _MAX_IMAGES:
-            self._model.removeRow(self._model.rowCount() - 1)
+            last_row = self._model.rowCount() - 1
+            evicted = self._model.item(last_row)
+            if evicted is not None:
+                old_path = evicted.data(_IMAGE_PATH_ROLE)
+                if old_path:
+                    Path(old_path).unlink(missing_ok=True)
+            self._model.removeRow(last_row)
 
     def clear(self) -> None:
         self._model.clear()
@@ -97,7 +122,7 @@ class ImageGalleryWidget(QListView):
         item = self._model.itemFromIndex(index)
         if item is None:
             return
-        image = item.data(_PIL_IMAGE_ROLE)
+        image = _load_item_image(item)
         mode = item.data(_MODE_ROLE)
         if image is not None and mode is not None:
             self.image_activated.emit(image, mode)
@@ -109,9 +134,8 @@ class ImageGalleryWidget(QListView):
         item = self._model.itemFromIndex(index)
         if item is None:
             return
-        image = item.data(_PIL_IMAGE_ROLE)
         mode = item.data(_MODE_ROLE)
-        if image is None or mode is None:
+        if mode is None:
             return
 
         menu = QMenu(self)
@@ -119,11 +143,25 @@ class ImageGalleryWidget(QListView):
         copy_action = menu.addAction("Copy to Clipboard")
         action = menu.exec(self.mapToGlobal(pos))
 
-        if action == save_action:
-            self.image_activated.emit(image, mode)
-        elif action == copy_action:
-            pixmap = _pil_to_pixmap(image)
-            QApplication.clipboard().setPixmap(pixmap)
+        if action == save_action or action == copy_action:
+            image = _load_item_image(item)
+            if image is None:
+                return
+            if action == save_action:
+                self.image_activated.emit(image, mode)
+            else:
+                QApplication.clipboard().setPixmap(_pil_to_pixmap(image))
+
+
+def _load_item_image(item: QStandardItem) -> "PILImage | None":
+    """Load the PIL Image for a gallery item from its on-disk temp file."""
+    path_str = item.data(_IMAGE_PATH_ROLE)
+    if not path_str:
+        return None
+    path = Path(path_str)
+    if not path.exists():
+        return None
+    return PILImageModule.open(path).copy()  # .copy() detaches from the file handle
 
 
 def _pil_to_pixmap(image: "PILImage") -> QPixmap:

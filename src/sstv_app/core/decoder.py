@@ -1030,6 +1030,16 @@ class Decoder:
         """
         return self._last_complete_buffer
 
+    def consume_last_buffer(self) -> np.ndarray | None:
+        """Return and clear the last-complete-buffer, freeing its memory.
+
+        Use this instead of ``last_complete_buffer()`` when the caller
+        is done with the raw audio after a re-decode pass.
+        """
+        buf = self._last_complete_buffer
+        self._last_complete_buffer = None
+        return buf
+
     def feed(self, samples: "NDArray") -> list[DecoderEvent]:
         """Append a chunk of audio and return any decoder events it
         triggered. Safe to call from a worker thread.
