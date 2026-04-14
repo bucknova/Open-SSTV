@@ -79,12 +79,13 @@ def _all_devices() -> list[AudioDevice]:
     host_api_names = [str(h["name"]) for h in host_apis]
     devices = sd.query_devices()
     out: list[AudioDevice] = []
-    for raw in devices:
+    for pa_index, raw in enumerate(devices):
         # PortAudio yields each entry as a dict on this codepath; the
-        # ``index`` field isn't always present (some hostapis omit it),
-        # so we patch it in from the iteration order.
+        # ``index`` field isn't always present (some host APIs omit it),
+        # so we patch it in from the PortAudio enumeration position.
+        # Using len(out) would be wrong when earlier devices were skipped.
         if "index" not in raw:
-            raw = {**raw, "index": len(out)}
+            raw = {**raw, "index": pa_index}
         out.append(_build(dict(raw), host_api_names))
     return out
 

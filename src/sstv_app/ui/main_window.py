@@ -9,7 +9,7 @@ images to the configured directory.
 Threading
 ---------
 
-Four threads total:
+Five threads total:
 
 * GUI thread — owns the window, the two panels, and Qt's event loop.
 * TX worker thread — owns ``TxWorker``, runs encode + ``play_blocking``.
@@ -17,6 +17,8 @@ Four threads total:
   drain timer.
 * RX decode thread — owns ``RxWorker``, runs ``Decoder.feed`` on
   flushed batches.
+* Rig poll thread — owns ``_RigPollWorker``, runs blocking get_freq /
+  get_mode / get_strength calls so the GUI never stalls on serial I/O.
 
 Splitting audio capture from decoding is deliberate: a slow decode
 pass must not stall the PortAudio queue drain. Each worker runs on a
@@ -106,6 +108,40 @@ from sstv_app.ui.workers import RxWorker, TxWorker
 
 if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
+
+
+class _RigPollWorker(QObject):
+    """Polls the rig for frequency, mode, and S-meter on a dedicated thread.
+
+    The ``poll`` slot blocks on serial/socket I/O; by running on its own
+    ``QThread`` it cannot freeze the GUI regardless of connection quality.
+    The GUI thread fires the 1 Hz ``_rig_poll_timer``; that timer's
+    ``timeout`` signal is connected here via a queued connection so the
+    actual blocking call happens on this object's thread.
+    """
+
+    poll_result = Signal(int, str, int)  # (freq_hz, mode_name, strength_db)
+    poll_error = Signal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._rig: Rig = ManualRig()
+
+    def set_rig(self, rig: Rig) -> None:
+        """Swap the rig reference. GIL-safe for a plain attribute store."""
+        self._rig = rig
+
+    @Slot()
+    def poll(self) -> None:
+        """Read freq/mode/strength from the rig. Blocks; runs on worker thread."""
+        try:
+            freq = self._rig.get_freq()
+            mode_name, _ = self._rig.get_mode()
+            strength = self._rig.get_strength()
+        except RigError:
+            self.poll_error.emit()
+            return
+        self.poll_result.emit(freq, mode_name, strength)
 
 
 class MainWindow(QMainWindow):
@@ -255,10 +291,23 @@ class MainWindow(QMainWindow):
         self._rx_worker.status_update.connect(self._rx_panel.set_status)
         self._rx_worker.error.connect(self._on_rx_error)
 
-        # --- 1 Hz rig poll timer (started on connect, stopped on disconnect) ---
+        # --- Rig poll: lightweight 1 Hz timer on GUI thread dispatches to
+        #     _RigPollWorker on its own thread so blocking serial/socket calls
+        #     never stall the event loop. ---
         self._rig_poll_timer = QTimer(self)
         self._rig_poll_timer.setInterval(1000)
-        self._rig_poll_timer.timeout.connect(self._poll_rig)
+
+        self._rig_poll_thread = QThread(self)
+        self._rig_poll_thread.setObjectName("sstv-app-rig-poll")
+        self._rig_poll_worker = _RigPollWorker()
+        self._rig_poll_worker.moveToThread(self._rig_poll_thread)
+        self._rig_poll_thread.finished.connect(self._rig_poll_worker.deleteLater)
+        self._rig_poll_thread.start()
+
+        # Queued connection: timeout fires on GUI thread → slot runs on poll thread.
+        self._rig_poll_timer.timeout.connect(self._rig_poll_worker.poll)
+        self._rig_poll_worker.poll_result.connect(self._on_poll_result)
+        self._rig_poll_worker.poll_error.connect(self._radio_panel.set_connection_error)
 
         # --- Keyboard shortcuts ---
         save_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
@@ -530,6 +579,7 @@ class MainWindow(QMainWindow):
 
         self._rig = rig
         self._tx_worker.set_rig(rig)
+        self._rig_poll_worker.set_rig(rig)
         self._radio_panel.set_connected(True)
         self._rig_poll_timer.start()
         self.statusBar().showMessage(
@@ -560,9 +610,6 @@ class MainWindow(QMainWindow):
                 self._rigctld_proc = subprocess.Popen(
                     cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 )
-                # Give rigctld a moment to bind the port
-                import time
-                time.sleep(0.5)
             except FileNotFoundError:
                 self.statusBar().showMessage(
                     "rigctld not found — install Hamlib, or switch to Direct Serial in Settings", 5000,
@@ -571,7 +618,19 @@ class MainWindow(QMainWindow):
             except Exception as exc:  # noqa: BLE001
                 self.statusBar().showMessage(f"Failed to launch rigctld: {exc}", 5000)
                 return
+            # Give rigctld 500 ms to bind the port without freezing the GUI.
+            QTimer.singleShot(500, lambda: self._finish_rigctld_connect(host, port))
+            return
 
+        self._finish_rigctld_connect(host, port)
+
+    def _finish_rigctld_connect(self, host: str, port: int) -> None:
+        """Attempt the actual socket connection to rigctld.
+
+        Called either immediately (no auto-launch) or after a 500 ms
+        ``QTimer.singleShot`` delay when rigctld was just spawned.
+        Runs on the GUI thread but is fast (single TCP connect + ping).
+        """
         try:
             client = RigctldClient(host=host, port=port)
             client.open()
@@ -586,6 +645,7 @@ class MainWindow(QMainWindow):
 
         self._rig = client
         self._tx_worker.set_rig(client)
+        self._rig_poll_worker.set_rig(client)
         self._radio_panel.set_connected(True)
         self._rig_poll_timer.start()
         self.statusBar().showMessage(
@@ -602,6 +662,7 @@ class MainWindow(QMainWindow):
             pass
         self._rig = ManualRig()
         self._tx_worker.set_rig(self._rig)
+        self._rig_poll_worker.set_rig(self._rig)
         self._radio_panel.set_connected(False)
         # Stop rigctld if we launched it
         self._kill_rigctld()
@@ -617,23 +678,14 @@ class MainWindow(QMainWindow):
                 self._rigctld_proc.kill()
             self._rigctld_proc = None
 
-    @Slot()
-    def _poll_rig(self) -> None:
-        """Read frequency, mode, and S-meter from the rig.
+    @Slot(int, str, int)
+    def _on_poll_result(self, freq: int, mode_name: str, strength: int) -> None:
+        """Receive a successful rig poll result from ``_RigPollWorker``.
 
-        Called every 1 s by ``_rig_poll_timer``. If the rig connection
-        fails, show "Connection lost" in the radio panel and keep
-        the timer running so reconnection attempts happen automatically
-        (the ``RigctldClient`` retries once per call internally).
+        Called via queued connection from the poll worker thread; runs
+        on the GUI thread. ``poll_error`` from the worker connects directly
+        to ``_radio_panel.set_connection_error``.
         """
-        try:
-            freq = self._rig.get_freq()
-            mode_name, _ = self._rig.get_mode()
-            strength = self._rig.get_strength()
-        except RigError:
-            self._radio_panel.set_connection_error()
-            return
-
         self._radio_panel.update_rig_status(freq, mode_name, strength)
 
     # === lifecycle ===
@@ -668,7 +720,12 @@ class MainWindow(QMainWindow):
         # thread's event loop before ``quit()`` drains it.
         self._request_stop_capture.emit()
 
-        for thread in (self._tx_thread, self._audio_thread, self._rx_thread):
+        for thread in (
+            self._tx_thread,
+            self._audio_thread,
+            self._rx_thread,
+            self._rig_poll_thread,
+        ):
             thread.quit()
             thread.wait(3000)
 

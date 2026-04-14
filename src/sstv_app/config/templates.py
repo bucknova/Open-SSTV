@@ -12,10 +12,13 @@ three built-in defaults (CQ, Exchange, 73) are returned.
 """
 from __future__ import annotations
 
+import logging
 import tomllib
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 import platformdirs
 import tomli_w
@@ -155,27 +158,31 @@ def load_templates(path: Path | None = None) -> list[QSOTemplate]:
     if not path.is_file():
         return default_templates()
 
-    with path.open("rb") as f:
-        raw = tomllib.load(f)
+    try:
+        with path.open("rb") as f:
+            raw = tomllib.load(f)
 
-    templates: list[QSOTemplate] = []
-    for tpl_raw in raw.get("template", []):
-        overlays: list[QSOTemplateOverlay] = []
-        for ov_raw in tpl_raw.get("overlay", []):
-            color_raw = ov_raw.get("color", [255, 255, 255])
-            overlays.append(
-                QSOTemplateOverlay(
-                    text=ov_raw.get("text", ""),
-                    position=ov_raw.get("position", "Bottom Center"),
-                    size=ov_raw.get("size", 24),
-                    color=tuple(color_raw[:3]) if len(color_raw) >= 3 else (255, 255, 255),
+        templates: list[QSOTemplate] = []
+        for tpl_raw in raw.get("template", []):
+            overlays: list[QSOTemplateOverlay] = []
+            for ov_raw in tpl_raw.get("overlay", []):
+                color_raw = ov_raw.get("color", [255, 255, 255])
+                overlays.append(
+                    QSOTemplateOverlay(
+                        text=ov_raw.get("text", ""),
+                        position=ov_raw.get("position", "Bottom Center"),
+                        size=ov_raw.get("size", 24),
+                        color=tuple(color_raw[:3]) if len(color_raw) >= 3 else (255, 255, 255),
+                    )
                 )
+            templates.append(
+                QSOTemplate(name=tpl_raw.get("name", ""), overlays=overlays)
             )
-        templates.append(
-            QSOTemplate(name=tpl_raw.get("name", ""), overlays=overlays)
-        )
 
-    return templates if templates else default_templates()
+        return templates if templates else default_templates()
+    except Exception:  # noqa: BLE001 — corrupt file must never crash startup
+        _log.warning("Templates file %s is corrupt or unreadable — using defaults", path)
+        return default_templates()
 
 
 def save_templates(

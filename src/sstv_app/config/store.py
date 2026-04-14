@@ -9,9 +9,12 @@ The config file lives at ``platformdirs.user_config_dir("sstv_app") / "config.to
 """
 from __future__ import annotations
 
+import logging
 import tomllib
 from dataclasses import asdict, fields
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 import platformdirs
 import tomli_w
@@ -39,14 +42,17 @@ def load_config(path: Path | None = None) -> AppConfig:
     if not path.is_file():
         return AppConfig()
 
-    with path.open("rb") as f:
-        raw = tomllib.load(f)
-
-    # Only pass keys that AppConfig actually defines, so a TOML file
-    # from a newer version with extra keys doesn't blow up construction.
-    known = {f.name for f in fields(AppConfig)}
-    filtered = {k: v for k, v in raw.items() if k in known}
-    return AppConfig(**filtered)
+    try:
+        with path.open("rb") as f:
+            raw = tomllib.load(f)
+        # Only pass keys that AppConfig actually defines, so a TOML file
+        # from a newer version with extra keys doesn't blow up construction.
+        known = {f.name for f in fields(AppConfig)}
+        filtered = {k: v for k, v in raw.items() if k in known}
+        return AppConfig(**filtered)
+    except Exception:  # noqa: BLE001 — corrupt file must never crash startup
+        _log.warning("Config file %s is corrupt or unreadable — using defaults", path)
+        return AppConfig()
 
 
 def save_config(cfg: AppConfig, path: Path | None = None) -> None:
