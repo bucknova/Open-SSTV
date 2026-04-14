@@ -188,9 +188,19 @@ def load_templates(path: Path | None = None) -> list[QSOTemplate]:
 def save_templates(
     templates: list[QSOTemplate], path: Path | None = None
 ) -> None:
-    """Write *templates* to *path* (default: ``templates_path()``)."""
+    """Write *templates* to *path* (default: ``templates_path()``).
+
+    Raises
+    ------
+    OSError
+        If the file cannot be created or written (disk full, permissions,
+        etc.).  Callers are expected to catch this and show a user-facing
+        error dialog.
+    """
     if path is None:
         path = templates_path()
+    # Let OSError propagate so callers can surface it in a dialog rather
+    # than silently losing template edits.
     path.parent.mkdir(parents=True, exist_ok=True)
 
     data: dict = {"template": []}

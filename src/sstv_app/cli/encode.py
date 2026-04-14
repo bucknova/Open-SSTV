@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""``sstv-app-encode`` — render an image to an SSTV WAV file.
+"""``open-sstv-encode`` — render an image to an SSTV WAV file.
 
 Usage::
 
-    sstv-app-encode in.png --mode martin_m1 -o out.wav
-    sstv-app-encode in.jpg --mode robot_36 --sample-rate 44100 -o out.wav
+    open-sstv-encode in.png --mode martin_m1 -o out.wav
+    open-sstv-encode in.jpg --mode robot_36 --sample-rate 44100 -o out.wav
 
 A thin argparse wrapper around ``sstv_app.core.encoder.encode``. We write
 the WAV with stdlib ``wave`` rather than ``scipy.io.wavfile`` so that this
@@ -35,7 +35,7 @@ from sstv_app.core.modes import Mode
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="sstv-app-encode",
+        prog="open-sstv-encode",
         description=(
             "Render an image as an SSTV WAV file. The output is 16-bit mono "
             "PCM at the chosen sample rate; play it through your radio's "

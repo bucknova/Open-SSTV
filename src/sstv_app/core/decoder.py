@@ -588,7 +588,7 @@ def _decode_pasokon_rgb(
     ``spec.sync_porch_ms`` holds the inter-channel gap value.
     Scan time: ``scan_ms = (line_time − sync − 4×gap) / 3``
 
-    Handles P3 (~203 s), P5 (~304 s), and P7 (~456 s), all 640×496.
+    Handles P3 (~203 s), P5 (~304 s), and P7 (~406 s), all 640×496.
     """
     width = spec.width
     height = spec.height

@@ -662,7 +662,6 @@ class SettingsDialog(QDialog):
             rig_connection_mode=conn_mode,
             rigctld_host=self._rigctld_host.text().strip(),
             rigctld_port=self._rigctld_port.value(),
-            rig_enabled=conn_mode != "manual",
             ptt_delay_s=self._ptt_delay.value(),
             rig_model_id=self._custom_model_id.value(),
             rig_serial_port=serial_port,
@@ -674,7 +673,6 @@ class SettingsDialog(QDialog):
             audio_input_gain=self._input_gain_slider.value() / 100.0,
             audio_output_gain=self._output_gain_slider.value() / 100.0,
             callsign=self._callsign.text().strip().upper(),
-            last_image_dir=self._config.last_image_dir,
             images_save_dir=self._save_dir.text(),
             auto_save=self._auto_save.isChecked(),
         )

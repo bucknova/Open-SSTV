@@ -44,7 +44,6 @@ class AppConfig:
     rig_connection_mode: str = "manual"
     rigctld_host: str = "127.0.0.1"
     rigctld_port: int = 4532
-    rig_enabled: bool = False
     ptt_delay_s: float = 0.2
     rig_model_id: int = 0
     rig_serial_port: str = ""
@@ -65,7 +64,6 @@ class AppConfig:
     callsign: str = ""
 
     # --- Directories ---
-    last_image_dir: str = field(default_factory=_default_images_dir)
     images_save_dir: str = field(default_factory=_default_images_dir)
     auto_save: bool = False
 

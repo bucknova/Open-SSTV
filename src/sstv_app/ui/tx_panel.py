@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QSizePolicy,
@@ -120,7 +121,15 @@ class TxPanel(QWidget):
         )
         for mode in Mode:
             spec = MODE_TABLE[mode]
-            label = f"{mode.value}  ({spec.width}\u00d7{spec.height}, {spec.total_duration_s:.0f}s)"
+            # PD modes store half the actual image height in spec.height
+            # (sync-pulse count convention used by the decoder). Multiply
+            # back to display the real resolution to the user.
+            display_height = (
+                spec.height * 2
+                if mode.value.startswith("pd_")
+                else spec.height
+            )
+            label = f"{mode.value}  ({spec.width}\u00d7{display_height}, {spec.total_duration_s:.0f}s)"
             self._mode_combo.addItem(label, mode)
         if default_mode:
             # Find the combo entry whose Mode.value matches the config string.
@@ -396,7 +405,10 @@ class TxPanel(QWidget):
         )
         if dlg.exec() == TemplateEditorDialog.DialogCode.Accepted:
             self._templates = dlg.result_templates()
-            save_templates(self._templates)
+            try:
+                save_templates(self._templates)
+            except OSError as exc:
+                QMessageBox.warning(self, "Could not save templates", str(exc))
             self._template_bar.set_templates(self._templates)
 
     def set_templates(self, templates: list[QSOTemplate]) -> None:

@@ -11,6 +11,7 @@ and headless launches can swap them out without monkey-patching the UI.
 """
 from __future__ import annotations
 
+import signal
 import sys
 
 from sstv_app import __version__
@@ -60,6 +61,12 @@ def main(argv: list[str] | None = None) -> int:
     # the window's closeEvent fires so the TX worker thread shuts down
     # cleanly instead of being destroyed mid-run.
     app.aboutToQuit.connect(window.close)
+
+    # Route SIGTERM (systemd stop, kill PID, container shutdown) through
+    # Qt's event loop so closeEvent fires and PTT is unkeyed cleanly.
+    signal.signal(signal.SIGTERM, lambda *_: app.quit())
+    # SIGINT (Ctrl-C in terminal) follows the same path.
+    signal.signal(signal.SIGINT, lambda *_: app.quit())
 
     return app.exec()
 
