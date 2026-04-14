@@ -183,7 +183,8 @@ class RigctldClient:
 
     def _send_recv_locked(self, command: str) -> list[str]:
         """Inner half — assumes the lock is held and the socket is open."""
-        assert self._sock is not None
+        if self._sock is None:
+            raise RigConnectionError(f"{self.name}: socket is not open")
         # ``+`` activates rigctld's extended response mode for this command,
         # so the response is always terminated by an ``RPRT N`` line.
         wire = f"+{command}\n".encode("ascii")
@@ -212,7 +213,8 @@ class RigctldClient:
 
     def _read_until_rprt(self) -> list[str]:
         """Read from the socket until we see a complete ``RPRT N`` line."""
-        assert self._sock is not None
+        if self._sock is None:
+            raise RigConnectionError(f"{self.name}: socket is not open")
         buf = bytearray()
         while True:
             chunk = self._sock.recv(4096)

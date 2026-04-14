@@ -191,6 +191,14 @@ _PYSSTV_CLASSES: dict[Mode, type[SSTV]] = {
     Mode.PASOKON_P7: PasokonP7,
 }
 
+# Fail loudly at import time if a Mode was added to the enum without a
+# corresponding encoder entry, rather than silently crashing at first TX.
+_missing_encoder = set(Mode) - set(_PYSSTV_CLASSES)
+assert not _missing_encoder, (
+    f"Encoder missing for Mode(s): {_missing_encoder}. "
+    "Add an entry to _PYSSTV_CLASSES in encoder.py."
+)
+
 #: Default sound card sample rate. 48 kHz is the lowest rate every modern
 #: USB sound card and Mac built-in audio supports natively without internal
 #: resampling, and it leaves comfortable headroom above the 2.3 kHz top of

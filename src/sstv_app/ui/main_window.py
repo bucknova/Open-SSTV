@@ -738,7 +738,7 @@ class MainWindow(QMainWindow):
         # thread.wait(3000) below would handle it anyway, but waiting here
         # first makes the shutdown ordering explicit and avoids the edge case
         # where the thread.quit() drains queued events before the worker exits.
-        self._tx_worker._stop_event.wait(timeout=1.0)
+        self._tx_worker.wait_for_stop(timeout=1.0)
 
         # Stop RX audio capture via the queued signal so the actual
         # PortAudio/QTimer teardown runs on the audio worker thread

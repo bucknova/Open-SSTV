@@ -806,6 +806,18 @@ _PIXEL_DECODERS: dict[Mode, Callable[..., Image.Image | None]] = {
     Mode.PASOKON_P7: _decode_pasokon_rgb,
 }
 
+# Fail loudly at import time if a Mode was added to the enum without a
+# corresponding pixel decoder entry, rather than silently returning None
+# when a user tries to receive that mode.
+# Note: ROBOT_36 IS in the table (uses _decode_robot36 as a fallback);
+# the main decode path auto-detects single-line vs line-pair and dispatches
+# directly, but having it here keeps the completeness check simple.
+_missing_decoder = set(Mode) - set(_PIXEL_DECODERS)
+assert not _missing_decoder, (
+    f"Decoder missing for Mode(s): {_missing_decoder}. "
+    "Add an entry to _PIXEL_DECODERS in decoder.py."
+)
+
 
 # === partial (progressive) decode helpers ===
 

@@ -273,6 +273,17 @@ class TxWorker(QObject):
         self._stop_event.set()
         output_stream.stop()
 
+    def wait_for_stop(self, timeout: float) -> bool:
+        """Block until the stop flag is set or *timeout* seconds elapse.
+
+        Returns ``True`` if the flag was set within the timeout, ``False``
+        if the timeout expired first. Safe to call from any thread.
+
+        Intended for ``closeEvent`` so the TX worker can unwind out of
+        ``play_blocking`` before the owning ``QThread`` is quit.
+        """
+        return self._stop_event.wait(timeout=timeout)
+
     def _watchdog_fire(self) -> None:
         """Called by the watchdog timer when TX exceeds ``_MAX_TX_DURATION_S``.
 
