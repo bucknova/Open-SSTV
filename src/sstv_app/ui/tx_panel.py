@@ -133,9 +133,13 @@ class TxPanel(QWidget):
             self._mode_combo.addItem(label, mode)
         if default_mode:
             # Find the combo entry whose Mode.value matches the config string.
+            # Qt may unwrap the stored StrEnum back to a plain str via QVariant,
+            # so guard against both a Mode object and a raw string.
             for i in range(self._mode_combo.count()):
-                if self._mode_combo.itemData(i) is not None:
-                    if self._mode_combo.itemData(i).value == default_mode:
+                item = self._mode_combo.itemData(i)
+                if item is not None:
+                    item_value = item if isinstance(item, str) else item.value
+                    if item_value == default_mode:
                         self._mode_combo.setCurrentIndex(i)
                         break
         mode_row.addWidget(self._mode_combo, stretch=1)
@@ -282,10 +286,12 @@ class TxPanel(QWidget):
         Does nothing if the value doesn't match any known mode.
         """
         for i in range(self._mode_combo.count()):
-            item_mode = self._mode_combo.itemData(i)
-            if item_mode is not None and item_mode.value == mode_value:
-                self._mode_combo.setCurrentIndex(i)
-                break
+            item = self._mode_combo.itemData(i)
+            if item is not None:
+                item_val = item if isinstance(item, str) else item.value
+                if item_val == mode_value:
+                    self._mode_combo.setCurrentIndex(i)
+                    break
 
     def selected_mode(self) -> Mode:
         # Qt's QVariant unwraps a StrEnum back to a plain ``str`` when it

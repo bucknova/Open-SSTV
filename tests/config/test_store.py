@@ -25,10 +25,8 @@ def test_round_trip_custom_values(tmp_path: Path) -> None:
         default_tx_mode="robot_36",
         rigctld_host="10.0.0.5",
         rigctld_port=4533,
-        rig_enabled=True,
         ptt_delay_s=0.5,
         callsign="W0AEZ",
-        last_image_dir="/tmp/sstv",
         images_save_dir="/tmp/sstv/saved",
         auto_save=True,
     )
@@ -58,7 +56,6 @@ def test_load_fills_missing_keys_with_defaults(tmp_path: Path) -> None:
     loaded = load_config(path=p)
     assert loaded.sample_rate == 44_100
     assert loaded.callsign == ""
-    assert loaded.rig_enabled is False
 
 
 def test_save_creates_parent_dirs(tmp_path: Path) -> None:

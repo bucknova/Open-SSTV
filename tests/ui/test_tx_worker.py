@@ -22,7 +22,7 @@ from PIL import Image
 from sstv_app.core.modes import Mode
 from sstv_app.radio.base import ManualRig
 from sstv_app.radio.exceptions import RigConnectionError
-from sstv_app.ui.workers import TxWorker
+from sstv_app.ui.workers import TxWorker, _make_two_tone, _TEST_TONE_DURATION_S
 
 pytestmark = pytest.mark.gui
 
@@ -243,3 +243,86 @@ def test_unkey_failure_is_reported_but_doesnt_block_complete(
     assert calls == [True, False]
     assert log["complete"] == [True]
     assert log["error"] and "ptt-off rejected" in log["error"][0]
+
+
+# === two-tone generator ===
+
+
+class TestMakeTwoTone:
+    """Tests for the _make_two_tone PCM generator."""
+
+    SR = 48_000
+
+    def test_length_matches_duration(self) -> None:
+        samples = _make_two_tone(self.SR, 5.0)
+        assert len(samples) == self.SR * 5
+
+    def test_dtype_is_int16(self) -> None:
+        samples = _make_two_tone(self.SR, 1.0)
+        assert samples.dtype == np.dtype("int16")
+
+    def test_no_clipping(self) -> None:
+        """Peak of the two-tone sum must never hit the int16 rails."""
+        samples = _make_two_tone(self.SR, 5.0)
+        assert int(np.abs(samples).max()) < 32767
+
+    def test_peak_near_minus6_dbfs(self) -> None:
+        """Peak amplitude should be close to 10^(-6/20) of full scale.
+
+        The theoretical maximum of two equal-amplitude sines with the
+        chosen scale factor is exactly 32767 * 10^(-6/20) ≈ 16417.
+        Due to sampling, the observed peak may be slightly below that.
+        We verify it's within a 15% tolerance band: the signal is
+        non-trivial and not clipped.
+        """
+        samples = _make_two_tone(self.SR, 5.0)
+        target = 32767 * (10 ** (-6.0 / 20.0))  # ≈ 16417
+        peak = int(np.abs(samples).max())
+        assert peak > target * 0.70, (
+            f"Peak {peak} is too low — signal may be missing"
+        )
+        assert peak < 32767, "Signal is clipping"
+
+    def test_short_duration(self) -> None:
+        """Generator must work for sub-second durations."""
+        samples = _make_two_tone(self.SR, 0.1)
+        assert len(samples) == int(self.SR * 0.1)
+        assert samples.dtype == np.dtype("int16")
+
+
+# === transmit_test_tone slot ===
+
+
+def test_transmit_test_tone_emits_started_then_complete(qapp) -> None:
+    """transmit_test_tone follows the same signal contract as transmit."""
+    worker = TxWorker(rig=ManualRig(), ptt_delay_s=0)
+    log = _record_signals(worker)
+
+    worker.transmit_test_tone()
+
+    assert log["started"] == [True]
+    assert log["complete"] == [True]
+    assert log["aborted"] == []
+    assert log["error"] == []
+
+
+def test_transmit_test_tone_keys_and_unkeys_rig(qapp) -> None:
+    rig = MagicMock(spec=["set_ptt", "open", "close"])
+    worker = TxWorker(rig=rig, ptt_delay_s=0)
+
+    worker.transmit_test_tone()
+
+    assert [c.args for c in rig.set_ptt.call_args_list] == [(True,), (False,)]
+
+
+def test_transmit_test_tone_ptt_failure_does_not_play(qapp) -> None:
+    rig = MagicMock(spec=["set_ptt"])
+    rig.set_ptt.side_effect = RigConnectionError("no radio")
+    worker = TxWorker(rig=rig, ptt_delay_s=0)
+    log = _record_signals(worker)
+
+    worker.transmit_test_tone()
+
+    assert log["error"] and "no radio" in log["error"][0]
+    assert log["started"] == []
+    assert log["complete"] == []

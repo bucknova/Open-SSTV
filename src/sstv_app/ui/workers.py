@@ -119,6 +119,34 @@ _RX_FLUSH_SAMPLES_DEFAULT: int = 48_000
 #: against a stuck encoder or hung audio driver.
 _MAX_TX_DURATION_S: float = 300.0
 
+#: Default duration for the ALC/linearity test tone, in seconds.
+_TEST_TONE_DURATION_S: float = 5.0
+
+#: Two-tone test frequencies (Hz).  700 + 1900 Hz is the ARRL standard
+#: for SSB ALC / intermodulation testing.
+_TEST_TONE_FREQ_LO: float = 700.0
+_TEST_TONE_FREQ_HI: float = 1900.0
+
+
+def _make_two_tone(sample_rate: int, duration_s: float) -> "NDArray[np.int16]":
+    """Generate a two-tone test signal (700 Hz + 1900 Hz) as int16 PCM.
+
+    The two equal-amplitude sine waves are summed and the result is scaled
+    so the *peak* of the sum sits at −6 dBFS.  Each component therefore
+    has an amplitude of ``0.5 × 10^(−6/20) ≈ 0.251`` of full scale, which
+    leaves 6 dB of headroom against flat-topping while still driving the
+    ALC visibly on peaks.
+    """
+    n = int(sample_rate * duration_s)
+    t = np.arange(n, dtype=np.float64) / sample_rate
+    # Peak of two equal-amplitude sines can reach 2.0, so each is scaled
+    # to half the −6 dBFS ceiling.
+    amplitude = 0.5 * (10 ** (-6.0 / 20.0))  # ≈ 0.2512
+    sig = np.sin(2.0 * np.pi * _TEST_TONE_FREQ_LO * t)
+    sig += np.sin(2.0 * np.pi * _TEST_TONE_FREQ_HI * t)
+    sig *= amplitude
+    return (sig * 32767.0).astype(np.int16)
+
 
 class TxWorker(QObject):
     """Render an image to SSTV audio and play it on a worker thread.
@@ -226,9 +254,7 @@ class TxWorker(QObject):
         with self._rig_lock:
             rig = self._rig
 
-        # Start the watchdog before any blocking work. If encode + playback
-        # haven't finished within _MAX_TX_DURATION_S, the timer fires on its
-        # own thread, emits an error, and calls request_stop() to force unkey.
+        # Start the watchdog before any blocking work.
         watchdog = threading.Timer(_MAX_TX_DURATION_S, self._watchdog_fire)
         watchdog.start()
 
@@ -247,55 +273,116 @@ class TxWorker(QObject):
                     -32768, 32767,
                 ).astype(samples.dtype)
 
-            # --- Key the rig ---
-            try:
-                rig.set_ptt(True)
-            except RigError as exc:
-                # User explicitly wanted rig control and it failed — abort
-                # before any audio leaves the soundcard. ManualRig never
-                # raises so this only fires for real backends.
-                self.error.emit(f"Could not key rig: {exc}")
-                return
-
-            self.transmission_started.emit()
-
-            # --- Play the buffer ---
-            playback_succeeded = False
-            try:
-                time.sleep(self._ptt_delay_s)
-                if self._stop_event.is_set():
-                    # Stop pressed during the PTT delay window, before any audio.
-                    pass
-                else:
-                    output_stream.play_blocking(
-                        samples,
-                        self._sample_rate,
-                        device=self._output_device,
-                        progress_callback=lambda played, total: self.transmission_progress.emit(played, total),
-                        stop_event=self._stop_event,
-                    )
-                    playback_succeeded = not self._stop_event.is_set()
-            except sd.PortAudioError:
-                self.error.emit("Audio device disconnected during transmission.")
-            except Exception as exc:  # noqa: BLE001
-                self.error.emit(f"Playback failed: {exc}")
-            finally:
-                # ALWAYS unkey, even on error or stop, so the rig never gets
-                # left in a stuck-keyed state.
-                try:
-                    rig.set_ptt(False)
-                except RigError as exc:
-                    self.error.emit(f"Could not unkey rig: {exc}")
+            result = self._run_tx(samples, rig)
         finally:
             # Cancel the watchdog whether we finished cleanly, were stopped,
             # or hit an error — it must not fire after transmit() returns.
             watchdog.cancel()
 
+        if result is None:
+            return  # PTT failed; error already emitted
         if self._stop_event.is_set():
             self.transmission_aborted.emit()
-        elif playback_succeeded:
+        elif result:
             self.transmission_complete.emit()
-        # else: an error has already been emitted via the playback failure path
+        # else: playback error — error signal already emitted, no complete/aborted
+
+    @Slot()
+    def transmit_test_tone(self) -> None:
+        """Generate and transmit a two-tone test signal. Worker-thread entry point.
+
+        Produces ``_TEST_TONE_DURATION_S`` seconds of 700 Hz + 1900 Hz at
+        −6 dBFS peak.  Follows the identical PTT-key → ptt_delay → play →
+        PTT-unkey sequence as ``transmit()``, including the watchdog, stop
+        button, and gain controls.
+        """
+        self._stop_event.clear()
+        self._watchdog_triggered = False
+
+        with self._rig_lock:
+            rig = self._rig
+
+        watchdog = threading.Timer(_MAX_TX_DURATION_S, self._watchdog_fire)
+        watchdog.start()
+
+        try:
+            samples = _make_two_tone(self._sample_rate, _TEST_TONE_DURATION_S)
+
+            # Honour the user's output-gain setting just like regular TX.
+            if self._output_gain != 1.0:
+                samples = np.clip(
+                    samples.astype(np.float64) * self._output_gain,
+                    -32768, 32767,
+                ).astype(samples.dtype)
+
+            result = self._run_tx(samples, rig)
+        finally:
+            watchdog.cancel()
+
+        if result is None:
+            return
+        if self._stop_event.is_set():
+            self.transmission_aborted.emit()
+        elif result:
+            self.transmission_complete.emit()
+
+    def _run_tx(
+        self, samples: "NDArray", rig: "Rig"
+    ) -> "bool | None":
+        """Key PTT, play *samples*, unkey PTT.
+
+        Returns
+        -------
+        True
+            Playback completed cleanly (no stop, no error).
+        False
+            Playback was cut short by a stop request or a non-fatal audio
+            error (``error`` signal already emitted in that case).
+        None
+            PTT key failed; ``error`` signal already emitted.  The caller
+            should return immediately without emitting complete/aborted.
+        """
+        # --- Key the rig ---
+        try:
+            rig.set_ptt(True)
+        except RigError as exc:
+            # User explicitly wanted rig control and it failed — abort
+            # before any audio leaves the soundcard.  ManualRig never
+            # raises so this only fires for real backends.
+            self.error.emit(f"Could not key rig: {exc}")
+            return None
+
+        self.transmission_started.emit()
+
+        # --- Play the buffer ---
+        playback_succeeded = False
+        try:
+            time.sleep(self._ptt_delay_s)
+            if self._stop_event.is_set():
+                # Stop pressed during the PTT delay window, before any audio.
+                pass
+            else:
+                output_stream.play_blocking(
+                    samples,
+                    self._sample_rate,
+                    device=self._output_device,
+                    progress_callback=lambda played, total: self.transmission_progress.emit(played, total),
+                    stop_event=self._stop_event,
+                )
+                playback_succeeded = not self._stop_event.is_set()
+        except sd.PortAudioError:
+            self.error.emit("Audio device disconnected during transmission.")
+        except Exception as exc:  # noqa: BLE001
+            self.error.emit(f"Playback failed: {exc}")
+        finally:
+            # ALWAYS unkey, even on error or stop, so the rig never gets
+            # left in a stuck-keyed state.
+            try:
+                rig.set_ptt(False)
+            except RigError as exc:
+                self.error.emit(f"Could not unkey rig: {exc}")
+
+        return playback_succeeded
 
     def request_stop(self) -> None:
         """Abort an in-flight transmission. Safe to call from any thread.
@@ -377,6 +464,7 @@ class RxWorker(QObject):
         self._total_samples: int = 0
         self._decoding: bool = False
         self._input_gain: float = 1.0
+        self._tx_active: bool = False
         self._flush_samples: int = (
             flush_samples
             if flush_samples is not None
@@ -386,6 +474,26 @@ class RxWorker(QObject):
     def set_input_gain(self, gain: float) -> None:
         """Set the software input gain (1.0 = unity). Thread-safe."""
         self._input_gain = gain
+
+    @Slot(bool)
+    def set_tx_active(self, active: bool) -> None:
+        """Gate the decoder while a transmission is in progress.
+
+        When ``active`` is ``True``, ``feed_chunk`` discards all incoming
+        audio so the radio's own transmitted signal is never fed into the
+        decoder (self-decode through RF/audio loopback).
+
+        When ``active`` becomes ``False`` (TX ended), the scratch buffer
+        and decoder state are reset so the next RX attempt starts clean —
+        no partial frame from the TX period bleeds through.
+
+        Called via queued connection from the GUI thread so the flag flip
+        always lands on this worker's event loop.
+        """
+        self._tx_active = active
+        if not active:
+            # Clear any audio that bled in from the TX period and start fresh.
+            self.reset()
 
     def set_sample_rate(self, sample_rate: int) -> None:
         """Update the sample rate and reconstruct the internal Decoder.
@@ -414,7 +522,14 @@ class RxWorker(QObject):
         thread. The chunk is copied into float64 eagerly (the rest of
         the DSP pipeline runs in float64) so the caller is free to
         reuse its buffer after the signal returns.
+
+        While TX is active (``_tx_active`` is ``True``) chunks are
+        discarded silently so the radio's own transmitted signal is
+        never fed into the decoder (self-decode prevention, bug R-2).
         """
+        if self._tx_active:
+            return
+
         try:
             arr = np.asarray(chunk, dtype=np.float64)
         except (TypeError, ValueError) as exc:

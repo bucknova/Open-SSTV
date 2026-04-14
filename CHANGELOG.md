@@ -11,6 +11,38 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.10] — 2026-04-14
+
+### Added
+- **Test Tone** — new "Test Tone" button in the Radio panel (enabled when a real rig is
+  connected and idle). Transmits a 700 Hz + 1900 Hz two-tone signal for 5 s at −6 dBFS
+  peak via the configured output device and rig PTT. Respects TX watchdog, output gain,
+  and the Stop button. Status bar shows a per-second countdown while keyed; on completion
+  shows "Adjust mic/RF gain so ALC just barely lights on peaks."
+
+### Fixed
+- **R-1** — RX sample counter did not reset when capture was stopped and restarted;
+  the "Xs buffered" label kept climbing past the IDLE timeout indefinitely.
+  `_on_capture_requested` now emits `_request_rx_reset` before restarting the audio
+  stream so each session starts from zero.
+- **R-2** — Self-decode through RF/audio loopback: `RxWorker.feed_chunk` now discards
+  audio while TX is active (`_tx_active` gate set by `transmission_started`/`complete`).
+  After TX ends a 50 ms gate-off delay lets trailing audio drain before the decoder
+  resumes; the buffer and decoder state are reset at that point.
+- **C-1** — `IcomCIVRig.get_freq()` passed the full CI-V response payload (including
+  the command-echo byte 0x03) to `_bcd_to_freq`, corrupting the frequency result.
+  Fixed: strip echo byte (`resp[1:]`), update length check to `>= 6`.
+- **C-2** — `IcomCIVRig.get_mode()` read `resp[0]` (command echo 0x04 = RTTY in the
+  mode map) as the mode byte, so the mode display always showed "RTTY" regardless of
+  the radio's actual mode. Fixed: use `resp[1]` for mode, `resp[2]` for passband.
+- **C-3** — `IcomCIVRig.get_ptt()` read `resp[0]` (command echo 0x1C ≠ 0x00) as the
+  PTT state, so the rig always appeared keyed. Fixed: use `resp[2]`.
+- **C-4** — `IcomCIVRig.get_strength()` built `raw` from `resp[0]` and `resp[1]`
+  (command echo + subcmd = constant 0x1502 = 5378), so the S-meter never changed.
+  Fixed: use `resp[2]` and `resp[3]`.
+
+---
+
 ## [0.1.9] — 2026-04-14
 
 ### Fixed

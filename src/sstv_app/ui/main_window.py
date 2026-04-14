@@ -71,7 +71,7 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -158,6 +158,12 @@ class MainWindow(QMainWindow):
     #: Routes the "Clear" action to RxWorker.reset() via a queued connection
     #: so the reset runs on the RX decode thread, not the GUI thread.
     _request_rx_reset = Signal()
+    #: Dispatch TX calls to the TX worker thread via queued connection.
+    #: Direct method calls from the GUI thread would run on the wrong thread.
+    _request_transmit = Signal(object, object)  # (PIL.Image, Mode)
+    _request_test_tone = Signal()
+    #: Gates the RX decoder on/off during TX (queued → RxWorker thread).
+    _request_rx_gate = Signal(bool)
 
     def __init__(
         self,
@@ -193,6 +199,7 @@ class MainWindow(QMainWindow):
         self._rigctld_proc: "subprocess.Popen | None" = None
         self._capture_running: bool = False
         self._last_abort_was_watchdog: bool = False
+        self._last_tx_was_test_tone: bool = False
 
         # --- Menu bar ---
         self._build_menu_bar()
@@ -261,11 +268,18 @@ class MainWindow(QMainWindow):
         self._rx_thread.finished.connect(self._rx_worker.deleteLater)
         self._rx_thread.start()
 
-        # --- Wire TX signals (unchanged from Phase 1) ---
-        self._tx_panel.transmit_requested.connect(self._tx_worker.transmit)
+        # --- Wire TX signals ---
+        # panel → flag-setter on GUI thread, then dispatch via queued signal
+        self._tx_panel.transmit_requested.connect(self._on_transmit_requested)
         self._tx_panel.stop_requested.connect(self._on_stop_requested)
+        self._radio_panel.test_tone_requested.connect(self._on_test_tone_requested)
+        # Private dispatch signals → worker slots (QueuedConnection across thread)
+        self._request_transmit.connect(self._tx_worker.transmit)
+        self._request_test_tone.connect(self._tx_worker.transmit_test_tone)
+        self._request_rx_gate.connect(self._rx_worker.set_tx_active)
         self._tx_worker.transmission_started.connect(self._on_tx_started)
         self._tx_worker.transmission_progress.connect(self._tx_panel.show_tx_progress)
+        self._tx_worker.transmission_progress.connect(self._on_tx_progress)
         self._tx_worker.transmission_complete.connect(self._on_tx_complete)
         self._tx_worker.transmission_aborted.connect(self._on_tx_aborted)
         self._tx_worker.watchdog_fired.connect(self._on_watchdog_fired)
@@ -433,31 +447,82 @@ class MainWindow(QMainWindow):
 
     # === TX slots ===
 
+    @Slot(object, object)
+    def _on_transmit_requested(self, image: "PILImage", mode: "Mode") -> None:
+        """Set the test-tone flag and dispatch via queued signal to TX thread."""
+        self._last_tx_was_test_tone = False
+        self._request_transmit.emit(image, mode)
+
+    @Slot()
+    def _on_test_tone_requested(self) -> None:
+        """Set the test-tone flag and dispatch via queued signal to TX thread."""
+        self._last_tx_was_test_tone = True
+        self._request_test_tone.emit()
+
     @Slot()
     def _on_stop_requested(self) -> None:
         self._tx_worker.request_stop()
 
+    @Slot(int, int)
+    def _on_tx_progress(self, samples_played: int, samples_total: int) -> None:
+        """Update the status bar countdown during a test-tone transmission."""
+        if not self._last_tx_was_test_tone or samples_total <= 0:
+            return
+        remaining_s = max(
+            0, int((samples_total - samples_played) / self._config.sample_rate)
+        )
+        self.statusBar().showMessage(
+            f"Transmitting test tone… {remaining_s}s remaining"
+        )
+
     @Slot()
     def _on_tx_started(self) -> None:
         self._tx_panel.set_transmitting(True)
-        self._tx_panel.set_status("Transmitting…")
-        self.statusBar().showMessage("Transmitting")
+        if self._last_tx_was_test_tone:
+            self._tx_panel.set_status("Transmitting test tone…")
+            self.statusBar().showMessage("Transmitting test tone…")
+        else:
+            self._tx_panel.set_status("Transmitting…")
+            self.statusBar().showMessage("Transmitting")
         # Lock rig controls for the duration of the transmission so the user
         # can't swap or disconnect the rig while PTT is keyed.
         self._radio_panel.set_tx_active(True)
         self._settings_action.setEnabled(False)
+        # Gate the RX decoder to prevent self-decode through loopback (R-2).
+        self._request_rx_gate.emit(True)
+        self._rx_panel.set_status("RX paused during TX.")
 
     def _unlock_rig_controls(self) -> None:
         """Re-enable rig UI after TX completes, aborts, or errors."""
         self._radio_panel.set_tx_active(False)
         self._settings_action.setEnabled(True)
 
+    def _schedule_rx_resume(self) -> None:
+        """Lift the RX gate 50 ms after TX ends.
+
+        The brief delay lets any trailing RF (and the PortAudio callback
+        that was already queued) drain before the decoder resumes, so no
+        TX-period audio bleeds into the next RX attempt.  The gate-off
+        also calls RxWorker.reset() so the counter and decoder start clean.
+        """
+        QTimer.singleShot(50, lambda: self._request_rx_gate.emit(False))
+
     @Slot()
     def _on_tx_complete(self) -> None:
         self._tx_panel.set_transmitting(False)
-        self._tx_panel.set_status("Transmission complete.")
-        self.statusBar().showMessage("Ready")
+        if self._last_tx_was_test_tone:
+            self._last_tx_was_test_tone = False
+            alc_msg = (
+                "Test tone complete. "
+                "Adjust mic/RF gain so ALC just barely lights on peaks."
+            )
+            self._tx_panel.set_status(alc_msg)
+            self.statusBar().showMessage(alc_msg, 10000)
+        else:
+            self._tx_panel.set_status("Transmission complete.")
+            self.statusBar().showMessage("Ready")
         self._unlock_rig_controls()
+        self._schedule_rx_resume()
 
     @Slot()
     def _on_watchdog_fired(self) -> None:
@@ -476,16 +541,23 @@ class MainWindow(QMainWindow):
             self._tx_panel.set_status(msg)
             self.statusBar().showMessage(msg)
         else:
-            self._tx_panel.set_status("Transmission aborted.")
+            if self._last_tx_was_test_tone:
+                self._last_tx_was_test_tone = False
+                self._tx_panel.set_status("Test tone stopped.")
+            else:
+                self._tx_panel.set_status("Transmission aborted.")
             self.statusBar().showMessage("Ready")
         self._unlock_rig_controls()
+        self._schedule_rx_resume()
 
     @Slot(str)
     def _on_tx_error(self, message: str) -> None:
+        self._last_tx_was_test_tone = False
         self._tx_panel.set_transmitting(False)
         self._tx_panel.set_status(f"Error: {message}")
         self.statusBar().showMessage(message, 5000)
         self._unlock_rig_controls()
+        self._schedule_rx_resume()
 
     # === RX slots ===
 
@@ -499,6 +571,10 @@ class MainWindow(QMainWindow):
         rather than on the GUI thread.
         """
         if start:
+            # Reset the decoder + sample counter so each new capture session
+            # starts from zero rather than accumulating across stop/restart
+            # cycles (bug R-1: counter climbed past 127s with no image).
+            self._request_rx_reset.emit()
             self._request_start_capture.emit(
                 self._input_device, self._config.sample_rate, DEFAULT_BLOCKSIZE
             )
@@ -776,7 +852,8 @@ class MainWindow(QMainWindow):
         # connection is already gone (e.g. closeEvent firing twice via
         # aboutToQuit + the X button), so we swallow both.
         for signal, slot in (
-            (self._tx_panel.transmit_requested, self._tx_worker.transmit),
+            (self._request_transmit, self._tx_worker.transmit),
+            (self._request_test_tone, self._tx_worker.transmit_test_tone),
             (self._audio_worker.chunk_ready, self._rx_worker.feed_chunk),
         ):
             try:

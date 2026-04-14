@@ -213,9 +213,11 @@ class IcomCIVRig:
     def get_freq(self) -> int:
         """Read the current VFO frequency."""
         resp = self._command(b"\x03")
-        if len(resp) < 5:
+        # Response payload: [cmd_echo(0x03), b0, b1, b2, b3, b4] — 6 bytes.
+        # Strip the command echo before handing to _bcd_to_freq.
+        if len(resp) < 6:
             return 0
-        return self._bcd_to_freq(resp)
+        return self._bcd_to_freq(resp[1:])
 
     def set_freq(self, hz: int) -> None:
         data = self._freq_to_bcd(hz)
@@ -223,17 +225,20 @@ class IcomCIVRig:
 
     def get_mode(self) -> tuple[str, int]:
         resp = self._command(b"\x04")
-        if len(resp) < 1:
+        # Response payload: [cmd_echo(0x04), mode_byte, passband_byte].
+        # resp[0] is the command echo (happens to equal 0x04 = RTTY in the
+        # mode_map), so without stripping it the mode always reads as RTTY.
+        if len(resp) < 2:
             return ("", 0)
         mode_map = {
             0x00: "LSB", 0x01: "USB", 0x02: "AM", 0x03: "CW",
             0x04: "RTTY", 0x05: "FM", 0x07: "CW-R", 0x08: "RTTY-R",
             0x17: "DV",
         }
-        mode_name = mode_map.get(resp[0], f"0x{resp[0]:02X}")
+        mode_name = mode_map.get(resp[1], f"0x{resp[1]:02X}")
         passband = 0
-        if len(resp) >= 2:
-            passband = resp[1] * 100  # rough approximation
+        if len(resp) >= 3:
+            passband = resp[2] * 100  # rough approximation
         return (mode_name, passband)
 
     def set_mode(self, mode: str, passband_hz: int) -> None:
@@ -246,9 +251,12 @@ class IcomCIVRig:
 
     def get_ptt(self) -> bool:
         # CI-V command 0x1C 0x00 — read TX state
+        # Response: [cmd_echo(0x1C), subcmd(0x00), tx_state].
+        # resp[0]=0x1C is always non-zero, so without stripping the echo
+        # get_ptt() would always return True (rig appears permanently keyed).
         resp = self._command(b"\x1c\x00")
-        if len(resp) >= 1:
-            return resp[0] != 0x00
+        if len(resp) >= 3:
+            return resp[2] != 0x00
         return False
 
     def set_ptt(self, on: bool) -> None:
@@ -257,9 +265,12 @@ class IcomCIVRig:
 
     def get_strength(self) -> int:
         # CI-V command 0x15 0x02 — read S-meter
+        # Response: [cmd_echo(0x15), subcmd(0x02), hi, lo].
+        # Without stripping the echo, raw was always 0x1502=5378 regardless
+        # of signal strength, so the S-meter display never changed.
         resp = self._command(b"\x15\x02")
-        if len(resp) >= 2:
-            raw = (resp[0] << 8) | resp[1]
+        if len(resp) >= 4:
+            raw = (resp[2] << 8) | resp[3]
             # Icom S-meter: 0000=S0, 0120=S9, 0241=S9+60
             # Rough conversion to dBm
             if raw <= 120:

@@ -29,10 +29,12 @@ class RadioPanel(QWidget):
 
     connect_requested = Signal()
     disconnect_requested = Signal()
+    test_tone_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._connected = False
+        self._tx_active = False
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(6, 2, 6, 2)
@@ -42,6 +44,16 @@ class RadioPanel(QWidget):
         self._connect_btn.setFixedWidth(130)
         self._connect_btn.clicked.connect(self._on_connect_clicked)
         layout.addWidget(self._connect_btn)
+
+        # Test Tone button — disabled until a real rig is connected
+        self._test_tone_btn = QPushButton("Test Tone")
+        self._test_tone_btn.setToolTip(
+            "Transmit a 700 Hz + 1900 Hz two-tone signal for 5 s.\n"
+            "Adjust mic/RF gain so ALC just barely lights on peaks."
+        )
+        self._test_tone_btn.setEnabled(False)
+        self._test_tone_btn.clicked.connect(self.test_tone_requested.emit)
+        layout.addWidget(self._test_tone_btn)
 
         # Status indicator
         self._status_label = QLabel("Disconnected")
@@ -118,6 +130,7 @@ class RadioPanel(QWidget):
             self._freq_label.setText("—")
             self._mode_label.setText("—")
             self._smeter_bar.setValue(0)
+        self._update_test_tone_btn()
 
     def set_connection_error(self) -> None:
         """Show a disconnected/error state without changing the button."""
@@ -125,12 +138,18 @@ class RadioPanel(QWidget):
         self._status_label.setStyleSheet("color: red;")
 
     def set_tx_active(self, active: bool) -> None:
-        """Disable the connect/disconnect button while a transmission is active.
+        """Disable the connect/disconnect and test-tone buttons during TX.
 
         Prevents the user from swapping or disconnecting the rig mid-transmit,
         which could leave the radio stuck keyed on the wrong backend.
         """
+        self._tx_active = active
         self._connect_btn.setEnabled(not active)
+        self._update_test_tone_btn()
+
+    def _update_test_tone_btn(self) -> None:
+        """Enable the Test Tone button only when a rig is connected and idle."""
+        self._test_tone_btn.setEnabled(self._connected and not self._tx_active)
 
     def set_callsign(self, callsign: str) -> None:
         self._callsign_label.setText(callsign)
