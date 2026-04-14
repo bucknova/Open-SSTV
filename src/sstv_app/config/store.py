@@ -59,14 +59,25 @@ def save_config(cfg: AppConfig, path: Path | None = None) -> None:
     """Write *cfg* to *path* (default: ``config_path()``).
 
     Creates parent directories if needed.
+
+    Raises
+    ------
+    OSError
+        If the config directory cannot be created or the file cannot be
+        written (permission denied, disk full, etc.). The caller is
+        expected to catch this and surface it to the user rather than
+        letting it propagate as an unhandled exception.
     """
     if path is None:
         path = config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    data = {k: v for k, v in asdict(cfg).items() if v is not None}
-    with path.open("wb") as f:
-        tomli_w.dump(data, f)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = {k: v for k, v in asdict(cfg).items() if v is not None}
+        with path.open("wb") as f:
+            tomli_w.dump(data, f)
+    except OSError as exc:
+        _log.error("Could not save config to %s: %s", path, exc)
+        raise
 
 
 __all__ = ["config_path", "load_config", "save_config"]

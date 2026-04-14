@@ -368,27 +368,38 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(self._config, parent=self)
         if dlg.exec() == SettingsDialog.DialogCode.Accepted:
             self._config = dlg.result_config()
-            save_config(self._config)
-            self._radio_panel.set_callsign(self._config.callsign)
-            self._tx_panel.set_callsign(self._config.callsign)
-            self._tx_panel.set_default_mode(self._config.default_tx_mode)
-            # Apply audio device + gain settings to workers
-            new_output = find_output_device_by_name(
-                self._config.audio_output_device
-            )
-            self._tx_worker.set_output_device(new_output)
-            self._tx_worker.set_output_gain(self._config.audio_output_gain)
-            self._tx_worker.set_ptt_delay(self._config.ptt_delay_s)
-
-            new_input = find_input_device_by_name(
-                self._config.audio_input_device
-            )
-            self._input_device = new_input
-            self._rx_worker.set_input_gain(self._config.audio_input_gain)
-            # Adopt any rigctld process the dialog launched
+            # Adopt any rigctld process the dialog launched before trying to
+            # persist, so a save failure doesn't orphan the process.
             if dlg.rigctld_process is not None:
                 self._rigctld_proc = dlg.rigctld_process
+            # Always apply to in-memory state so the session works even if
+            # the disk write fails.
+            self._apply_config()
+            try:
+                save_config(self._config)
+            except OSError as exc:
+                self.statusBar().showMessage(
+                    f"Settings applied but could not be saved to disk: {exc}", 8000
+                )
+                return
             self.statusBar().showMessage("Settings saved.", 3000)
+
+    def _apply_config(self) -> None:
+        """Push the current ``_config`` into all live workers and UI elements.
+
+        Called both on a successful settings save and on a disk-write failure
+        so the session always reflects the user's latest choices.
+        """
+        self._radio_panel.set_callsign(self._config.callsign)
+        self._tx_panel.set_callsign(self._config.callsign)
+        self._tx_panel.set_default_mode(self._config.default_tx_mode)
+        new_output = find_output_device_by_name(self._config.audio_output_device)
+        self._tx_worker.set_output_device(new_output)
+        self._tx_worker.set_output_gain(self._config.audio_output_gain)
+        self._tx_worker.set_ptt_delay(self._config.ptt_delay_s)
+        new_input = find_input_device_by_name(self._config.audio_input_device)
+        self._input_device = new_input
+        self._rx_worker.set_input_gain(self._config.audio_input_gain)
 
     # === TX slots ===
 

@@ -12,9 +12,12 @@ after the dialog is accepted.
 """
 from __future__ import annotations
 
+import logging
 import subprocess
 
 import serial.tools.list_ports
+
+_log = logging.getLogger(__name__)
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -236,7 +239,7 @@ class SettingsDialog(QDialog):
         self._serial_port_combo = QComboBox()
         self._serial_port_combo.setEditable(True)
         self._serial_port_combo.addItem("")
-        for port_info in sorted(serial.tools.list_ports.comports(), key=lambda p: p.device):
+        for port_info in sorted(_list_serial_ports(), key=lambda p: p.device):
             self._serial_port_combo.addItem(port_info.device)
         if self._config.rig_serial_port:
             self._serial_port_combo.setCurrentText(self._config.rig_serial_port)
@@ -339,7 +342,7 @@ class SettingsDialog(QDialog):
         self._rigctld_serial_combo = QComboBox()
         self._rigctld_serial_combo.setEditable(True)
         self._rigctld_serial_combo.addItem("")
-        for port_info in sorted(serial.tools.list_ports.comports(), key=lambda p: p.device):
+        for port_info in sorted(_list_serial_ports(), key=lambda p: p.device):
             self._rigctld_serial_combo.addItem(port_info.device)
         if self._config.rig_serial_port:
             self._rigctld_serial_combo.setCurrentText(self._config.rig_serial_port)
@@ -680,6 +683,21 @@ class SettingsDialog(QDialog):
     def rigctld_process(self) -> subprocess.Popen | None:
         """Return the rigctld subprocess if we launched one."""
         return self._rigctld_proc
+
+
+def _list_serial_ports() -> list:
+    """Return available serial ports, or an empty list on enumeration failure.
+
+    ``serial.tools.list_ports.comports()`` can raise on some platforms
+    (permission denied, USB sub-system errors). We treat any failure as
+    "no ports available" and log a warning so the Settings dialog still
+    opens cleanly.
+    """
+    try:
+        return list(serial.tools.list_ports.comports())
+    except Exception:  # noqa: BLE001
+        _log.warning("Could not enumerate serial ports", exc_info=True)
+        return []
 
 
 __all__ = ["SettingsDialog"]
