@@ -533,3 +533,77 @@ def test_detach_cancel_event() -> None:
 
     decoder.set_cancel_event(None)
     assert not decoder._is_cancelled()
+
+
+# === D-3 progressive decode stability (walk_sync_grid) ===
+
+
+def test_walk_sync_grid_stable_for_existing_candidates() -> None:
+    """Progressive decode uses walk_sync_grid so already-detected line positions
+    are identical regardless of how many additional candidates arrive later (D-3).
+
+    walk_sync_grid anchors at the first valid pair and walks forward.  Adding
+    more candidates past the current horizon extends the walk but leaves the
+    first N entries unchanged.  This is the key property that prevents the
+    top-of-image "break" that occurred when slant_corrected_line_starts was
+    used in the progressive path: there, every new batch of candidates refitted
+    the least-squares line and shifted all previously-computed positions.
+    """
+    from open_sstv.core.sync import walk_sync_grid
+
+    # Scottie S1 nominal line period at 48 kHz (~428 ms).
+    nominal = 428.22 / 1000.0 * 48_000  # ≈ 20555 samples
+    n_lines = 256
+
+    # Synthetic candidates with ~300 ppm drift: actual period slightly longer.
+    true_period = nominal * 1.003
+    anchor = 50_000
+    candidates = [int(round(anchor + i * true_period)) for i in range(n_lines)]
+
+    # First flush: only 60 lines detected.
+    grid_60 = walk_sync_grid(candidates[:60], nominal, n_lines)
+
+    # Second flush: 180 lines detected (3× more data).
+    grid_180 = walk_sync_grid(candidates[:180], nominal, n_lines)
+
+    # The first 60 entries must be byte-for-byte identical.
+    assert grid_60[:60] == grid_180[:60], (
+        "walk_sync_grid must return identical positions for already-detected lines "
+        "when more candidates are appended (D-3 stability contract)"
+    )
+
+
+def test_slant_correction_shifts_positions_with_more_data() -> None:
+    """Regression guard: slant_corrected_line_starts DOES change positions as
+    more noisy candidates arrive, confirming the test above is non-trivial.
+
+    This test documents WHY we use walk_sync_grid in _partial_decode() instead
+    of slant_corrected_line_starts: with noisy, drifted candidates the
+    least-squares fit parameters change as N grows, causing already-projected
+    positions to shift — the D-3 symptom.
+    """
+    import random
+
+    from open_sstv.core.slant import slant_corrected_line_starts
+
+    rng = random.Random(0xC0DE)
+    nominal = 20555.0
+    n_lines = 256
+
+    # Candidates with drift + per-candidate jitter so the regression fit
+    # changes non-trivially between 40 and 200 data points.
+    true_period = nominal * 1.003
+    anchor = 50_000
+    candidates = [
+        int(round(anchor + i * true_period + rng.gauss(0, 8)))
+        for i in range(n_lines)
+    ]
+
+    slant_40 = slant_corrected_line_starts(candidates[:40], nominal, n_lines)
+    slant_200 = slant_corrected_line_starts(candidates[:200], nominal, n_lines)
+
+    # At least some of the first-40 positions must differ between the two fits.
+    assert any(slant_40[i] != slant_200[i] for i in range(40)), (
+        "slant_corrected_line_starts should update projected positions as more "
+        "candidates arrive (verifying the D-3 test above is not vacuously true)"
+    )

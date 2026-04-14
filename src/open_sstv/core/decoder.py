@@ -82,7 +82,7 @@ from open_sstv.core.demod import (
 from open_sstv.core.dsp_utils import bandpass_sos
 from open_sstv.core.modes import MODE_TABLE, Mode, ModeSpec, mode_from_vis
 from open_sstv.core.slant import slant_corrected_line_starts
-from open_sstv.core.sync import find_sync_candidates
+from open_sstv.core.sync import find_sync_candidates, walk_sync_grid
 from open_sstv.core.vis import detect_vis
 
 # Bandpass edges for the pre-demod filter. The SSTV signalling frequencies
@@ -878,6 +878,19 @@ def _partial_decode(
     sync candidates are usable yet or if ``cancel`` is set. The image is
     always full-size (``spec.width × spec.height``) with black rows for
     undecoded lines.
+
+    **Progressive decode must NOT apply slant correction here.** Slant
+    correction (``slant_corrected_line_starts``) fits a least-squares line
+    through all currently-detected sync positions.  As more candidates
+    arrive in later flushes the fit changes, which shifts the projected
+    positions of already-decoded lines — the top rows appear clean, then
+    "break" a few seconds later when the slant parameters update (D-3).
+
+    Instead we use ``walk_sync_grid``, whose anchor-and-walk algorithm
+    produces identical positions for already-confirmed lines regardless of
+    how many additional candidates arrive later.  Slant correction is
+    applied by the final one-shot re-decode in ``RxWorker._dispatch``
+    (via ``decode_wav``), so the saved image still benefits from it.
     """
     if mode == Mode.ROBOT_36:
         return _partial_decode_robot36(inst, fs, spec, vis_end, cancel=cancel)
@@ -892,9 +905,9 @@ def _partial_decode(
     )
     if cancel is not None and cancel.is_set():
         return None
-    line_starts = slant_corrected_line_starts(
-        candidates, line_samples, spec.height
-    )
+    # Use walk_sync_grid (not slant_corrected_line_starts) so positions are
+    # stable across progressive flushes — see docstring for the full rationale.
+    line_starts = walk_sync_grid(candidates, line_samples, spec.height)
     usable = _trim_to_buffer(line_starts, inst.size)
     if not usable:
         return None
@@ -942,9 +955,8 @@ def _partial_decode_robot36(
         return None
     median_diff = float(np.median(diffs))
     if abs(median_diff - line_samples) <= line_samples * tolerance:
-        line_starts = slant_corrected_line_starts(
-            candidates, line_samples, spec.height
-        )
+        # walk_sync_grid for position stability — see _partial_decode() docstring.
+        line_starts = walk_sync_grid(candidates, line_samples, spec.height)
         usable = _trim_to_buffer(line_starts, inst.size)
         if not usable:
             return None
@@ -954,9 +966,8 @@ def _partial_decode_robot36(
         return (image, len(usable), spec.height)
 
     if abs(median_diff - pair_samples) <= pair_samples * tolerance:
-        super_starts = slant_corrected_line_starts(
-            candidates, pair_samples, spec.height // 2
-        )
+        # walk_sync_grid for position stability — see _partial_decode() docstring.
+        super_starts = walk_sync_grid(candidates, pair_samples, spec.height // 2)
         usable = _trim_to_buffer(super_starts, inst.size)
         if not usable:
             return None

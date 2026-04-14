@@ -11,6 +11,31 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.16] — 2026-04-14
+
+### Fixed
+- **Progressive decode "breaks" after a few seconds (D-3 slant instability).**
+  The live draw path in `_partial_decode` / `_partial_decode_robot36` was calling
+  `slant_corrected_line_starts()`, which fits a least-squares line through *all
+  currently-detected sync positions* and reprojects every line on every flush.
+  As more candidates arrive the fit changes, shifting the projected offsets for
+  already-decoded rows — the top of the image appeared clean, then "broke" a
+  few seconds in when the slant parameters updated.
+
+  Fix: replace `slant_corrected_line_starts` with `walk_sync_grid` in both
+  progressive decode functions.  `walk_sync_grid` anchors at the first valid
+  candidate pair and walks forward; adding more candidates extends the walk
+  but leaves already-confirmed positions unchanged.  Slant correction is still
+  applied by the final one-shot re-decode in `RxWorker._dispatch` (via
+  `decode_wav → slant_corrected_line_starts`), so the saved image benefits
+  from it without the mid-decode instability.
+
+  Two new regression tests in `tests/core/test_decoder.py` lock in the
+  position-stability contract and document why slant correction was removed
+  from the progressive path.
+
+---
+
 ## [0.1.15] — 2026-04-14
 
 ### Fixed
