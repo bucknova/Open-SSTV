@@ -1092,7 +1092,14 @@ class Decoder:
         vis_code, vis_end = vis_result
         mode = mode_from_vis(vis_code)
         if mode is None:
-            return [DecodeError(f"Unsupported VIS code 0x{vis_code:02X}")]
+            # Unknown VIS code is a noise false-positive — VIS 0x00 (all
+            # zeros, even parity) is the most common case and can occur when
+            # silence or loopback audio is misread. Drop samples up to the
+            # detected header end, stay in IDLE, and keep hunting. Never
+            # emit a DecodeError for this: false VIS detections are expected
+            # on low-SNR or silent inputs and should not alarm the user.
+            self._buffer = [joined[vis_end:]]
+            return []
 
         spec = MODE_TABLE[mode]
         self._state = _DecoderState.DECODING

@@ -11,6 +11,37 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.11] — 2026-04-14
+
+### Changed
+- **Test Tone peak raised to −1 dBFS** — two-tone calibration signal now drives the output
+  harder (was −6 dBFS), making ALC movement visible without relying on downstream gain.
+- **TX Output Gain slider extended to 500%** — previous ceiling was 200%; IC-7300 and similar
+  radios may need higher digital gain when the radio-side USB MOD Level is conservatively set.
+
+### Fixed
+- **ALC advice message** — status bar message after Test Tone now lists specific diagnostic
+  steps: radio's USB MOD Level menu, app TX gain slider, and computer output volume.
+- **D-1 — VIS false-positive no longer alarming** — when `detect_vis` decodes an unknown VIS
+  code (most commonly 0x00: all-zeros, even parity, which noise can produce), the decoder
+  now silently drops samples past the false header and stays in IDLE rather than emitting a
+  "Unsupported VIS code" error. VIS detection is probabilistic; false positives on noise or
+  RF loopback are expected and should not alarm the user. Real transmissions decode normally.
+- **C-4b — S-meter BCD parsing** — `IcomCIVRig.get_strength()` was treating the two S-meter
+  payload bytes as a 16-bit binary integer (`(resp[2]<<8)|resp[3]`). The IC-7300 encodes the
+  reading as BCD: S9 is sent as bytes `[0x01, 0x20]` (decimal 120), not `[0x00, 0x78]`
+  (binary 120). Added `_bcd_byte_to_int` helper and updated the parse; S0/S9/S9+60 now
+  decode correctly.
+
+### Docs
+- **User guide §12.1** — Output Gain entry updated to show 0–500% range; added informational
+  IC-7300 USB MOD Level note (factory default ~50% is fine for most setups).
+- **User guide §17** — New "ALC doesn't move during Test Tone or transmission" entry covering
+  Output Gain, macOS per-device system volume (System Settings → Sound → Output), and the
+  IC-7300 USB MOD Level reference.
+
+---
+
 ## [0.1.10] — 2026-04-14
 
 ### Added

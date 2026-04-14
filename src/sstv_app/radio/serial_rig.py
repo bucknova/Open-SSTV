@@ -265,14 +265,14 @@ class IcomCIVRig:
 
     def get_strength(self) -> int:
         # CI-V command 0x15 0x02 — read S-meter
-        # Response: [cmd_echo(0x15), subcmd(0x02), hi, lo].
-        # Without stripping the echo, raw was always 0x1502=5378 regardless
-        # of signal strength, so the S-meter display never changed.
+        # Response: [cmd_echo(0x15), subcmd(0x02), hi_bcd, lo_bcd].
+        # Without stripping the echo, raw was always 0x1502=5378 (C-4).
+        # The payload bytes are BCD, not binary: S9 is sent as 0x01 0x20
+        # (= decimal 120), not 0x00 0x78 (= binary 120).
         resp = self._command(b"\x15\x02")
         if len(resp) >= 4:
-            raw = (resp[2] << 8) | resp[3]
-            # Icom S-meter: 0000=S0, 0120=S9, 0241=S9+60
-            # Rough conversion to dBm
+            raw = self._bcd_byte_to_int(resp[2]) * 100 + self._bcd_byte_to_int(resp[3])
+            # Icom S-meter: 0=S0, 120=S9, 241=S9+60 (decimal values)
             if raw <= 120:
                 return -73 - (9 - raw * 9 // 120) * 6
             return -73 + (raw - 120) * 60 // 121
@@ -342,6 +342,15 @@ class IcomCIVRig:
                     # Data response (e.g. frequency read) — command echo + data
                     return payload
         raise RigConnectionError("CI-V response timeout")
+
+    @staticmethod
+    def _bcd_byte_to_int(b: int) -> int:
+        """Convert a single BCD-encoded byte to its decimal integer value.
+
+        Each nibble holds one decimal digit: upper nibble = tens, lower = ones.
+        E.g. 0x20 → 2*10 + 0 = 20; 0x41 → 4*10 + 1 = 41.
+        """
+        return (b >> 4) * 10 + (b & 0x0F)
 
     @staticmethod
     def _bcd_to_freq(data: bytes) -> int:

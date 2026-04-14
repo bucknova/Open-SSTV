@@ -175,13 +175,16 @@ class SettingsDialog(QDialog):
         in_row.addWidget(self._input_gain_label)
         gain_layout.addRow("RX input gain:", in_row)
 
-        # Output gain slider (0–200% in 1% steps)
+        # Output gain slider (0–500% in 1% steps).
+        # Extended to 500% so users with conservative radio-side MOD Level
+        # settings (e.g. IC-7300 USB MOD Level) can still drive ALC on peaks
+        # without needing to touch the radio's menu during a test tone.
         out_row = QHBoxLayout()
         self._output_gain_slider = QSlider(Qt.Orientation.Horizontal)
-        self._output_gain_slider.setRange(0, 200)
+        self._output_gain_slider.setRange(0, 500)
         self._output_gain_slider.setValue(int(self._config.audio_output_gain * 100))
         self._output_gain_label = QLabel(f"{self._config.audio_output_gain * 100:.0f}%")
-        self._output_gain_label.setFixedWidth(45)
+        self._output_gain_label.setFixedWidth(50)
         self._output_gain_slider.valueChanged.connect(
             lambda v: self._output_gain_label.setText(f"{v}%")
         )

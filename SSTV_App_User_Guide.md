@@ -465,7 +465,9 @@ Open the settings dialog via **File > Settings** (or the menu shortcut). It has 
 | Output Device | Audio output for TX (list of detected devices, or "System default") | System default |
 | Sample Rate | 44100 Hz or 48000 Hz | 48000 Hz |
 | Input Gain | Digital gain for received audio, 0–200% | 100% |
-| Output Gain | Digital gain for transmitted audio, 0–200% | 100% |
+| Output Gain | Digital gain for transmitted audio, 0–500% | 100% |
+
+> **IC-7300 note:** The radio has its own audio input level control at **Menu → SET → Connectors → USB MOD Level**. The factory default (around 50%) is fine for most setups — you generally don't need to change it. Adjust the app's Output Gain slider and your computer's system output volume first; only touch USB MOD Level if you are recalibrating from scratch.
 
 ![Audio settings tab](docs/screenshots/settings-audio.png)
 
@@ -673,6 +675,13 @@ If either file is missing or empty, the app creates it with default values on fi
 - Increase the output gain if the level is very low.
 - If using a USB audio interface, make sure it is selected as the output device — not your computer's built-in speakers.
 - On macOS, check System Settings > Sound to ensure the correct output device is active.
+
+**ALC doesn't move during Test Tone or transmission**
+
+- Raise the Output Gain slider in **Settings → Audio**. Values above 100% (up to 500%) apply digital gain before the samples reach the sound card — push it up until ALC just starts to flicker on peaks, then back off slightly.
+- Check the **macOS system output volume for the USB audio device**. macOS stores a per-device volume that can default below 100% and is separate from the master volume. Go to **System Settings → Sound → Output**, select your USB audio interface, and set the volume to 100%.
+- Make sure the correct output device is selected in Settings → Audio. If "System default" is chosen but your radio interface is not the macOS default, the audio goes to the wrong device.
+- For reference, the IC-7300's radio-side input level is at **Menu → SET → Connectors → USB MOD Level**. The factory default (~50%) works for most setups and you shouldn't need to change it if the steps above resolve the issue.
 
 **Application crashes or freezes**
 

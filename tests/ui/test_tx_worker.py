@@ -266,17 +266,17 @@ class TestMakeTwoTone:
         samples = _make_two_tone(self.SR, 5.0)
         assert int(np.abs(samples).max()) < 32767
 
-    def test_peak_near_minus6_dbfs(self) -> None:
-        """Peak amplitude should be close to 10^(-6/20) of full scale.
+    def test_peak_near_minus1_dbfs(self) -> None:
+        """Peak amplitude should be close to 10^(-1/20) of full scale.
 
         The theoretical maximum of two equal-amplitude sines with the
-        chosen scale factor is exactly 32767 * 10^(-6/20) ≈ 16417.
+        chosen scale factor is exactly 32767 * 10^(-1/20) ≈ 29204.
         Due to sampling, the observed peak may be slightly below that.
         We verify it's within a 15% tolerance band: the signal is
         non-trivial and not clipped.
         """
         samples = _make_two_tone(self.SR, 5.0)
-        target = 32767 * (10 ** (-6.0 / 20.0))  # ≈ 16417
+        target = 32767 * (10 ** (-1.0 / 20.0))  # ≈ 29204
         peak = int(np.abs(samples).max())
         assert peak > target * 0.70, (
             f"Peak {peak} is too low — signal may be missing"

@@ -133,22 +133,44 @@ def test_get_ptt_echo_byte_alone_would_be_truthy(rig: IcomCIVRig) -> None:
 
 
 def test_get_strength_s9(rig: IcomCIVRig) -> None:
-    """S9 corresponds to raw=120 → −73 dBm by the Icom mapping."""
-    # [cmd_echo(0x15), subcmd(0x02), hi(0x00), lo(0x78)]  0x0078 = 120
-    with patch.object(rig, "_command", return_value=bytes([0x15, 0x02, 0x00, 0x78])):
+    """S9 corresponds to raw=120 → −73 dBm.
+
+    IC-7300 encodes 120 as BCD bytes [0x01, 0x20], not binary [0x00, 0x78].
+    _bcd_byte_to_int(0x01)=1, _bcd_byte_to_int(0x20)=20 → 1*100+20 = 120.
+    """
+    # [cmd_echo(0x15), subcmd(0x02), hi_bcd(0x01), lo_bcd(0x20)]
+    with patch.object(rig, "_command", return_value=bytes([0x15, 0x02, 0x01, 0x20])):
         strength = rig.get_strength()
     assert strength == -73
 
 
 def test_get_strength_s0(rig: IcomCIVRig) -> None:
-    """S0 corresponds to raw=0."""
+    """S0 corresponds to raw=0 → −127 dBm."""
     with patch.object(rig, "_command", return_value=bytes([0x15, 0x02, 0x00, 0x00])):
         strength = rig.get_strength()
     assert strength == -73 - 9 * 6  # S0 = -127 dBm
 
 
+def test_get_strength_s9_plus_60(rig: IcomCIVRig) -> None:
+    """S9+60 corresponds to raw=241 → −13 dBm."""
+    # [cmd_echo(0x15), subcmd(0x02), hi_bcd(0x02), lo_bcd(0x41)]
+    # _bcd_byte_to_int(0x02)=2, _bcd_byte_to_int(0x41)=41 → 2*100+41 = 241
+    with patch.object(rig, "_command", return_value=bytes([0x15, 0x02, 0x02, 0x41])):
+        strength = rig.get_strength()
+    assert strength == -73 + (241 - 120) * 60 // 121  # == -13 dBm
+
+
+def test_get_strength_bcd_not_binary(rig: IcomCIVRig) -> None:
+    """Documents C-4b regression: naive binary read of the S9 BCD payload
+    gives 288 instead of 120, mapping to a nonsensical ~S9+80 reading."""
+    # S9 BCD payload bytes (after echo + subcmd): 0x01, 0x20
+    # Binary interpretation: (0x01 << 8) | 0x20 = 288 — wrong
+    # BCD interpretation: 1*100 + 20 = 120 — correct
+    assert (0x01 << 8) | 0x20 == 288  # what the old code would compute
+
+
 def test_get_strength_fixed_raw_without_fix_would_be_constant(rig: IcomCIVRig) -> None:
-    """Documents the regression: old code computed raw=(0x15<<8)|0x02=5378
+    """Documents the C-4 regression: old code computed raw=(0x15<<8)|0x02=5378
     regardless of actual signal, so S-meter never changed."""
     # Echo byte 0x15, subcmd 0x02
     old_raw = (0x15 << 8) | 0x02

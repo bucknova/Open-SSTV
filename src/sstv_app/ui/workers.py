@@ -132,16 +132,21 @@ def _make_two_tone(sample_rate: int, duration_s: float) -> "NDArray[np.int16]":
     """Generate a two-tone test signal (700 Hz + 1900 Hz) as int16 PCM.
 
     The two equal-amplitude sine waves are summed and the result is scaled
-    so the *peak* of the sum sits at −6 dBFS.  Each component therefore
-    has an amplitude of ``0.5 × 10^(−6/20) ≈ 0.251`` of full scale, which
-    leaves 6 dB of headroom against flat-topping while still driving the
-    ALC visibly on peaks.
+    so the *peak* of the sum sits at −1 dBFS.  Each component therefore
+    has an amplitude of ``0.5 × 10^(−1/20) ≈ 0.446`` of full scale.
+
+    This is a calibration signal, not a linearity-critical SSTV image, so
+    we want maximum drive into the radio.  At −1 dBFS peak the two-tone
+    average power is −7 dBFS, which is enough to light ALC on the IC-7300
+    and similar radios even with a conservatively set USB MOD Level.  The
+    user's TX output-gain slider provides additional headroom control if
+    needed.
     """
     n = int(sample_rate * duration_s)
     t = np.arange(n, dtype=np.float64) / sample_rate
     # Peak of two equal-amplitude sines can reach 2.0, so each is scaled
-    # to half the −6 dBFS ceiling.
-    amplitude = 0.5 * (10 ** (-6.0 / 20.0))  # ≈ 0.2512
+    # to half the −1 dBFS ceiling.
+    amplitude = 0.5 * (10 ** (-1.0 / 20.0))  # ≈ 0.4467
     sig = np.sin(2.0 * np.pi * _TEST_TONE_FREQ_LO * t)
     sig += np.sin(2.0 * np.pi * _TEST_TONE_FREQ_HI * t)
     sig *= amplitude
@@ -292,7 +297,7 @@ class TxWorker(QObject):
         """Generate and transmit a two-tone test signal. Worker-thread entry point.
 
         Produces ``_TEST_TONE_DURATION_S`` seconds of 700 Hz + 1900 Hz at
-        −6 dBFS peak.  Follows the identical PTT-key → ptt_delay → play →
+        −1 dBFS peak.  Follows the identical PTT-key → ptt_delay → play →
         PTT-unkey sequence as ``transmit()``, including the watchdog, stop
         button, and gain controls.
         """

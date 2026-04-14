@@ -514,7 +514,10 @@ class MainWindow(QMainWindow):
             self._last_tx_was_test_tone = False
             alc_msg = (
                 "Test tone complete. "
-                "Adjust mic/RF gain so ALC just barely lights on peaks."
+                "If ALC didn't move, check: "
+                "(1) Radio's USB MOD Level menu, "
+                "(2) this app's TX gain slider, "
+                "(3) computer output volume."
             )
             self._tx_panel.set_status(alc_msg)
             self.statusBar().showMessage(alc_msg, 10000)
