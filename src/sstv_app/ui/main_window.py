@@ -388,7 +388,19 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _open_settings(self) -> None:
-        dlg = SettingsDialog(self._config, parent=self)
+        dlg = SettingsDialog(
+            self._config,
+            rig_connected=self._radio_panel.connected,
+            parent=self,
+        )
+        # Route Test Tone from the dialog through the same path as the Radio
+        # panel button (queued signal → TxWorker on its own thread).
+        dlg.test_tone_requested.connect(self._on_test_tone_requested)
+        # Keep the dialog's button in sync with live TX state while it's open.
+        self._tx_worker.transmission_started.connect(dlg.on_tx_started)
+        self._tx_worker.transmission_complete.connect(dlg.on_tx_ended)
+        self._tx_worker.transmission_aborted.connect(dlg.on_tx_ended)
+        self._tx_worker.error.connect(dlg.on_tx_error)
         if dlg.exec() == SettingsDialog.DialogCode.Accepted:
             old_input_device = self._config.audio_input_device
             old_sample_rate = self._config.sample_rate

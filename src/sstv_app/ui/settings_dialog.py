@@ -19,7 +19,7 @@ import serial.tools.list_ports
 
 _log = logging.getLogger(__name__)
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -92,13 +92,23 @@ _BAUD_RATES: list[int] = [4800, 9600, 19200, 38400, 57600, 115200]
 class SettingsDialog(QDialog):
     """Modal dialog for editing ``AppConfig``."""
 
+    #: Emitted when the user clicks Test Tone. MainWindow routes this to
+    #: ``TxWorker.transmit_test_tone`` via the same queued-signal path as the
+    #: Radio panel's Test Tone button.
+    test_tone_requested = Signal()
+
     def __init__(
-        self, config: AppConfig, parent: QWidget | None = None
+        self,
+        config: AppConfig,
+        rig_connected: bool = False,
+        parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.setMinimumWidth(480)
         self._config = config
+        self._rig_connected = rig_connected
+        self._tx_active = False
 
         layout = QVBoxLayout(self)
 
@@ -175,22 +185,32 @@ class SettingsDialog(QDialog):
         in_row.addWidget(self._input_gain_label)
         gain_layout.addRow("RX input gain:", in_row)
 
-        # Output gain slider (0–500% in 1% steps).
-        # Extended to 500% so users with conservative radio-side MOD Level
-        # settings (e.g. IC-7300 USB MOD Level) can still drive ALC on peaks
-        # without needing to touch the radio's menu during a test tone.
+        # Output gain slider (0–200% in 1% steps).
         out_row = QHBoxLayout()
         self._output_gain_slider = QSlider(Qt.Orientation.Horizontal)
-        self._output_gain_slider.setRange(0, 500)
+        self._output_gain_slider.setRange(0, 200)
         self._output_gain_slider.setValue(int(self._config.audio_output_gain * 100))
         self._output_gain_label = QLabel(f"{self._config.audio_output_gain * 100:.0f}%")
-        self._output_gain_label.setFixedWidth(50)
+        self._output_gain_label.setFixedWidth(45)
         self._output_gain_slider.valueChanged.connect(
             lambda v: self._output_gain_label.setText(f"{v}%")
         )
         out_row.addWidget(self._output_gain_slider)
         out_row.addWidget(self._output_gain_label)
         gain_layout.addRow("TX output gain:", out_row)
+
+        # Test Tone button — triggers a 5 s calibration transmission.
+        # Only enabled when a rig is connected (enforced via _rig_connected /
+        # _tx_active flags kept in sync with TxWorker TX lifecycle signals).
+        self._test_tone_btn = QPushButton("Test Tone")
+        self._test_tone_btn.setToolTip(
+            "Transmit a 700 Hz + 1900 Hz two-tone signal for 5 s.\n"
+            "Adjust TX output gain above until ALC just barely lights on peaks.\n"
+            "The gain slider remains live while the tone plays."
+        )
+        self._test_tone_btn.clicked.connect(self._on_test_tone_clicked)
+        gain_layout.addRow("", self._test_tone_btn)
+        self._update_test_tone_btn()
 
         form.addRow(gain_group)
 
@@ -636,6 +656,39 @@ class SettingsDialog(QDialog):
         )
         if directory:
             self._save_dir.setText(directory)
+
+    @Slot()
+    def _on_test_tone_clicked(self) -> None:
+        """Disable the button immediately and emit the signal to main window."""
+        self._tx_active = True
+        self._update_test_tone_btn()
+        self.test_tone_requested.emit()
+
+    def _update_test_tone_btn(self) -> None:
+        """Enable Test Tone only when a rig is connected and no TX is active."""
+        enabled = self._rig_connected and not self._tx_active
+        self._test_tone_btn.setEnabled(enabled)
+        self._test_tone_btn.setText("Testing…" if self._tx_active else "Test Tone")
+
+    # === TX lifecycle slots (connected by MainWindow before exec()) ===
+
+    @Slot()
+    def on_tx_started(self) -> None:
+        """Called by MainWindow when any transmission begins."""
+        self._tx_active = True
+        self._update_test_tone_btn()
+
+    @Slot()
+    def on_tx_ended(self) -> None:
+        """Called by MainWindow when a transmission completes, aborts, or errors."""
+        self._tx_active = False
+        self._update_test_tone_btn()
+
+    @Slot(str)
+    def on_tx_error(self, _message: str) -> None:
+        """Called by MainWindow on TX error; restores button state."""
+        self._tx_active = False
+        self._update_test_tone_btn()
 
     # === Public API ===
 

@@ -116,6 +116,11 @@ class RadioPanel(QWidget):
 
     # === Public API ===
 
+    @property
+    def connected(self) -> bool:
+        """True when a rig backend is currently connected."""
+        return self._connected
+
     def set_connected(self, connected: bool) -> None:
         """Update the button label and status indicator."""
         self._connected = connected
@@ -172,9 +177,13 @@ class RadioPanel(QWidget):
         # Mode
         self._mode_label.setText(mode if mode else "—")
 
-        # S-meter: convert dBm-ish to S-units (S9 ≈ -73 dBm, 6 dB/S-unit)
+        # S-meter: convert dBm to S-units.
+        # Standard scale: S0 = −127 dBm, each S-unit = 6 dB, S9 = −73 dBm.
+        # Formula: S = (dBm + 127) // 6  (clamped 0–9).
+        # Bug history: the old formula (dBm+73)//6 mapped S9→0, making the
+        # bar appear empty for every real signal until S9+60 was exceeded.
         if strength_db != 0:
-            s_unit = min(9, max(0, (strength_db + 73) // 6))
+            s_unit = min(9, max(0, (strength_db + 127) // 6))
             self._smeter_bar.setValue(s_unit)
         else:
             self._smeter_bar.setValue(0)

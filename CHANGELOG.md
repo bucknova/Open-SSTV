@@ -11,6 +11,30 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.12] — 2026-04-14
+
+### Added
+- **Test Tone in Settings dialog** — Audio tab now has a "Test Tone" button next to the
+  TX output gain slider. Same 700 Hz + 1900 Hz / 5 s calibration signal as the Radio
+  panel button. Enabled when a rig is connected; shows "Testing…" while active; gain slider
+  remains live during the tone. Suggested workflow in §12.1 of the user guide.
+
+### Changed
+- **TX Output Gain slider reverted to 0–200%** (was 0–500% in v0.1.11). Any stored value
+  above 200% is silently clamped to 200% via `AppConfig.__post_init__` on first load.
+
+### Fixed
+- **S-5 — S-meter display formula** — `RadioPanel.update_rig_status` used
+  `(dBm + 73) // 6` to map dBm to S-units, which maps S9 (−73 dBm) to 0 and any signal
+  weaker than S9+60 to 0 or negative. The bar appeared empty for all real-world signals.
+  Root cause: the formula was hidden by the C-4 echo-byte bug (raw was always 5378 → +2534
+  dBm → always showed S9 bar). After C-4 fixed the bytes, the correct −73 dBm value flowed
+  through but the display ate it. Fixed: `(dBm + 127) // 6` (S0 = −127 dBm, 6 dB/unit).
+- Added INFO-level diagnostic logging in `IcomCIVRig.get_strength()` (runs at 1 Hz while
+  connected) to confirm BCD byte layout in field. Visible with default console log level.
+
+---
+
 ## [0.1.11] — 2026-04-14
 
 ### Changed

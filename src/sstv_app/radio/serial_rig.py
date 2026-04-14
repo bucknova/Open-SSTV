@@ -33,10 +33,13 @@ Usage
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 
 import serial
+
+_log = logging.getLogger(__name__)
 
 from sstv_app.radio.exceptions import RigCommandError, RigConnectionError
 
@@ -270,8 +273,10 @@ class IcomCIVRig:
         # The payload bytes are BCD, not binary: S9 is sent as 0x01 0x20
         # (= decimal 120), not 0x00 0x78 (= binary 120).
         resp = self._command(b"\x15\x02")
+        _log.info("S-meter: resp=%s (%d bytes)", resp.hex() if resp else "(empty)", len(resp))
         if len(resp) >= 4:
             raw = self._bcd_byte_to_int(resp[2]) * 100 + self._bcd_byte_to_int(resp[3])
+            _log.info("S-meter: hi_bcd=0x%02x lo_bcd=0x%02x raw=%d", resp[2], resp[3], raw)
             # Icom S-meter: 0=S0, 120=S9, 241=S9+60 (decimal values)
             if raw <= 120:
                 return -73 - (9 - raw * 9 // 120) * 6

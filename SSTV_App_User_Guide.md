@@ -465,7 +465,10 @@ Open the settings dialog via **File > Settings** (or the menu shortcut). It has 
 | Output Device | Audio output for TX (list of detected devices, or "System default") | System default |
 | Sample Rate | 44100 Hz or 48000 Hz | 48000 Hz |
 | Input Gain | Digital gain for received audio, 0–200% | 100% |
-| Output Gain | Digital gain for transmitted audio, 0–500% | 100% |
+| Output Gain | Digital gain for transmitted audio, 0–200% | 100% |
+| Test Tone | Transmit a 700 Hz + 1900 Hz two-tone signal for 5 s (enabled when a rig is connected) | — |
+
+**TX gain calibration workflow:** With a rig connected, raise Output Gain → click Test Tone → watch your radio's ALC meter → adjust Output Gain up or down → repeat until ALC just barely flickers on peaks. The gain slider remains live while the tone is playing so you can tune without stopping.
 
 > **IC-7300 note:** The radio has its own audio input level control at **Menu → SET → Connectors → USB MOD Level**. The factory default (around 50%) is fine for most setups — you generally don't need to change it. Adjust the app's Output Gain slider and your computer's system output volume first; only touch USB MOD Level if you are recalibrating from scratch.
 

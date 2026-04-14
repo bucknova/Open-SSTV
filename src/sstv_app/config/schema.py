@@ -67,5 +67,12 @@ class AppConfig:
     images_save_dir: str = field(default_factory=_default_images_dir)
     auto_save: bool = False
 
+    def __post_init__(self) -> None:
+        # v0.1.12: slider ceiling reverted from 500% to 200%.
+        # Clamp any stored value so users who raised it to ≤500% on v0.1.11
+        # don't get unexpected clipping on next open.
+        if self.audio_output_gain > 2.0:
+            self.audio_output_gain = 2.0
+
 
 __all__ = ["AppConfig"]
