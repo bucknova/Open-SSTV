@@ -69,6 +69,13 @@ class AppConfig:
     # minimum duration (20 ms → 15 ms) for weak/fading signal conditions.
     rx_weak_signal_mode: bool = False
 
+    # --- CW station ID ---
+    # v0.1.14: appended after every SSTV TX (not test tone). Uses the
+    # callsign field below. Skipped with a warning if callsign is empty.
+    cw_id_enabled: bool = True
+    cw_id_wpm: int = 20     # valid range 15–30
+    cw_id_tone_hz: int = 800  # valid range 400–1200
+
     # --- Identity ---
     callsign: str = ""
 
@@ -94,6 +101,10 @@ class AppConfig:
                 "overdrive auto-enabled (migrated from pre-v0.1.13 config).",
                 self.audio_output_gain * 100,
             )
+        # v0.1.14: clamp CW fields to their valid ranges so hand-edited
+        # TOML files can't push WPM or tone outside what the UI allows.
+        self.cw_id_wpm = max(15, min(30, self.cw_id_wpm))
+        self.cw_id_tone_hz = max(400, min(1200, self.cw_id_tone_hz))
 
 
 __all__ = ["AppConfig"]

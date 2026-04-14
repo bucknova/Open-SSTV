@@ -22,7 +22,7 @@ from PIL import Image
 from open_sstv.core.modes import Mode
 from open_sstv.radio.base import ManualRig
 from open_sstv.radio.exceptions import RigConnectionError
-from open_sstv.ui.workers import TxWorker, _make_two_tone, _TEST_TONE_DURATION_S
+from open_sstv.ui.workers import TxWorker, _CW_GAP_S, _make_two_tone, _TEST_TONE_DURATION_S
 
 pytestmark = pytest.mark.gui
 
@@ -326,3 +326,114 @@ def test_transmit_test_tone_ptt_failure_does_not_play(qapp) -> None:
     assert log["error"] and "no radio" in log["error"][0]
     assert log["started"] == []
     assert log["complete"] == []
+
+
+# === CW station ID ===
+
+
+def test_cw_id_appended_to_sstv_samples(
+    qapp,
+    gradient_image: Image.Image,
+    patch_encode_and_playback: dict[str, MagicMock],
+    fake_samples: np.ndarray,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With CW ID enabled the played buffer is SSTV + gap + CW samples."""
+    cw_fake = np.zeros(500, dtype=np.int16)
+    monkeypatch.setattr(
+        "open_sstv.ui.workers.make_cw", MagicMock(return_value=cw_fake)
+    )
+
+    worker = TxWorker(rig=ManualRig(), ptt_delay_s=0, sample_rate=48_000)
+    worker.set_cw_id(True, "W0AEZ", wpm=20, tone_hz=800)
+    worker.transmit(gradient_image, Mode.ROBOT_36)
+
+    play = patch_encode_and_playback["play"]
+    play.assert_called_once()
+    args, _ = play.call_args
+    sent = args[0]
+    gap_n = int(_CW_GAP_S * 48_000)
+    assert len(sent) == len(fake_samples) + gap_n + len(cw_fake)
+
+
+def test_cw_id_skipped_when_callsign_empty(
+    qapp,
+    gradient_image: Image.Image,
+    patch_encode_and_playback: dict[str, MagicMock],
+    fake_samples: np.ndarray,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty callsign → only SSTV plays, make_cw is never called."""
+    make_cw_mock = MagicMock(return_value=np.zeros(200, dtype=np.int16))
+    monkeypatch.setattr("open_sstv.ui.workers.make_cw", make_cw_mock)
+
+    worker = TxWorker(rig=ManualRig(), ptt_delay_s=0, sample_rate=48_000)
+    worker.set_cw_id(True, "", wpm=20, tone_hz=800)  # enabled but no callsign
+    worker.transmit(gradient_image, Mode.ROBOT_36)
+
+    make_cw_mock.assert_not_called()
+    args, _ = patch_encode_and_playback["play"].call_args
+    assert len(args[0]) == len(fake_samples)
+
+
+def test_cw_id_disabled_skips_cw(
+    qapp,
+    gradient_image: Image.Image,
+    patch_encode_and_playback: dict[str, MagicMock],
+    fake_samples: np.ndarray,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CW ID disabled → just SSTV, even if callsign is set."""
+    make_cw_mock = MagicMock(return_value=np.zeros(200, dtype=np.int16))
+    monkeypatch.setattr("open_sstv.ui.workers.make_cw", make_cw_mock)
+
+    worker = TxWorker(rig=ManualRig(), ptt_delay_s=0, sample_rate=48_000)
+    worker.set_cw_id(False, "W0AEZ", wpm=20, tone_hz=800)
+    worker.transmit(gradient_image, Mode.ROBOT_36)
+
+    make_cw_mock.assert_not_called()
+    args, _ = patch_encode_and_playback["play"].call_args
+    assert len(args[0]) == len(fake_samples)
+
+
+def test_test_tone_does_not_append_cw(
+    qapp,
+    patch_encode_and_playback: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """transmit_test_tone never calls make_cw, even with CW ID enabled."""
+    make_cw_mock = MagicMock(return_value=np.zeros(200, dtype=np.int16))
+    monkeypatch.setattr("open_sstv.ui.workers.make_cw", make_cw_mock)
+
+    worker = TxWorker(rig=ManualRig(), ptt_delay_s=0)
+    worker.set_cw_id(True, "W0AEZ", wpm=20, tone_hz=800)
+    worker.transmit_test_tone()
+
+    make_cw_mock.assert_not_called()
+
+
+def test_cw_id_output_gain_applied_to_cw(
+    qapp,
+    gradient_image: Image.Image,
+    patch_encode_and_playback: dict[str, MagicMock],
+    fake_samples: np.ndarray,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Output gain is applied to the CW tail, just like SSTV samples."""
+    # Return a non-zero CW buffer so we can detect gain scaling.
+    cw_fake = np.full(100, 10000, dtype=np.int16)
+    monkeypatch.setattr(
+        "open_sstv.ui.workers.make_cw", MagicMock(return_value=cw_fake)
+    )
+
+    worker = TxWorker(rig=ManualRig(), ptt_delay_s=0, sample_rate=48_000)
+    worker.set_output_gain(0.5)
+    worker.set_cw_id(True, "W0AEZ", wpm=20, tone_hz=800)
+    worker.transmit(gradient_image, Mode.ROBOT_36)
+
+    args, _ = patch_encode_and_playback["play"].call_args
+    sent = args[0]
+    gap_n = int(_CW_GAP_S * 48_000)
+    cw_portion = sent[len(fake_samples) + gap_n:]
+    # All CW samples should be ~5000 (10000 * 0.5).
+    assert int(np.abs(cw_portion).max()) <= 5001

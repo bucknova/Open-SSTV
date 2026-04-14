@@ -46,6 +46,7 @@
     - [Audio Tab](#121-audio-tab)
     - [Radio Tab](#122-radio-tab)
     - [Images Tab](#123-images-tab)
+    - [CW Station ID](#124-cw-station-id)
 13. [QSO Templates In Depth](#13-qso-templates-in-depth)
     - [How Templates Work](#131-how-templates-work)
     - [Built-In Templates](#132-built-in-templates)
@@ -512,6 +513,27 @@ Open the settings dialog via **File > Settings** (or the menu shortcut). It has 
 | Save Directory | Folder for saved and auto-saved images (browse button to pick) | ~/Pictures/open_sstv |
 
 ![Images settings tab](docs/screenshots/settings-images.png)
+
+### 12.4 CW Station ID
+
+Open-SSTV can automatically append a Morse code station identification to every SSTV transmission. This satisfies the FCC Part 97 (and equivalent ITU) requirement that every amateur radio transmission be identified by the station's callsign at least every ten minutes and at the end of each contact.
+
+**Why CW?** Morse code is universally understood by ham radio equipment and operators worldwide, and it can be decoded even when voice audio would be unintelligible. A short CW tail adds only a few seconds to the end of a transmission and ensures legal identification without interrupting the image.
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| Append CW ID after transmissions | Enable/disable automatic CW ID | On |
+| Speed | Sending speed in words per minute (15–30 WPM) | 20 WPM |
+| Tone | Sidetone frequency in Hz (400–1200 Hz, step 50) | 800 Hz |
+| Callsign used | Read-only; shows the callsign from PTT / Identity above | — |
+
+**How it works:** After the SSTV image audio completes, Open-SSTV inserts 500 ms of silence (to let receiver AGC settle), then plays the CW sidetone. PTT remains keyed throughout the entire SSTV + silence + CW sequence — there is no unkey between the image and the ID. The Stop button cancels at any point; the watchdog timer (5 minutes) applies to the total TX duration.
+
+**Test Tone is exempt** — the ALC calibration signal does not append a CW ID because it is not a communication transmission.
+
+**If callsign is empty:** CW ID is skipped with a warning in the log. TX is not blocked — but you should set your callsign in PTT / Identity before going on the air.
+
+> **Regulatory note:** Part 97.119 requires identification at the end of each communication and at least every 10 minutes during a communication. SSTV images typically take 36 seconds to 5 minutes to transmit, so the end-of-transmission CW ID satisfies the requirement for a single SSTV QSO exchange.
 
 ---
 

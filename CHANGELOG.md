@@ -11,6 +11,26 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.14] — 2026-04-14
+
+### Added
+- **CW station ID** (`core/cw.py`) — every SSTV transmission now appends a
+  Morse code callsign after the image audio (500 ms gap + CW tail), keyed under
+  the same PTT with no unkey between. Satisfies the Part 97 requirement that every
+  transmission be identified by the station's callsign. Test Tone is exempt (it's
+  a calibration aid, not a communication). Stop button and the 5-minute watchdog
+  apply to the combined SSTV + CW duration.
+  - New module `core/cw.py`: ITU-R M.1677-1 Morse table (A–Z, 0–9, `/`, `-`),
+    windowed-sine generator with 5 ms attack/decay to suppress key clicks,
+    standard PARIS timing (dit = 1.2 / WPM seconds).
+  - New config fields: `cw_id_enabled: bool = True`, `cw_id_wpm: int = 20`,
+    `cw_id_tone_hz: int = 800`.  Callsign is read from the existing `callsign`
+    field; if empty, CW ID is skipped with a warning and TX is not blocked.
+  - Settings → Radio → CW Station ID section: enabled checkbox, WPM spinbox
+    (15–30), tone spinbox (400–1200 Hz, step 50), live callsign indicator.
+
+---
+
 ## [0.1.13] — 2026-04-14
 
 ### Added

@@ -463,6 +463,12 @@ class MainWindow(QMainWindow):
         self._input_device = new_input
         self._rx_worker.set_input_gain(self._config.audio_input_gain)
         self._rx_worker.set_weak_signal(self._config.rx_weak_signal_mode)
+        self._tx_worker.set_cw_id(
+            self._config.cw_id_enabled,
+            self._config.callsign,
+            self._config.cw_id_wpm,
+            self._config.cw_id_tone_hz,
+        )
         # Propagate sample rate to both workers (takes effect on the next
         # encode/capture start; see H-02 fix for full context).
         self._tx_worker.set_sample_rate(self._config.sample_rate)

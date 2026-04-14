@@ -80,6 +80,7 @@ _log = logging.getLogger(__name__)
 
 from open_sstv.audio import output_stream
 from open_sstv.audio.devices import AudioDevice
+from open_sstv.core.cw import make_cw
 from open_sstv.core.decoder import (
     DecodeError,
     Decoder,
@@ -97,6 +98,10 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
     from PIL.Image import Image as PILImage
 
+
+#: Silence inserted between the end of the SSTV image audio and the CW ID.
+#: 500 ms gives the receiver AGC time to settle before the CW tone starts.
+_CW_GAP_S: float = 0.500
 
 #: Default delay between keying PTT and starting audio playback. Most
 #: rigs need ~50–200 ms for the relay to settle and the SSB filter to
@@ -196,6 +201,10 @@ class TxWorker(QObject):
         self._sample_rate = sample_rate
         self._ptt_delay_s = ptt_delay_s
         self._output_gain: float = 1.0
+        self._cw_id_enabled: bool = False
+        self._cw_callsign: str = ""
+        self._cw_wpm: int = 20
+        self._cw_tone_hz: int = 800
         self._stop_event = threading.Event()
         self._watchdog_triggered: bool = False
 
@@ -227,6 +236,39 @@ class TxWorker(QObject):
         any thread (plain int assignment is atomic under the GIL).
         """
         self._sample_rate = sample_rate
+
+    def set_cw_id(
+        self,
+        enabled: bool,
+        callsign: str,
+        wpm: int = 20,
+        tone_hz: int = 800,
+    ) -> None:
+        """Configure CW station ID appended to every SSTV transmission.
+
+        Thread-safe: all fields are plain Python scalars/strings whose
+        assignment is atomic under the GIL. Called from the GUI thread
+        via ``MainWindow._apply_config()``.
+
+        Parameters
+        ----------
+        enabled:
+            Whether to append CW ID. When ``False`` (or when
+            *callsign* is empty) the ID is silently skipped.
+        callsign:
+            Operator callsign in any case; ``make_cw`` uppercases it.
+            If empty, CW ID is skipped with a warning log even when
+            *enabled* is ``True``.
+        wpm:
+            Sending speed (15–30 WPM). Values outside range are safe
+            but should be clamped upstream in ``AppConfig``.
+        tone_hz:
+            Sidetone frequency in Hz (400–1200).
+        """
+        self._cw_id_enabled = enabled
+        self._cw_callsign = callsign.strip()
+        self._cw_wpm = wpm
+        self._cw_tone_hz = tone_hz
 
     def emergency_unkey(self) -> None:
         """Best-effort PTT-off for the shutdown path.
@@ -277,6 +319,32 @@ class TxWorker(QObject):
                     samples.astype(np.float64) * self._output_gain,
                     -32768, 32767,
                 ).astype(samples.dtype)
+
+            # Append CW station ID: gap + CW tail keyed under the same PTT.
+            # Test Tone skips this path entirely (see transmit_test_tone).
+            if self._cw_id_enabled:
+                if self._cw_callsign:
+                    gap = np.zeros(
+                        int(_CW_GAP_S * self._sample_rate), dtype=np.int16
+                    )
+                    cw = make_cw(
+                        self._cw_callsign,
+                        wpm=self._cw_wpm,
+                        tone_hz=self._cw_tone_hz,
+                        sample_rate=self._sample_rate,
+                        peak_dbfs=-1.0,
+                    )
+                    if self._output_gain != 1.0:
+                        cw = np.clip(
+                            cw.astype(np.float64) * self._output_gain,
+                            -32768, 32767,
+                        ).astype(np.int16)
+                    samples = np.concatenate([samples, gap, cw])
+                else:
+                    _log.warning(
+                        "CW ID is enabled but callsign is empty — "
+                        "skipping CW tail. Set callsign in Settings."
+                    )
 
             result = self._run_tx(samples, rig)
         finally:

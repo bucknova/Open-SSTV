@@ -455,6 +455,48 @@ class SettingsDialog(QDialog):
         misc_form.addRow("Callsign:", self._callsign)
 
         layout.addWidget(misc_group)
+
+        # --- CW station ID ---
+        cw_group = QGroupBox("CW Station ID")
+        cw_form = QFormLayout(cw_group)
+
+        cw_help = QLabel(
+            "Appends a Morse code station ID after every SSTV transmission "
+            "to satisfy regulatory identification requirements."
+        )
+        cw_help.setWordWrap(True)
+        cw_form.addRow(cw_help)
+
+        self._cw_enabled = QCheckBox("Append CW ID after transmissions")
+        self._cw_enabled.setChecked(self._config.cw_id_enabled)
+        cw_form.addRow(self._cw_enabled)
+
+        self._cw_wpm = QSpinBox()
+        self._cw_wpm.setRange(15, 30)
+        self._cw_wpm.setValue(self._config.cw_id_wpm)
+        self._cw_wpm.setSuffix(" WPM")
+        cw_form.addRow("Speed:", self._cw_wpm)
+
+        self._cw_tone_hz = QSpinBox()
+        self._cw_tone_hz.setRange(400, 1200)
+        self._cw_tone_hz.setValue(self._config.cw_id_tone_hz)
+        self._cw_tone_hz.setSingleStep(50)
+        self._cw_tone_hz.setSuffix(" Hz")
+        cw_form.addRow("Tone:", self._cw_tone_hz)
+
+        # Live-updating callsign label — reflects the Callsign field above
+        # so the user knows which callsign will be sent without scrolling.
+        _cs_display = self._callsign.text().strip().upper() or "(not set — see Callsign above)"
+        self._cw_callsign_label = QLabel(_cs_display)
+        self._cw_callsign_label.setStyleSheet("color: gray;")
+        self._callsign.textChanged.connect(
+            lambda cs: self._cw_callsign_label.setText(
+                cs.strip().upper() or "(not set — see Callsign above)"
+            )
+        )
+        cw_form.addRow("Callsign used:", self._cw_callsign_label)
+
+        layout.addWidget(cw_group)
         layout.addStretch()
 
         # rigctld process handle (managed by this dialog instance)
@@ -782,6 +824,9 @@ class SettingsDialog(QDialog):
             audio_output_gain=self._output_gain_slider.value() / 100.0,
             tx_output_overdrive=self._overdrive_check.isChecked(),
             rx_weak_signal_mode=self._weak_signal_check.isChecked(),
+            cw_id_enabled=self._cw_enabled.isChecked(),
+            cw_id_wpm=self._cw_wpm.value(),
+            cw_id_tone_hz=self._cw_tone_hz.value(),
             callsign=self._callsign.text().strip().upper(),
             images_save_dir=self._save_dir.text(),
             auto_save=self._auto_save.isChecked(),
