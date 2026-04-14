@@ -145,6 +145,7 @@ class TxWorker(QObject):
     transmission_progress = Signal(int, int)  # (samples_played, samples_total)
     transmission_complete = Signal()
     transmission_aborted = Signal()
+    watchdog_fired = Signal()
     error = Signal(str)
 
     def __init__(
@@ -157,11 +158,13 @@ class TxWorker(QObject):
     ) -> None:
         super().__init__(parent)
         self._rig: Rig = rig if rig is not None else ManualRig()
+        self._rig_lock = threading.Lock()
         self._output_device = output_device
         self._sample_rate = sample_rate
         self._ptt_delay_s = ptt_delay_s
         self._output_gain: float = 1.0
         self._stop_event = threading.Event()
+        self._watchdog_triggered: bool = False
 
     def set_output_device(self, device: AudioDevice | int | None) -> None:
         """Change the output device at runtime (e.g. after settings save)."""
@@ -176,8 +179,34 @@ class TxWorker(QObject):
         self._ptt_delay_s = delay_s
 
     def set_rig(self, rig: Rig) -> None:
-        """Swap the rig backend at runtime (e.g. after connect/disconnect)."""
-        self._rig = rig
+        """Swap the rig backend at runtime (e.g. after connect/disconnect).
+
+        Protected by a lock so a GUI-thread swap can't race with the
+        worker-thread snapshot in ``transmit()``.
+        """
+        with self._rig_lock:
+            self._rig = rig
+
+    def set_sample_rate(self, sample_rate: int) -> None:
+        """Update the sample rate used for encoding and playback.
+
+        Takes effect on the next ``transmit()`` call. Safe to call from
+        any thread (plain int assignment is atomic under the GIL).
+        """
+        self._sample_rate = sample_rate
+
+    def emergency_unkey(self) -> None:
+        """Best-effort PTT-off for the shutdown path.
+
+        Called from closeEvent if the TX thread doesn't join within the
+        timeout.  Runs on the GUI thread; ignores all errors so we never
+        block the exit path.
+        """
+        try:
+            with self._rig_lock:
+                self._rig.set_ptt(False)
+        except Exception:  # noqa: BLE001
+            pass
 
     @Slot(object, object)
     def transmit(self, image: "PILImage", mode: Mode) -> None:
@@ -188,12 +217,14 @@ class TxWorker(QObject):
         failure, only ``error``).
         """
         self._stop_event.clear()
+        self._watchdog_triggered = False
 
         # Snapshot the rig reference once so a mid-TX call to set_rig()
         # (e.g. user disconnects the radio) cannot swap the backend between
         # set_ptt(True) and set_ptt(False), which would leave the real rig
         # stuck keyed via a no-op ManualRig.set_ptt(False).
-        rig = self._rig
+        with self._rig_lock:
+            rig = self._rig
 
         # Start the watchdog before any blocking work. If encode + playback
         # haven't finished within _MAX_TX_DURATION_S, the timer fires on its
@@ -290,14 +321,16 @@ class TxWorker(QObject):
     def _watchdog_fire(self) -> None:
         """Called by the watchdog timer when TX exceeds ``_MAX_TX_DURATION_S``.
 
-        Safe to call from the timer's background thread: ``error`` is a
-        Qt signal (queued to the GUI thread) and ``request_stop`` is
-        explicitly thread-safe.
+        Safe to call from the timer's background thread: signals are Qt
+        queued connections (delivered on the GUI thread) and
+        ``request_stop`` is explicitly thread-safe.
+
+        Emits ``watchdog_fired`` instead of ``error`` so the GUI can
+        display a persistent watchdog message that isn't immediately
+        clobbered by the subsequent ``transmission_aborted`` signal.
         """
-        self.error.emit(
-            f"TX watchdog: transmission exceeded {_MAX_TX_DURATION_S:.0f} s "
-            "— rig unkeyed automatically"
-        )
+        self._watchdog_triggered = True
+        self.watchdog_fired.emit()
         self.request_stop()
 
 
@@ -353,6 +386,19 @@ class RxWorker(QObject):
     def set_input_gain(self, gain: float) -> None:
         """Set the software input gain (1.0 = unity). Thread-safe."""
         self._input_gain = gain
+
+    def set_sample_rate(self, sample_rate: int) -> None:
+        """Update the sample rate and reconstruct the internal Decoder.
+
+        Should be called only when capture is not running — the new
+        Decoder discards any in-flight buffered audio. The caller
+        (``MainWindow._open_settings``) shows a status-bar notice asking
+        the user to restart capture when the rate changes mid-session.
+        """
+        self._sample_rate = sample_rate
+        self._decoder = Decoder(sample_rate)
+        self._scratch.clear()
+        self._scratch_samples = 0
 
     @property
     def sample_rate(self) -> int:

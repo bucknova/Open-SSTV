@@ -87,9 +87,9 @@ from sstv_app.audio.devices import (
     find_input_device_by_name,
     find_output_device_by_name,
 )
+from sstv_app import __version__
 from sstv_app.audio.input_stream import (
     DEFAULT_BLOCKSIZE,
-    DEFAULT_SAMPLE_RATE,
     InputStreamWorker,
 )
 from sstv_app.config.schema import AppConfig
@@ -191,6 +191,8 @@ class MainWindow(QMainWindow):
             )
         self._input_device = input_device
         self._rigctld_proc: "subprocess.Popen | None" = None
+        self._capture_running: bool = False
+        self._last_abort_was_watchdog: bool = False
 
         # --- Menu bar ---
         self._build_menu_bar()
@@ -229,7 +231,11 @@ class MainWindow(QMainWindow):
         # --- TX worker on its own thread ---
         self._tx_thread = QThread(self)
         self._tx_thread.setObjectName("sstv-app-tx-worker")
-        self._tx_worker = TxWorker(rig=self._rig, output_device=output_device)
+        self._tx_worker = TxWorker(
+            rig=self._rig,
+            output_device=output_device,
+            sample_rate=self._config.sample_rate,
+        )
         self._tx_worker.moveToThread(self._tx_thread)
         # Standard Qt cleanup pattern: when the thread finishes, schedule
         # the worker for deletion. Without this the worker is left as an
@@ -250,7 +256,7 @@ class MainWindow(QMainWindow):
         # --- RX decode worker on its own thread ---
         self._rx_thread = QThread(self)
         self._rx_thread.setObjectName("sstv-app-rx-decode")
-        self._rx_worker = RxWorker()
+        self._rx_worker = RxWorker(sample_rate=self._config.sample_rate)
         self._rx_worker.moveToThread(self._rx_thread)
         self._rx_thread.finished.connect(self._rx_worker.deleteLater)
         self._rx_thread.start()
@@ -262,6 +268,7 @@ class MainWindow(QMainWindow):
         self._tx_worker.transmission_progress.connect(self._tx_panel.show_tx_progress)
         self._tx_worker.transmission_complete.connect(self._on_tx_complete)
         self._tx_worker.transmission_aborted.connect(self._on_tx_aborted)
+        self._tx_worker.watchdog_fired.connect(self._on_watchdog_fired)
         self._tx_worker.error.connect(self._on_tx_error)
 
         # --- Wire RX signals ---
@@ -355,9 +362,10 @@ class MainWindow(QMainWindow):
         QMessageBox.about(
             self,
             "About Open-SSTV",
-            "<h3>Open-SSTV v0.1.2</h3>"
+            f"<h3>Open-SSTV v{__version__}</h3>"
             "<p>Open-source SSTV transceiver for amateur radio.</p>"
-            "<p>Robot 36 · Martin M1 · Scottie S1</p>"
+            "<p>17 modes: Robot 36, Martin M1/M2, Scottie S1/S2/DX, "
+            "PD-90/120/160/180/240/290, Wraase SC2-120/180, Pasokon P3/P5/P7.</p>"
             '<p><a href="https://github.com/bucknova/Open-SSTV">'
             "github.com/bucknova/Open-SSTV</a></p>"
             "<p>GPL-3.0-or-later</p>",
@@ -367,6 +375,9 @@ class MainWindow(QMainWindow):
     def _open_settings(self) -> None:
         dlg = SettingsDialog(self._config, parent=self)
         if dlg.exec() == SettingsDialog.DialogCode.Accepted:
+            old_input_device = self._config.audio_input_device
+            old_sample_rate = self._config.sample_rate
+
             self._config = dlg.result_config()
             # Adopt any rigctld process the dialog launched before trying to
             # persist, so a save failure doesn't orphan the process.
@@ -382,7 +393,21 @@ class MainWindow(QMainWindow):
                     f"Settings applied but could not be saved to disk: {exc}", 8000
                 )
                 return
-            self.statusBar().showMessage("Settings saved.", 3000)
+
+            # If audio input device or sample rate changed while capture is
+            # active, the running stream is still using the old settings.
+            # Notify the user — we don't auto-restart because that would
+            # discard any partially decoded in-flight image.
+            audio_restart_needed = (
+                self._config.audio_input_device != old_input_device
+                or self._config.sample_rate != old_sample_rate
+            )
+            if audio_restart_needed and self._capture_running:
+                self.statusBar().showMessage(
+                    "Audio settings changed — restart capture to apply.", 5000
+                )
+            else:
+                self.statusBar().showMessage("Settings saved.", 3000)
 
     def _apply_config(self) -> None:
         """Push the current ``_config`` into all live workers and UI elements.
@@ -400,6 +425,10 @@ class MainWindow(QMainWindow):
         new_input = find_input_device_by_name(self._config.audio_input_device)
         self._input_device = new_input
         self._rx_worker.set_input_gain(self._config.audio_input_gain)
+        # Propagate sample rate to both workers (takes effect on the next
+        # encode/capture start; see H-02 fix for full context).
+        self._tx_worker.set_sample_rate(self._config.sample_rate)
+        self._rx_worker.set_sample_rate(self._config.sample_rate)
 
     # === TX slots ===
 
@@ -430,10 +459,24 @@ class MainWindow(QMainWindow):
         self._unlock_rig_controls()
 
     @Slot()
+    def _on_watchdog_fired(self) -> None:
+        """Watchdog tripped: record the fact so _on_tx_aborted can display
+        a persistent message instead of the generic "Ready"."""
+        self._last_abort_was_watchdog = True
+
+    @Slot()
     def _on_tx_aborted(self) -> None:
         self._tx_panel.set_transmitting(False)
-        self._tx_panel.set_status("Transmission aborted.")
-        self.statusBar().showMessage("Ready")
+        if self._last_abort_was_watchdog:
+            self._last_abort_was_watchdog = False
+            msg = (
+                f"TX watchdog: exceeded {300:.0f} s — rig unkeyed automatically"
+            )
+            self._tx_panel.set_status(msg)
+            self.statusBar().showMessage(msg)
+        else:
+            self._tx_panel.set_status("Transmission aborted.")
+            self.statusBar().showMessage("Ready")
         self._unlock_rig_controls()
 
     @Slot(str)
@@ -456,18 +499,20 @@ class MainWindow(QMainWindow):
         """
         if start:
             self._request_start_capture.emit(
-                self._input_device, DEFAULT_SAMPLE_RATE, DEFAULT_BLOCKSIZE
+                self._input_device, self._config.sample_rate, DEFAULT_BLOCKSIZE
             )
         else:
             self._request_stop_capture.emit()
 
     @Slot()
     def _on_rx_started(self) -> None:
+        self._capture_running = True
         self._rx_panel.set_capturing(True)
         self.statusBar().showMessage("Capturing")
 
     @Slot()
     def _on_rx_stopped(self) -> None:
+        self._capture_running = False
         self._rx_panel.set_capturing(False)
         self._rx_panel.set_status("Capture stopped.")
         self.statusBar().showMessage("Ready")
@@ -489,10 +534,13 @@ class MainWindow(QMainWindow):
         mode_name = mode.value if isinstance(mode, Mode) else str(mode)
         stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         save_dir = Path(self._config.images_save_dir)
-        save_dir.mkdir(parents=True, exist_ok=True)
         path = save_dir / f"sstv_{mode_name}_{stamp}.png"
-        pil_image.save(str(path))
-        self.statusBar().showMessage(f"Auto-saved {path.name}", 3000)
+        try:
+            save_dir.mkdir(parents=True, exist_ok=True)
+            pil_image.save(str(path))
+            self.statusBar().showMessage(f"Auto-saved {path.name}", 3000)
+        except OSError as exc:
+            QMessageBox.warning(self, "Save failed", str(exc))
 
     @Slot(object, object)
     def _on_rx_image_saved(self, image: object, mode: object) -> None:
@@ -510,10 +558,13 @@ class MainWindow(QMainWindow):
 
         if self._config.auto_save:
             save_dir = Path(self._config.images_save_dir)
-            save_dir.mkdir(parents=True, exist_ok=True)
             path = save_dir / default_name
-            pil_image.save(str(path))
-            self.statusBar().showMessage(f"Saved {path.name}", 3000)
+            try:
+                save_dir.mkdir(parents=True, exist_ok=True)
+                pil_image.save(str(path))
+                self.statusBar().showMessage(f"Saved {path.name}", 3000)
+            except OSError as exc:
+                QMessageBox.warning(self, "Save failed", str(exc))
         else:
             start_dir = str(
                 Path(self._config.images_save_dir) / default_name
@@ -525,10 +576,13 @@ class MainWindow(QMainWindow):
                 "PNG (*.png);;JPEG (*.jpg *.jpeg);;All files (*)",
             )
             if path_str:
-                pil_image.save(path_str)
-                self.statusBar().showMessage(
-                    f"Saved {Path(path_str).name}", 3000
-                )
+                try:
+                    pil_image.save(path_str)
+                    self.statusBar().showMessage(
+                        f"Saved {Path(path_str).name}", 3000
+                    )
+                except OSError as exc:
+                    QMessageBox.warning(self, "Save failed", str(exc))
 
     @Slot()
     def _on_save_shortcut(self) -> None:
@@ -735,7 +789,7 @@ class MainWindow(QMainWindow):
         self._tx_worker.request_stop()
         self.statusBar().showMessage("Closing…")
         # Give the TX worker up to 1 s to unwind out of play_blocking
-        # (chunked-write path checks stop_event only between 0.5 s chunks).
+        # (chunked-write path checks stop_event only between 0.1 s chunks).
         # thread.wait(3000) below would handle it anyway, but waiting here
         # first makes the shutdown ordering explicit and avoids the edge case
         # where the thread.quit() drains queued events before the worker exits.
@@ -748,8 +802,16 @@ class MainWindow(QMainWindow):
         # thread's event loop before ``quit()`` drains it.
         self._request_stop_capture.emit()
 
+        self._tx_thread.quit()
+        if not self._tx_thread.wait(3000):
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "TX worker thread did not finish within timeout — "
+                "attempting emergency PTT unkey"
+            )
+            self._tx_worker.emergency_unkey()
+
         for thread in (
-            self._tx_thread,
             self._audio_thread,
             self._rx_thread,
             self._rig_poll_thread,
