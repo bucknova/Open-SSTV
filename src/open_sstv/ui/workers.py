@@ -535,11 +535,13 @@ class RxWorker(QObject):
         sample_rate: int = DEFAULT_SAMPLE_RATE,
         flush_samples: int | None = None,
         weak_signal: bool = False,
+        final_slant_correction: bool = False,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._sample_rate = sample_rate
         self._weak_signal = weak_signal
+        self._final_slant_correction = final_slant_correction
         self._cancel_event = threading.Event()
         self._decoder = Decoder(sample_rate, weak_signal=weak_signal)
         self._decoder.set_cancel_event(self._cancel_event)
@@ -564,6 +566,20 @@ class RxWorker(QObject):
         self._weak_signal = enabled
         self._decoder = Decoder(self._sample_rate, weak_signal=enabled)
         self._decoder.set_cancel_event(self._cancel_event)
+
+    def set_final_slant_correction(self, enabled: bool) -> None:
+        """Enable or disable final one-shot re-decode with slant correction.
+
+        When *enabled* is ``True``, ``_dispatch`` runs ``decode_wav`` on the
+        retained raw buffer after a complete image and uses the result if the
+        mode matches.  This applies a global least-squares slant fit that can
+        improve images from rigs with slight clock drift, but degrades images
+        from weak/noisy signals where false-positive sync candidates corrupt
+        the polyfit.  Off by default (progressive decode is used as-is).
+
+        Thread-safe: plain bool assignment is atomic under the GIL.
+        """
+        self._final_slant_correction = enabled
 
     @Slot(bool)
     def set_tx_active(self, active: bool) -> None:
@@ -732,19 +748,26 @@ class RxWorker(QObject):
                 event.lines_total,
             )
         elif isinstance(event, ImageComplete):
-            # Try a full-quality single-pass re-decode from the retained
-            # raw audio buffer. The progressive decode is good but the
-            # one-shot path has better bandpass edge behavior and a
-            # consistent sync grid across all lines.
+            # Always free the retained raw audio buffer (memory, regardless of
+            # whether we re-decode from it).
+            raw = self._decoder.consume_last_buffer()
             final_image = event.image
-            try:
-                raw = self._decoder.consume_last_buffer()
-                if raw is not None and isinstance(raw, np.ndarray) and raw.size > 0:
-                    result = decode_wav(raw, self._sample_rate)
-                    if result is not None and result.mode == event.mode:
-                        final_image = result.image
-            except Exception as exc:  # noqa: BLE001
-                _log.debug("re-decode failed, using progressive result: %s", exc, exc_info=True)
+            if self._final_slant_correction:
+                # Opt-in: run a full single-pass re-decode with global
+                # least-squares slant correction.  Helpful for clean signals
+                # with clock drift; harmful for weak/noisy signals where
+                # false-positive syncs corrupt the polyfit.
+                try:
+                    if raw is not None and isinstance(raw, np.ndarray) and raw.size > 0:
+                        result = decode_wav(raw, self._sample_rate)
+                        if result is not None and result.mode == event.mode:
+                            final_image = result.image
+                except Exception as exc:  # noqa: BLE001
+                    _log.debug(
+                        "re-decode (slant correction) failed, using progressive result: %s",
+                        exc,
+                        exc_info=True,
+                    )
             self.image_complete.emit(final_image, event.mode, event.vis_code)
         elif isinstance(event, DecodeError):
             self.error.emit(event.message)

@@ -8,7 +8,7 @@ buffer through PySSTV.
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -239,3 +239,121 @@ def test_end_to_end_with_real_encoded_image(qapp) -> None:
     img, mode, code = log["image_complete"][0]
     assert mode == Mode.ROBOT_36
     assert code == MODE_TABLE[Mode.ROBOT_36].vis_code
+
+
+# === final slant-correction toggle (v0.1.18) ===
+
+
+def _make_complete_event(mode: Mode = Mode.MARTIN_M1, vis_code: int = 44) -> tuple:
+    """Return (ImageComplete event, fake progressive PIL image)."""
+    prog_image = Image.new("RGB", (320, 256), color=(10, 20, 30))
+    return ImageComplete(image=prog_image, mode=mode, vis_code=vis_code), prog_image
+
+
+def _setup_worker_for_dispatch(flag: bool) -> tuple:
+    """Create an RxWorker with mocked decoder ready to dispatch one ImageComplete.
+
+    Returns (worker, log, raw_audio_array).
+    """
+    worker = RxWorker(sample_rate=48_000, flush_samples=1, final_slant_correction=flag)
+    event, prog_image = _make_complete_event()
+    raw_audio = np.zeros(100, dtype=np.float64)
+
+    worker._decoder = MagicMock()
+    worker._decoder.feed.return_value = [
+        ImageStarted(mode=Mode.MARTIN_M1, vis_code=44),
+        event,
+    ]
+    worker._decoder.consume_last_buffer.return_value = raw_audio
+
+    log = _record_signals(worker)
+    return worker, log, raw_audio, prog_image
+
+
+def test_final_slant_off_does_not_call_decode_wav(qapp) -> None:
+    """With apply_final_slant_correction=False, decode_wav must never be called.
+
+    The progressive image from the ImageComplete event must be emitted as-is.
+    """
+    worker, log, raw_audio, prog_image = _setup_worker_for_dispatch(flag=False)
+
+    with patch("open_sstv.ui.workers.decode_wav") as mock_decode_wav:
+        worker.feed_chunk(np.zeros(10, dtype=np.float32))
+
+    mock_decode_wav.assert_not_called()
+    # consume_last_buffer IS called regardless (memory management)
+    worker._decoder.consume_last_buffer.assert_called_once()
+    # Progressive image is emitted unchanged
+    assert len(log["image_complete"]) == 1
+    img, mode, code = log["image_complete"][0]
+    assert img is prog_image
+    assert mode == Mode.MARTIN_M1
+
+
+def test_final_slant_on_calls_decode_wav_and_uses_result(qapp) -> None:
+    """With apply_final_slant_correction=True, decode_wav is called and its
+    result replaces the progressive image when the mode matches.
+    """
+    worker, log, raw_audio, prog_image = _setup_worker_for_dispatch(flag=True)
+
+    final_image = Image.new("RGB", (320, 256), color=(200, 100, 50))
+
+    decode_result = MagicMock()
+    decode_result.mode = Mode.MARTIN_M1
+    decode_result.image = final_image
+
+    with patch("open_sstv.ui.workers.decode_wav", return_value=decode_result) as mock_dw:
+        worker.feed_chunk(np.zeros(10, dtype=np.float32))
+
+    mock_dw.assert_called_once_with(raw_audio, 48_000)
+    worker._decoder.consume_last_buffer.assert_called_once()
+    # Re-decoded image replaces the progressive one
+    assert len(log["image_complete"]) == 1
+    img, mode, code = log["image_complete"][0]
+    assert img is final_image
+    assert mode == Mode.MARTIN_M1
+
+
+def test_final_slant_on_mode_mismatch_falls_back_to_progressive(qapp) -> None:
+    """If decode_wav returns a result with a different mode, the progressive
+    image is kept rather than emitting a wrong-mode image.
+    """
+    worker, log, raw_audio, prog_image = _setup_worker_for_dispatch(flag=True)
+
+    decode_result = MagicMock()
+    decode_result.mode = Mode.ROBOT_36  # different from MARTIN_M1 in the event
+    decode_result.image = Image.new("RGB", (320, 240))
+
+    with patch("open_sstv.ui.workers.decode_wav", return_value=decode_result):
+        worker.feed_chunk(np.zeros(10, dtype=np.float32))
+
+    assert len(log["image_complete"]) == 1
+    img, _mode, _code = log["image_complete"][0]
+    assert img is prog_image  # progressive preserved
+
+
+def test_final_slant_on_decode_wav_exception_falls_back(qapp) -> None:
+    """If decode_wav raises, the progressive image is used and no error
+    signal is emitted (the exception is logged at DEBUG, not surfaced to UI).
+    """
+    worker, log, raw_audio, prog_image = _setup_worker_for_dispatch(flag=True)
+
+    with patch("open_sstv.ui.workers.decode_wav", side_effect=RuntimeError("oops")):
+        worker.feed_chunk(np.zeros(10, dtype=np.float32))
+
+    assert log["error"] == []  # no UI error
+    assert len(log["image_complete"]) == 1
+    img, _mode, _code = log["image_complete"][0]
+    assert img is prog_image
+
+
+def test_set_final_slant_correction_toggles_behavior(qapp) -> None:
+    """set_final_slant_correction() changes behavior mid-session without
+    needing to reconstruct the worker.
+    """
+    worker = RxWorker(sample_rate=48_000, flush_samples=1, final_slant_correction=False)
+    assert worker._final_slant_correction is False
+    worker.set_final_slant_correction(True)
+    assert worker._final_slant_correction is True
+    worker.set_final_slant_correction(False)
+    assert worker._final_slant_correction is False

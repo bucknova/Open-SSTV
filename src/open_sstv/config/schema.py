@@ -68,6 +68,13 @@ class AppConfig:
     # v0.1.13: relaxes VIS leader presence (0.40 → 0.25) and start-bit
     # minimum duration (20 ms → 15 ms) for weak/fading signal conditions.
     rx_weak_signal_mode: bool = False
+    # v0.1.18: when True, the completed image is re-decoded in a single pass
+    # with slant correction (np.polyfit across all sync candidates). Off by
+    # default because polyfit has no outlier rejection — on weak/marginal
+    # signals the least-squares fit is corrupted by false-positive sync
+    # detections, producing an image worse than the progressive decode.
+    # Opt-in for clean, timing-drifted signals only.
+    apply_final_slant_correction: bool = False
 
     # --- CW station ID ---
     # v0.1.14: appended after every SSTV TX (not test tone). Uses the

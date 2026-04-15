@@ -252,6 +252,17 @@ class SettingsDialog(QDialog):
         self._weak_signal_check.setChecked(self._config.rx_weak_signal_mode)
         rx_layout.addRow(self._weak_signal_check)
 
+        self._final_slant_check = QCheckBox(
+            "Apply slant correction to final image (may worsen weak signals)"
+        )
+        self._final_slant_check.setToolTip(
+            "When enabled, the completed image is re-decoded with slant correction\n"
+            "after transmission. Helpful for clean signals with timing drift; can\n"
+            "corrupt weak or marginal signals. Off by default."
+        )
+        self._final_slant_check.setChecked(self._config.apply_final_slant_correction)
+        rx_layout.addRow(self._final_slant_check)
+
         form.addRow(rx_group)
 
         return tab
@@ -824,6 +835,7 @@ class SettingsDialog(QDialog):
             audio_output_gain=self._output_gain_slider.value() / 100.0,
             tx_output_overdrive=self._overdrive_check.isChecked(),
             rx_weak_signal_mode=self._weak_signal_check.isChecked(),
+            apply_final_slant_correction=self._final_slant_check.isChecked(),
             cw_id_enabled=self._cw_enabled.isChecked(),
             cw_id_wpm=self._cw_wpm.value(),
             cw_id_tone_hz=self._cw_tone_hz.value(),

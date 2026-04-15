@@ -11,6 +11,28 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.18] — 2026-04-14
+
+### Fixed
+- **Final one-shot re-decode no longer corrupts images by default.**
+  After progressive decode completed, `RxWorker._dispatch` was running
+  `decode_wav` unconditionally and replacing the progressive image with the
+  result.  `decode_wav` applies `slant_corrected_line_starts`, which fits a
+  plain least-squares line through *all* detected sync candidates with no
+  outlier rejection.  On weak or marginal signals the false-positive candidates
+  corrupt the fit, shifting every line position — the re-decoded image was
+  visibly worse than the progressive one.
+
+### Added
+- **`apply_final_slant_correction` setting (Settings → Audio → Receive, default Off).**
+  The final re-decode is now an explicit opt-in.  When disabled (default), the
+  progressive image is used as-is and `decode_wav` is never called — no extra
+  sosfiltfilt / Hilbert work, and no 5–10 s gallery-appearance delay on long
+  transmissions.  Enable only for clean, strong signals from stations with a
+  known clock-drift problem.
+
+---
+
 ## [0.1.17] — 2026-04-14
 
 ### Changed
