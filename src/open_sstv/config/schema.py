@@ -83,6 +83,9 @@ class AppConfig:
     tx_banner_enabled: bool = False
     tx_banner_bg_color: str = "#202020"
     tx_banner_text_color: str = "#FFFFFF"
+    # v0.1.20: "small" (24 px / 14 pt), "medium" (32 px / 20 pt, default),
+    # "large" (40 px / 26 pt). Unknown values fall back to "medium".
+    tx_banner_size: str = "medium"
 
     # --- CW station ID ---
     # v0.1.14: appended after every SSTV TX (not test tone). Uses the

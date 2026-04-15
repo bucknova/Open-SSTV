@@ -11,6 +11,34 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.20] — 2026-04-14
+
+### Changed
+- **TX banner layout reworked — callsign left, version right.**
+  Previous layout centred "Open-SSTV v{version}" and placed the callsign
+  flush-right; both texts share a single horizontal axis and could collide
+  on long callsigns.  New layout: callsign flush-left with 8 px padding,
+  "Open-SSTV v{version}" flush-right with 8 px padding.  Empty callsign
+  shows only the right column.  If text would still overlap (extremely
+  narrow modes), the version text is pushed right and clipped by the image
+  boundary rather than overwriting the callsign.
+- **TX banner now defaults to Medium size (32 px strip, 20 pt text).**
+  Previous hardcoded size was Small (24 px / 14 pt), which was hard to read.
+  Existing installs with no `tx_banner_size` key in TOML get "medium" on first
+  run via the `AppConfig` dataclass default.
+
+### Added
+- **TX banner size selector** — Small / Medium / Large dropdown in
+  Settings → Images → TX Banner.  Drives both strip height and font size
+  proportionally: Small (24 px / 14 pt), Medium (32 px / 20 pt), Large
+  (40 px / 26 pt).  Persisted as `tx_banner_size: str = "medium"`.
+- **`SIZE_TABLE` and `banner_size_params()`** exported from `core/banner.py`
+  so callers can look up (height, font_size) by name without hard-coding values.
+- **Live preview resizes** with the chosen size so the preview label always
+  matches the actual strip height.
+
+---
+
 ## [0.1.19] — 2026-04-14
 
 ### Added

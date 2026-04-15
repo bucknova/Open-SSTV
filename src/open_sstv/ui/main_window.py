@@ -470,6 +470,7 @@ class MainWindow(QMainWindow):
             self._config.callsign,
             self._config.tx_banner_bg_color,
             self._config.tx_banner_text_color,
+            self._config.tx_banner_size,
         )
         self._tx_worker.set_cw_id(
             self._config.cw_id_enabled,

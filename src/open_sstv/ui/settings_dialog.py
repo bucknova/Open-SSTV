@@ -58,7 +58,7 @@ from open_sstv.audio.devices import (
 )
 from open_sstv import __version__ as _APP_VERSION
 from open_sstv.config.schema import AppConfig
-from open_sstv.core.banner import BANNER_HEIGHT, apply_tx_banner
+from open_sstv.core.banner import apply_tx_banner, banner_size_params
 from open_sstv.core.modes import Mode
 
 
@@ -696,9 +696,19 @@ class SettingsDialog(QDialog):
         self._banner_text_btn.clicked.connect(self._pick_banner_text_color)
         banner_layout.addRow("Text:", self._banner_text_btn)
 
-        # Live preview — 320×BANNER_HEIGHT real render via apply_tx_banner().
+        # Size selector
+        self._banner_size = QComboBox()
+        for label, key in [("Small", "small"), ("Medium", "medium"), ("Large", "large")]:
+            self._banner_size.addItem(label, key)
+        _size_idx = self._banner_size.findData(self._config.tx_banner_size)
+        if _size_idx >= 0:
+            self._banner_size.setCurrentIndex(_size_idx)
+        self._banner_size.currentIndexChanged.connect(self._refresh_banner_preview)
+        banner_layout.addRow("Size:", self._banner_size)
+
+        # Live preview — real render via apply_tx_banner() at the chosen size.
         self._banner_preview = QLabel()
-        self._banner_preview.setFixedSize(320, BANNER_HEIGHT)
+        self._banner_preview.setFixedWidth(320)
         self._banner_preview.setToolTip(
             "Live preview of the banner as it will appear on transmitted images."
         )
@@ -803,14 +813,18 @@ class SettingsDialog(QDialog):
             self._save_dir.setText(directory)
 
     def _refresh_banner_preview(self) -> None:
-        """Re-render the banner preview label from the current colour selections.
+        """Re-render the banner preview label from the current selections.
 
         Uses the same ``apply_tx_banner`` call that ``TxWorker.transmit``
-        uses, so what you see here is exactly what will be stamped on air.
+        uses — what you see here is exactly what will be stamped on air.
         The source image is a 320×240 neutral-gray fill; we crop the top
-        ``BANNER_HEIGHT`` rows as the preview pixmap.
+        *banner_height* rows as the preview pixmap and resize the label
+        to match so the strip always fills the allocated space exactly.
         """
         from PIL import Image as _PILImage
+
+        size_key = self._banner_size.currentData() or "medium"
+        bh, fs = banner_size_params(size_key)
 
         source = _PILImage.new("RGB", (320, 240), (0x80, 0x80, 0x80))
         banner = apply_tx_banner(
@@ -819,11 +833,14 @@ class SettingsDialog(QDialog):
             self._config.callsign,
             self._banner_bg_color,
             self._banner_text_color,
+            banner_height=bh,
+            font_size=fs,
         )
-        strip = banner.crop((0, 0, 320, BANNER_HEIGHT))  # 320×24 RGB
+        strip = banner.crop((0, 0, 320, bh))
         raw = strip.tobytes("raw", "RGB")
         qimg = QImage(raw, strip.width, strip.height, strip.width * 3,
                       QImage.Format.Format_RGB888)
+        self._banner_preview.setFixedHeight(bh)
         self._banner_preview.setPixmap(QPixmap.fromImage(qimg))
 
     def _pick_banner_bg_color(self) -> None:
@@ -945,6 +962,7 @@ class SettingsDialog(QDialog):
             tx_banner_enabled=self._banner_enabled.isChecked(),
             tx_banner_bg_color=self._banner_bg_color,
             tx_banner_text_color=self._banner_text_color,
+            tx_banner_size=self._banner_size.currentData() or "medium",
         )
 
     @property

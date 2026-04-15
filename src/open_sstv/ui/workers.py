@@ -216,6 +216,7 @@ class TxWorker(QObject):
         self._tx_banner_callsign: str = ""
         self._tx_banner_bg_color: str = "#202020"
         self._tx_banner_text_color: str = "#FFFFFF"
+        self._tx_banner_size: str = "medium"
         self._stop_event = threading.Event()
         self._watchdog_triggered: bool = False
 
@@ -287,6 +288,7 @@ class TxWorker(QObject):
         callsign: str,
         bg_color: str = "#202020",
         text_color: str = "#FFFFFF",
+        size: str = "medium",
     ) -> None:
         """Configure the TX header banner stamped on every SSTV transmission.
 
@@ -305,11 +307,15 @@ class TxWorker(QObject):
             CSS hex background colour, e.g. ``"#202020"``.
         text_color:
             CSS hex text colour, e.g. ``"#FFFFFF"``.
+        size:
+            Named size preset — ``"small"``, ``"medium"``, or ``"large"``.
+            Controls both strip height and font size proportionally.
         """
         self._tx_banner_enabled = enabled
         self._tx_banner_callsign = callsign.strip().upper()
         self._tx_banner_bg_color = bg_color
         self._tx_banner_text_color = text_color
+        self._tx_banner_size = size
 
     def emergency_unkey(self) -> None:
         """Best-effort PTT-off for the shutdown path.
@@ -350,13 +356,16 @@ class TxWorker(QObject):
             # --- Apply TX banner (if enabled) ---
             if self._tx_banner_enabled:
                 from open_sstv import __version__
-                from open_sstv.core.banner import apply_tx_banner
+                from open_sstv.core.banner import apply_tx_banner, banner_size_params
+                _bh, _fs = banner_size_params(self._tx_banner_size)
                 image = apply_tx_banner(
                     image,
                     __version__,
                     self._tx_banner_callsign,
                     self._tx_banner_bg_color,
                     self._tx_banner_text_color,
+                    banner_height=_bh,
+                    font_size=_fs,
                 )
 
             # --- Encode (CPU-bound, ~100 ms for the modes we ship) ---

@@ -17,7 +17,12 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from open_sstv.core.banner import BANNER_HEIGHT, apply_tx_banner
+from open_sstv.core.banner import (
+    BANNER_HEIGHT,
+    SIZE_TABLE,
+    apply_tx_banner,
+    banner_size_params,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -159,3 +164,69 @@ def test_banner_respects_custom_bg_and_text_colors() -> None:
     blue_array = np.array([0, 0, 255], dtype=np.uint8)
     has_blue = np.any(np.all(banner_rows == blue_array, axis=2))
     assert not has_blue, "Source blue pixels leaked through the banner background."
+
+
+# ---------------------------------------------------------------------------
+# 6. SIZE_TABLE and banner_size_params
+# ---------------------------------------------------------------------------
+
+def test_size_table_contains_all_presets() -> None:
+    """SIZE_TABLE must have entries for small, medium, and large."""
+    for key in ("small", "medium", "large"):
+        assert key in SIZE_TABLE, f"SIZE_TABLE missing preset '{key}'"
+        height, font_size = SIZE_TABLE[key]
+        assert height > 0, f"SIZE_TABLE[{key!r}] height must be positive"
+        assert font_size > 0, f"SIZE_TABLE[{key!r}] font_size must be positive"
+
+
+def test_size_table_ordering() -> None:
+    """Each larger preset must have a strictly larger height and font size."""
+    small_h, small_f = SIZE_TABLE["small"]
+    medium_h, medium_f = SIZE_TABLE["medium"]
+    large_h, large_f = SIZE_TABLE["large"]
+    assert small_h < medium_h < large_h, "Strip heights must increase small < medium < large"
+    assert small_f < medium_f < large_f, "Font sizes must increase small < medium < large"
+
+
+def test_banner_size_params_known_keys() -> None:
+    """banner_size_params returns the table entry for known keys."""
+    for key in ("small", "medium", "large"):
+        assert banner_size_params(key) == SIZE_TABLE[key]
+
+
+def test_banner_size_params_unknown_falls_back_to_medium() -> None:
+    """Unknown size name falls back to medium without raising."""
+    assert banner_size_params("xl") == SIZE_TABLE["medium"]
+    assert banner_size_params("") == SIZE_TABLE["medium"]
+
+
+@pytest.mark.parametrize("size_name", ["small", "medium", "large"])
+def test_banner_parametrized_height_fills_correct_rows(size_name: str) -> None:
+    """apply_tx_banner with explicit params fills exactly the right rows."""
+    bh, fs = SIZE_TABLE[size_name]
+    fill = (10, 20, 30)
+    img = _solid(320, 256, fill)
+    result = apply_tx_banner(img, "0.1.20", "W0AEZ",
+                             banner_height=bh, font_size=fs)
+    arr = np.array(result)
+
+    # Image dimensions unchanged.
+    assert result.size == (320, 256)
+
+    # Rows below the strip must be pixel-identical to the source.
+    below = arr[bh:, :, :]
+    expected = np.full_like(below, fill)
+    assert np.array_equal(below, expected), (
+        f"Rows below banner (height={bh}) were modified for size '{size_name}'"
+    )
+
+    # Top rows must be dominated by the bg colour (#202020).
+    bg_rgb = _hex_to_rgb("#202020")
+    bg_array = np.array(bg_rgb, dtype=np.uint8)
+    banner_rows = arr[:bh, :, :]
+    is_bg = np.all(banner_rows == bg_array, axis=2)
+    non_bg_fraction = 1.0 - is_bg.mean()
+    # Larger presets use proportionally larger text, so allow up to 20%.
+    assert non_bg_fraction < 0.20, (
+        f"Too many non-bg pixels in '{size_name}' banner: {non_bg_fraction:.1%}"
+    )
