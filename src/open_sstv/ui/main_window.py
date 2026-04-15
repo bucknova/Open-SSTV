@@ -263,7 +263,12 @@ class MainWindow(QMainWindow):
         # --- RX decode worker on its own thread ---
         self._rx_thread = QThread(self)
         self._rx_thread.setObjectName("sstv-app-rx-decode")
-        self._rx_worker = RxWorker(sample_rate=self._config.sample_rate)
+        self._rx_worker = RxWorker(
+            sample_rate=self._config.sample_rate,
+            weak_signal=self._config.rx_weak_signal_mode,
+            final_slant_correction=self._config.apply_final_slant_correction,
+            experimental_incremental_decode=self._config.experimental_incremental_decode,
+        )
         self._rx_worker.moveToThread(self._rx_thread)
         self._rx_thread.finished.connect(self._rx_worker.deleteLater)
         self._rx_thread.start()
@@ -477,6 +482,9 @@ class MainWindow(QMainWindow):
         self._rx_worker.set_input_gain(self._config.audio_input_gain)
         self._rx_worker.set_weak_signal(self._config.rx_weak_signal_mode)
         self._rx_worker.set_final_slant_correction(self._config.apply_final_slant_correction)
+        self._rx_worker.set_experimental_incremental_decode(
+            self._config.experimental_incremental_decode
+        )
         self._tx_worker.set_tx_banner(
             self._config.tx_banner_enabled,
             self._config.callsign,
