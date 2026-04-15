@@ -11,6 +11,26 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.21] — 2026-04-15
+
+### Added
+- **5 new SSTV modes — Martin M3/M4, Scottie S3/S4, PD-50** (22 supported modes
+  total, up from 17). All five are height- or timing-only variants of existing
+  families; each required a thin one-line PySSTV subclass, a `ModeSpec` entry in
+  `core/modes.py`, and a `_PIXEL_DECODERS` registration in `core/decoder.py`.
+  - **Martin M3** (VIS 36) — 320×128, identical line timing to M1, ~57 s.
+  - **Martin M4** (VIS 32) — 160×128, identical line timing to M2, ~29 s.
+  - **Scottie S3** (VIS 52) — 320×128, identical line timing to S1, ~55 s.
+  - **Scottie S4** (VIS 48) — 160×128, identical line timing to S2, ~36 s.
+  - **PD-50** (VIS 93) — 320×256 decoded image, pixel time 0.286 ms (half of
+    PD-90's 0.532 ms), ~50 s.
+- **`tests/core/test_new_modes.py`** — 13 tests covering VIS round-trip, encoder/
+  decoder dispatch, spec sanity, family timing consistency, and encode→decode
+  dimension checks for all 5 modes. M4 and S4 round-trips run unconditionally;
+  M3, S3, and PD-50 are marked `@pytest.mark.slow` (50–57 s of audio each).
+
+---
+
 ## [0.1.20] — 2026-04-14
 
 ### Changed

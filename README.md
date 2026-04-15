@@ -4,7 +4,7 @@ An open-source, cross-platform SSTV (Slow Scan Television) transceiver for amate
 radio. Receives and decodes SSTV images live off your radio, and encodes and
 transmits images back, with optional Hamlib or direct serial PTT and frequency control.
 
-**Status:** Alpha (v0.1.20). TX and RX paths work end-to-end across all 17 supported
+**Status:** Alpha (v0.1.21). TX and RX paths work end-to-end across all 22 supported
 modes. Rig control via rigctld or direct serial CAT is functional. Weak-signal decode
 is usable down to roughly 0 dB SNR on Robot 36.
 
@@ -28,7 +28,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
 ## Features
 
 ### Transmit (TX)
-- **17 SSTV modes** -- Robot 36, Martin M1/M2, Scottie S1/S2/DX, PD-90/120/160/180/240/290,
+- **22 SSTV modes** -- Robot 36, Martin M1/M2/M3/M4, Scottie S1/S2/DX/S3/S4, PD-50/90/120/160/180/240/290,
   Wraase SC2-120/180, and Pasokon P3/P5/P7. See the Supported Modes table below.
 - **Image editor** -- crop, rotate, flip, and add text overlays (callsign, labels)
   before transmitting. Crop is locked to the target mode's aspect ratio.
@@ -45,7 +45,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
   (0–2 s, default 200 ms), plays SSTV audio, then de-keys. Works with rigctld,
   direct serial CAT, DTR/RTS, or manual (VOX).
 - **TX banner** -- optional thin identification strip stamped across the top of every
-  transmitted image. Shows "Open-SSTV v{version}" centred and your callsign flush-right.
+  transmitted image. Shows your callsign flush-left and "Open-SSTV v{version}" flush-right.
   Configurable background and text colours; off by default.
 - **TX watchdog** -- a 300-second hard-limit timer forces PTT off and aborts playback
   if an encode + playback cycle exceeds the limit, preventing accidental extended
@@ -106,16 +106,21 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
 
 ## Supported Modes
 
-All 17 modes support both TX (encode) and RX (decode).
+All 22 modes support both TX (encode) and RX (decode).
 
 | Mode | Resolution | Duration | Color System |
 |------|-----------|----------|--------------|
 | Robot 36 | 320×240 | ~36 s | YCbCr |
 | Martin M1 | 320×256 | ~114 s | RGB |
 | Martin M2 | 160×256 | ~57 s | RGB |
+| Martin M3 | 320×128 | ~57 s | RGB |
+| Martin M4 | 160×128 | ~29 s | RGB |
 | Scottie S1 | 320×256 | ~110 s | RGB |
 | Scottie S2 | 160×256 | ~71 s | RGB |
 | Scottie DX | 320×256 | ~269 s | RGB |
+| Scottie S3 | 320×128 | ~55 s | RGB |
+| Scottie S4 | 160×128 | ~36 s | RGB |
+| PD-50 | 320×256 | ~50 s | YCbCr |
 | PD-90 | 320×256 | ~90 s | YCbCr |
 | PD-120 | 640×496 | ~126 s | YCbCr |
 | PD-160 | 512×400 | ~161 s | YCbCr |
@@ -128,9 +133,8 @@ All 17 modes support both TX (encode) and RX (decode).
 | Pasokon P5 | 640×496 | ~304 s | RGB |
 | Pasokon P7 | 640×496 | ~406 s | RGB |
 
-**Not yet implemented** (no PySSTV encoder class; custom encoder needed): Robot 8,
-Robot 12, Robot 24, Robot 72, Martin M3, Martin M4, Scottie S3, Scottie S4, PD-50.
-These are planned for a future release.
+**Not yet implemented** (need custom YCbCr 4:2:2 encoders not in PySSTV): Robot 8,
+Robot 12, Robot 24, Robot 72. Planned for a future release.
 
 ## Screenshots
 
@@ -191,8 +195,8 @@ open-sstv-decode in.wav -o out.png                    # CLI decoder
 ## Roadmap
 
 ### v0.2 (planned)
-- **Remaining SSTV modes** -- Robot 8/12/24/72, Martin M3/M4, Scottie S3/S4, PD-50
-  (9 modes needing custom encoders not yet in PySSTV).
+- **Remaining SSTV modes** -- Robot 8/12/24/72 (4 modes needing custom YCbCr 4:2:2
+  encoders not yet in PySSTV).
 - **Waterfall display** -- live FFT spectrogram in the RX panel
   (scope: [docs/waterfall_scope.md](docs/waterfall_scope.md)).
 - **Raspberry Pi / ARM support** -- tested on Pi 4/5.

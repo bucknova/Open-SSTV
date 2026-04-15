@@ -815,11 +815,16 @@ _PIXEL_DECODERS: dict[Mode, Callable[..., Image.Image | None]] = {
     # Martin family
     Mode.MARTIN_M1: _decode_martin_rgb,
     Mode.MARTIN_M2: _decode_martin_rgb,
+    Mode.MARTIN_M3: _decode_martin_rgb,
+    Mode.MARTIN_M4: _decode_martin_rgb,
     # Scottie family
     Mode.SCOTTIE_S1: _decode_scottie_rgb,
     Mode.SCOTTIE_S2: _decode_scottie_rgb,
     Mode.SCOTTIE_DX: _decode_scottie_rgb,
+    Mode.SCOTTIE_S3: _decode_scottie_rgb,
+    Mode.SCOTTIE_S4: _decode_scottie_rgb,
     # PD family (YCbCr line-pair)
+    Mode.PD_50: _decode_pd,
     Mode.PD_90: _decode_pd,
     Mode.PD_120: _decode_pd,
     Mode.PD_160: _decode_pd,

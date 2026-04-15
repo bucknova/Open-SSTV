@@ -163,6 +163,45 @@ class Robot36LinePair(Robot36):
 
 
 # ---------------------------------------------------------------------------
+# Thin PySSTV subclasses for modes not in the upstream library
+# ---------------------------------------------------------------------------
+# Martin M3/M4 and Scottie S3/S4 are height-only variants of M1/M2 and
+# S1/S2 respectively — every timing constant stays the same; only HEIGHT
+# (and VIS_CODE) differs.  PD-50 is PD-90 with a slower pixel clock.
+# PySSTV's encoder reads WIDTH/HEIGHT/SCAN/VIS_CODE as class attributes,
+# so a one-line subclass is sufficient for each.
+
+class MartinM3(MartinM1):
+    """Martin M3 — 320×128 pixels, same line timing as M1, VIS 36."""
+    VIS_CODE = 36
+    HEIGHT = 128
+
+
+class MartinM4(MartinM2):
+    """Martin M4 — 160×128 pixels, same line timing as M2, VIS 32."""
+    VIS_CODE = 32
+    HEIGHT = 128
+
+
+class ScottieS3(ScottieS1):
+    """Scottie S3 — 320×128 pixels, same line timing as S1, VIS 52."""
+    VIS_CODE = 52
+    HEIGHT = 128
+
+
+class ScottieS4(ScottieS2):
+    """Scottie S4 — 160×128 pixels, same line timing as S2, VIS 48."""
+    VIS_CODE = 48
+    HEIGHT = 128
+
+
+class PD50(PD90):
+    """PD-50 — 320×256 pixels, pixel time 0.286 ms (vs PD-90's 0.532 ms), VIS 93."""
+    VIS_CODE = 93
+    PIXEL = 0.286
+
+
+# ---------------------------------------------------------------------------
 # Mode → PySSTV class mapping
 # ---------------------------------------------------------------------------
 
@@ -175,9 +214,14 @@ _PYSSTV_CLASSES: dict[Mode, type[SSTV]] = {
     Mode.ROBOT_36: Robot36LinePair,
     Mode.MARTIN_M1: MartinM1,
     Mode.MARTIN_M2: MartinM2,
+    Mode.MARTIN_M3: MartinM3,
+    Mode.MARTIN_M4: MartinM4,
     Mode.SCOTTIE_S1: ScottieS1,
     Mode.SCOTTIE_S2: ScottieS2,
     Mode.SCOTTIE_DX: ScottieDX,
+    Mode.SCOTTIE_S3: ScottieS3,
+    Mode.SCOTTIE_S4: ScottieS4,
+    Mode.PD_50: PD50,
     Mode.PD_90: PD90,
     Mode.PD_120: PD120,
     Mode.PD_160: PD160,

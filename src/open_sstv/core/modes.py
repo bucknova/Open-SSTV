@@ -30,19 +30,25 @@ class Mode(StrEnum):
     entry, (c) a class mapping in ``core/encoder.py``, and — for RX — (d) a
     per-mode decode function registered in ``core/decoder.py``.
 
-    Modes backed directly by PySSTV are: Robot 36, Martin M1/M2, Scottie
-    S1/S2/DX, PD 90/120/160/180/240/290, Wraase SC2-120/180, Pasokon P3/P5/P7.
+    Modes backed by PySSTV (directly or via thin subclass): Robot 36,
+    Martin M1/M2/M3/M4, Scottie S1/S2/DX/S3/S4, PD 50/90/120/160/180/240/290,
+    Wraase SC2-120/180, Pasokon P3/P5/P7.
 
-    Modes not yet supported (no PySSTV class, would need a custom encoder):
-    Robot 8/12/24/72, Martin M3/M4, Scottie S3/S4, PD 50.
+    Modes not yet supported (need custom encoders — Robot family YCbCr):
+    Robot 8, Robot 12, Robot 24, Robot 72.
     """
 
     ROBOT_36 = "robot_36"
     MARTIN_M1 = "martin_m1"
     MARTIN_M2 = "martin_m2"
+    MARTIN_M3 = "martin_m3"
+    MARTIN_M4 = "martin_m4"
     SCOTTIE_S1 = "scottie_s1"
     SCOTTIE_S2 = "scottie_s2"
     SCOTTIE_DX = "scottie_dx"
+    SCOTTIE_S3 = "scottie_s3"
+    SCOTTIE_S4 = "scottie_s4"
+    PD_50 = "pd_50"
     PD_90 = "pd_90"
     PD_120 = "pd_120"
     PD_160 = "pd_160"
@@ -137,6 +143,7 @@ _ROBOT_36_SYNC_PORCH_MS = 3.0
 # therefore equals (line_time_ms × (height÷2×2)) / 1000 = correct duration.
 _PD_SYNC_MS: float = 20.0
 _PD_PORCH_MS: float = 2.08
+_PD_50_CHANNEL_SCAN_MS: float = 320 * 0.286    # 91.52 ms
 _PD_90_CHANNEL_SCAN_MS: float = 320 * 0.532    # 170.24 ms
 _PD_120_CHANNEL_SCAN_MS: float = 640 * 0.190   # 121.60 ms
 _PD_160_CHANNEL_SCAN_MS: float = 512 * 0.382   # 195.584 ms
@@ -244,6 +251,41 @@ MODE_TABLE: dict[Mode, ModeSpec] = {
     ),
 
     # ------------------------------------------------------------------ #
+    # Martin M3 / M4 — 128-line variants of M1/M2. Identical timing; only  #
+    # height differs. VIS 36 (M3) / 32 (M4). ~57 s / ~29 s.              #
+    # ------------------------------------------------------------------ #
+    Mode.MARTIN_M3: ModeSpec(
+        name=Mode.MARTIN_M3,
+        vis_code=0x24,  # 36
+        width=320,
+        height=128,
+        sync_pulse_ms=_MARTIN_M1_SYNC_MS,
+        sync_porch_ms=_MARTIN_M1_PORCH_MS,
+        line_time_ms=(
+            _MARTIN_M1_SYNC_MS
+            + 4 * _MARTIN_M1_PORCH_MS
+            + 3 * _MARTIN_M1_SCAN_MS
+        ),
+        color_layout=("G", "B", "R"),
+        sync_position=SyncPosition.LINE_START,
+    ),
+    Mode.MARTIN_M4: ModeSpec(
+        name=Mode.MARTIN_M4,
+        vis_code=0x20,  # 32
+        width=160,
+        height=128,
+        sync_pulse_ms=_MARTIN_M1_SYNC_MS,
+        sync_porch_ms=_MARTIN_M1_PORCH_MS,
+        line_time_ms=(
+            _MARTIN_M1_SYNC_MS
+            + 4 * _MARTIN_M1_PORCH_MS
+            + 3 * _MARTIN_M2_SCAN_MS
+        ),
+        color_layout=("G", "B", "R"),
+        sync_position=SyncPosition.LINE_START,
+    ),
+
+    # ------------------------------------------------------------------ #
     # Scottie S2 — half horizontal resolution of S1, ~71 s for 160×256.  #
     # Scottie DX — wide-scan high-quality, ~269 s for 320×256.           #
     # ------------------------------------------------------------------ #
@@ -280,12 +322,62 @@ MODE_TABLE: dict[Mode, ModeSpec] = {
     ),
 
     # ------------------------------------------------------------------ #
+    # Scottie S3 / S4 — 128-line variants of S1/S2. Identical timing;    #
+    # only height differs. VIS 52 (S3) / 48 (S4). ~55 s / ~36 s.        #
+    # ------------------------------------------------------------------ #
+    Mode.SCOTTIE_S3: ModeSpec(
+        name=Mode.SCOTTIE_S3,
+        vis_code=0x34,  # 52
+        width=320,
+        height=128,
+        sync_pulse_ms=_SCOTTIE_S1_SYNC_MS,
+        sync_porch_ms=_SCOTTIE_S1_PORCH_MS,
+        line_time_ms=(
+            _SCOTTIE_S1_SYNC_MS
+            + 6 * _SCOTTIE_S1_PORCH_MS
+            + 3 * _SCOTTIE_S1_SCAN_MS
+        ),
+        color_layout=("G", "B", "R"),
+        sync_position=SyncPosition.BEFORE_RED,
+    ),
+    Mode.SCOTTIE_S4: ModeSpec(
+        name=Mode.SCOTTIE_S4,
+        vis_code=0x30,  # 48
+        width=160,
+        height=128,
+        sync_pulse_ms=_SCOTTIE_S1_SYNC_MS,
+        sync_porch_ms=_SCOTTIE_S1_PORCH_MS,
+        line_time_ms=(
+            _SCOTTIE_S1_SYNC_MS
+            + 6 * _SCOTTIE_S1_PORCH_MS
+            + 3 * _SCOTTIE_S2_SCAN_MS
+        ),
+        color_layout=("G", "B", "R"),
+        sync_position=SyncPosition.BEFORE_RED,
+    ),
+
+    # ------------------------------------------------------------------ #
     # PD family — YCbCr line-pair (one sync covers two image rows).       #
     # height = actual_image_height // 2 (number of sync pulses).          #
     # line_time_ms = full super-line period (SYNC + PORCH + 4×channel).   #
     # Decoders output width × (height×2) images.                          #
     # VIS codes: 7 LSBs of PySSTV VIS_CODE constant.                      #
     # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
+    # PD-50 — 320×256 image, ~50 s. Same layout as PD-90; pixel time    #
+    # 0.286 ms instead of 0.532 ms. VIS 93 (0x5D).                      #
+    # ------------------------------------------------------------------ #
+    Mode.PD_50: ModeSpec(
+        name=Mode.PD_50,
+        vis_code=0x5D,  # 93  — 320×256 image, ~50 s
+        width=320,
+        height=128,     # 256 image rows / 2
+        sync_pulse_ms=_PD_SYNC_MS,
+        sync_porch_ms=_PD_PORCH_MS,
+        line_time_ms=_PD_SYNC_MS + _PD_PORCH_MS + 4 * _PD_50_CHANNEL_SCAN_MS,
+        color_layout=("Y0", "Cr", "Cb", "Y1"),
+        sync_position=SyncPosition.LINE_START,
+    ),
     Mode.PD_90: ModeSpec(
         name=Mode.PD_90,
         vis_code=0x63,  # 99  — 320×256 image, ~90 s

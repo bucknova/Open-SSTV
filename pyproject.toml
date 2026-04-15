@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "open-sstv"
-version = "0.1.20"
+version = "0.1.21"
 description = "Open-source cross-platform SSTV transceiver for amateur radio."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -75,6 +75,7 @@ testpaths = ["tests"]
 markers = [
     "gui: marks tests that require a Qt display (deselect with -m 'not gui')",
     "integration: marks tests that require external services (e.g. rigctld)",
+    "slow: marks tests that take >10 s of wall time (deselect with -m 'not slow')",
 ]
 
 [tool.ruff]
