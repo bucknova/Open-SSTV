@@ -95,6 +95,7 @@ class ImageEditorDialog(QDialog):
         self._callsign = callsign
         self._text_overlays: list[dict] = []
         self._result_image: PILImage | None = None
+        self._result_base_image: PILImage | None = None
 
         # Target aspect ratio — use display_height for PD modes where
         # spec.height is the sync-pulse count (half the actual image height).
@@ -521,18 +522,30 @@ class ImageEditorDialog(QDialog):
 
     def _on_accept(self) -> None:
         """Build the final image: apply overlays, resize to mode, accept."""
-        img = self._build_display_image()
-        # Resize to mode-native dimensions
-        img = img.resize(
-            (self._target_w, self._target_h),
-            Image.Resampling.LANCZOS,
+        size = (self._target_w, self._target_h)
+        # Base image: cropped/rotated/filtered but NO text overlays.
+        # Used by TxPanel as the "clean" baseline that Clear Text reverts to.
+        self._result_base_image = self._working_image.copy().resize(
+            size, Image.Resampling.LANCZOS,
         )
+        # Full image: base + text overlays baked in.
+        img = self._build_display_image()
+        img = img.resize(size, Image.Resampling.LANCZOS)
         self._result_image = img
         self.accept()
 
     def result_image(self) -> "PILImage | None":
-        """Return the edited image, or None if the dialog was cancelled."""
+        """Return the edited image with text overlays, or None if cancelled."""
         return self._result_image
+
+    def result_base_image(self) -> "PILImage | None":
+        """Return the edited image WITHOUT text overlays, or None if cancelled.
+
+        This is the crop/rotation/filter result before any text was drawn.
+        TxPanel stores it as the "clean" baseline that Clear Text reverts to,
+        so Clear Text removes both template-applied AND manually-added text.
+        """
+        return self._result_base_image
 
 
 __all__ = ["ImageEditorDialog"]

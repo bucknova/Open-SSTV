@@ -315,7 +315,13 @@ class TxPanel(QWidget):
             result = dlg.result_image()
             if result is not None:
                 self._current_image = result
-                self._base_image = result.copy()
+                # Use the text-free base so "Clear Text" removes ALL
+                # overlays (template-applied AND manually-added in the
+                # editor).  Falls back to a copy of the full result if
+                # the editor didn't provide a separate base (shouldn't
+                # happen, but defensive).
+                base = dlg.result_base_image()
+                self._base_image = base if base is not None else result.copy()
                 self._preview_source = _pil_to_pixmap(result)
                 self._update_preview_pixmap()
                 self._preview.setText("")
