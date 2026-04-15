@@ -11,6 +11,23 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.19] — 2026-04-14
+
+### Added
+- **TX banner** — optional identification strip stamped on every transmitted image
+  (not the test tone). The strip is `BANNER_HEIGHT = 24` pixels tall, spans the full
+  image width, and shows "Open-SSTV v{version}" centred and the callsign flush-right.
+  Implemented in `core/banner.py` (`apply_tx_banner`) using Pillow `ImageDraw`; applied
+  in `TxWorker.transmit()` after any image-editor crop/overlay but before `encode()`.
+  Off by default. Configure via Settings → Images → TX Banner:
+  - **Enable banner** checkbox.
+  - **Background colour** swatch button (default `#202020`).
+  - **Text colour** swatch button (default `#FFFFFF`).
+  Three new `AppConfig` fields: `tx_banner_enabled`, `tx_banner_bg_color`,
+  `tx_banner_text_color`.
+
+---
+
 ## [0.1.18] — 2026-04-14
 
 ### Fixed

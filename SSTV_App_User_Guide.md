@@ -514,6 +514,13 @@ Open the settings dialog via **File > Settings** (or the menu shortcut). It has 
 | Default TX Mode | SSTV mode pre-selected in the Transmit panel mode dropdown | Martin M1 |
 | Auto-save | Automatically save every decoded image to the save directory | Off |
 | Save Directory | Folder for saved and auto-saved images (browse button to pick) | ~/Pictures/open_sstv |
+| **TX Banner — Enable** | Stamp a header strip on every transmitted image | Off |
+| **TX Banner — Background** | Banner background colour (click swatch to pick) | #202020 |
+| **TX Banner — Text** | Banner text colour (click swatch to pick) | #FFFFFF |
+
+**TX Banner** stamps a 24-pixel-tall strip across the top of every transmitted image (not the test tone). The strip shows "Open-SSTV v{version}" centred and your callsign flush-right. It is applied after all image-editor crops and text overlays, immediately before SSTV encoding — so the strip is always the outermost layer.
+
+> **Note:** The banner overlays the top 24 rows of the image, not additional rows. SSTV mode dimensions are unchanged.
 
 ![Images settings tab](docs/screenshots/settings-images.png)
 

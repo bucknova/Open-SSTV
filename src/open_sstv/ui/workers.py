@@ -212,6 +212,10 @@ class TxWorker(QObject):
         self._cw_callsign: str = ""
         self._cw_wpm: int = 20
         self._cw_tone_hz: int = 800
+        self._tx_banner_enabled: bool = False
+        self._tx_banner_callsign: str = ""
+        self._tx_banner_bg_color: str = "#202020"
+        self._tx_banner_text_color: str = "#FFFFFF"
         self._stop_event = threading.Event()
         self._watchdog_triggered: bool = False
 
@@ -277,6 +281,36 @@ class TxWorker(QObject):
         self._cw_wpm = wpm
         self._cw_tone_hz = tone_hz
 
+    def set_tx_banner(
+        self,
+        enabled: bool,
+        callsign: str,
+        bg_color: str = "#202020",
+        text_color: str = "#FFFFFF",
+    ) -> None:
+        """Configure the TX header banner stamped on every SSTV transmission.
+
+        Thread-safe: all fields are plain Python scalars/strings.
+        Called from the GUI thread via ``MainWindow._apply_config()``.
+
+        Parameters
+        ----------
+        enabled:
+            Whether to stamp the banner.  When ``False`` the image is
+            passed to ``encode()`` unchanged.
+        callsign:
+            Operator callsign shown flush-right in the banner.  Empty
+            string omits the callsign column.
+        bg_color:
+            CSS hex background colour, e.g. ``"#202020"``.
+        text_color:
+            CSS hex text colour, e.g. ``"#FFFFFF"``.
+        """
+        self._tx_banner_enabled = enabled
+        self._tx_banner_callsign = callsign.strip().upper()
+        self._tx_banner_bg_color = bg_color
+        self._tx_banner_text_color = text_color
+
     def emergency_unkey(self) -> None:
         """Best-effort PTT-off for the shutdown path.
 
@@ -313,6 +347,18 @@ class TxWorker(QObject):
         watchdog.start()
 
         try:
+            # --- Apply TX banner (if enabled) ---
+            if self._tx_banner_enabled:
+                from open_sstv import __version__
+                from open_sstv.core.banner import apply_tx_banner
+                image = apply_tx_banner(
+                    image,
+                    __version__,
+                    self._tx_banner_callsign,
+                    self._tx_banner_bg_color,
+                    self._tx_banner_text_color,
+                )
+
             # --- Encode (CPU-bound, ~100 ms for the modes we ship) ---
             try:
                 samples = encode(image, mode, sample_rate=self._sample_rate)

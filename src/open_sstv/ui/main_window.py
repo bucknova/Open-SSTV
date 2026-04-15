@@ -465,6 +465,12 @@ class MainWindow(QMainWindow):
         self._rx_worker.set_input_gain(self._config.audio_input_gain)
         self._rx_worker.set_weak_signal(self._config.rx_weak_signal_mode)
         self._rx_worker.set_final_slant_correction(self._config.apply_final_slant_correction)
+        self._tx_worker.set_tx_banner(
+            self._config.tx_banner_enabled,
+            self._config.callsign,
+            self._config.tx_banner_bg_color,
+            self._config.tx_banner_text_color,
+        )
         self._tx_worker.set_cw_id(
             self._config.cw_id_enabled,
             self._config.callsign,

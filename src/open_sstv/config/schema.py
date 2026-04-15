@@ -76,6 +76,14 @@ class AppConfig:
     # Opt-in for clean, timing-drifted signals only.
     apply_final_slant_correction: bool = False
 
+    # --- TX banner ---
+    # v0.1.19: when True, a thin identification strip is stamped across the
+    # top of every transmitted image (not test tone). The strip shows
+    # "Open-SSTV v{version}" centred and the callsign flush-right.
+    tx_banner_enabled: bool = False
+    tx_banner_bg_color: str = "#202020"
+    tx_banner_text_color: str = "#FFFFFF"
+
     # --- CW station ID ---
     # v0.1.14: appended after every SSTV TX (not test tone). Uses the
     # callsign field below. Skipped with a warning if callsign is empty.

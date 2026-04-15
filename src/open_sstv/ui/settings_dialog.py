@@ -20,7 +20,9 @@ import serial.tools.list_ports
 _log = logging.getLogger(__name__)
 
 from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
+    QColorDialog,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -655,6 +657,45 @@ class SettingsDialog(QDialog):
         dir_row.addWidget(browse_btn)
         form.addRow("Save directory:", dir_row)
 
+        # --- TX Banner ---
+        banner_group = QGroupBox("TX Banner")
+        banner_layout = QFormLayout(banner_group)
+
+        self._banner_enabled = QCheckBox(
+            "Stamp Open-SSTV banner on transmitted images"
+        )
+        self._banner_enabled.setToolTip(
+            "Adds a thin identification strip across the top of every\n"
+            "transmitted image (not the test tone). Shows the app version\n"
+            "centred and your callsign flush-right."
+        )
+        self._banner_enabled.setChecked(self._config.tx_banner_enabled)
+        banner_layout.addRow(self._banner_enabled)
+
+        # Background colour swatch button
+        self._banner_bg_color: str = self._config.tx_banner_bg_color
+        self._banner_bg_btn = QPushButton()
+        self._banner_bg_btn.setFixedSize(60, 22)
+        self._banner_bg_btn.setToolTip("Click to choose banner background colour")
+        self._banner_bg_btn.setStyleSheet(
+            f"background-color: {self._banner_bg_color}; border: 1px solid #888;"
+        )
+        self._banner_bg_btn.clicked.connect(self._pick_banner_bg_color)
+        banner_layout.addRow("Background:", self._banner_bg_btn)
+
+        # Text colour swatch button
+        self._banner_text_color: str = self._config.tx_banner_text_color
+        self._banner_text_btn = QPushButton()
+        self._banner_text_btn.setFixedSize(60, 22)
+        self._banner_text_btn.setToolTip("Click to choose banner text colour")
+        self._banner_text_btn.setStyleSheet(
+            f"background-color: {self._banner_text_color}; border: 1px solid #888;"
+        )
+        self._banner_text_btn.clicked.connect(self._pick_banner_text_color)
+        banner_layout.addRow("Text:", self._banner_text_btn)
+
+        form.addRow(banner_group)
+
         return tab
 
     # === Private slots ===
@@ -750,6 +791,28 @@ class SettingsDialog(QDialog):
         if directory:
             self._save_dir.setText(directory)
 
+    def _pick_banner_bg_color(self) -> None:
+        """Open a colour picker for the TX banner background."""
+        color = QColorDialog.getColor(
+            QColor(self._banner_bg_color), self, "Banner background colour"
+        )
+        if color.isValid():
+            self._banner_bg_color = color.name()
+            self._banner_bg_btn.setStyleSheet(
+                f"background-color: {self._banner_bg_color}; border: 1px solid #888;"
+            )
+
+    def _pick_banner_text_color(self) -> None:
+        """Open a colour picker for the TX banner text."""
+        color = QColorDialog.getColor(
+            QColor(self._banner_text_color), self, "Banner text colour"
+        )
+        if color.isValid():
+            self._banner_text_color = color.name()
+            self._banner_text_btn.setStyleSheet(
+                f"background-color: {self._banner_text_color}; border: 1px solid #888;"
+            )
+
     @Slot(bool)
     def _on_overdrive_toggled(self, enabled: bool) -> None:
         """Expand or contract the TX output gain slider range."""
@@ -842,6 +905,9 @@ class SettingsDialog(QDialog):
             callsign=self._callsign.text().strip().upper(),
             images_save_dir=self._save_dir.text(),
             auto_save=self._auto_save.isChecked(),
+            tx_banner_enabled=self._banner_enabled.isChecked(),
+            tx_banner_bg_color=self._banner_bg_color,
+            tx_banner_text_color=self._banner_text_color,
         )
 
     @property
