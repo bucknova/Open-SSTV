@@ -482,8 +482,10 @@ def test_make_incremental_decoder_factory_dispatch() -> None:
     """Factory returns the correct subclass per mode and None for Robot 36."""
     from open_sstv.core.incremental_decoder import (
         MartinIncrementalDecoder,
+        PasokonIncrementalDecoder,
         PDIncrementalDecoder,
         ScottieIncrementalDecoder,
+        WraaseIncrementalDecoder,
         make_incremental_decoder,
     )
 
@@ -496,6 +498,10 @@ def test_make_incremental_decoder_factory_dispatch() -> None:
         (Mode.MARTIN_M4, MartinIncrementalDecoder),
         (Mode.PD_50, PDIncrementalDecoder),
         (Mode.PD_290, PDIncrementalDecoder),
+        (Mode.WRAASE_SC2_120, WraaseIncrementalDecoder),
+        (Mode.WRAASE_SC2_180, WraaseIncrementalDecoder),
+        (Mode.PASOKON_P3, PasokonIncrementalDecoder),
+        (Mode.PASOKON_P7, PasokonIncrementalDecoder),
     ]
     for mode, expected_cls in cases:
         inc = make_incremental_decoder(
@@ -530,3 +536,37 @@ def test_incremental_martin_m1_full_roundtrip() -> None:
     assert len(completes) == 1
     assert completes[0].mode == Mode.MARTIN_M1
     assert completes[0].image.size == (320, 256)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("mode", [Mode.WRAASE_SC2_120, Mode.PASOKON_P3])
+def test_incremental_wraase_pasokon_roundtrip(mode: Mode) -> None:
+    """Wraase SC2 and Pasokon route through their own subclasses and
+    produce a complete image with the correct dimensions.
+
+    Both families are long (≥ 120 s) so the test is marked slow.  Pasokon
+    P3 in particular is ~203 s of synthetic audio; even under pytest the
+    full round-trip takes ~20 s, making this a slow-mode-only regression
+    guard.  Solid-colour fixture is sufficient: we're validating routing
+    and completion, not pixel fidelity (Martin covers that).
+    """
+    fs = 48_000
+    spec = MODE_TABLE[mode]
+    img = _solid_image(spec.width, spec.height)
+    samples_int16 = encode(img, mode, sample_rate=fs)
+    audio = samples_int16.astype(np.float64) / 32768.0
+
+    events = _run_decoder_events(audio, fs, incremental=True)
+    completes = [e for e in events if isinstance(e, ImageComplete)]
+    assert len(completes) == 1, f"{mode.name}: expected 1 ImageComplete"
+    assert completes[0].mode == mode
+    assert completes[0].image.size == (spec.width, spec.height)
+
+    # Sanity: round-tripped mean should be close to the source colour.
+    arr = np.array(completes[0].image)
+    r_mean, g_mean, b_mean = arr[..., 0].mean(), arr[..., 1].mean(), arr[..., 2].mean()
+    assert abs(r_mean - 120) < 25 and abs(g_mean - 80) < 25 and abs(b_mean - 200) < 25, (
+        f"{mode.name} round-trip mean RGB drifted: "
+        f"got ({r_mean:.0f},{g_mean:.0f},{b_mean:.0f}), "
+        f"expected ~(120,80,200)"
+    )

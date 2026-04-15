@@ -274,17 +274,18 @@ class SettingsDialog(QDialog):
         # and any unsupported mode fall back to the batch decoder
         # transparently.
         self._exp_incremental_check = QCheckBox(
-            "Experimental: per-line incremental decode (Scottie / Martin / PD)"
+            "Experimental: per-line incremental decode (all modes except Robot 36)"
         )
         self._exp_incremental_check.setToolTip(
-            "EXPERIMENTAL — Scottie, Martin, and PD families.\n\n"
+            "EXPERIMENTAL — every mode except Robot 36.\n\n"
+            "Covers Scottie, Martin, PD, Wraase SC2, and Pasokon families.\n"
             "Decodes each line as its sync pulse arrives instead of\n"
             "reprocessing the whole buffer on every flush.  Roughly a\n"
             "50× CPU reduction on long receives, and keeps the decoder\n"
             "ahead of real-time on slower machines where the batch path\n"
-            "falls behind mid-image on Martin M1.\n\n"
+            "falls behind mid-image.\n\n"
             "Robot 36 still uses the batch decoder (line-pair dispatch\n"
-            "isn't ported yet).\n\n"
+            "with alternating chroma isn't ported yet).\n\n"
             "Off by default.  If a decode looks wrong, turn this off and\n"
             "file an issue with the saved audio."
         )

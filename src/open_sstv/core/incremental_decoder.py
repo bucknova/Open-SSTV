@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Experimental streaming SSTV decoder — covers Scottie, Martin, and PD.
+"""Experimental streaming SSTV decoder — covers Scottie, Martin, PD, Wraase, Pasokon.
 
 **Status**: Experimental. Enable via
 ``AppConfig.experimental_incremental_decode = True`` (off by default).
@@ -22,22 +22,28 @@ audio window, sync-candidate harvesting with ``walk_sync_grid``, per-line
 window extraction with ``FILTER_MARGIN`` samples of sosfiltfilt padding,
 and audio pruning down to the next expected line's leading edge.
 
-Three concrete subclasses cover all pixel-RGB modes we ship:
+Five concrete subclasses cover every pixel-RGB mode we ship except
+Robot 36:
 
 * ``ScottieIncrementalDecoder`` — ``BEFORE_RED`` Scottie family
   (S1 / S2 / DX / S3 / S4).  Sync lands mid-line; G and B offsets are
   negative relative to the sync pulse.
 * ``MartinIncrementalDecoder`` — ``LINE_START`` Martin family
-  (M1 / M2 / M3 / M4).  One sync + four porches + three equal scans.
+  (M1 / M2 / M3 / M4).  One sync + four porches + three equal GBR scans.
 * ``PDIncrementalDecoder`` — ``LINE_START`` PD family
   (PD-50 / 90 / 120 / 160 / 180 / 240 / 290).  One sync + one porch +
   four equal scans (Y0 / Cr / Cb / Y1); each sync produces **two**
   output image rows.  YCbCr→RGB is done per-pair to match PIL's
   ``Image.frombytes("YCbCr", ...).convert("RGB")`` path exactly.
+* ``WraaseIncrementalDecoder`` — ``LINE_START`` Wraase SC2 family
+  (SC2-120 / SC2-180).  One sync + one porch + three back-to-back RGB
+  scans (no inter-channel gaps).
+* ``PasokonIncrementalDecoder`` — ``LINE_START`` Pasokon family
+  (P3 / P5 / P7).  One sync + four equal gaps + three RGB scans.
 
 Robot 36's line-pair dispatch and alternating chroma don't fit cleanly
-into the per-sync pattern and remain on the batch decoder for now.  They
-are short modes (~36 s) and the batch decoder keeps up with them even on
+into the per-sync pattern and remain on the batch decoder for now.  It
+is a short mode (~36 s) and the batch decoder keeps up with it even on
 modest hardware, so this is a pragmatic trade-off rather than a bug.
 
 Byte-identical guarantee
@@ -622,6 +628,144 @@ class MartinIncrementalDecoder(IncrementalDecoderBase):
 
 
 # ---------------------------------------------------------------------------
+# Wraase SC2 (LINE_START, RGB, no inter-channel gaps)
+# ---------------------------------------------------------------------------
+
+
+class WraaseIncrementalDecoder(IncrementalDecoderBase):
+    """Streaming decoder for Wraase SC2-family modes (SC2-120, SC2-180).
+
+    Layout: sync → porch → R_scan → G_scan → B_scan.  RGB order (not GBR
+    like Martin), and only one porch — the three channel scans run
+    back-to-back with no inter-channel gaps.
+    """
+
+    def __init__(
+        self,
+        spec: ModeSpec,
+        fs: int,
+        vis_end_abs: int,
+        start_abs: int = 0,
+    ) -> None:
+        if spec.sync_position != SyncPosition.LINE_START:
+            raise ValueError(
+                f"WraaseIncrementalDecoder only handles LINE_START modes "
+                f"(got {spec.name!r} with sync_position={spec.sync_position!r})"
+            )
+        super().__init__(spec, fs, vis_end_abs, start_abs)
+
+    def _compute_timing(self, spec: ModeSpec, fs: int) -> None:
+        sync_ms = spec.sync_pulse_ms
+        porch_ms = spec.sync_porch_ms
+        # Mirrors _decode_wraase_rgb: 1 porch + 3 back-to-back scans.
+        scan_ms = (spec.line_time_ms - sync_ms - porch_ms) / 3
+
+        r_offset_ms = sync_ms + porch_ms
+        g_offset_ms = r_offset_ms + scan_ms
+        b_offset_ms = g_offset_ms + scan_ms
+        b_end_ms = b_offset_ms + scan_ms
+
+        self._r_channel_off: float = r_offset_ms / 1000.0 * fs
+        self._g_channel_off: float = g_offset_ms / 1000.0 * fs
+        self._b_channel_off: float = b_offset_ms / 1000.0 * fs
+        self._scan_samp: float = scan_ms / 1000.0 * fs
+
+        self._g_lookback: int = self.FILTER_MARGIN
+        self._r_lookahead: int = int(b_end_ms / 1000.0 * fs) + self.FILTER_MARGIN
+        self._ready_post_sync: int = int(b_end_ms / 1000.0 * fs)
+
+    def _decode_window(
+        self,
+        inst: "NDArray",
+        sync_in_win: int,
+        n: int,
+        grid_index: int,
+    ) -> list[tuple[int, "NDArray[np.uint8]"]]:
+        width = self._spec.width
+        row: NDArray[np.uint8] = np.zeros((width, 3), dtype=np.uint8)
+        row[:, 0] = _sample_pixels_inc(
+            inst, sync_in_win + self._r_channel_off, self._scan_samp, width, n
+        )
+        row[:, 1] = _sample_pixels_inc(
+            inst, sync_in_win + self._g_channel_off, self._scan_samp, width, n
+        )
+        row[:, 2] = _sample_pixels_inc(
+            inst, sync_in_win + self._b_channel_off, self._scan_samp, width, n
+        )
+        self._image[grid_index] = row
+        return [(grid_index, row.copy())]
+
+
+# ---------------------------------------------------------------------------
+# Pasokon (LINE_START, RGB, equal inter-channel gaps on both sides of each scan)
+# ---------------------------------------------------------------------------
+
+
+class PasokonIncrementalDecoder(IncrementalDecoderBase):
+    """Streaming decoder for Pasokon-family modes (P3, P5, P7).
+
+    Layout: sync → gap → R_scan → gap → G_scan → gap → B_scan → gap.
+    Four equal gaps flank the three RGB scans.  ``spec.sync_porch_ms``
+    holds the gap duration (per the ModeSpec convention).
+    """
+
+    def __init__(
+        self,
+        spec: ModeSpec,
+        fs: int,
+        vis_end_abs: int,
+        start_abs: int = 0,
+    ) -> None:
+        if spec.sync_position != SyncPosition.LINE_START:
+            raise ValueError(
+                f"PasokonIncrementalDecoder only handles LINE_START modes "
+                f"(got {spec.name!r} with sync_position={spec.sync_position!r})"
+            )
+        super().__init__(spec, fs, vis_end_abs, start_abs)
+
+    def _compute_timing(self, spec: ModeSpec, fs: int) -> None:
+        sync_ms = spec.sync_pulse_ms
+        gap_ms = spec.sync_porch_ms
+        # Mirrors _decode_pasokon_rgb: 4 gaps + 3 equal scans.
+        scan_ms = (spec.line_time_ms - sync_ms - 4 * gap_ms) / 3
+
+        r_offset_ms = sync_ms + gap_ms
+        g_offset_ms = r_offset_ms + scan_ms + gap_ms
+        b_offset_ms = g_offset_ms + scan_ms + gap_ms
+        b_end_ms = b_offset_ms + scan_ms
+
+        self._r_channel_off: float = r_offset_ms / 1000.0 * fs
+        self._g_channel_off: float = g_offset_ms / 1000.0 * fs
+        self._b_channel_off: float = b_offset_ms / 1000.0 * fs
+        self._scan_samp: float = scan_ms / 1000.0 * fs
+
+        self._g_lookback: int = self.FILTER_MARGIN
+        self._r_lookahead: int = int(b_end_ms / 1000.0 * fs) + self.FILTER_MARGIN
+        self._ready_post_sync: int = int(b_end_ms / 1000.0 * fs)
+
+    def _decode_window(
+        self,
+        inst: "NDArray",
+        sync_in_win: int,
+        n: int,
+        grid_index: int,
+    ) -> list[tuple[int, "NDArray[np.uint8]"]]:
+        width = self._spec.width
+        row: NDArray[np.uint8] = np.zeros((width, 3), dtype=np.uint8)
+        row[:, 0] = _sample_pixels_inc(
+            inst, sync_in_win + self._r_channel_off, self._scan_samp, width, n
+        )
+        row[:, 1] = _sample_pixels_inc(
+            inst, sync_in_win + self._g_channel_off, self._scan_samp, width, n
+        )
+        row[:, 2] = _sample_pixels_inc(
+            inst, sync_in_win + self._b_channel_off, self._scan_samp, width, n
+        )
+        self._image[grid_index] = row
+        return [(grid_index, row.copy())]
+
+
+# ---------------------------------------------------------------------------
 # PD (LINE_START, line-pair YCbCr) — sync covers TWO image rows
 # ---------------------------------------------------------------------------
 
@@ -735,8 +879,8 @@ class PDIncrementalDecoder(IncrementalDecoderBase):
 
 
 #: Modes we hand off to the incremental path.  Anything not in this set
-#: stays on the batch decoder (currently: Robot 36, SC2 variants we don't
-#: fully decode yet).
+#: stays on the batch decoder (currently only Robot 36 — its line-pair
+#: + alternating-chroma dispatch doesn't fit the per-sync template).
 _MARTIN_MODES: frozenset[Mode] = frozenset({
     Mode.MARTIN_M1, Mode.MARTIN_M2, Mode.MARTIN_M3, Mode.MARTIN_M4,
 })
@@ -747,6 +891,12 @@ _SCOTTIE_MODES: frozenset[Mode] = frozenset({
 _PD_MODES: frozenset[Mode] = frozenset({
     Mode.PD_50, Mode.PD_90, Mode.PD_120, Mode.PD_160,
     Mode.PD_180, Mode.PD_240, Mode.PD_290,
+})
+_WRAASE_MODES: frozenset[Mode] = frozenset({
+    Mode.WRAASE_SC2_120, Mode.WRAASE_SC2_180,
+})
+_PASOKON_MODES: frozenset[Mode] = frozenset({
+    Mode.PASOKON_P3, Mode.PASOKON_P5, Mode.PASOKON_P7,
 })
 
 
@@ -759,8 +909,8 @@ def make_incremental_decoder(
     """Return an appropriate incremental decoder for ``spec``, or ``None``.
 
     Returns ``None`` for modes that don't yet have an incremental
-    implementation (notably Robot 36).  The caller should fall back to
-    the batch decoder in that case.
+    implementation (currently only Robot 36).  The caller should fall
+    back to the batch decoder in that case.
     """
     mode = spec.name
     if mode in _SCOTTIE_MODES:
@@ -769,6 +919,10 @@ def make_incremental_decoder(
         return MartinIncrementalDecoder(spec, fs, vis_end_abs, start_abs)
     if mode in _PD_MODES:
         return PDIncrementalDecoder(spec, fs, vis_end_abs, start_abs)
+    if mode in _WRAASE_MODES:
+        return WraaseIncrementalDecoder(spec, fs, vis_end_abs, start_abs)
+    if mode in _PASOKON_MODES:
+        return PasokonIncrementalDecoder(spec, fs, vis_end_abs, start_abs)
     return None
 
 
@@ -778,5 +932,7 @@ __all__ = [
     "ScottieS1IncrementalDecoder",  # back-compat alias
     "MartinIncrementalDecoder",
     "PDIncrementalDecoder",
+    "WraaseIncrementalDecoder",
+    "PasokonIncrementalDecoder",
     "make_incremental_decoder",
 ]
