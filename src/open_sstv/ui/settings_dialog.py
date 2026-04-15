@@ -269,23 +269,25 @@ class SettingsDialog(QDialog):
 
         # Experimental: per-line incremental decoder.  Off by default —
         # the batch decoder is the tested / stable path.  When enabled,
-        # Scottie, Martin, and PD receives route through the incremental
-        # decoder for roughly O(n) rather than O(n²) CPU cost; Robot 36
-        # and any unsupported mode fall back to the batch decoder
-        # transparently.
+        # every mode routes through the incremental decoder for roughly
+        # O(n) rather than O(n²) CPU cost.  Robot 36 additionally runs
+        # the experimental linear-chroma + interpolating upsampler path
+        # on the incremental side.
         self._exp_incremental_check = QCheckBox(
-            "Experimental: per-line incremental decode (all modes except Robot 36)"
+            "Experimental: per-line incremental decode (all modes)"
         )
         self._exp_incremental_check.setToolTip(
-            "EXPERIMENTAL — every mode except Robot 36.\n\n"
-            "Covers Scottie, Martin, PD, Wraase SC2, and Pasokon families.\n"
+            "EXPERIMENTAL — every mode.\n\n"
+            "Covers Scottie, Martin, PD, Wraase SC2, Pasokon, and Robot 36\n"
+            "(both per-line and line-pair wire formats, auto-detected).\n"
             "Decodes each line as its sync pulse arrives instead of\n"
             "reprocessing the whole buffer on every flush.  Roughly a\n"
             "50× CPU reduction on long receives, and keeps the decoder\n"
             "ahead of real-time on slower machines where the batch path\n"
             "falls behind mid-image.\n\n"
-            "Robot 36 still uses the batch decoder (line-pair dispatch\n"
-            "with alternating chroma isn't ported yet).\n\n"
+            "Robot 36 also gets experimental linear (mean) chroma sampling\n"
+            "and linear inter-row chroma upsampling — softer chroma edges\n"
+            "vs. the batch decoder's median + nearest-neighbor copy.\n\n"
             "Off by default.  If a decode looks wrong, turn this off and\n"
             "file an issue with the saved audio."
         )

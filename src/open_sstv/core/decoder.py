@@ -81,6 +81,10 @@ from open_sstv.core.demod import (
 )
 from open_sstv.core.dsp_utils import bandpass_sos
 from open_sstv.core.modes import MODE_TABLE, Mode, ModeSpec, mode_from_vis
+from open_sstv.core.robot36_dsp import (
+    sample_scan as _robot36_sample_scan,
+    ycbcr_to_rgb as _robot36_ycbcr_to_rgb,
+)
 from open_sstv.core.slant import slant_corrected_line_starts
 from open_sstv.core.sync import find_sync_candidates, walk_sync_grid
 from open_sstv.core.vis import detect_vis
@@ -269,11 +273,17 @@ def _decode_robot36(
     *,
     cancel: threading.Event | None = None,
 ) -> Image.Image | None:
-    """Slice a frequency track into a Robot 36 YCbCr image.
+    """Slice a frequency track into a Robot 36 YCbCr image (per-line format).
 
-    See the module docstring for the per-line layout. ``line_starts`` is
-    the list of sample indices where each scan line begins (one per
-    image row, ``spec.height`` long).
+    Delegates per-pixel sampling and YCbCr→RGB to the slowrx port in
+    ``core.robot36_dsp``: single-sample-with-5-sample-mean reads (no
+    chroma floor, no right-edge guard), then slowrx's integer matrix
+    for the colour conversion.  See that module's docstring for why
+    this is not the shared ``_sample_pixels`` path that every other
+    mode uses.
+
+    ``line_starts`` is the list of sample indices where each scan line
+    begins (one per image row, ``spec.height`` long).
     """
     width = spec.width
     height = spec.height
@@ -286,15 +296,14 @@ def _decode_robot36(
     porch_ms = 1.5
     c_scan_ms = 44.0
 
-    sync_samples = sync_ms / 1000.0 * fs
-    sync_porch_samples = sync_porch_ms / 1000.0 * fs
+    y_offset_samples = (sync_ms + sync_porch_ms) / 1000.0 * fs
+    c_offset_samples = (
+        (sync_ms + sync_porch_ms + y_scan_ms + inter_ch_gap_ms + porch_ms)
+        / 1000.0
+        * fs
+    )
     y_scan_samples = y_scan_ms / 1000.0 * fs
-    inter_ch_gap_samples = inter_ch_gap_ms / 1000.0 * fs
-    porch_samples = porch_ms / 1000.0 * fs
     c_scan_samples = c_scan_ms / 1000.0 * fs
-
-    y_offset = sync_samples + sync_porch_samples
-    c_offset = y_offset + y_scan_samples + inter_ch_gap_samples + porch_samples
 
     y_plane = np.zeros((height, width), dtype=np.uint8)
     # Cb/Cr neutral midpoint is 128 — initializing to 0 would produce a
@@ -306,41 +315,33 @@ def _decode_robot36(
     for row, line_start in enumerate(line_starts):
         if cancel is not None and cancel.is_set():
             return None
-        y_start = line_start + y_offset
-        c_start = line_start + c_offset
-        y_row = _sample_pixels(inst, y_start, y_scan_samples, width, n)
-        c_row = _sample_pixels(inst, c_start, c_scan_samples, width, n, chroma=True)
-        y_plane[row] = y_row
+        y_start = line_start + y_offset_samples
+        c_start = line_start + c_offset_samples
+        y_plane[row] = _robot36_sample_scan(inst, y_start, y_scan_samples, width, n)
+        c_row = _robot36_sample_scan(inst, c_start, c_scan_samples, width, n)
         # PySSTV: even lines (row%2 == 0) carry Cr, odd lines carry Cb.
-        # We fill the matching plane on the line that sent the chroma; the
-        # other plane keeps its neutral-128 default and is filled in by
-        # the neighbor-pair pass below.
         if row % 2 == 0:
             cr_plane[row] = c_row
         else:
             cb_plane[row] = c_row
 
-    # Chroma subsampling: each line only carries one of the two chroma
-    # channels, so we copy the missing chroma from the adjacent line in
-    # the same Y/Cb/Cr pair. (Real Robot 36 decoders can interpolate; for
-    # v1 we use nearest-neighbor copy, which is what slowrx does.)
+    # Nearest-neighbour chroma upsample: each line carries only one of
+    # Cr / Cb, so copy the missing component from the adjacent line.
+    # slowrx's model — we experimented with linear interpolation between
+    # rows in the incremental decoder and found it added complexity
+    # without meaningful image-quality gain.
     for row in range(height):
         if row % 2 == 0:
-            # Need Cb from the next line (or previous if at the very end).
             src = row + 1 if row + 1 < height else row - 1
             cb_plane[row] = cb_plane[src]
         else:
             src = row - 1 if row - 1 >= 0 else row + 1
             cr_plane[row] = cr_plane[src]
 
-    ycbcr = np.stack([y_plane, cb_plane, cr_plane], axis=-1)
-    # Construct via ``frombytes`` rather than ``fromarray(mode="YCbCr")``:
-    # Pillow 13 deprecates the explicit ``mode`` parameter on ``fromarray``
-    # in favor of auto-detection, which would give us "RGB" instead of
-    # "YCbCr". ``frombytes`` is the modern way to label color space.
-    return Image.frombytes("YCbCr", (width, height), ycbcr.tobytes()).convert(
-        "RGB"
-    )
+    rgb = _robot36_ycbcr_to_rgb(y_plane, cb_plane, cr_plane)
+    # ``mode=`` omitted: Pillow 13 deprecates it; autodetection on a
+    # (H, W, 3) uint8 array produces RGB, which is what we want.
+    return Image.fromarray(rgb)
 
 
 def _decode_robot36_line_pair(
@@ -372,7 +373,8 @@ def _decode_robot36_line_pair(
     Total: 290.5 ms. ``super_starts`` contains ``spec.height // 2``
     indices, one per pair; we produce two Y rows per super-line and
     copy each chroma pair across both rows (nearest-neighbor subsampling,
-    matching ``_decode_robot36``).
+    matching slowrx).  Sampling and YCbCr→RGB both run through
+    ``core.robot36_dsp`` — see the per-line decoder above for rationale.
     """
     width = spec.width
     height = spec.height
@@ -408,14 +410,10 @@ def _decode_robot36_line_pair(
         row_odd = row_even + 1
         if row_odd >= height:
             break
-        y_plane[row_even] = _sample_pixels(
-            inst, sup + y0_off, y_span, width, n
-        )
-        y_plane[row_odd] = _sample_pixels(
-            inst, sup + y1_off, y_span, width, n
-        )
-        cr_row = _sample_pixels(inst, sup + cr_off, c_span, width, n, chroma=True)
-        cb_row = _sample_pixels(inst, sup + cb_off, c_span, width, n, chroma=True)
+        y_plane[row_even] = _robot36_sample_scan(inst, sup + y0_off, y_span, width, n)
+        y_plane[row_odd] = _robot36_sample_scan(inst, sup + y1_off, y_span, width, n)
+        cr_row = _robot36_sample_scan(inst, sup + cr_off, c_span, width, n)
+        cb_row = _robot36_sample_scan(inst, sup + cb_off, c_span, width, n)
         # Both rows in the pair share the pair's chroma (nearest-neighbor
         # upsample from the 320×(height/2) chroma grid).
         cr_plane[row_even] = cr_row
@@ -423,10 +421,10 @@ def _decode_robot36_line_pair(
         cb_plane[row_even] = cb_row
         cb_plane[row_odd] = cb_row
 
-    ycbcr = np.stack([y_plane, cb_plane, cr_plane], axis=-1)
-    return Image.frombytes("YCbCr", (width, height), ycbcr.tobytes()).convert(
-        "RGB"
-    )
+    rgb = _robot36_ycbcr_to_rgb(y_plane, cb_plane, cr_plane)
+    # ``mode=`` omitted: Pillow 13 deprecates it; autodetection on a
+    # (H, W, 3) uint8 array produces RGB, which is what we want.
+    return Image.fromarray(rgb)
 
 
 def _decode_martin_rgb(

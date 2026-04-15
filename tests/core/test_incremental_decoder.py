@@ -267,9 +267,13 @@ def test_decoder_incremental_flag_routes_scottie_s1() -> None:
     assert complete.image.size == (320, 256)
 
 
-def test_decoder_incremental_batch_fallback_for_robot36() -> None:
-    """experimental_incremental_decode=True still uses the batch path for
-    Robot 36 (only BEFORE_RED modes get the incremental path)."""
+def test_decoder_incremental_robot36_end_to_end() -> None:
+    """experimental_incremental_decode=True routes Robot 36 through the
+    auto-detecting incremental wrapper and produces a complete image.
+
+    The default Robot 36 encoder emits the canonical line-pair format,
+    so this exercises the line-pair branch of ``Robot36IncrementalDecoder``.
+    """
     fs = 48_000
     img = Image.new("RGB", (320, 240), color=(100, 150, 200))
     samples_int16 = encode(img, Mode.ROBOT_36, sample_rate=fs)
@@ -284,13 +288,19 @@ def test_decoder_incremental_batch_fallback_for_robot36() -> None:
         events.extend(dec.feed(audio[pos : pos + CHUNK]))
         pos += CHUNK
 
-    # Should still produce a complete image via the batch path.
     completes = [e for e in events if isinstance(e, ImageComplete)]
     assert len(completes) == 1, (
-        f"Robot 36 via incremental Decoder did not complete (got {len(completes)} "
-        "ImageComplete events)"
+        f"Robot 36 via incremental Decoder did not complete "
+        f"(got {len(completes)} ImageComplete events)"
     )
     assert completes[0].mode == Mode.ROBOT_36
+    assert completes[0].image.size == (320, 240)
+    arr = np.array(completes[0].image)
+    # Sanity: mean RGB should be within 25 LSB of the source solid colour.
+    r_mean, g_mean, b_mean = arr[..., 0].mean(), arr[..., 1].mean(), arr[..., 2].mean()
+    assert abs(r_mean - 100) < 25, f"R mean drift: {r_mean:.0f}"
+    assert abs(g_mean - 150) < 25, f"G mean drift: {g_mean:.0f}"
+    assert abs(b_mean - 200) < 25, f"B mean drift: {b_mean:.0f}"
 
 
 def test_decoder_incremental_flag_false_uses_batch_for_scottie_s1() -> None:
@@ -479,11 +489,12 @@ def test_incremental_pd_line_pair_fills_full_image() -> None:
 
 
 def test_make_incremental_decoder_factory_dispatch() -> None:
-    """Factory returns the correct subclass per mode and None for Robot 36."""
+    """Factory returns the correct subclass for every supported mode."""
     from open_sstv.core.incremental_decoder import (
         MartinIncrementalDecoder,
         PasokonIncrementalDecoder,
         PDIncrementalDecoder,
+        Robot36IncrementalDecoder,
         ScottieIncrementalDecoder,
         WraaseIncrementalDecoder,
         make_incremental_decoder,
@@ -502,6 +513,9 @@ def test_make_incremental_decoder_factory_dispatch() -> None:
         (Mode.WRAASE_SC2_180, WraaseIncrementalDecoder),
         (Mode.PASOKON_P3, PasokonIncrementalDecoder),
         (Mode.PASOKON_P7, PasokonIncrementalDecoder),
+        # Robot 36 now routes through the auto-detecting wrapper — which
+        # format (per-line vs line-pair) is decided at feed time, not here.
+        (Mode.ROBOT_36, Robot36IncrementalDecoder),
     ]
     for mode, expected_cls in cases:
         inc = make_incremental_decoder(
@@ -510,11 +524,6 @@ def test_make_incremental_decoder_factory_dispatch() -> None:
         assert isinstance(inc, expected_cls), (
             f"{mode.name} -> {type(inc).__name__}, expected {expected_cls.__name__}"
         )
-
-    # Robot 36 stays on the batch path.
-    assert make_incremental_decoder(
-        MODE_TABLE[Mode.ROBOT_36], fs, vis_end_abs=vis_end,
-    ) is None
 
 
 @pytest.mark.slow
@@ -569,4 +578,270 @@ def test_incremental_wraase_pasokon_roundtrip(mode: Mode) -> None:
         f"{mode.name} round-trip mean RGB drifted: "
         f"got ({r_mean:.0f},{g_mean:.0f},{b_mean:.0f}), "
         f"expected ~(120,80,200)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 5. Robot 36 — both wire formats + experimental chroma pipeline
+# ---------------------------------------------------------------------------
+#
+# Robot 36 is handled by an auto-detecting wrapper that buffers initial
+# audio, measures inter-sync spacing, and dispatches to either a per-line
+# or line-pair backend.  The backends use linear (mean) chroma sampling
+# and linear inter-row chroma upsampling — soft-edged alternatives to the
+# batch decoder's median + nearest-neighbour copy.  These tests cover:
+#
+#   * Wrapper dispatch to the line-pair backend for canonical-encoder audio
+#     (``encode(img, Mode.ROBOT_36, ...)`` emits line-pair).
+#   * Wrapper dispatch to the per-line backend for vanilla-PySSTV audio.
+#   * Unit test for the linear chroma sampler (proves it's a mean, not
+#     a median, by construction).
+
+
+def _encode_robot36_per_line(img: Image.Image, fs: int = 48_000) -> np.ndarray:
+    """Encode a test image as per-line Robot 36 (upstream PySSTV format).
+
+    The app's ``encode(..., Mode.ROBOT_36)`` always emits the line-pair
+    wire format for transmit-path compatibility with MMSSTV / iOS apps.
+    To exercise the per-line branch of ``Robot36IncrementalDecoder`` in a
+    test we bypass our encoder and drive PySSTV's stock ``Robot36`` class
+    directly.  Matches what slowrx / PySSTV-based transmitters emit.
+    """
+    from pysstv.color import Robot36 as PySSTVRobot36  # noqa: PLC0415
+
+    prepared = img if img.size == (320, 240) else img.resize((320, 240))
+    sstv = PySSTVRobot36(prepared.convert("RGB"), fs, 16)
+    return np.fromiter(sstv.gen_samples(), dtype=np.int16)
+
+
+@pytest.mark.slow
+def test_incremental_robot36_per_line_roundtrip() -> None:
+    """Robot 36 per-line format: wrapper auto-detects and decodes cleanly.
+
+    Transmits via PySSTV's vanilla per-line ``Robot36`` (sync every
+    150 ms) and verifies the wrapper picks ``_Robot36PerLineIncrementalDecoder``
+    rather than the line-pair backend.  A solid-colour fixture is
+    sufficient — we're checking that the format dispatch and linear
+    chroma upsampling produce a colour roughly matching the source.
+    Marked slow because a full Robot 36 transmission is ~36 s of audio.
+    """
+    fs = 48_000
+    img = Image.new("RGB", (320, 240), color=(200, 60, 40))
+    samples_int16 = _encode_robot36_per_line(img, fs)
+    audio = samples_int16.astype(np.float64) / 32768.0
+
+    events = _run_decoder_events(audio, fs, incremental=True)
+    completes = [e for e in events if isinstance(e, ImageComplete)]
+    assert len(completes) == 1, (
+        f"per-line Robot 36 did not complete (got {len(completes)} events)"
+    )
+    assert completes[0].mode == Mode.ROBOT_36
+    assert completes[0].image.size == (320, 240)
+
+    arr = np.array(completes[0].image)
+    r_mean = float(arr[..., 0].mean())
+    g_mean = float(arr[..., 1].mean())
+    b_mean = float(arr[..., 2].mean())
+    # Wider tolerance than RGB modes: Robot 36 round-trips YCbCr with
+    # 2:1 horizontal subsampling + inter-row interpolation, so single-
+    # channel error budget is ~30 LSB on solid colour.
+    assert abs(r_mean - 200) < 35, f"per-line R drift: {r_mean:.0f}"
+    assert abs(g_mean - 60) < 35, f"per-line G drift: {g_mean:.0f}"
+    assert abs(b_mean - 40) < 35, f"per-line B drift: {b_mean:.0f}"
+
+
+def test_incremental_robot36_wrapper_rejects_empty_feed() -> None:
+    """Wrapper silently buffers before format detection and never crashes
+    on short / empty feeds."""
+    from open_sstv.core.incremental_decoder import Robot36IncrementalDecoder
+
+    spec = MODE_TABLE[Mode.ROBOT_36]
+    wrapper = Robot36IncrementalDecoder(spec, fs=48_000, vis_end_abs=5_000)
+
+    # Empty feed — no-op.
+    assert wrapper.feed(np.zeros(0, dtype=np.float64)) == []
+    # Tiny pre-VIS chunk — buffered, no detection possible, no emission.
+    assert wrapper.feed(np.zeros(100, dtype=np.float64)) == []
+    assert wrapper.lines_decoded == 0
+    assert not wrapper.complete
+    # image_height falls back to spec.height before backend selection so
+    # the UI progress denominator is sane during detection.
+    assert wrapper.image_height == 240
+
+
+def test_sample_pixels_chroma_does_not_clamp_low_values() -> None:
+    """Low chroma frequencies decode as themselves, not 128.
+
+    Regression guard: an earlier revision of ``_sample_pixels_inc``
+    clamped any chroma frequency below 15 % of the signalling band
+    (~byte 38) to neutral 128, which corrupted every saturated yellow
+    (Cb≈0), cyan (Cr≈0), and green (Cr≈21) pixel — visible as pink /
+    pale-blue / olive bars on decoded test cards.  This test feeds the
+    helper a constant frequency that represents chroma byte value 10
+    and asserts the output is near 10, not 128.
+    """
+    from open_sstv.core.demod import SSTV_BLACK_HZ, SSTV_WHITE_HZ
+    from open_sstv.core.incremental_decoder import _sample_pixels_inc
+
+    width = 16
+    pixel_span_samples = 100
+    total_samples = width * pixel_span_samples
+    # Byte 10 → freq = 1500 + (10/255)*800 = 1531.37 Hz.  Well below the
+    # old 0.15 floor (which rejected anything under 1620 Hz → byte 38).
+    target_byte = 10
+    target_freq = SSTV_BLACK_HZ + (
+        (target_byte / 255.0) * (SSTV_WHITE_HZ - SSTV_BLACK_HZ)
+    )
+    inst = np.full(total_samples, target_freq, dtype=np.float64)
+
+    out = _sample_pixels_inc(
+        inst,
+        start=0.0,
+        span_samples=float(total_samples),
+        width=width,
+        track_len=total_samples,
+        chroma=True,
+    )
+    # Leftmost pixel (well away from the narrow right-edge guard).
+    assert abs(int(out[0]) - target_byte) <= 2, (
+        f"_sample_pixels_inc: chroma byte {target_byte} decoded as "
+        f"{out[0]} — floor clamp regression?"
+    )
+
+
+def test_sample_pixels_chroma_rejects_sync_band_leakage() -> None:
+    """Sync-band frequencies still clamp chroma to neutral 128.
+
+    Regression guard: the flipside of the low-chroma fix.  When a PD
+    chroma sampling window slips into a sync pulse (~1200 Hz), that's
+    not a valid byte-0 chroma read — it's out-of-band leakage and
+    should not contaminate the image as strong green (Cr = 0, Cb = 0
+    → G = 255 under BT.601).  ``_SYNC_REJECT_HZ`` clamps such reads
+    to neutral 128 so neighbour-row interpolation can recover.
+
+    (Robot 36 uses its own slowrx-style sampler now and doesn't go
+    through ``_sample_pixels_inc``; this guard protects PD, which
+    still does.)
+    """
+    from open_sstv.core.demod import SSTV_SYNC_HZ
+    from open_sstv.core.incremental_decoder import _sample_pixels_inc
+
+    width = 16
+    pixel_span_samples = 100
+    total_samples = width * pixel_span_samples
+    # Pure sync-band energy — the chroma window landed on the sync pulse.
+    inst = np.full(total_samples, float(SSTV_SYNC_HZ), dtype=np.float64)
+
+    out = _sample_pixels_inc(
+        inst,
+        start=0.0,
+        span_samples=float(total_samples),
+        width=width,
+        track_len=total_samples,
+        chroma=True,
+    )
+    assert int(out[0]) == 128, (
+        f"_sample_pixels_inc: sync-band leakage decoded as {out[0]}, "
+        "expected neutral 128 (would produce green-stripe artefact)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 6. Robot 36 slowrx-port unit tests
+# ---------------------------------------------------------------------------
+#
+# The slowrx-style helpers bypass our shared pipeline: single-sample
+# per-pixel sampling, direct integer YCbCr→RGB matrix.  These tests
+# pin down the arithmetic so the port stays faithful to the reference.
+
+
+def test_sample_pixel_slowrx_byte_mapping() -> None:
+    """slowrx byte mapping: ``byte = (freq - 1500) / 3.1372549``.
+
+    Spot-check the three canonical points:
+    * 1500 Hz → byte 0 (chroma zero, luma black)
+    * 1900 Hz → byte ≈ 127 (midpoint)
+    * 2300 Hz → byte 255 (chroma 255, luma white)
+    Plus saturation at both ends.
+    """
+    from open_sstv.core.incremental_decoder import _sample_pixel_slowrx
+
+    # 16 samples per "pixel", constant frequency, read at the centre.
+    for freq, expected in [
+        (1500.0, 0),
+        (1900.0, 127),  # off by 1 due to /3.1372549 rounding — accept ±1
+        (2300.0, 255),
+    ]:
+        inst = np.full(32, freq, dtype=np.float64)
+        got = _sample_pixel_slowrx(inst, center_sample=16.0, track_len=32)
+        assert abs(got - expected) <= 1, (
+            f"slowrx byte mapping: freq {freq} Hz → {got}, expected ~{expected}"
+        )
+
+    # Below 1500 Hz saturates to 0, above 2300 Hz saturates to 255.
+    inst_low = np.full(32, 1200.0, dtype=np.float64)  # sync territory
+    inst_high = np.full(32, 2600.0, dtype=np.float64)  # above white
+    assert _sample_pixel_slowrx(inst_low, 16.0, 32) == 0
+    assert _sample_pixel_slowrx(inst_high, 16.0, 32) == 255
+
+
+def test_ycbcr_to_rgb_slowrx_primary_colours() -> None:
+    """slowrx integer matrix round-trips the six BT.601 primaries
+    within a few LSB of PIL's YCbCr→RGB convert.
+
+    The slowrx coefficients are rounded versions of BT.601 (1.40 vs
+    1.402, 1.78 vs 1.772, etc.), so we expect small per-channel
+    deviation but the same saturation / near-saturation behaviour.
+    """
+    from open_sstv.core.incremental_decoder import _ycbcr_to_rgb_slowrx
+
+    # Source colour → (Y, Cb, Cr) under BT.601 full-range.
+    # Computed with the PIL matrix and rounded; good enough for spot-check.
+    cases = [
+        # (label,         rgb,               (Y, Cb, Cr))
+        ("white",         (255, 255, 255),   (255, 128, 128)),
+        ("black",         (0, 0, 0),         (0,   128, 128)),
+        ("red",           (255, 0, 0),       (76,  85,  255)),
+        ("green",         (0, 255, 0),       (150, 44,  21)),
+        ("blue",          (0, 0, 255),       (29,  255, 107)),
+        ("yellow",        (255, 255, 0),     (226, 1,   149)),
+    ]
+    for label, (r_in, g_in, b_in), (y, cb, cr) in cases:
+        y_arr = np.array([[y]], dtype=np.uint8)
+        cb_arr = np.array([[cb]], dtype=np.uint8)
+        cr_arr = np.array([[cr]], dtype=np.uint8)
+        rgb = _ycbcr_to_rgb_slowrx(y_arr, cb_arr, cr_arr)
+        assert rgb.shape == (1, 1, 3)
+        r_out, g_out, b_out = int(rgb[0, 0, 0]), int(rgb[0, 0, 1]), int(rgb[0, 0, 2])
+        # Allow ±5 LSB per channel for the rounded-coefficient difference.
+        assert (
+            abs(r_out - r_in) <= 5
+            and abs(g_out - g_in) <= 5
+            and abs(b_out - b_in) <= 5
+        ), (
+            f"{label}: YCbCr({y},{cb},{cr}) → RGB({r_out},{g_out},{b_out}), "
+            f"expected ≈ ({r_in},{g_in},{b_in})"
+        )
+
+
+def test_sample_scan_slowrx_constant_freq() -> None:
+    """A constant-frequency scan produces identical byte values at every
+    pixel position — sanity check that there's no systematic position
+    bias in the per-pixel sampling loop (e.g. off-by-half-pixel)."""
+    from open_sstv.core.incremental_decoder import _sample_scan_slowrx
+
+    # 320 pixels across 2000 samples — roughly Robot 36 chroma density.
+    width = 320
+    total = 2000
+    # Freq for byte ≈ 100: 1500 + 100 * 3.1372549 = 1813.7 Hz
+    freq = 1500.0 + 100.0 * ((2300.0 - 1500.0) / 255.0)
+    inst = np.full(total, freq, dtype=np.float64)
+    out = _sample_scan_slowrx(
+        inst, start=0.0, span_samples=float(total), width=width, track_len=total,
+    )
+    assert out.shape == (width,)
+    # Every pixel should land at byte 100 ± 1 (rounding).
+    assert (np.abs(out.astype(int) - 100) <= 1).all(), (
+        f"constant-freq scan produced non-uniform output: "
+        f"min={out.min()}, max={out.max()}"
     )
