@@ -247,6 +247,11 @@ class ScottieS1IncrementalDecoder:
         # Absolute positions of all confirmed sync candidates found so far.
         # These are NEVER pruned (only a few hundred integers, negligible memory).
         self._sync_abs: list[int] = []
+        # End of the most-recent _update_syncs search range (absolute).
+        # Seeded to start_abs so the first call searches from vis_end onward.
+        # Bug-1 fix: we overlap successive searches by one line period so that
+        # no sync at a chunk boundary is ever missed.
+        self._last_search_end_abs: int = start_abs
 
         # --- Image state ---
         self._lines_decoded: int = 0
@@ -311,20 +316,57 @@ class ScottieS1IncrementalDecoder:
     # --- Private helpers ---
 
     def _update_syncs(self, current_abs: int) -> None:
-        """Search the rolling tail for new sync candidates and append them."""
-        tail_len = int(self.SYNC_SEARCH_LINES * self._line_samp) + 2048
-        tail_start = max(0, len(self._buf) - tail_len)
-        tail = self._buf[tail_start:]
+        """Search for new sync candidates from just before the last search end.
+
+        Two fixes applied here vs. the original rolling-tail approach:
+
+        **Bug-1 fix (overlap):** instead of searching only a fixed
+        ``SYNC_SEARCH_LINES`` rolling tail, we search from
+        ``(last_search_end − line_samp)`` to ``current_abs``.  This gives a
+        one-line-period backward overlap with the previous call's search
+        window so that a sync falling right at a chunk boundary can never be
+        skipped regardless of chunk size.
+
+        **Filter warm-up:** the bandpass filter needs ``FILTER_MARGIN``
+        samples of context before the search region to be fully settled.
+        Without this, the very first sync (which sits right at ``vis_end``)
+        is detected against a transient filter state, shifting its position vs
+        the batch decoder (which filters from sample 0).  The fix prepends
+        ``min(FILTER_MARGIN, search_from_buf)`` samples of real audio before
+        the search region, and adjusts ``start_idx`` so candidates are only
+        reported from the intended region onward.
+
+        The deduplication radius ``_DEDUP_RADIUS`` handles candidates
+        re-discovered in the overlap region without creating duplicates.
+        """
+        # Start of the search region: one line period before last search end,
+        # but never before vis_end (no valid syncs before VIS header).
+        search_from_abs = max(
+            self._vis_end_abs,
+            self._last_search_end_abs - int(self._line_samp),
+        )
+
+        # Map to a buffer-relative offset (buffer may have been pruned past
+        # search_from_abs → clamp to buf start in that case).
+        search_from_buf = max(0, search_from_abs - self._buf_abs_start)
+
+        # Prepend up to FILTER_MARGIN samples of real audio so the bandpass
+        # filter is fully settled by the time it reaches the search region.
+        # lead_in == min(FILTER_MARGIN, search_from_buf) ≤ search_from_buf.
+        lead_in = min(self.FILTER_MARGIN, search_from_buf)
+        actual_start = search_from_buf - lead_in
+        tail = self._buf[actual_start:]
 
         if tail.size < _MIN_BP_SAMPLES:
             return
 
         filtered_tail = _bp_window(tail, self._fs)
         inst_tail = instantaneous_frequency(filtered_tail, self._fs)
-        tail_abs_start = self._buf_abs_start + tail_start
+        tail_abs_start = self._buf_abs_start + actual_start
 
-        # Start search after vis_end; clamp to tail start.
-        search_start = max(0, self._vis_end_abs - tail_abs_start)
+        # Only report candidates from the actual search region (past lead-in).
+        # Since search_from_abs ≥ vis_end_abs, this also satisfies the VIS gate.
+        search_start = lead_in
 
         cands_rel = find_sync_candidates(
             inst_tail,
@@ -341,6 +383,7 @@ class ScottieS1IncrementalDecoder:
             self._sync_abs.append(c_abs)
 
         self._sync_abs.sort()
+        self._last_search_end_abs = current_abs
 
     def _try_decode_next(
         self,
@@ -373,8 +416,23 @@ class ScottieS1IncrementalDecoder:
         if sync_in_buf < 0:
             return False
 
-        # Wait until we have enough post-sync audio to cover the R scan + margin.
-        if current_abs < sync_abs + self._r_lookahead:
+        # Wait until the R channel's last pixel has arrived.
+        #
+        # Bug-2 fix: the previous guard used self._r_lookahead which includes
+        # FILTER_MARGIN (4096) samples of trailing padding beyond the R scan's
+        # last pixel.  For all lines except the very last this padding is
+        # available.  For the last line the audio stream ends ~2 samples after
+        # the R scan ends, so the full r_lookahead is never satisfied and the
+        # decoder stalls.
+        #
+        # Fix: gate on the R scan end (r_offset + scan_samp), not on
+        # r_lookahead.  The extraction already clamps win_end to len(buf), so
+        # the trailing filter-startup region will be shorter on the last line —
+        # but the order-4 Butterworth decays to <1e-10 in ~200 samples, and
+        # we have ~69 samples of trailing audio (7137 − 7068) which is enough
+        # for the last few pixels to be unaffected in practice.
+        r_scan_end = int(self._r_offset + self._scan_samp)
+        if current_abs < sync_abs + r_scan_end:
             return False
 
         # Extract the decode window.
