@@ -51,7 +51,7 @@ from PySide6.QtWidgets import (
 )
 
 from open_sstv.core.modes import MODE_TABLE, Mode
-from open_sstv.ui.draw_text import draw_text_overlay
+from open_sstv.ui.draw_text import draw_text_overlay, position_to_xy
 from open_sstv.ui.utils import pil_to_pixmap as _pil_to_pixmap
 
 if TYPE_CHECKING:
@@ -279,13 +279,36 @@ class ImageEditorDialog(QDialog):
             "Top Left", "Top Center", "Top Right",
             "Center",
             "Bottom Left", "Bottom Center", "Bottom Right",
+            "Custom",
         ])
         self._text_position.setCurrentText("Bottom Left")
         self._text_position.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
+        self._text_position.currentTextChanged.connect(self._on_position_preset_changed)
         pos_row.addWidget(self._text_position, stretch=1)
         text_form.addLayout(pos_row)
+
+        # Fine X/Y adjustment — auto-filled from the Position preset,
+        # manually editable for pixel-precise placement.
+        xy_row = QHBoxLayout()
+        xy_row.addWidget(QLabel("X:"))
+        self._text_x = QSpinBox()
+        self._text_x.setRange(0, self._target_w)
+        self._text_x.setSingleStep(5)
+        self._text_x.setSuffix(" px")
+        self._text_x.valueChanged.connect(self._on_text_xy_changed)
+        xy_row.addWidget(self._text_x, stretch=1)
+        xy_row.addWidget(QLabel("Y:"))
+        self._text_y = QSpinBox()
+        self._text_y.setRange(0, self._target_h)
+        self._text_y.setSingleStep(5)
+        self._text_y.setSuffix(" px")
+        self._text_y.valueChanged.connect(self._on_text_xy_changed)
+        xy_row.addWidget(self._text_y, stretch=1)
+        text_form.addLayout(xy_row)
+        # Seed initial X/Y from the default preset.
+        self._sync_xy_from_preset()
 
         add_row = QHBoxLayout()
         self._add_text_btn = QPushButton("Add Text")
@@ -385,6 +408,8 @@ class ImageEditorDialog(QDialog):
             position=overlay["position"],
             size=overlay["size"],
             color=overlay["color"],
+            x=overlay.get("x"),
+            y=overlay.get("y"),
         )
 
     # === Crop ===
@@ -532,11 +557,52 @@ class ImageEditorDialog(QDialog):
                 f"background-color: {color.name()};"
             )
 
+    def _sync_xy_from_preset(self) -> None:
+        """Compute X/Y from the current Position preset and update the
+        spin boxes.  Called when the dropdown changes to a named preset."""
+        pos = self._text_position.currentText()
+        if pos == "Custom":
+            return
+        text = self._text_input.text().strip() or "Ag"  # placeholder for bbox
+        try:
+            from PIL import ImageDraw, ImageFont
+            font = ImageFont.load_default(size=self._font_size.value())
+        except TypeError:
+            from PIL import ImageDraw, ImageFont
+            font = ImageFont.load_default()
+        from PIL import Image as _PILImage
+        tmp = _PILImage.new("RGB", (self._target_w, self._target_h))
+        draw = ImageDraw.Draw(tmp)
+        bbox = draw.textbbox((0, 0), text, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        x, y = position_to_xy(
+            pos, (self._target_w, self._target_h), (tw, th),
+        )
+        self._text_x.blockSignals(True)
+        self._text_y.blockSignals(True)
+        self._text_x.setValue(x)
+        self._text_y.setValue(y)
+        self._text_x.blockSignals(False)
+        self._text_y.blockSignals(False)
+
+    def _on_position_preset_changed(self, text: str) -> None:
+        """When the user picks a named preset, auto-fill X/Y."""
+        if text != "Custom":
+            self._sync_xy_from_preset()
+
+    def _on_text_xy_changed(self) -> None:
+        """When the user manually edits X/Y, switch the dropdown to Custom."""
+        if self._text_position.currentText() != "Custom":
+            self._text_position.blockSignals(True)
+            self._text_position.setCurrentText("Custom")
+            self._text_position.blockSignals(False)
+
     def _add_text_overlay(self) -> None:
         text = self._text_input.text().strip()
         if not text:
             return
-        overlay = {
+        pos = self._text_position.currentText()
+        overlay: dict = {
             "text": text,
             "size": self._font_size.value(),
             "color": (
@@ -544,12 +610,17 @@ class ImageEditorDialog(QDialog):
                 self._text_color.green(),
                 self._text_color.blue(),
             ),
-            "position": self._text_position.currentText(),
+            "position": pos,
         }
+        # Store explicit x/y when set (always populated from spinboxes).
+        overlay["x"] = self._text_x.value()
+        overlay["y"] = self._text_y.value()
         self._text_overlays.append(overlay)
-        self._text_list.addItem(
-            f'"{text}" {overlay["size"]}px @ {overlay["position"]}'
-        )
+        if pos == "Custom":
+            label = f'"{text}" {overlay["size"]}px @ ({overlay["x"]},{overlay["y"]})'
+        else:
+            label = f'"{text}" {overlay["size"]}px @ {pos}'
+        self._text_list.addItem(label)
         self._refresh_preview()
 
     def _remove_text_overlay(self) -> None:

@@ -33,12 +33,21 @@ _TEMPLATES_FILENAME = "templates.toml"
 
 @dataclass
 class QSOTemplateOverlay:
-    """A single text element within a template."""
+    """A single text element within a template.
+
+    When *x* and *y* are both set, they override the named *position*
+    preset with explicit pixel coordinates.  ``None`` (the default)
+    means "compute from the position name at render time."  This keeps
+    existing templates backward-compatible — only templates saved with
+    the new X/Y spin boxes will carry explicit coordinates.
+    """
 
     text: str = ""
     position: str = "Bottom Center"
     size: int = 24
     color: tuple[int, int, int] = (255, 255, 255)
+    x: int | None = None
+    y: int | None = None
 
 
 @dataclass
@@ -173,6 +182,8 @@ def load_templates(path: Path | None = None) -> list[QSOTemplate]:
                         position=ov_raw.get("position", "Bottom Center"),
                         size=ov_raw.get("size", 24),
                         color=tuple(color_raw[:3]) if len(color_raw) >= 3 else (255, 255, 255),
+                        x=ov_raw.get("x"),
+                        y=ov_raw.get("y"),
                     )
                 )
             templates.append(
@@ -207,12 +218,17 @@ def save_templates(
     for tpl in templates:
         tpl_dict: dict = {"name": tpl.name, "overlay": []}
         for ov in tpl.overlays:
-            tpl_dict["overlay"].append({
+            ov_dict: dict = {
                 "text": ov.text,
                 "position": ov.position,
                 "size": ov.size,
                 "color": list(ov.color),
-            })
+            }
+            if ov.x is not None:
+                ov_dict["x"] = ov.x
+            if ov.y is not None:
+                ov_dict["y"] = ov.y
+            tpl_dict["overlay"].append(ov_dict)
         data["template"].append(tpl_dict)
 
     with path.open("wb") as f:

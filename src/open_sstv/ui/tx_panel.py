@@ -383,6 +383,8 @@ class TxPanel(QWidget):
                 position=ov["position"],
                 size=ov["size"],
                 color=ov["color"],
+                x=ov.get("x"),
+                y=ov.get("y"),
             )
         self._current_image = img
         self._preview_source = _pil_to_pixmap(img)
