@@ -55,8 +55,8 @@ runs ``decode_wav`` over the accumulated buffer every time, which is
 O(buffer) and therefore prohibitive if called on every ~20 ms audio
 chunk. The worker absorbs that by accumulating chunks locally and
 only flushing to ``Decoder.feed`` every ``_RX_FLUSH_SAMPLES_DEFAULT``
-samples of audio (2 s at 48 kHz). This turns a 36 s Robot 36
-transmission from ~1800 decode attempts into ~18, each of which
+samples of audio (1 s at 48 kHz). This turns a 36 s Robot 36
+transmission from ~1800 decode attempts into ~36, each of which
 fails fast until the full image is present — leaving plenty of
 headroom on a Pi-class machine.
 
@@ -112,11 +112,15 @@ DEFAULT_PTT_DELAY_S = 0.2
 #: How long to accumulate audio in ``RxWorker`` before flushing a
 #: batch to ``Decoder.feed``.  The batch decoder reprocesses the entire
 #: growing buffer on every flush (O(N) per flush → O(N²) total), so a
-#: longer interval trades responsiveness for lower CPU load.  2 s is the
-#: sweet spot: it halves the decode-attempt count vs. 1 s without
-#: delaying the "image complete" signal by more than one extra second.
+#: longer interval trades responsiveness for lower CPU load.  Reverted
+#: to 1 s in v0.2 for a more responsive "paint-as-you-go" feel —
+#: noticeably snappier on short modes (Robot 36, PD-50) and effectively
+#: free on the experimental incremental decoder (per-sync work, not
+#: per-flush).  The extra CPU cost vs. 2 s only matters for long
+#: Scottie-family receives on the batch path, and even there it stays
+#: well under real-time on any machine from the last decade.
 #: Tune this constant rather than hunting for the magic number in tests.
-_DECODE_FLUSH_INTERVAL_S: float = 2.0
+_DECODE_FLUSH_INTERVAL_S: float = 1.0
 
 #: Derived flush threshold in samples at the default 48 kHz sample rate.
 #: ``RxWorker`` recomputes a per-instance value from the constructor's
