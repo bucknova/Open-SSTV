@@ -20,7 +20,7 @@ import serial.tools.list_ports
 _log = logging.getLogger(__name__)
 
 from PySide6.QtCore import Qt, Signal, Slot
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtWidgets import (
     QColorDialog,
     QCheckBox,
@@ -56,7 +56,9 @@ from open_sstv.audio.devices import (
     list_input_devices,
     list_output_devices,
 )
+from open_sstv import __version__ as _APP_VERSION
 from open_sstv.config.schema import AppConfig
+from open_sstv.core.banner import BANNER_HEIGHT, apply_tx_banner
 from open_sstv.core.modes import Mode
 
 
@@ -694,6 +696,15 @@ class SettingsDialog(QDialog):
         self._banner_text_btn.clicked.connect(self._pick_banner_text_color)
         banner_layout.addRow("Text:", self._banner_text_btn)
 
+        # Live preview — 320×BANNER_HEIGHT real render via apply_tx_banner().
+        self._banner_preview = QLabel()
+        self._banner_preview.setFixedSize(320, BANNER_HEIGHT)
+        self._banner_preview.setToolTip(
+            "Live preview of the banner as it will appear on transmitted images."
+        )
+        banner_layout.addRow("Preview:", self._banner_preview)
+        self._refresh_banner_preview()
+
         form.addRow(banner_group)
 
         return tab
@@ -791,6 +802,30 @@ class SettingsDialog(QDialog):
         if directory:
             self._save_dir.setText(directory)
 
+    def _refresh_banner_preview(self) -> None:
+        """Re-render the banner preview label from the current colour selections.
+
+        Uses the same ``apply_tx_banner`` call that ``TxWorker.transmit``
+        uses, so what you see here is exactly what will be stamped on air.
+        The source image is a 320×240 neutral-gray fill; we crop the top
+        ``BANNER_HEIGHT`` rows as the preview pixmap.
+        """
+        from PIL import Image as _PILImage
+
+        source = _PILImage.new("RGB", (320, 240), (0x80, 0x80, 0x80))
+        banner = apply_tx_banner(
+            source,
+            _APP_VERSION,
+            self._config.callsign,
+            self._banner_bg_color,
+            self._banner_text_color,
+        )
+        strip = banner.crop((0, 0, 320, BANNER_HEIGHT))  # 320×24 RGB
+        raw = strip.tobytes("raw", "RGB")
+        qimg = QImage(raw, strip.width, strip.height, strip.width * 3,
+                      QImage.Format.Format_RGB888)
+        self._banner_preview.setPixmap(QPixmap.fromImage(qimg))
+
     def _pick_banner_bg_color(self) -> None:
         """Open a colour picker for the TX banner background."""
         color = QColorDialog.getColor(
@@ -801,6 +836,7 @@ class SettingsDialog(QDialog):
             self._banner_bg_btn.setStyleSheet(
                 f"background-color: {self._banner_bg_color}; border: 1px solid #888;"
             )
+            self._refresh_banner_preview()
 
     def _pick_banner_text_color(self) -> None:
         """Open a colour picker for the TX banner text."""
@@ -812,6 +848,7 @@ class SettingsDialog(QDialog):
             self._banner_text_btn.setStyleSheet(
                 f"background-color: {self._banner_text_color}; border: 1px solid #888;"
             )
+            self._refresh_banner_preview()
 
     @Slot(bool)
     def _on_overdrive_toggled(self, enabled: bool) -> None:
