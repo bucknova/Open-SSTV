@@ -330,3 +330,203 @@ def test_incremental_decoder_empty_feeds_return_no_lines() -> None:
     assert inc.feed(np.zeros(100, dtype=np.float64)) == []
     assert inc.lines_decoded == 0
     assert not inc.complete
+
+
+# ---------------------------------------------------------------------------
+# 4. Martin (LINE_START) and PD (LINE_START + line-pair) integration
+# ---------------------------------------------------------------------------
+#
+# The same three acceptance criteria as Scottie, now parametrised across
+# the modes that the incremental path covers.  We exercise the full
+# Decoder pipeline (``experimental_incremental_decode=True``) rather than
+# instantiating the subclasses directly — this is the path that matters
+# to users and it catches routing regressions for free.
+
+
+def _solid_image(width: int, height: int) -> Image.Image:
+    """Cheap fixture for Martin/PD round-trip tests.
+
+    A solid-colour image is fine for these tests: we're validating the
+    decoder plumbing, not fine-grained pixel fidelity (the byte-identical
+    guarantee is already exercised on Scottie S1 with a gradient).
+    """
+    return Image.new("RGB", (width, height), color=(120, 80, 200))
+
+
+def _run_decoder_events(
+    audio: np.ndarray, fs: int, *, incremental: bool,
+) -> list:
+    dec = Decoder(fs, experimental_incremental_decode=incremental)
+    events: list = []
+    CHUNK = 96_000
+    pos = 0
+    while pos < len(audio):
+        events.extend(dec.feed(audio[pos : pos + CHUNK]))
+        pos += CHUNK
+    return events
+
+
+@pytest.mark.parametrize(
+    "mode,width,height",
+    [
+        # Shorter Martin variant — keeps default test time reasonable.
+        (Mode.MARTIN_M2, 160, 256),
+        # Shortest PD variant — 50 s image, exercises the line-pair path.
+        (Mode.PD_50, 320, 256),
+    ],
+)
+def test_decoder_incremental_routes_line_start_modes(
+    mode: Mode, width: int, height: int,
+) -> None:
+    """Incremental path handles Martin and PD families end-to-end.
+
+    Verifies: routing (experimental flag on → incremental subclass used),
+    progressive emission (some ImageProgress before ImageComplete), and
+    image completion (exactly one ImageComplete with the right mode and
+    dimensions).
+    """
+    fs = 48_000
+    img = _solid_image(width, height)
+    samples_int16 = encode(img, mode, sample_rate=fs)
+    audio = samples_int16.astype(np.float64) / 32768.0
+
+    events = _run_decoder_events(audio, fs, incremental=True)
+
+    assert any(isinstance(e, ImageStarted) for e in events), "no ImageStarted"
+    progress = [e for e in events if isinstance(e, ImageProgress)]
+    assert len(progress) > 0, (
+        f"{mode.name}: no ImageProgress events — incremental path is not "
+        "streaming lines."
+    )
+    completes = [e for e in events if isinstance(e, ImageComplete)]
+    assert len(completes) == 1, (
+        f"{mode.name}: expected 1 ImageComplete, got {len(completes)}"
+    )
+
+    complete = completes[0]
+    assert complete.mode == mode
+    assert complete.image.size == (width, height)
+
+
+@pytest.mark.parametrize("mode,width,height", [(Mode.MARTIN_M2, 160, 256)])
+def test_incremental_pixel_quality_martin(
+    mode: Mode, width: int, height: int,
+) -> None:
+    """Incremental Martin produces visually equivalent output to batch.
+
+    Same tolerance rationale as the Scottie S1 test: walk_sync_grid fed
+    from rolling windows vs. the full signal can pick slightly different
+    candidate sets, so we allow < 1 % of channels to differ by more than
+    5 LSB rather than requiring byte-for-byte equality.
+    """
+    fs = 48_000
+    img = _solid_image(width, height)
+    samples_int16 = encode(img, mode, sample_rate=fs)
+    audio = samples_int16.astype(np.float64) / 32768.0
+
+    batch_events = _run_decoder_events(audio, fs, incremental=False)
+    inc_events = _run_decoder_events(audio, fs, incremental=True)
+
+    batch_complete = [e for e in batch_events if isinstance(e, ImageComplete)]
+    inc_complete = [e for e in inc_events if isinstance(e, ImageComplete)]
+    assert len(batch_complete) == 1 and len(inc_complete) == 1
+
+    batch_pixels = np.array(batch_complete[0].image)
+    inc_pixels = np.array(inc_complete[0].image)
+    assert batch_pixels.shape == inc_pixels.shape
+
+    diff = np.abs(inc_pixels.astype(int) - batch_pixels.astype(int))
+    n_bad = int((diff > 5).sum())
+    total = inc_pixels.size
+    assert n_bad / total < 0.01, (
+        f"{mode.name}: incremental pixel quality drift too large "
+        f"({n_bad}/{total} = {n_bad/total:.2%} channels differ by > 5 LSB)"
+    )
+
+
+def test_incremental_pd_line_pair_fills_full_image() -> None:
+    """PD super-line emission writes both even and odd rows.
+
+    Regression guard: PD's ``_rows_per_sync = 2`` must paint two image
+    rows per confirmed sync.  A subtle bug (e.g., only painting the even
+    row) would leave every odd row at the default black — detectable by
+    checking the mean luminance of the odd rows.
+    """
+    fs = 48_000
+    img = _solid_image(320, 256)
+    samples_int16 = encode(img, Mode.PD_50, sample_rate=fs)
+    audio = samples_int16.astype(np.float64) / 32768.0
+
+    events = _run_decoder_events(audio, fs, incremental=True)
+    completes = [e for e in events if isinstance(e, ImageComplete)]
+    assert len(completes) == 1
+    pixels = np.array(completes[0].image)  # (256, 320, 3)
+
+    even_mean = float(pixels[0::2].mean())
+    odd_mean = float(pixels[1::2].mean())
+    # A solid-colour source has every row well above black; missing odd
+    # rows would drop the odd-row mean to near 0.
+    assert odd_mean > 30, (
+        f"PD odd-row mean luminance suspiciously low ({odd_mean:.1f}); "
+        "line-pair painting may be broken."
+    )
+    # Even and odd rows come from the same source colour, so their means
+    # should be within a small tolerance of each other.
+    assert abs(even_mean - odd_mean) < 20, (
+        f"PD even/odd row means diverge ({even_mean:.1f} vs {odd_mean:.1f}) — "
+        "Y0/Y1 channel offsets may be wrong."
+    )
+
+
+def test_make_incremental_decoder_factory_dispatch() -> None:
+    """Factory returns the correct subclass per mode and None for Robot 36."""
+    from open_sstv.core.incremental_decoder import (
+        MartinIncrementalDecoder,
+        PDIncrementalDecoder,
+        ScottieIncrementalDecoder,
+        make_incremental_decoder,
+    )
+
+    fs = 48_000
+    vis_end = 10_000
+    cases = [
+        (Mode.SCOTTIE_S1, ScottieIncrementalDecoder),
+        (Mode.SCOTTIE_DX, ScottieIncrementalDecoder),
+        (Mode.MARTIN_M1, MartinIncrementalDecoder),
+        (Mode.MARTIN_M4, MartinIncrementalDecoder),
+        (Mode.PD_50, PDIncrementalDecoder),
+        (Mode.PD_290, PDIncrementalDecoder),
+    ]
+    for mode, expected_cls in cases:
+        inc = make_incremental_decoder(
+            MODE_TABLE[mode], fs, vis_end_abs=vis_end, start_abs=0,
+        )
+        assert isinstance(inc, expected_cls), (
+            f"{mode.name} -> {type(inc).__name__}, expected {expected_cls.__name__}"
+        )
+
+    # Robot 36 stays on the batch path.
+    assert make_incremental_decoder(
+        MODE_TABLE[Mode.ROBOT_36], fs, vis_end_abs=vis_end,
+    ) is None
+
+
+@pytest.mark.slow
+def test_incremental_martin_m1_full_roundtrip() -> None:
+    """Martin M1 (~114 s) through the incremental path produces a clean image.
+
+    This is the regression guard for the specific user bug that motivated
+    the generalisation: batch Martin M1 was falling behind real-time
+    mid-transmission on laptop-class hardware.  Marked slow because the
+    full image takes ~15 s to encode and decode under pytest.
+    """
+    fs = 48_000
+    img = _solid_image(320, 256)
+    samples_int16 = encode(img, Mode.MARTIN_M1, sample_rate=fs)
+    audio = samples_int16.astype(np.float64) / 32768.0
+
+    events = _run_decoder_events(audio, fs, incremental=True)
+    completes = [e for e in events if isinstance(e, ImageComplete)]
+    assert len(completes) == 1
+    assert completes[0].mode == Mode.MARTIN_M1
+    assert completes[0].image.size == (320, 256)

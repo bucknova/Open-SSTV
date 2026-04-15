@@ -1,49 +1,56 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Experimental streaming SSTV decoder — Scottie S1 proof-of-concept.
+"""Experimental streaming SSTV decoder — covers Scottie, Martin, and PD.
 
-**Status**: Experimental / local-only. Enable via
+**Status**: Experimental. Enable via
 ``AppConfig.experimental_incremental_decode = True`` (off by default).
 
 Problem solved
 --------------
 The batch ``Decoder`` reprocesses the full growing audio buffer on every
-2-second flush: O(buffer²) total CPU. For a 110-second Scottie S1 receive
-that means ~18 flushes × average buffer of ~55 s ≈ 990 equivalent
-full-signal passes. This module replaces that with O(1 line period) per
-feed call — a ~50× improvement on a typical Scottie S1 image.
+flush: O(buffer²) total CPU.  For a 110-second Scottie S1 receive that
+means ~18 flushes × average buffer of ~55 s ≈ 990 equivalent full-signal
+passes.  For Martin M1 (~114 s) the same pattern meant the batch path was
+falling behind real-time partway through the image on laptop-class
+hardware.  This module replaces that with O(1 line period) per feed call —
+a ~50× improvement on long modes and, for Martin M1, the difference
+between "fine" and "slideshow".
 
 Architecture
 ------------
-``ScottieS1IncrementalDecoder`` maintains a bounded sliding audio window.
-For each newly confirmed sync pulse it:
+``IncrementalDecoderBase`` owns the common machinery: a bounded sliding
+audio window, sync-candidate harvesting with ``walk_sync_grid``, per-line
+window extraction with ``FILTER_MARGIN`` samples of sosfiltfilt padding,
+and audio pruning down to the next expected line's leading edge.
 
-1. Extracts a fixed-size window of audio centred on the sync position
-   (lookback covers G + filter margin; lookahead covers R + filter margin).
-2. Applies the same zero-phase ``sosfiltfilt`` bandpass as the batch decoder.
-3. Computes instantaneous frequency via Hilbert transform.
-4. Samples RGB pixels with the identical ``_sample_pixels`` algorithm.
-5. Emits a ``(row_index, rgb_array)`` tuple for that line.
-6. Prunes the audio buffer to the start of the *next* expected line's G
-   channel, keeping the window bounded at ~2 × line period.
+Three concrete subclasses cover all pixel-RGB modes we ship:
+
+* ``ScottieIncrementalDecoder`` — ``BEFORE_RED`` Scottie family
+  (S1 / S2 / DX / S3 / S4).  Sync lands mid-line; G and B offsets are
+  negative relative to the sync pulse.
+* ``MartinIncrementalDecoder`` — ``LINE_START`` Martin family
+  (M1 / M2 / M3 / M4).  One sync + four porches + three equal scans.
+* ``PDIncrementalDecoder`` — ``LINE_START`` PD family
+  (PD-50 / 90 / 120 / 160 / 180 / 240 / 290).  One sync + one porch +
+  four equal scans (Y0 / Cr / Cb / Y1); each sync produces **two**
+  output image rows.  YCbCr→RGB is done per-pair to match PIL's
+  ``Image.frombytes("YCbCr", ...).convert("RGB")`` path exactly.
+
+Robot 36's line-pair dispatch and alternating chroma don't fit cleanly
+into the per-sync pattern and remain on the batch decoder for now.  They
+are short modes (~36 s) and the batch decoder keeps up with them even on
+modest hardware, so this is a pragmatic trade-off rather than a bug.
 
 Byte-identical guarantee
 ------------------------
 With ``FILTER_MARGIN = 4096`` samples of sosfiltfilt padding before and
 after each pixel region, the windowed filtered signal is numerically
-identical to what the batch decoder produces on the full signal. The
+identical to what the batch decoder produces on the full signal.  The
 order-4 Butterworth impulse response decays to <1e-10 within ~200
 samples; 4096 is massive overkill that guarantees byte-identical output
-even at the very first line. See ``test_incremental_decoder.py``.
-
-Scope
------
-Scottie S1 only. The architecture generalises to any ``BEFORE_RED``
-Scottie family mode and, with a little extra plumbing, to LINE_START
-modes. Robot 36's line-pair dispatch and YCbCr conversion are deferred
-to a follow-on.
+even at the very first line.  See ``test_incremental_decoder.py``.
 
 NOTE: ``_sample_pixels_inc`` below is intentionally kept in sync with
-``decoder._sample_pixels``. Any change there must be mirrored here to
+``decoder._sample_pixels``.  Any change there must be mirrored here to
 preserve the byte-identical guarantee.
 """
 from __future__ import annotations
@@ -56,7 +63,7 @@ from scipy.signal import sosfiltfilt
 
 from open_sstv.core.demod import SSTV_BLACK_HZ, SSTV_WHITE_HZ, instantaneous_frequency
 from open_sstv.core.dsp_utils import bandpass_sos
-from open_sstv.core.modes import ModeSpec, SyncPosition
+from open_sstv.core.modes import Mode, ModeSpec, SyncPosition
 from open_sstv.core.sync import find_sync_candidates, walk_sync_grid
 
 if TYPE_CHECKING:
@@ -143,46 +150,39 @@ def _sample_pixels_inc(
 
 
 # ---------------------------------------------------------------------------
-# Incremental decoder
+# Base class
 # ---------------------------------------------------------------------------
 
 
-class ScottieS1IncrementalDecoder:
-    """Streaming Scottie S1 decoder: emits line events as each arrives.
+class IncrementalDecoderBase:
+    """Shared buffer / sync / prune machinery for per-line SSTV decoding.
 
-    Unlike the batch ``Decoder``, which reprocesses the full growing buffer
-    on every flush, this decoder maintains a bounded sliding audio window and
-    decodes each line the moment enough audio has accumulated. The audio
-    buffer is pruned after each confirmed line, keeping memory consumption
-    bounded at approximately ``2 × line_period`` samples (~850 ms at 48 kHz).
+    Subclasses fill in the geometry (offsets from the sync pulse, how many
+    image rows each sync yields) via a small set of hooks.  The base owns:
 
-    Handles any ``SyncPosition.BEFORE_RED`` Scottie-family mode (S1, S2, DX)
-    but validated only against S1 in v0.1.x.
+    * The rolling audio buffer and its absolute-position bookkeeping.
+    * Sync-candidate harvesting (with filter-warm-up lead-in and cross-chunk
+      de-duplication).
+    * Calling ``walk_sync_grid`` to produce stable line positions.
+    * Waiting for enough post-sync audio to arrive before attempting decode.
+    * Extracting the bandpass-filtered Hilbert envelope for each line
+      window.
+    * Pruning the buffer once a line is confirmed decoded.
 
-    Parameters
-    ----------
-    spec:
-        Mode specification (Scottie S1 / S2 / DX).
-    fs:
-        Sample rate in Hz.
-    vis_end_abs:
-        Absolute sample position (relative to ``start_abs``) where the VIS
-        header ends. Sync candidates before this point are ignored.
-    start_abs:
-        Absolute position of the first sample that will be fed. Defaults to
-        0. Pass a non-zero value when the caller's audio buffer starts at a
-        known offset (e.g., ``Decoder``'s rolling IDLE window).
+    Subclasses implement:
 
-    Usage
-    -----
-    ::
-
-        spec = MODE_TABLE[Mode.SCOTTIE_S1]
-        inc = ScottieS1IncrementalDecoder(spec, fs=48000, vis_end_abs=vis_end)
-        for chunk in audio_chunks:
-            for row_idx, rgb_row in inc.feed(chunk):
-                display_line(row_idx, rgb_row)
-        image = inc.get_image()
+    * ``_compute_timing(spec, fs)`` — populate any instance-level offsets.
+    * ``_g_lookback`` / ``_r_lookahead`` — samples of audio needed before
+      and after the sync to cover the window (plus ``FILTER_MARGIN`` each
+      side).  The names are historical (Scottie-centric); they mean "how
+      far behind" and "how far ahead" of the sync we reach.
+    * ``_decode_window(inst, sync_in_win, n, grid_index)`` — perform the
+      per-line pixel sampling and return a list of ``(row_idx, rgb_row)``
+      tuples.  PD returns two rows per call; Scottie / Martin return one.
+    * ``_rows_per_sync`` — 1 for Scottie / Martin, 2 for PD.
+    * ``_ready_post_sync`` — minimum post-sync offset (in samples) that
+      must be present in the buffer before a line can be decoded.  Usually
+      the end of the last channel's scan.
     """
 
     #: Samples of sosfiltfilt padding before/after each pixel region.
@@ -191,13 +191,25 @@ class ScottieS1IncrementalDecoder:
     FILTER_MARGIN: int = 4096
 
     #: Width of the rolling tail searched for sync candidates on each
-    #: ``feed()`` call, in line periods. 3 line periods (~1.3 s) gives the
-    #: ``walk_sync_grid`` anchor detector at least two candidate pairs.
+    #: ``feed()`` call, in line periods.
     SYNC_SEARCH_LINES: float = 3.0
 
     #: Two sync candidates within this many samples of each other are
     #: considered the same pulse (de-duplication across consecutive tails).
     _DEDUP_RADIUS: int = 100
+
+    #: Tolerance (samples) applied when gating the last line's readiness.
+    #: Floating-point line-period rounding can leave the encoded audio
+    #: a few samples short of the full ``_ready_post_sync`` budget; a 128-
+    #: sample slack (≈2.7 ms at 48 kHz, well under 1 pixel of any mode)
+    #: absorbs that without risking wrong-data decodes on in-progress
+    #: lines (they're gated by the *next* sync arriving, not by this
+    #: threshold).
+    _READY_SLACK_SAMPLES: int = 128
+
+    #: Number of image rows produced per confirmed sync pulse. Overridden
+    #: to 2 by PD (which uses line-pair super-lines).
+    _rows_per_sync: int = 1
 
     def __init__(
         self,
@@ -206,58 +218,64 @@ class ScottieS1IncrementalDecoder:
         vis_end_abs: int,
         start_abs: int = 0,
     ) -> None:
-        if spec.sync_position != SyncPosition.BEFORE_RED:
-            raise ValueError(
-                f"ScottieS1IncrementalDecoder only handles BEFORE_RED modes "
-                f"(got {spec.name!r} with sync_position={spec.sync_position!r})"
-            )
         self._spec = spec
         self._fs = fs
         self._vis_end_abs = vis_end_abs
 
-        # --- Timing constants (derived from spec) ---
-        sync_ms = spec.sync_pulse_ms
-        porch_ms = spec.sync_porch_ms
-        scan_ms = (spec.line_time_ms - sync_ms - 6.0 * porch_ms) / 3.0
-
-        # Offsets from sync pulse leading edge — identical to _decode_scottie_rgb.
-        #   G starts this many ms BEFORE the sync (negative offset).
-        #   R ends this many ms AFTER the sync (positive offset).
-        g_start_ms = -(porch_ms + scan_ms + porch_ms + porch_ms + scan_ms)
-        r_end_ms = sync_ms + porch_ms + scan_ms + porch_ms
-
-        self._g_offset: float = g_start_ms / 1000.0 * fs          # negative
-        self._b_offset: float = -(porch_ms + scan_ms) / 1000.0 * fs  # negative
-        self._r_offset: float = (sync_ms + porch_ms) / 1000.0 * fs   # positive
-        self._scan_samp: float = scan_ms / 1000.0 * fs
-
-        # Pre-audio and post-audio needed around each sync for pixel decode,
-        # plus the filter-startup padding that guarantees byte-identity.
-        self._g_lookback: int = int(abs(g_start_ms) / 1000.0 * fs) + self.FILTER_MARGIN
-        self._r_lookahead: int = int(r_end_ms / 1000.0 * fs) + self.FILTER_MARGIN
+        # Hook for subclass geometry (offsets, channel scan length, etc.).
+        self._compute_timing(spec, fs)
 
         self._line_samp: float = spec.line_time_ms / 1000.0 * fs
 
         # --- Buffer state ---
         self._buf: NDArray = np.zeros(0, dtype=np.float64)
-        self._buf_abs_start: int = start_abs   # absolute position of _buf[0]
-        self._total_fed: int = 0               # samples fed (relative to start_abs)
+        self._buf_abs_start: int = start_abs
+        self._total_fed: int = 0
 
         # --- Sync state ---
-        # Absolute positions of all confirmed sync candidates found so far.
-        # These are NEVER pruned (only a few hundred integers, negligible memory).
         self._sync_abs: list[int] = []
-        # End of the most-recent _update_syncs search range (absolute).
-        # Seeded to start_abs so the first call searches from vis_end onward.
-        # Bug-1 fix: we overlap successive searches by one line period so that
-        # no sync at a chunk boundary is ever missed.
         self._last_search_end_abs: int = start_abs
 
         # --- Image state ---
-        self._lines_decoded: int = 0
+        # _syncs_consumed counts grid positions turned into image rows;
+        # it never exceeds spec.height (the grid length).
+        self._syncs_consumed: int = 0
+        image_rows = spec.height * self._rows_per_sync
         self._image: NDArray[np.uint8] = np.zeros(
-            (spec.height, spec.width, 3), dtype=np.uint8
+            (image_rows, spec.width, 3), dtype=np.uint8
         )
+
+    # --- Subclass hooks ---
+
+    def _compute_timing(self, spec: ModeSpec, fs: int) -> None:
+        """Compute per-channel offsets and window bounds from ``spec``.
+
+        Must set ``self._g_lookback`` and ``self._r_lookahead`` (samples
+        of audio needed before / after the sync pulse, *including* the
+        ``FILTER_MARGIN`` padding on each side), and ``self._ready_post_sync``
+        (the minimum post-sync offset at which a decode attempt makes
+        sense — typically the end of the last channel's scan).
+
+        Any additional instance attributes needed by ``_decode_window``
+        should be populated here too.
+        """
+        raise NotImplementedError
+
+    def _decode_window(
+        self,
+        inst: "NDArray",
+        sync_in_win: int,
+        n: int,
+        grid_index: int,
+    ) -> list[tuple[int, "NDArray[np.uint8]"]]:
+        """Sample pixels from the bandpass-filtered Hilbert track.
+
+        ``grid_index`` is the zero-based index of the sync pulse within the
+        grid produced by ``walk_sync_grid``.  The subclass is responsible
+        for writing to ``self._image`` and returning the
+        ``(row_idx, rgb_row)`` tuples for the UI.
+        """
+        raise NotImplementedError
 
     # --- Public API ---
 
@@ -268,13 +286,18 @@ class ScottieS1IncrementalDecoder:
 
     @property
     def lines_decoded(self) -> int:
-        """Number of lines that have been decoded and written to the image."""
-        return self._lines_decoded
+        """Number of image rows painted so far."""
+        return self._syncs_consumed * self._rows_per_sync
+
+    @property
+    def image_height(self) -> int:
+        """Total rows in the output image (``spec.height × _rows_per_sync``)."""
+        return self._spec.height * self._rows_per_sync
 
     @property
     def complete(self) -> bool:
-        """True when all ``spec.height`` lines have been decoded."""
-        return self._lines_decoded >= self._spec.height
+        """True when all image rows have been decoded."""
+        return self._syncs_consumed >= self._spec.height
 
     def get_image(self) -> Image.Image:
         """Return the current image (partial until ``complete`` is True)."""
@@ -291,9 +314,9 @@ class ScottieS1IncrementalDecoder:
         -------
         list[tuple[int, NDArray[np.uint8]]]
             ``[(row_index, rgb_row), ...]`` for each line decoded in this
-            call. ``rgb_row`` is a ``(width, 3)`` uint8 RGB array. The list
-            is empty between sync detections or while waiting for enough
-            post-sync audio for the red channel.
+            call.  PD emits two entries per completed sync; Scottie and
+            Martin emit one.  The list is empty between sync detections or
+            while waiting for enough post-sync audio.
         """
         arr = np.asarray(chunk, dtype=np.float64)
         if arr.ndim != 1 or arr.size == 0:
@@ -313,46 +336,33 @@ class ScottieS1IncrementalDecoder:
         self._prune()
         return new_lines
 
-    # --- Private helpers ---
+    # --- Private helpers (shared across all concrete decoders) ---
 
     def _update_syncs(self, current_abs: int) -> None:
         """Search for new sync candidates from just before the last search end.
 
-        Two fixes applied here vs. the original rolling-tail approach:
+        Two fixes baked in here vs. a naive rolling-tail approach:
 
-        **Bug-1 fix (overlap):** instead of searching only a fixed
-        ``SYNC_SEARCH_LINES`` rolling tail, we search from
-        ``(last_search_end − line_samp)`` to ``current_abs``.  This gives a
-        one-line-period backward overlap with the previous call's search
-        window so that a sync falling right at a chunk boundary can never be
-        skipped regardless of chunk size.
+        **Overlap:** search from ``(last_search_end − line_samp)`` to
+        ``current_abs`` so a sync at a chunk boundary is never skipped.
 
-        **Filter warm-up:** the bandpass filter needs ``FILTER_MARGIN``
-        samples of context before the search region to be fully settled.
-        Without this, the very first sync (which sits right at ``vis_end``)
-        is detected against a transient filter state, shifting its position vs
-        the batch decoder (which filters from sample 0).  The fix prepends
-        ``min(FILTER_MARGIN, search_from_buf)`` samples of real audio before
-        the search region, and adjusts ``start_idx`` so candidates are only
-        reported from the intended region onward.
+        **Filter warm-up:** prepend up to ``FILTER_MARGIN`` samples of
+        real audio before the search region so the bandpass filter is
+        fully settled by the time it reaches the first candidate position.
+        Without this, the very first sync (right at ``vis_end``) is
+        detected against a transient filter state and its position can
+        shift vs. the batch decoder.
 
-        The deduplication radius ``_DEDUP_RADIUS`` handles candidates
-        re-discovered in the overlap region without creating duplicates.
+        The ``_DEDUP_RADIUS`` check handles candidates re-discovered in
+        the overlap region without creating duplicates.
         """
-        # Start of the search region: one line period before last search end,
-        # but never before vis_end (no valid syncs before VIS header).
         search_from_abs = max(
             self._vis_end_abs,
             self._last_search_end_abs - int(self._line_samp),
         )
 
-        # Map to a buffer-relative offset (buffer may have been pruned past
-        # search_from_abs → clamp to buf start in that case).
         search_from_buf = max(0, search_from_abs - self._buf_abs_start)
 
-        # Prepend up to FILTER_MARGIN samples of real audio so the bandpass
-        # filter is fully settled by the time it reaches the search region.
-        # lead_in == min(FILTER_MARGIN, search_from_buf) ≤ search_from_buf.
         lead_in = min(self.FILTER_MARGIN, search_from_buf)
         actual_start = search_from_buf - lead_in
         tail = self._buf[actual_start:]
@@ -364,8 +374,6 @@ class ScottieS1IncrementalDecoder:
         inst_tail = instantaneous_frequency(filtered_tail, self._fs)
         tail_abs_start = self._buf_abs_start + actual_start
 
-        # Only report candidates from the actual search region (past lead-in).
-        # Since search_from_abs ≥ vis_end_abs, this also satisfies the VIS gate.
         search_start = lead_in
 
         cands_rel = find_sync_candidates(
@@ -377,7 +385,6 @@ class ScottieS1IncrementalDecoder:
         )
         for c_rel in cands_rel:
             c_abs = tail_abs_start + c_rel
-            # De-duplicate: skip if within _DEDUP_RADIUS of a known sync.
             if any(abs(c_abs - s) <= self._DEDUP_RADIUS for s in self._sync_abs):
                 continue
             self._sync_abs.append(c_abs)
@@ -396,43 +403,27 @@ class ScottieS1IncrementalDecoder:
         we should stop trying (not enough audio yet, or grid not anchored).
         """
         if len(self._sync_abs) < 2:
-            return False  # not enough candidates to anchor the grid
+            return False
 
-        # Build the sync grid using ALL known candidates (including historical
-        # ones whose audio has been pruned). Buffer-relative coordinates are
-        # fine for walk_sync_grid arithmetic — only the line we're about to
-        # decode needs a non-negative (in-buffer) position.
         cands_in_buf = [s - self._buf_abs_start for s in self._sync_abs]
         grid = walk_sync_grid(cands_in_buf, self._line_samp, self._spec.height)
 
-        if self._lines_decoded >= len(grid):
+        if self._syncs_consumed >= len(grid):
             return False
 
-        sync_in_buf = grid[self._lines_decoded]
+        sync_in_buf = grid[self._syncs_consumed]
         sync_abs = self._buf_abs_start + sync_in_buf
 
-        # Bail early if the sync's audio hasn't arrived yet (very first line
-        # and/or audio is arriving in small chunks).
         if sync_in_buf < 0:
             return False
 
-        # Wait until the R channel's last pixel has arrived.
-        #
-        # Bug-2 fix: the previous guard used self._r_lookahead which includes
-        # FILTER_MARGIN (4096) samples of trailing padding beyond the R scan's
-        # last pixel.  For all lines except the very last this padding is
-        # available.  For the last line the audio stream ends ~2 samples after
-        # the R scan ends, so the full r_lookahead is never satisfied and the
-        # decoder stalls.
-        #
-        # Fix: gate on the R scan end (r_offset + scan_samp), not on
-        # r_lookahead.  The extraction already clamps win_end to len(buf), so
-        # the trailing filter-startup region will be shorter on the last line —
-        # but the order-4 Butterworth decays to <1e-10 in ~200 samples, and
-        # we have ~69 samples of trailing audio (7137 − 7068) which is enough
-        # for the last few pixels to be unaffected in practice.
-        r_scan_end = int(self._r_offset + self._scan_samp)
-        if current_abs < sync_abs + r_scan_end:
+        # Wait until the last channel's scan has fully arrived.
+        # (See the Scottie docstring for the last-line edge case —
+        # FILTER_MARGIN is asymmetric on the last sync but the Butterworth
+        # transient is tiny, so the last few pixels remain unaffected.)
+        # ``_READY_SLACK_SAMPLES`` absorbs sub-pixel rounding between the
+        # encoder's integer sample count and our float line-period math.
+        if current_abs < sync_abs + self._ready_post_sync - self._READY_SLACK_SAMPLES:
             return False
 
         # Extract the decode window.
@@ -447,45 +438,32 @@ class ScottieS1IncrementalDecoder:
         inst = instantaneous_frequency(filtered, self._fs)
         n = inst.size
 
-        # Sync position within this window.
         sync_in_win = sync_in_buf - win_start
 
-        # Decode the three RGB channels (G, B, R order matches Scottie layout).
-        row: NDArray[np.uint8] = np.zeros((self._spec.width, 3), dtype=np.uint8)
-        row[:, 1] = _sample_pixels_inc(
-            inst, sync_in_win + self._g_offset, self._scan_samp, self._spec.width, n
+        new_rows = self._decode_window(
+            inst, sync_in_win, n, self._syncs_consumed
         )
-        row[:, 2] = _sample_pixels_inc(
-            inst, sync_in_win + self._b_offset, self._scan_samp, self._spec.width, n
-        )
-        row[:, 0] = _sample_pixels_inc(
-            inst, sync_in_win + self._r_offset, self._scan_samp, self._spec.width, n
-        )
-
-        self._image[self._lines_decoded] = row
-        out.append((self._lines_decoded, row.copy()))
-        self._lines_decoded += 1
+        out.extend(new_rows)
+        self._syncs_consumed += 1
         return True
 
     def _prune(self) -> None:
         """Trim audio we no longer need.
 
-        After decoding line k, audio before ``sync_{k+1} - g_lookback`` can
-        never be needed again (the next line's G channel starts there). We
-        leave the filter-margin padding in place so the next decode window
-        has a clean startup.
+        After decoding a grid position, audio before
+        ``next_sync − g_lookback`` can never be needed again.  We leave
+        ``FILTER_MARGIN`` padding in place so the next decode window has
+        a clean filter startup.
         """
-        if self._lines_decoded == 0 or not self._sync_abs:
+        if self._syncs_consumed == 0 or not self._sync_abs:
             return
 
-        # Reconstruct the grid to find the next expected sync position.
         cands_in_buf = [s - self._buf_abs_start for s in self._sync_abs]
         grid = walk_sync_grid(cands_in_buf, self._line_samp, self._spec.height)
 
-        if self._lines_decoded < len(grid):
-            next_sync_in_buf = grid[self._lines_decoded]
+        if self._syncs_consumed < len(grid):
+            next_sync_in_buf = grid[self._syncs_consumed]
         else:
-            # All lines decoded or grid exhausted — extrapolate next sync.
             next_sync_in_buf = (
                 int(cands_in_buf[-1] + self._line_samp) if cands_in_buf else 0
             )
@@ -496,4 +474,309 @@ class ScottieS1IncrementalDecoder:
             self._buf_abs_start += prune_to
 
 
-__all__ = ["ScottieS1IncrementalDecoder"]
+# ---------------------------------------------------------------------------
+# Scottie (BEFORE_RED) — sync lands mid-line, between B and R scans
+# ---------------------------------------------------------------------------
+
+
+class ScottieIncrementalDecoder(IncrementalDecoderBase):
+    """Streaming decoder for ``SyncPosition.BEFORE_RED`` Scottie modes.
+
+    Covers S1, S2, DX, S3, S4.  The sync pulse sits between the blue and
+    red scans of each line, so G and B offsets are *negative* relative to
+    the sync leading edge and R is positive.
+    """
+
+    def __init__(
+        self,
+        spec: ModeSpec,
+        fs: int,
+        vis_end_abs: int,
+        start_abs: int = 0,
+    ) -> None:
+        if spec.sync_position != SyncPosition.BEFORE_RED:
+            raise ValueError(
+                f"ScottieIncrementalDecoder only handles BEFORE_RED modes "
+                f"(got {spec.name!r} with sync_position={spec.sync_position!r})"
+            )
+        super().__init__(spec, fs, vis_end_abs, start_abs)
+
+    def _compute_timing(self, spec: ModeSpec, fs: int) -> None:
+        sync_ms = spec.sync_pulse_ms
+        porch_ms = spec.sync_porch_ms
+        scan_ms = (spec.line_time_ms - sync_ms - 6.0 * porch_ms) / 3.0
+
+        # G starts this many ms BEFORE the sync (negative offset).
+        # R ends this many ms AFTER the sync (positive offset).
+        g_start_ms = -(porch_ms + scan_ms + porch_ms + porch_ms + scan_ms)
+        r_end_ms = sync_ms + porch_ms + scan_ms + porch_ms
+
+        self._g_offset: float = g_start_ms / 1000.0 * fs          # negative
+        self._b_offset: float = -(porch_ms + scan_ms) / 1000.0 * fs  # negative
+        self._r_offset: float = (sync_ms + porch_ms) / 1000.0 * fs   # positive
+        self._scan_samp: float = scan_ms / 1000.0 * fs
+
+        self._g_lookback: int = int(abs(g_start_ms) / 1000.0 * fs) + self.FILTER_MARGIN
+        self._r_lookahead: int = int(r_end_ms / 1000.0 * fs) + self.FILTER_MARGIN
+
+        # Gate on the R scan END (not r_lookahead) so the final line is not
+        # starved of the trailing FILTER_MARGIN that the audio stream never
+        # supplies.  The Butterworth transient decays to <1e-10 in ~200
+        # samples, so the last few pixels are unaffected in practice.
+        self._ready_post_sync: int = int(self._r_offset + self._scan_samp)
+
+    def _decode_window(
+        self,
+        inst: "NDArray",
+        sync_in_win: int,
+        n: int,
+        grid_index: int,
+    ) -> list[tuple[int, "NDArray[np.uint8]"]]:
+        width = self._spec.width
+        row: NDArray[np.uint8] = np.zeros((width, 3), dtype=np.uint8)
+        row[:, 1] = _sample_pixels_inc(
+            inst, sync_in_win + self._g_offset, self._scan_samp, width, n
+        )
+        row[:, 2] = _sample_pixels_inc(
+            inst, sync_in_win + self._b_offset, self._scan_samp, width, n
+        )
+        row[:, 0] = _sample_pixels_inc(
+            inst, sync_in_win + self._r_offset, self._scan_samp, width, n
+        )
+        self._image[grid_index] = row
+        return [(grid_index, row.copy())]
+
+
+# Back-compat alias: early internal callers and tests used the S1-specific
+# name.  The class now covers the whole Scottie family.
+ScottieS1IncrementalDecoder = ScottieIncrementalDecoder
+
+
+# ---------------------------------------------------------------------------
+# Martin (LINE_START) — sync at line start, GBR in order
+# ---------------------------------------------------------------------------
+
+
+class MartinIncrementalDecoder(IncrementalDecoderBase):
+    """Streaming decoder for Martin-family modes (M1, M2, M3, M4).
+
+    Layout: sync → porch → G_scan → porch → B_scan → porch → R_scan → porch.
+    All channel offsets are positive relative to the sync leading edge.
+    """
+
+    def __init__(
+        self,
+        spec: ModeSpec,
+        fs: int,
+        vis_end_abs: int,
+        start_abs: int = 0,
+    ) -> None:
+        if spec.sync_position != SyncPosition.LINE_START:
+            raise ValueError(
+                f"MartinIncrementalDecoder only handles LINE_START modes "
+                f"(got {spec.name!r} with sync_position={spec.sync_position!r})"
+            )
+        super().__init__(spec, fs, vis_end_abs, start_abs)
+
+    def _compute_timing(self, spec: ModeSpec, fs: int) -> None:
+        sync_ms = spec.sync_pulse_ms
+        porch_ms = spec.sync_porch_ms
+        # Mirrors _decode_martin_rgb: 4 porches + 3 equal channel scans.
+        scan_ms = (spec.line_time_ms - sync_ms - 4 * porch_ms) / 3
+
+        g_offset_ms = sync_ms + porch_ms
+        b_offset_ms = g_offset_ms + scan_ms + porch_ms
+        r_offset_ms = b_offset_ms + scan_ms + porch_ms
+        r_end_ms = r_offset_ms + scan_ms
+
+        self._g_offset: float = g_offset_ms / 1000.0 * fs
+        self._b_offset: float = b_offset_ms / 1000.0 * fs
+        self._r_offset: float = r_offset_ms / 1000.0 * fs
+        self._scan_samp: float = scan_ms / 1000.0 * fs
+
+        # Sync is at the line start, so lookback only needs filter warm-up.
+        self._g_lookback: int = self.FILTER_MARGIN
+        self._r_lookahead: int = int(r_end_ms / 1000.0 * fs) + self.FILTER_MARGIN
+        self._ready_post_sync: int = int(r_offset_ms / 1000.0 * fs + self._scan_samp)
+
+    def _decode_window(
+        self,
+        inst: "NDArray",
+        sync_in_win: int,
+        n: int,
+        grid_index: int,
+    ) -> list[tuple[int, "NDArray[np.uint8]"]]:
+        width = self._spec.width
+        row: NDArray[np.uint8] = np.zeros((width, 3), dtype=np.uint8)
+        row[:, 1] = _sample_pixels_inc(
+            inst, sync_in_win + self._g_offset, self._scan_samp, width, n
+        )
+        row[:, 2] = _sample_pixels_inc(
+            inst, sync_in_win + self._b_offset, self._scan_samp, width, n
+        )
+        row[:, 0] = _sample_pixels_inc(
+            inst, sync_in_win + self._r_offset, self._scan_samp, width, n
+        )
+        self._image[grid_index] = row
+        return [(grid_index, row.copy())]
+
+
+# ---------------------------------------------------------------------------
+# PD (LINE_START, line-pair YCbCr) — sync covers TWO image rows
+# ---------------------------------------------------------------------------
+
+
+class PDIncrementalDecoder(IncrementalDecoderBase):
+    """Streaming decoder for PD-family modes (PD-50 / 90 / 120 / 160 /
+    180 / 240 / 290).
+
+    Layout: sync → porch → Y0_scan → Cr_scan → Cb_scan → Y1_scan.  Each
+    sync pulse covers **two** output image rows: Y0 paints the even row,
+    Y1 paints the odd row, and the single chroma pair is shared between
+    them (nearest-neighbour chroma upsampling, matching ``_decode_pd``).
+
+    ``spec.height`` is stored as (actual_image_height // 2) — the number
+    of sync pulses, not the number of image rows.  The ``_image`` buffer
+    is sized accordingly with ``_rows_per_sync = 2``.
+
+    YCbCr → RGB is performed per super-pair using the same PIL machinery
+    (``Image.frombytes("YCbCr", ...).convert("RGB")``) as the batch
+    decoder, so output pixels are bit-identical.
+    """
+
+    _rows_per_sync: int = 2
+
+    def __init__(
+        self,
+        spec: ModeSpec,
+        fs: int,
+        vis_end_abs: int,
+        start_abs: int = 0,
+    ) -> None:
+        if spec.sync_position != SyncPosition.LINE_START:
+            raise ValueError(
+                f"PDIncrementalDecoder only handles LINE_START modes "
+                f"(got {spec.name!r} with sync_position={spec.sync_position!r})"
+            )
+        super().__init__(spec, fs, vis_end_abs, start_abs)
+
+    def _compute_timing(self, spec: ModeSpec, fs: int) -> None:
+        sync_ms = spec.sync_pulse_ms
+        porch_ms = spec.sync_porch_ms
+        # Mirrors _decode_pd: 1 porch + 4 equal channel scans.
+        ch_ms = (spec.line_time_ms - sync_ms - porch_ms) / 4
+
+        y0_off_ms = sync_ms + porch_ms
+        cr_off_ms = y0_off_ms + ch_ms
+        cb_off_ms = cr_off_ms + ch_ms
+        y1_off_ms = cb_off_ms + ch_ms
+        y1_end_ms = y1_off_ms + ch_ms
+
+        self._y0_off: float = y0_off_ms / 1000.0 * fs
+        self._cr_off: float = cr_off_ms / 1000.0 * fs
+        self._cb_off: float = cb_off_ms / 1000.0 * fs
+        self._y1_off: float = y1_off_ms / 1000.0 * fs
+        self._ch_span: float = ch_ms / 1000.0 * fs
+
+        self._g_lookback: int = self.FILTER_MARGIN
+        self._r_lookahead: int = int(y1_end_ms / 1000.0 * fs) + self.FILTER_MARGIN
+        self._ready_post_sync: int = int(y1_end_ms / 1000.0 * fs)
+
+    def _decode_window(
+        self,
+        inst: "NDArray",
+        sync_in_win: int,
+        n: int,
+        grid_index: int,
+    ) -> list[tuple[int, "NDArray[np.uint8]"]]:
+        width = self._spec.width
+        y0 = _sample_pixels_inc(
+            inst, sync_in_win + self._y0_off, self._ch_span, width, n
+        )
+        cr = _sample_pixels_inc(
+            inst, sync_in_win + self._cr_off, self._ch_span, width, n,
+            chroma=True,
+        )
+        cb = _sample_pixels_inc(
+            inst, sync_in_win + self._cb_off, self._ch_span, width, n,
+            chroma=True,
+        )
+        y1 = _sample_pixels_inc(
+            inst, sync_in_win + self._y1_off, self._ch_span, width, n
+        )
+
+        # Build a 2-row YCbCr buffer and let PIL do the BT.601 full-range
+        # conversion, matching _decode_pd's final step exactly.
+        pair = np.empty((2, width, 3), dtype=np.uint8)
+        pair[0, :, 0] = y0
+        pair[1, :, 0] = y1
+        pair[0, :, 1] = cb  # Cb plane
+        pair[1, :, 1] = cb
+        pair[0, :, 2] = cr  # Cr plane
+        pair[1, :, 2] = cr
+
+        rgb_pair = np.asarray(
+            Image.frombytes("YCbCr", (width, 2), pair.tobytes()).convert("RGB")
+        )
+
+        row_even = grid_index * 2
+        row_odd = row_even + 1
+        self._image[row_even] = rgb_pair[0]
+        self._image[row_odd] = rgb_pair[1]
+        return [
+            (row_even, rgb_pair[0].copy()),
+            (row_odd, rgb_pair[1].copy()),
+        ]
+
+
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
+
+
+#: Modes we hand off to the incremental path.  Anything not in this set
+#: stays on the batch decoder (currently: Robot 36, SC2 variants we don't
+#: fully decode yet).
+_MARTIN_MODES: frozenset[Mode] = frozenset({
+    Mode.MARTIN_M1, Mode.MARTIN_M2, Mode.MARTIN_M3, Mode.MARTIN_M4,
+})
+_SCOTTIE_MODES: frozenset[Mode] = frozenset({
+    Mode.SCOTTIE_S1, Mode.SCOTTIE_S2, Mode.SCOTTIE_DX,
+    Mode.SCOTTIE_S3, Mode.SCOTTIE_S4,
+})
+_PD_MODES: frozenset[Mode] = frozenset({
+    Mode.PD_50, Mode.PD_90, Mode.PD_120, Mode.PD_160,
+    Mode.PD_180, Mode.PD_240, Mode.PD_290,
+})
+
+
+def make_incremental_decoder(
+    spec: ModeSpec,
+    fs: int,
+    vis_end_abs: int,
+    start_abs: int = 0,
+) -> IncrementalDecoderBase | None:
+    """Return an appropriate incremental decoder for ``spec``, or ``None``.
+
+    Returns ``None`` for modes that don't yet have an incremental
+    implementation (notably Robot 36).  The caller should fall back to
+    the batch decoder in that case.
+    """
+    mode = spec.name
+    if mode in _SCOTTIE_MODES:
+        return ScottieIncrementalDecoder(spec, fs, vis_end_abs, start_abs)
+    if mode in _MARTIN_MODES:
+        return MartinIncrementalDecoder(spec, fs, vis_end_abs, start_abs)
+    if mode in _PD_MODES:
+        return PDIncrementalDecoder(spec, fs, vis_end_abs, start_abs)
+    return None
+
+
+__all__ = [
+    "IncrementalDecoderBase",
+    "ScottieIncrementalDecoder",
+    "ScottieS1IncrementalDecoder",  # back-compat alias
+    "MartinIncrementalDecoder",
+    "PDIncrementalDecoder",
+    "make_incremental_decoder",
+]

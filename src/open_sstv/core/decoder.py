@@ -1203,25 +1203,25 @@ class Decoder:
             ImageStarted(mode=mode, vis_code=vis_code)
         ]
 
-        # Experimental incremental decode path — Scottie-family BEFORE_RED modes.
-        if self._exp_incremental and spec.sync_position.value == "before_red":
+        # Experimental incremental decode path — Scottie / Martin / PD.
+        # Robot 36 returns None from the factory and falls through to batch.
+        if self._exp_incremental:
             # Lazy import avoids a circular dependency at module load time.
             from open_sstv.core.incremental_decoder import (  # noqa: PLC0415
-                ScottieS1IncrementalDecoder,
+                make_incremental_decoder,
             )
-            self._incremental_dec = ScottieS1IncrementalDecoder(
-                spec,
-                self._fs,
-                vis_end_abs=vis_end,
-                start_abs=0,
+            inc = make_incremental_decoder(
+                spec, self._fs, vis_end_abs=vis_end, start_abs=0,
             )
-            # Pre-feed audio before VIS so line 0's G-channel window has the
-            # full FILTER_MARGIN of sosfiltfilt padding from the start.
-            pre_vis = joined[:vis_end]
-            if pre_vis.size > 0:
-                self._incremental_dec.feed(pre_vis)
-            self._incremental_total_fed = vis_end
-            return events  # immediate decode deferred to _feed_decoding
+            if inc is not None:
+                self._incremental_dec = inc
+                # Pre-feed audio before VIS so the first line's window has
+                # the full FILTER_MARGIN of sosfiltfilt padding from the start.
+                pre_vis = joined[:vis_end]
+                if pre_vis.size > 0:
+                    self._incremental_dec.feed(pre_vis)
+                self._incremental_total_fed = vis_end
+                return events  # immediate decode deferred to _feed_decoding
 
         # Batch path: try an immediate partial decode — the buffer may already
         # contain a few scan lines (or even a full image if the caller
@@ -1266,6 +1266,7 @@ class Decoder:
         line_tuples = self._incremental_dec.feed(new_audio)
 
         events: list[DecoderEvent] = []
+        image_height = self._incremental_dec.image_height
         for row_idx, _rgb in line_tuples:
             img = self._incremental_dec.get_image()
             events.append(
@@ -1274,7 +1275,7 @@ class Decoder:
                     mode=self._mode,
                     vis_code=self._vis_code,
                     lines_decoded=row_idx + 1,
-                    lines_total=self._spec.height,
+                    lines_total=image_height,
                 )
             )
 

@@ -267,20 +267,24 @@ class SettingsDialog(QDialog):
         self._final_slant_check.setChecked(self._config.apply_final_slant_correction)
         rx_layout.addRow(self._final_slant_check)
 
-        # Experimental: per-line incremental decoder (Scottie S1 only).  Off
-        # by default — the batch decoder is the tested / stable path.  When
-        # enabled, Scottie S1 receives route through ScottieS1IncrementalDecoder
-        # for roughly O(n) rather than O(n²) CPU cost; all other modes fall
-        # back to the batch decoder transparently.
+        # Experimental: per-line incremental decoder.  Off by default —
+        # the batch decoder is the tested / stable path.  When enabled,
+        # Scottie, Martin, and PD receives route through the incremental
+        # decoder for roughly O(n) rather than O(n²) CPU cost; Robot 36
+        # and any unsupported mode fall back to the batch decoder
+        # transparently.
         self._exp_incremental_check = QCheckBox(
-            "Experimental: per-line incremental decode (Scottie S1 only)"
+            "Experimental: per-line incremental decode (Scottie / Martin / PD)"
         )
         self._exp_incremental_check.setToolTip(
-            "EXPERIMENTAL — Scottie S1 only.\n\n"
+            "EXPERIMENTAL — Scottie, Martin, and PD families.\n\n"
             "Decodes each line as its sync pulse arrives instead of\n"
-            "reprocessing the whole buffer on every 2 s flush.  Roughly a\n"
-            "50× CPU reduction on long Scottie S1 receives.  Other modes\n"
-            "fall back to the batch decoder transparently.\n\n"
+            "reprocessing the whole buffer on every flush.  Roughly a\n"
+            "50× CPU reduction on long receives, and keeps the decoder\n"
+            "ahead of real-time on slower machines where the batch path\n"
+            "falls behind mid-image on Martin M1.\n\n"
+            "Robot 36 still uses the batch decoder (line-pair dispatch\n"
+            "isn't ported yet).\n\n"
             "Off by default.  If a decode looks wrong, turn this off and\n"
             "file an issue with the saved audio."
         )
