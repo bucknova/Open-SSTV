@@ -216,7 +216,7 @@ class TxWorker(QObject):
         self._tx_banner_callsign: str = ""
         self._tx_banner_bg_color: str = "#202020"
         self._tx_banner_text_color: str = "#FFFFFF"
-        self._tx_banner_size: str = "medium"
+        self._tx_banner_size: str = "small"
         self._stop_event = threading.Event()
         self._watchdog_triggered: bool = False
 
@@ -288,7 +288,7 @@ class TxWorker(QObject):
         callsign: str,
         bg_color: str = "#202020",
         text_color: str = "#FFFFFF",
-        size: str = "medium",
+        size: str = "small",
     ) -> None:
         """Configure the TX header banner stamped on every SSTV transmission.
 
@@ -308,8 +308,9 @@ class TxWorker(QObject):
         text_color:
             CSS hex text colour, e.g. ``"#FFFFFF"``.
         size:
-            Named size preset — ``"small"``, ``"medium"``, or ``"large"``.
-            Controls both strip height and font size proportionally.
+            Named size preset — ``"small"`` (default since v0.1.22),
+            ``"medium"``, or ``"large"``.  Controls both strip height and
+            font size proportionally.
         """
         self._tx_banner_enabled = enabled
         self._tx_banner_callsign = callsign.strip().upper()

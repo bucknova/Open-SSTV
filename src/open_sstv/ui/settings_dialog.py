@@ -715,6 +715,20 @@ class SettingsDialog(QDialog):
         banner_layout.addRow("Preview:", self._banner_preview)
         self._refresh_banner_preview()
 
+        # Preview on a real image — file-picker → modal dialog showing the full
+        # image with the banner stamped on top using the current colour/size
+        # selections.  Lets the operator see how the banner actually looks
+        # composited against a photo, not just the neutral-grey strip above.
+        self._banner_preview_on_image_btn = QPushButton("Preview on image…")
+        self._banner_preview_on_image_btn.setToolTip(
+            "Pick an image from disk and see the banner applied to it using "
+            "the current colour and size settings."
+        )
+        self._banner_preview_on_image_btn.clicked.connect(
+            self._preview_banner_on_image
+        )
+        banner_layout.addRow("", self._banner_preview_on_image_btn)
+
         form.addRow(banner_group)
 
         return tab
@@ -823,7 +837,7 @@ class SettingsDialog(QDialog):
         """
         from PIL import Image as _PILImage
 
-        size_key = self._banner_size.currentData() or "medium"
+        size_key = self._banner_size.currentData() or "small"
         bh, fs = banner_size_params(size_key)
 
         source = _PILImage.new("RGB", (320, 240), (0x80, 0x80, 0x80))
@@ -866,6 +880,96 @@ class SettingsDialog(QDialog):
                 f"background-color: {self._banner_text_color}; border: 1px solid #888;"
             )
             self._refresh_banner_preview()
+
+    def _preview_banner_on_image(self) -> None:
+        """Open a file picker and show the banner composited onto the chosen image.
+
+        The strip-only preview above is handy for colour tuning, but it hides
+        the one question operators actually care about: *does this look okay on
+        top of an actual photo?*  This opens a modal with the current colour
+        and size selections applied to a user-chosen image so they can see the
+        whole result before committing to TX.
+
+        Does not require saving settings first — whatever is currently picked
+        in the dialog (enabled state ignored, colours + size live) is used.
+        Large images are scaled down to fit the available screen area.
+        """
+        # Lazy imports so opening Settings doesn't pay for them when the
+        # button is never clicked.
+        from pathlib import Path as _Path
+
+        from PIL import Image as _PILImage, UnidentifiedImageError
+
+        initial_dir = self._save_dir.text() or str(_Path.home())
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Preview banner on image",
+            initial_dir,
+            "Images (*.png *.jpg *.jpeg *.bmp *.webp *.tiff *.gif);;All files (*)",
+        )
+        if not path:
+            return
+
+        try:
+            source = _PILImage.open(path).convert("RGB")
+        except (OSError, UnidentifiedImageError) as exc:
+            QMessageBox.warning(
+                self,
+                "Could not open image",
+                f"Failed to load {path!r}:\n\n{exc}",
+            )
+            return
+
+        size_key = self._banner_size.currentData() or "small"
+        bh, fs = banner_size_params(size_key)
+        stamped = apply_tx_banner(
+            source,
+            _APP_VERSION,
+            self._config.callsign,
+            self._banner_bg_color,
+            self._banner_text_color,
+            banner_height=bh,
+            font_size=fs,
+        )
+
+        # PIL → QPixmap at native size.
+        raw = stamped.tobytes("raw", "RGB")
+        qimg = QImage(
+            raw, stamped.width, stamped.height, stamped.width * 3,
+            QImage.Format.Format_RGB888,
+        )
+        pix = QPixmap.fromImage(qimg)
+
+        # Scale down if bigger than 80 % of the current screen — PD-290 at
+        # 800×616 would otherwise spill off a laptop display.
+        screen_geom = self.screen().availableGeometry()
+        max_w = int(screen_geom.width() * 0.80)
+        max_h = int(screen_geom.height() * 0.80)
+        if pix.width() > max_w or pix.height() > max_h:
+            pix = pix.scaled(
+                max_w, max_h,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Banner preview — {_Path(path).name}")
+        lay = QVBoxLayout(dlg)
+        caption = QLabel(
+            f"{stamped.width}×{stamped.height} · {size_key} size "
+            f"({bh} px / {fs} pt)"
+        )
+        caption.setStyleSheet("color: #888;")
+        lay.addWidget(caption)
+        img_label = QLabel()
+        img_label.setPixmap(pix)
+        img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(img_label)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        btns.rejected.connect(dlg.reject)
+        btns.accepted.connect(dlg.accept)
+        lay.addWidget(btns)
+        dlg.exec()
 
     @Slot(bool)
     def _on_overdrive_toggled(self, enabled: bool) -> None:
@@ -962,7 +1066,7 @@ class SettingsDialog(QDialog):
             tx_banner_enabled=self._banner_enabled.isChecked(),
             tx_banner_bg_color=self._banner_bg_color,
             tx_banner_text_color=self._banner_text_color,
-            tx_banner_size=self._banner_size.currentData() or "medium",
+            tx_banner_size=self._banner_size.currentData() or "small",
         )
 
     @property

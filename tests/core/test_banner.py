@@ -69,15 +69,17 @@ def test_banner_fills_top_rows_with_bg_color() -> None:
     arr = np.array(result)  # (H, W, 3)
     banner_rows = arr[:BANNER_HEIGHT, :, :]  # (BANNER_HEIGHT, W, 3)
 
-    # Text pixels will differ from bg_color. We allow up to 15% of pixels
+    # Text pixels will differ from bg_color. We allow up to 20% of pixels
     # to be non-background (text rendering on a ~24×320 strip with version
-    # text centred and optional callsign leaves well under that).
+    # text flush-right and optional callsign leaves well under that; the
+    # threshold was raised from 15% to 20% in v0.1.22 when the default font
+    # size was bumped 14 pt → 18 pt for a fuller-looking strip).
     bg_array = np.array(bg_rgb, dtype=np.uint8)
     is_bg = np.all(banner_rows == bg_array, axis=2)  # (BANNER_HEIGHT, W)
     non_bg_fraction = 1.0 - is_bg.mean()
-    assert non_bg_fraction < 0.15, (
+    assert non_bg_fraction < 0.20, (
         f"Too many non-background pixels in banner: {non_bg_fraction:.1%} "
-        f"(expected < 15%)"
+        f"(expected < 20%)"
     )
 
 
@@ -118,7 +120,7 @@ def test_banner_with_callsign_still_fills_background() -> None:
     bg_array = np.array(bg_rgb, dtype=np.uint8)
     is_bg = np.all(banner_rows == bg_array, axis=2)
     non_bg_fraction = 1.0 - is_bg.mean()
-    assert non_bg_fraction < 0.15, (
+    assert non_bg_fraction < 0.20, (
         f"Background not correctly painted when callsign present: "
         f"{non_bg_fraction:.1%} non-bg pixels"
     )
@@ -157,7 +159,7 @@ def test_banner_respects_custom_bg_and_text_colors() -> None:
     bg_array = np.array(bg_rgb, dtype=np.uint8)
     is_bg = np.all(banner_rows == bg_array, axis=2)
     non_bg_fraction = 1.0 - is_bg.mean()
-    assert non_bg_fraction < 0.15, (
+    assert non_bg_fraction < 0.20, (
         f"Custom background colour not applied: {non_bg_fraction:.1%} non-bg"
     )
     # No blue pixels (original fill) should survive inside the banner strip.
@@ -194,10 +196,10 @@ def test_banner_size_params_known_keys() -> None:
         assert banner_size_params(key) == SIZE_TABLE[key]
 
 
-def test_banner_size_params_unknown_falls_back_to_medium() -> None:
-    """Unknown size name falls back to medium without raising."""
-    assert banner_size_params("xl") == SIZE_TABLE["medium"]
-    assert banner_size_params("") == SIZE_TABLE["medium"]
+def test_banner_size_params_unknown_falls_back_to_small() -> None:
+    """Unknown size name falls back to small (the default since v0.1.22)."""
+    assert banner_size_params("xl") == SIZE_TABLE["small"]
+    assert banner_size_params("") == SIZE_TABLE["small"]
 
 
 @pytest.mark.parametrize("size_name", ["small", "medium", "large"])

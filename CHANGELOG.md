@@ -11,6 +11,37 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.22] — 2026-04-15
+
+### Changed
+- **TX banner default size is "small" again** (was "medium" since v0.1.20).
+  The new "small" has a fuller-looking strip than the old small because
+  every preset's font size was bumped +4 pt in this release — the default
+  24 px strip now uses 18 pt text (was 14 pt).  Operators who had
+  `tx_banner_size: "medium"` persisted to disk keep their choice; only
+  fresh installs and the fallback-on-unknown path see "small" now.
+- **SIZE_TABLE font sizes bumped +4 pt across the board**: small 14 → 18 pt,
+  medium 20 → 24 pt, large 26 → 30 pt.  Strip heights are unchanged
+  (24 / 32 / 40 px) so the banner footprint on transmitted images does not
+  grow — only the text fills more of the vertical space.  Non-background
+  pixel-fraction thresholds in `test_banner.py` were raised from 15 % → 20 %
+  to accommodate the larger glyphs.
+- **`banner_size_params()` unknown-name fallback is now "small"** (was
+  "medium"), matching the new default.
+
+### Added
+- **"Preview on image…" button** in Settings → Images → TX Banner.  Opens a
+  file picker, stamps the banner onto the chosen image using the current
+  colour and size selections (live — no need to save settings first), and
+  shows the result in a modal dialog.  Large images (PD-290 at 800×616,
+  say) are scaled down to 80 % of the available screen area with
+  `Qt.SmoothTransformation` so they fit on a laptop display.  The caption
+  under the image reports native dimensions and the active size preset.
+  Complements the strip-only live preview above it — now the operator can
+  see the banner composited against a real photo before committing to TX.
+
+---
+
 ## [0.1.21] — 2026-04-15
 
 ### Added

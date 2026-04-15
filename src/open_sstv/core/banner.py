@@ -19,9 +19,13 @@ Three named sizes are available via :data:`SIZE_TABLE` and
 
 .. code-block:: text
 
-    "small"  →  24 px strip, 14 pt text
-    "medium" →  32 px strip, 20 pt text   (recommended default)
-    "large"  →  40 px strip, 26 pt text
+    "small"  →  24 px strip, 18 pt text   (recommended default)
+    "medium" →  32 px strip, 24 pt text
+    "large"  →  40 px strip, 30 pt text
+
+Font sizes were bumped +4 pt across all presets in v0.1.22 so text fills
+more of the strip without looking undersized.  Older configs that saved
+``tx_banner_size: "medium"`` continue to work — only the point size changed.
 """
 from __future__ import annotations
 
@@ -37,14 +41,17 @@ BANNER_HEIGHT: int = 24
 #: Right-edge margin (pixels) for the callsign text.
 _CALLSIGN_MARGIN: int = 4
 
-#: Default (small) font size in points.
-_DEFAULT_FONT_SIZE: int = 14
+#: Default (small) font size in points.  Raised from 14 pt → 18 pt in v0.1.22
+#: so the default "small" preset fills more of its 24 px strip.
+_DEFAULT_FONT_SIZE: int = 18
 
-#: Mapping from size name → (banner_height, font_size).
+#: Mapping from size name → (banner_height, font_size).  Font sizes were bumped
+#: +4 pt uniformly in v0.1.22 so every preset has a fuller fill ratio
+#: (~75 %) than before.
 SIZE_TABLE: dict[str, tuple[int, int]] = {
-    "small":  (24, 14),
-    "medium": (32, 20),
-    "large":  (40, 26),
+    "small":  (24, 18),
+    "medium": (32, 24),
+    "large":  (40, 30),
 }
 
 
@@ -56,7 +63,8 @@ SIZE_TABLE: dict[str, tuple[int, int]] = {
 def banner_size_params(size: str) -> tuple[int, int]:
     """Return ``(banner_height, font_size)`` for a named size preset.
 
-    Unknown names fall back to ``"medium"``.  Case-insensitive.
+    Unknown names fall back to ``"small"`` (the recommended default since
+    v0.1.22).  Case-insensitive.
 
     Parameters
     ----------
@@ -68,7 +76,7 @@ def banner_size_params(size: str) -> tuple[int, int]:
     tuple[int, int]
         ``(banner_height_px, font_size_pt)``
     """
-    return SIZE_TABLE.get(size.lower(), SIZE_TABLE["medium"])
+    return SIZE_TABLE.get(size.lower(), SIZE_TABLE["small"])
 
 
 def _load_font(size: int) -> ImageFont.ImageFont | ImageFont.FreeTypeFont:
@@ -118,7 +126,8 @@ def apply_tx_banner(
         (24 px, the *small* preset).  Use :func:`banner_size_params` to look
         up the right value for a named size.
     font_size:
-        Font size in points.  Defaults to :data:`_DEFAULT_FONT_SIZE` (14 pt).
+        Font size in points.  Defaults to :data:`_DEFAULT_FONT_SIZE` (18 pt
+        since v0.1.22, was 14 pt previously).
 
     Returns
     -------
