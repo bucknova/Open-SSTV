@@ -207,6 +207,10 @@ open-sstv-decode in.wav -o out.png                    # CLI decoder
 - Plugin/macro system.
 - Internationalization.
 
+## Author
+
+Open-SSTV is developed by Kevin (W0AEZ).
+
 ## License
 
 GPL-3.0-or-later. See [LICENSE](./LICENSE).

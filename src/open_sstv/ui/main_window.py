@@ -381,6 +381,7 @@ class MainWindow(QMainWindow):
             "<p>Open-source SSTV transceiver for amateur radio.</p>"
             "<p>17 modes: Robot 36, Martin M1/M2, Scottie S1/S2/DX, "
             "PD-90/120/160/180/240/290, Wraase SC2-120/180, Pasokon P3/P5/P7.</p>"
+            "<p>Created by Kevin &mdash; W0AEZ</p>"
             '<p><a href="https://github.com/bucknova/Open-SSTV">'
             "github.com/bucknova/Open-SSTV</a></p>"
             "<p>GPL-3.0-or-later</p>",

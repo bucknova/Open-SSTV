@@ -74,7 +74,7 @@ No special hardware is required beyond a radio and a computer with a sound card.
 
 ## 2. About Open-SSTV
 
-Open-SSTV is a free, open-source, cross-platform SSTV transceiver for amateur radio operators. It provides a graphical application for transmitting and receiving SSTV images as well as headless command-line tools for encoding and decoding. The project is built with Python and Qt 6 (PySide6) and runs on Linux, macOS, and Windows.
+Open-SSTV is a free, open-source, cross-platform SSTV transceiver for amateur radio operators, developed by Kevin, W0AEZ. It provides a graphical application for transmitting and receiving SSTV images as well as headless command-line tools for encoding and decoding. The project is built with Python and Qt 6 (PySide6) and runs on Linux, macOS, and Windows.
 
 Key features at a glance:
 
