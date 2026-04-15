@@ -55,6 +55,8 @@ from open_sstv.ui.draw_text import draw_text_overlay
 from open_sstv.ui.utils import pil_to_pixmap as _pil_to_pixmap
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from PIL.Image import Image as PILImage
 
 
@@ -64,13 +66,33 @@ class _CropRect(QGraphicsRectItem):
     The user can drag the entire rectangle or resize from the edges.
     For simplicity, drag moves the whole rect; resize isn't interactive
     — the user adjusts crop via spinboxes.
+
+    When the rect is dragged, ``itemChange`` fires with the new
+    position.  If ``on_moved`` is set (a callable), it is called with
+    the effective scene-space origin ``(x, y)`` so the parent dialog
+    can sync its spinboxes.
     """
+
+    on_moved: "Callable[[int, int], None] | None" = None
 
     def __init__(self, rect: QRectF, parent=None) -> None:
         super().__init__(rect, parent)
         self.setPen(QPen(QColor(255, 255, 0), 2, Qt.PenStyle.DashLine))
         self.setBrush(QBrush(QColor(255, 255, 0, 30)))
         self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.setFlag(
+            QGraphicsRectItem.GraphicsItemFlag.ItemSendsGeometryChanges, True,
+        )
+
+    def itemChange(self, change, value):
+        if (
+            change == QGraphicsRectItem.GraphicsItemChange.ItemPositionHasChanged
+            and self.on_moved is not None
+        ):
+            # The effective top-left in scene space is rect().topLeft() + pos().
+            origin = self.rect().topLeft() + value
+            self.on_moved(int(round(origin.x())), int(round(origin.y())))
+        return super().itemChange(change, value)
 
 
 class ImageEditorDialog(QDialog):
@@ -331,6 +353,7 @@ class ImageEditorDialog(QDialog):
         # Restore crop rect from saved geometry
         if saved_rect is not None:
             self._crop_rect_item = _CropRect(saved_rect)
+            self._crop_rect_item.on_moved = self._on_crop_rect_dragged
             self._scene.addItem(self._crop_rect_item)
 
         iw, ih = self._working_image.size
@@ -425,7 +448,25 @@ class ImageEditorDialog(QDialog):
             except RuntimeError:
                 pass  # C++ object already deleted by scene.clear()
         self._crop_rect_item = _CropRect(rect)
+        self._crop_rect_item.on_moved = self._on_crop_rect_dragged
         self._scene.addItem(self._crop_rect_item)
+
+    def _on_crop_rect_dragged(self, x: int, y: int) -> None:
+        """Called when the user drags the crop rectangle in the viewport.
+
+        Syncs the X/Y spinboxes to the effective scene-space origin so
+        ``_apply_crop`` reads the user's actual drag position, not the
+        stale auto-fit coordinates.  Width and height stay unchanged
+        (dragging only moves, it doesn't resize).
+        """
+        # Block signals to avoid a circular update (spinbox valueChanged →
+        # _update_crop_rect → new _CropRect → loses drag state).
+        self._crop_x.blockSignals(True)
+        self._crop_y.blockSignals(True)
+        self._crop_x.setValue(x)
+        self._crop_y.setValue(y)
+        self._crop_x.blockSignals(False)
+        self._crop_y.blockSignals(False)
 
     def _apply_crop(self) -> None:
         """Crop the working image to the current selection."""
