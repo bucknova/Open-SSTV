@@ -207,6 +207,13 @@ open-sstv-decode in.wav -o out.png                    # CLI decoder
 - Plugin/macro system.
 - Internationalization.
 
+### Considered and deferred
+- **Optional image post-processing** — non-destructive "clean up image" action in
+  the gallery (median filter for salt-and-pepper noise). Deferred: simple filters
+  trade detail for smoother noise; more advanced denoisers (NLM, neural) bring
+  significant dependency weight for mixed returns. May revisit if a concrete use
+  case emerges.
+
 ## Author
 
 Open-SSTV is developed by Kevin (W0AEZ).
