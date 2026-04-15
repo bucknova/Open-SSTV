@@ -96,9 +96,10 @@ class ImageEditorDialog(QDialog):
         self._text_overlays: list[dict] = []
         self._result_image: PILImage | None = None
 
-        # Target aspect ratio
+        # Target aspect ratio — use display_height for PD modes where
+        # spec.height is the sync-pulse count (half the actual image height).
         self._target_w = self._spec.width
-        self._target_h = self._spec.height
+        self._target_h = self._spec.display_height
         self._aspect = self._target_w / self._target_h
 
         layout = QHBoxLayout(self)

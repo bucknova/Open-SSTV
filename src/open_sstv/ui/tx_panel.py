@@ -121,15 +121,7 @@ class TxPanel(QWidget):
         )
         for mode in Mode:
             spec = MODE_TABLE[mode]
-            # PD modes store half the actual image height in spec.height
-            # (sync-pulse count convention used by the decoder). Multiply
-            # back to display the real resolution to the user.
-            display_height = (
-                spec.height * 2
-                if mode.value.startswith("pd_")
-                else spec.height
-            )
-            label = f"{mode.value}  ({spec.width}\u00d7{display_height}, {spec.total_duration_s:.0f}s)"
+            label = f"{mode.value}  ({spec.width}\u00d7{spec.display_height}, {spec.total_duration_s:.0f}s)"
             self._mode_combo.addItem(label, mode)
         if default_mode:
             # Find the combo entry whose Mode.value matches the config string.

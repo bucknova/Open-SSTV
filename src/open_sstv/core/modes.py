@@ -97,6 +97,28 @@ class ModeSpec:
     sync_position: SyncPosition
 
     @property
+    def display_height(self) -> int:
+        """Actual image height in pixels (for user-facing display and crop).
+
+        PD modes store ``height = actual_image_height // 2`` because
+        each sync pulse covers two image rows — the decoder treats
+        ``height`` as the sync-pulse count, not the pixel count.  This
+        property returns the real image height by checking whether the
+        color layout is the PD-style ``("Y", "Cb", "Cr", "Y")`` four-
+        channel YCbCr layout (where each sync line produces two rows)
+        and doubling if so.
+
+        For every non-PD mode, ``display_height == height``.
+        """
+        # PD modes have four equal-duration channels (Y0, Cr, Cb, Y1)
+        # packed into one sync period → two image rows per sync.  The
+        # color_layout tuple length of 4 reliably distinguishes them
+        # from Robot 36's ("Y", "C") and Scottie/Martin's ("G", "B", "R").
+        if len(self.color_layout) == 4:
+            return self.height * 2
+        return self.height
+
+    @property
     def total_duration_s(self) -> float:
         """Approximate end-to-end transmission length, in seconds.
 

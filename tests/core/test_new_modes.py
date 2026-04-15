@@ -183,3 +183,52 @@ def test_round_trip_dimensions_slow(mode: Mode) -> None:
     assert result.image.size == expected_size, (
         f"{mode.value}: decoded size {result.image.size} != expected {expected_size}"
     )
+
+
+# ---------------------------------------------------------------------------
+# display_height — user-facing pixel height vs. sync-pulse-count height
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "mode,expected_display_height",
+    [
+        # PD modes: display_height == 2 × spec.height
+        (Mode.PD_50, 256),
+        (Mode.PD_90, 256),
+        (Mode.PD_120, 496),
+        (Mode.PD_160, 400),
+        (Mode.PD_180, 496),
+        (Mode.PD_240, 496),
+        (Mode.PD_290, 616),
+        # Non-PD modes: display_height == spec.height
+        (Mode.ROBOT_36, 240),
+        (Mode.MARTIN_M1, 256),
+        (Mode.MARTIN_M2, 256),
+        (Mode.MARTIN_M3, 128),
+        (Mode.MARTIN_M4, 128),
+        (Mode.SCOTTIE_S1, 256),
+        (Mode.SCOTTIE_S2, 256),
+        (Mode.SCOTTIE_S3, 128),
+        (Mode.SCOTTIE_S4, 128),
+        (Mode.SCOTTIE_DX, 256),
+        (Mode.WRAASE_SC2_120, 256),
+        (Mode.WRAASE_SC2_180, 256),
+        (Mode.PASOKON_P3, 496),
+        (Mode.PASOKON_P5, 496),
+        (Mode.PASOKON_P7, 496),
+    ],
+)
+def test_display_height(mode: Mode, expected_display_height: int) -> None:
+    """``ModeSpec.display_height`` returns the actual pixel height for
+    user-facing dimensions.
+
+    Regression guard for the PD autocrop bug: the image editor was using
+    ``spec.height`` (sync-pulse count = half the image height) to set the
+    crop target, offering e.g. 320×128 for PD-50 instead of 320×256.
+    """
+    spec = MODE_TABLE[mode]
+    assert spec.display_height == expected_display_height, (
+        f"{mode.value}: display_height={spec.display_height}, "
+        f"expected {expected_display_height}"
+    )
