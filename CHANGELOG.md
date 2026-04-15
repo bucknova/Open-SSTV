@@ -11,6 +11,41 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.23] — 2026-04-15
+
+### Fixed
+- **PD-mode autocrop offered half the real height** — the image editor used
+  `spec.height` (sync-pulse count, half the pixel count for PD modes) as
+  the crop target.  PD-50 offered 320×128 instead of 320×256.  Added
+  `ModeSpec.display_height` property that returns the actual pixel height;
+  used in the image editor and TX mode dropdown.
+- **Settings dialog segfault on app exit** — four signal connections from
+  `TxWorker` to the `SettingsDialog` were never disconnected after
+  `exec()` returned; PySide6's C++ destructor hit a dangling Python
+  wrapper during `_Py_Finalize`.  Now disconnected immediately after
+  `exec()`.
+- **TX banner overwrote user content** — the banner drew directly over the
+  top rows of the source image.  Now the source is resized to fit below
+  the banner strip (≈9% vertical compression for "small" banner) so user
+  text overlays and image detail are never lost.
+- **Clear Text didn't remove manually-added editor text** — the image
+  editor baked text into `_base_image`, so reverting to it kept the
+  editor's overlays.  The editor now returns a separate text-free base;
+  Clear Text reverts to it, removing both template and editor text.
+- **Crop tool ignored user's drag position** — the crop rectangle was
+  draggable but the spinbox values were never updated on drag, so
+  "Apply Crop" always used the auto-fit coordinates.  `_CropRect` now
+  overrides `itemChange()` to sync spinboxes on every drag.
+
+### Added
+- **X/Y pixel spin boxes** in the image editor for fine text overlay
+  placement.  The Position dropdown (Top Left, Bottom Center, etc.) auto-
+  fills the spin boxes; manual edits flip the dropdown to "Custom."
+  Coordinates persist in the template TOML alongside the existing
+  position field (backward compatible).
+
+---
+
 ## [0.1.22] — 2026-04-15
 
 ### Changed
