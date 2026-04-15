@@ -170,6 +170,8 @@ different front-end (TUI, web, CLI) without modification.
 
 ## Install (development)
 
+### Linux and macOS (supported)
+
 ```bash
 git clone https://github.com/bucknova/Open-SSTV.git
 cd Open-SSTV
@@ -183,6 +185,52 @@ required for direct serial or manual PTT):
 
 - **macOS:** `brew install hamlib`
 - **Debian/Ubuntu:** `sudo apt install libhamlib-utils`
+
+### Windows (experimental — untested)
+
+> ⚠️ **Open-SSTV has not been tested on Windows.** Every runtime dependency
+> (PySide6, numpy, scipy, sounddevice, PySSTV, Pillow, pyserial) publishes
+> Windows wheels, so the app *should* install and run, but no one has yet
+> driven a real radio from Open-SSTV on Windows. Please treat the instructions
+> below as a call for testers rather than a supported install, and
+> [file issues](https://github.com/bucknova/Open-SSTV/issues) with your
+> findings — good or bad. Full Windows support is on the
+> [v0.2 roadmap](#v02-planned).
+
+Prerequisites: Python 3.11+ from [python.org](https://www.python.org/downloads/)
+(tick "Add Python to PATH" during install) and a working Git for Windows.
+
+From a `cmd.exe` or PowerShell prompt:
+
+```powershell
+git clone https://github.com/bucknova/Open-SSTV.git
+cd Open-SSTV
+python -m venv .venv
+.venv\Scripts\activate
+pip install -e ".[dev]"
+```
+
+For rigctld-based radio control, download Hamlib for Windows from the
+[official releases](https://github.com/Hamlib/Hamlib/releases) (pick a
+`hamlib-w64-*.zip`), unzip somewhere permanent, and either add its `bin\`
+folder to `PATH` or launch `rigctld.exe` manually before starting Open-SSTV.
+Direct serial rig control (Icom CI-V, Kenwood, Yaesu, DTR/RTS PTT) does
+**not** require Hamlib.
+
+Known Windows caveats (expected, not yet verified on hardware):
+
+- **Serial ports** appear as `COM3`, `COM4`, etc. — no `/dev/...` paths.
+  `serial.tools.list_ports` enumerates them natively, so the Settings
+  dialog's port picker should populate automatically.
+- **Audio devices** — use the MME or WASAPI host API. ASIO is not exposed
+  by `sounddevice` out of the box. If your USB interface doesn't appear,
+  open it once in the Windows Sound control panel to register the endpoint.
+- **Config directory** — settings persist to `%APPDATA%\open_sstv\`
+  (via `platformdirs`), not the Linux/macOS paths mentioned elsewhere in
+  this README.
+- **`rigctld` auto-launch** from the Settings dialog assumes `rigctld` is
+  on `PATH`; if not, launch it manually and connect Open-SSTV to
+  `127.0.0.1:4532` instead.
 
 ## Run
 
