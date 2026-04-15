@@ -83,8 +83,14 @@ def test_banner_fills_top_rows_with_bg_color() -> None:
     )
 
 
-def test_banner_does_not_alter_rows_below_strip() -> None:
-    """Rows below BANNER_HEIGHT must be pixel-identical to the source."""
+def test_banner_content_below_strip_is_resized_source() -> None:
+    """Rows below BANNER_HEIGHT contain the source image resized to fit.
+
+    The banner pushes image content down by ``banner_height`` pixels:
+    the source is scaled to ``(width, height − banner_height)`` and
+    pasted at ``y = banner_height``.  For a solid-colour source the
+    resized content is still that same solid colour.
+    """
     fill = (200, 100, 50)
     img = _solid(320, 256, fill)
     result = apply_tx_banner(img, "0.1.19", "W0AEZ")
@@ -92,8 +98,9 @@ def test_banner_does_not_alter_rows_below_strip() -> None:
     arr = np.array(result)
     below = arr[BANNER_HEIGHT:, :, :]
     expected = np.full_like(below, fill)
+    # LANCZOS resize of a solid colour is still that solid colour.
     assert np.array_equal(below, expected), (
-        "Pixels below the banner strip were modified — banner overflowed."
+        "Content below the banner strip is not the resized source."
     )
 
 
@@ -215,11 +222,12 @@ def test_banner_parametrized_height_fills_correct_rows(size_name: str) -> None:
     # Image dimensions unchanged.
     assert result.size == (320, 256)
 
-    # Rows below the strip must be pixel-identical to the source.
+    # Rows below the strip contain the resized source content.
+    # For a solid-colour source, the resized content is identical.
     below = arr[bh:, :, :]
     expected = np.full_like(below, fill)
     assert np.array_equal(below, expected), (
-        f"Rows below banner (height={bh}) were modified for size '{size_name}'"
+        f"Content below banner (height={bh}) not resized source for '{size_name}'"
     )
 
     # Top rows must be dominated by the bg colour (#202020).
@@ -231,4 +239,55 @@ def test_banner_parametrized_height_fills_correct_rows(size_name: str) -> None:
     # Larger presets use proportionally larger text, so allow up to 20%.
     assert non_bg_fraction < 0.20, (
         f"Too many non-bg pixels in '{size_name}' banner: {non_bg_fraction:.1%}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 7. Banner pushes content down (no collision)
+# ---------------------------------------------------------------------------
+
+
+def test_banner_pushes_content_down_not_overwrites() -> None:
+    """Source content near y=0 must be visible below the banner, not
+    destroyed.
+
+    Regression guard for the banner-collision bug: the old implementation
+    drew the banner ON TOP of the source pixels, overwriting any user
+    content (text overlays, image detail) in the top ``banner_height``
+    rows.  The fix resizes the source to fit below the banner strip so
+    no user pixels are lost.
+
+    We paint a distinct bright stripe at y=0..3 in the source.  After
+    the banner, that stripe should appear — pushed below the banner
+    strip — rather than being hidden under the bg fill.
+    """
+    width, height = 320, 256
+    bh = BANNER_HEIGHT  # 24
+    stripe_color = (255, 0, 0)  # bright red — easy to detect
+    fill = (50, 50, 50)  # neutral gray body
+
+    img = _solid(width, height, fill)
+    from PIL import ImageDraw as _ID
+    draw = _ID.Draw(img)
+    # Paint a 4-pixel-tall stripe at the very top of the source.
+    draw.rectangle([(0, 0), (width - 1, 3)], fill=stripe_color)
+
+    result = apply_tx_banner(img, "0.1.19", "W0AEZ")
+    arr = np.array(result)
+
+    # The stripe should now live at rows bh .. bh + (scaled stripe height).
+    # LANCZOS resize of 256→232 scales the 4 px stripe to ~3.6 px — at least
+    # 2 full rows should be dominantly red.
+    content_rows = arr[bh:bh + 4, :, :]
+    red_channel_mean = float(content_rows[:, :, 0].mean())
+    green_channel_mean = float(content_rows[:, :, 1].mean())
+    blue_channel_mean = float(content_rows[:, :, 2].mean())
+    # Red should dominate (> 150) while green and blue stay low (< 80).
+    assert red_channel_mean > 150, (
+        f"Source top-stripe red channel too low after banner: "
+        f"R={red_channel_mean:.0f} — content may have been overwritten."
+    )
+    assert green_channel_mean < 80 and blue_channel_mean < 80, (
+        f"Unexpected colour in pushed-down content: "
+        f"G={green_channel_mean:.0f}, B={blue_channel_mean:.0f}"
     )

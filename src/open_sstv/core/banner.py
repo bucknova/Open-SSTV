@@ -106,7 +106,12 @@ def apply_tx_banner(
     banner_height: int = BANNER_HEIGHT,
     font_size: int = _DEFAULT_FONT_SIZE,
 ) -> Image.Image:
-    """Return a copy of *image* with a header banner stamped across the top.
+    """Return a copy of *image* with a header banner and the content pushed down.
+
+    The source image is resized to ``(width, height − banner_height)`` and
+    pasted below a ``banner_height``-px strip, so the banner never
+    overwrites user content.  The returned image has the same dimensions
+    as the input — SSTV mode pixel geometry is preserved exactly.
 
     Parameters
     ----------
@@ -133,15 +138,18 @@ def apply_tx_banner(
     -------
     PIL.Image.Image
         New image with identical dimensions; top *banner_height* rows carry
-        the banner.
+        the banner, remaining rows carry the source content scaled to fit.
     """
-    out = image.copy()
+    width, height = image.size
+    content_height = height - banner_height
+
+    # Build the output canvas: banner strip at top, resized content below.
+    out = Image.new(image.mode or "RGB", (width, height), bg_color)
+    if content_height > 0:
+        shrunk = image.resize((width, content_height), Image.Resampling.LANCZOS)
+        out.paste(shrunk, (0, banner_height))
+
     draw = ImageDraw.Draw(out)
-    width = out.width
-
-    # Fill the banner rectangle.
-    draw.rectangle([(0, 0), (width - 1, banner_height - 1)], fill=bg_color)
-
     font = _load_font(font_size)
 
     # Horizontal padding: at least 8 px, or ~2 % of width for wide images.
