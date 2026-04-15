@@ -412,7 +412,19 @@ class MainWindow(QMainWindow):
         dlg.rejected.connect(
             lambda: self._tx_worker.set_output_gain(_original_output_gain)
         )
-        if dlg.exec() == SettingsDialog.DialogCode.Accepted:
+        result = dlg.exec()
+
+        # Disconnect tx_worker → dlg signals immediately.  The dialog is
+        # about to go out of scope; if these connections linger, PySide6's
+        # C++ side holds a stale reference and the QDialogWrapper destructor
+        # segfaults during Python finalization (atexit → destroyQCoreApplication
+        # → PySide::destructionVisitor on an already-freed Python wrapper).
+        self._tx_worker.transmission_started.disconnect(dlg.on_tx_started)
+        self._tx_worker.transmission_complete.disconnect(dlg.on_tx_ended)
+        self._tx_worker.transmission_aborted.disconnect(dlg.on_tx_ended)
+        self._tx_worker.error.disconnect(dlg.on_tx_error)
+
+        if result == SettingsDialog.DialogCode.Accepted:
             old_input_device = self._config.audio_input_device
             old_sample_rate = self._config.sample_rate
 
