@@ -554,7 +554,7 @@
 <!-- ── Hero ── -->
 <div class="hero">
   <div>
-    <div class="hero-badge">Pre-Beta · v0.1.37</div>
+    <div class="hero-badge" id="version-badge">Beta · v0.2.0</div>
     <h1>Open-Source<br /><span>SSTV Transceiver</span><br />for Amateur Radio</h1>
     <p>Transmit and receive Slow Scan Television images live from your rig — no external software required. 22 modes, modern Qt 6 GUI, cross-platform.</p>
     <div class="hero-actions">
@@ -791,6 +791,24 @@
 </footer>
 
 <script>
+  // Fetch latest version from CHANGELOG.md and update the hero badge
+  (async () => {
+    try {
+      const res = await fetch('https://raw.githubusercontent.com/bucknova/Open-SSTV/main/CHANGELOG.md');
+      if (!res.ok) return;
+      const text = await res.text();
+      const match = text.match(/^## \[(\d+\.\d+\.\d+)\][^\n]*(beta|pre-beta|alpha)?/im);
+      if (!match) return;
+      const version = match[1];
+      const label = match[0].toLowerCase();
+      let stage = 'Release';
+      if (label.includes('pre-beta') || label.includes('alpha')) stage = 'Pre-Beta';
+      else if (label.includes('beta')) stage = 'Beta';
+      const badge = document.getElementById('version-badge');
+      if (badge) badge.textContent = `${stage} · v${version}`;
+    } catch (_) {}
+  })();
+
   function openLightbox(src) {
     document.getElementById('lightbox-img').src = src;
     document.getElementById('lightbox').classList.add('open');
