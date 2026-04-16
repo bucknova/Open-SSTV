@@ -144,10 +144,26 @@ jobs:
           [Desktop Entry]
           Name=Open-SSTV
           Exec=open-sstv
+          Icon=open-sstv
           Type=Application
           Categories=HamRadio;Network;
           Comment=Open-source SSTV transceiver for amateur radio
           DESKTOP
+
+          # Placeholder icon — appimagetool requires one.
+          # Replace assets/icon.png in the repo to use a real icon.
+          if [ -f assets/icon.png ]; then
+            cp assets/icon.png AppDir/open-sstv.png
+          else
+            python3 -c "
+          from PIL import Image, ImageDraw, ImageFont
+          img = Image.new('RGB', (256, 256), '#1a3a5c')
+          draw = ImageDraw.Draw(img)
+          draw.ellipse([28, 28, 228, 228], outline='#4fc3f7', width=8)
+          draw.text((88, 100), 'SSTV', fill='#4fc3f7')
+          img.save('AppDir/open-sstv.png')
+          "
+          fi
 
           # Download appimagetool for this architecture
           TOOL="appimagetool-${ARCH}.AppImage"
