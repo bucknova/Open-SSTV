@@ -11,6 +11,72 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.2.0] — 2026-04-16 — 🎉 Beta release
+
+Open-SSTV is now **Beta** and ready for user testing and feedback.
+The v0.1.x series was the pre-beta stabilisation cycle; this release
+closes it out.
+
+### Journey
+
+From the Opus 4.6 audit of v0.1.26
+([`docs/audit_opus_1m_v0.1.26.md`](docs/audit_opus_1m_v0.1.26.md))
+through v0.1.37, the pre-beta cycle addressed **31 findings** (20 from
+the audit, 11 user-reported) and added **85 regression tests**:
+
+- **v0.1.27..v0.1.29** — closed 20 Opus audit findings: TX watchdog,
+  serial exception handling, per-line incremental decoder guards,
+  banner geometry, Pillow 10.1 pin, and a full README / User Guide
+  re-sync across 20 documentation discrepancies.
+- **v0.1.28** — per-transmission TX watchdog (was fixed 600 s; now
+  `max(30 s, (ptt_delay + samples/rate) × 1.20)` so a stuck Robot 36
+  aborts in under a minute instead of ten).
+- **v0.1.30..v0.1.31** — image editor crop pipeline rework (crop
+  resizes to target, strict 1:1 rendering so resolution changes are
+  visible, v0.1.35 added pre-shrink for oversized sources).
+- **v0.1.32** — auto-shrink + clamp for text overlays so narrow
+  modes (Martin M2, Scottie S2, M4, S4) don't let text spill off the
+  image edge.
+- **v0.1.33** — persisted settings now applied at startup, not only
+  after re-opening Settings.
+- **v0.1.34** — image editor strict 1:1 view with centre alignment
+  + dark canvas + startup version log for install diagnostics.
+- **v0.1.35** — editor pre-shrink for oversized sources; template
+  editor X/Y spin boxes with "Custom" position matching the image
+  editor's v0.1.23 UX.
+- **v0.1.36** — RX decoder watchdog (mirror of TX watchdog
+  philosophy); QSO-template Custom-position x/y fix in both
+  TX-apply paths.
+- **v0.1.37** — TX preview target outline + aspect match/mismatch
+  status label reacting to mode changes in real time.
+
+### Status
+
+- **Test suite**: 548 passed, 1 deliberate skip, ~5.5 min full run
+- **22 SSTV modes**: Robot 36; Martin M1/M2/M3/M4;
+  Scottie S1/S2/DX/S3/S4; PD-50/90/120/160/180/240/290;
+  Wraase SC2-120/180; Pasokon P3/P5/P7
+- **Rig control**: rigctld (Hamlib), direct serial CAT for Icom
+  CI-V / Kenwood / Yaesu / PTT-only DTR/RTS
+- **Platforms**: Linux and macOS (supported); Windows has
+  installation docs but has not yet been tested on real hardware
+
+### Development status classifier
+
+PyPI classifier bumped from `"Development Status :: 2 - Pre-Alpha"`
+to `"Development Status :: 4 - Beta"`.
+
+### What to file issues about
+
+Beta testers — please share findings. The README's new
+*Testing focus areas* section lists the surfaces we'd most like
+eyes on: weak-signal RX, TX output level calibration, CW station
+ID audibility, TX preview outline behaviour across modes, rig
+control edge cases, macOS privacy prompts on launch, and Windows
+installs.
+
+---
+
 ## [0.1.37] — 2026-04-16
 
 ### Added

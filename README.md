@@ -4,10 +4,15 @@ An open-source, cross-platform SSTV (Slow Scan Television) transceiver for amate
 radio. Receives and decodes SSTV images live off your radio, and encodes and
 transmits images back, with optional Hamlib or direct serial PTT and frequency control.
 
-**Status:** Pre-beta (v0.1.37). TX and RX paths work end-to-end across all 22 supported
-modes. Rig control via rigctld or direct serial CAT is functional. Weak-signal decode
-is usable down to roughly 0 dB SNR on Robot 36. Live field testing in progress; beta
-release pending real-radio validation of the v0.1.27..v0.1.30 audit fixes.
+**Status: Beta (v0.2.0) — ready for user testing and feedback.** TX and RX paths work
+end-to-end across all 22 supported modes. Rig control via rigctld or direct serial CAT
+is functional. Weak-signal decode is usable down to roughly 0 dB SNR on Robot 36.
+
+Open-SSTV is looking for testers — on-air reports, audio captures of problem decodes,
+and UI feedback all welcome. Please
+[file an issue](https://github.com/bucknova/Open-SSTV/issues) with your OS, Python
+version, radio / interface, and any terminal output. See
+[Testing focus areas](#testing-focus-areas) below for the spots we'd most like eyes on.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
 [User Guide](SSTV_App_User_Guide.md)
@@ -295,15 +300,43 @@ open-sstv-encode in.png --mode martin_m1 -o out.wav   # CLI encoder
 open-sstv-decode in.wav -o out.png                    # CLI decoder
 ```
 
+## Testing focus areas
+
+If you're kicking the tyres on the v0.2.0 beta, these are the surfaces we'd most
+like eyes on. File an [issue](https://github.com/bucknova/Open-SSTV/issues)
+with what you tried and what happened.
+
+- **Weak-signal RX**. Decode quality on fading / noisy signals; the weak-signal
+  mode toggle (Settings → Audio → Receive); false-positive VIS detections (expected
+  to reset silently — report if they don't).
+- **RX decoder watchdog** (v0.1.36). Intentionally interrupt a transmission
+  mid-image — does the partial image land in the gallery? Does the decoder return
+  to IDLE cleanly for the next VIS?
+- **TX output level calibration**. Test Tone button, output-gain slider, overdrive
+  toggle. Does ALC move predictably? Any odd interactions with your rig's USB MOD
+  Level or the OS system volume?
+- **CW station ID**. At 15 / 20 / 30 WPM, with your real callsign. Audible and
+  legible to a human copying by ear?
+- **TX preview outline** (v0.1.37). Load an image, walk through the mode dropdown —
+  does the green/amber match indicator track what you'd expect?
+- **Rig control edge cases**. Mid-session USB unplug; rigctld daemon crash; Icom
+  CI-V addresses other than the default 0x94; Kenwood/Yaesu protocol quirks.
+- **macOS privacy prompts**. If you see Music / iCloud / unexpected access
+  requests on launch, note which ones and when — we have a hunch this is PortAudio
+  device enumeration but haven't nailed it yet.
+- **Windows**. Open-SSTV has not been tested on real Windows hardware yet.
+  Installation instructions are in [Install](#install-development); first-launch
+  reports very welcome.
+
 ## Roadmap
 
-### v0.2 (planned)
+### Post-beta / v0.3
 - **Remaining SSTV modes** -- Robot 8/12/24/72 (4 modes needing custom YCbCr 4:2:2
   encoders not yet in PySSTV).
 - **Waterfall display** -- live FFT spectrogram in the RX panel
   (scope: [docs/waterfall_scope.md](docs/waterfall_scope.md)).
 - **Raspberry Pi / ARM support** -- tested on Pi 4/5.
-- **Windows support**.
+- **Windows support** (validated on real hardware).
 - **Digital VOX** -- auto-detect incoming SSTV and start decoding without manual
   capture start.
 - **Drag-and-drop** image loading in the TX panel.
