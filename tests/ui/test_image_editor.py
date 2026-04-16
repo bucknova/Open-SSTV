@@ -204,3 +204,90 @@ class TestApplyCropResizesToTarget:
         dlg._apply_crop()
 
         assert dlg._working_image.size == (800, 616)
+
+
+class TestRefreshPreviewSceneRect:
+    """The scene rect must match the working image's current size so the
+    view renders at the right scale.  Tracks the v0.1.31 fix where the
+    preview was being fit-to-view unconditionally, hiding the 800×600 →
+    320×240 size change from the user (both 4:3, both filled the view
+    identically).
+    """
+
+    def test_scene_rect_matches_working_image_after_apply_crop(
+        self, qtbot
+    ) -> None:
+        """Apply Crop shrinks the working image to target size; the scene
+        rect the view renders must match that new size, not the
+        pre-crop size."""
+        src = Image.new("RGB", (800, 600), (100, 100, 100))
+        dlg = ImageEditorDialog(src, Mode.ROBOT_36)
+        qtbot.addWidget(dlg)
+
+        dlg._apply_crop()
+
+        # Working image is 320×240; scene rect must be too.
+        scene_rect = dlg._scene.sceneRect()
+        assert scene_rect.width() == 320
+        assert scene_rect.height() == 240
+
+    def test_view_transform_is_identity_for_small_image(
+        self, qtbot
+    ) -> None:
+        """When the pixmap is smaller than the viewport (typical case
+        after cropping-and-resizing to 320×240), the view transform
+        must be reset to identity (1:1 pixel scale) so the user sees
+        the image at its actual size — not stretched to fill the view.
+        The previous behaviour (fitInView unconditionally) made every
+        4:3 preview look identical regardless of resolution.
+        """
+        from PySide6.QtWidgets import QApplication
+
+        src = Image.new("RGB", (800, 600), (200, 200, 200))
+        dlg = ImageEditorDialog(src, Mode.ROBOT_36)
+        qtbot.addWidget(dlg)
+        dlg.show()  # view needs a viewport size to make the comparison
+        qtbot.waitExposed(dlg)
+        QApplication.processEvents()
+
+        dlg._apply_crop()
+        QApplication.processEvents()
+
+        # View transform should be identity (m11 == 1.0, m22 == 1.0)
+        # because 320×240 fits inside the dialog's allocated view area.
+        t = dlg._view.transform()
+        assert abs(t.m11() - 1.0) < 0.01, (
+            f"View transform m11 (x-scale) should be 1.0 for a "
+            f"320×240 image inside a larger viewport, got {t.m11()}"
+        )
+        assert abs(t.m22() - 1.0) < 0.01, (
+            f"View transform m22 (y-scale) should be 1.0 for a "
+            f"320×240 image inside a larger viewport, got {t.m22()}"
+        )
+
+    def test_view_scales_down_when_image_exceeds_viewport(
+        self, qtbot
+    ) -> None:
+        """A very large target (PD-290 is 800×616) may still exceed a
+        small viewport — in that case ``fitInView`` must run to scale
+        the scene down.  Guards against a "never scale" regression."""
+        from PySide6.QtWidgets import QApplication
+
+        src = Image.new("RGB", (800, 616), (50, 50, 50))
+        dlg = ImageEditorDialog(src, Mode.PD_290)
+        qtbot.addWidget(dlg)
+        # Force the dialog to a small size so 800×616 exceeds the view.
+        dlg.resize(500, 400)
+        dlg.show()
+        qtbot.waitExposed(dlg)
+        QApplication.processEvents()
+
+        dlg._refresh_preview()
+        QApplication.processEvents()
+
+        # Should have scaled down — m11 and m22 should be < 1.0.
+        t = dlg._view.transform()
+        assert t.m11() < 1.0, (
+            f"800×616 image in a 500×400 dialog should have been "
+            f"scaled down, got m11={t.m11()}"
+        )

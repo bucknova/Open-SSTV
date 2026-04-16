@@ -11,6 +11,37 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.31] — 2026-04-16
+
+### Fixed
+- **Image editor: preview now visibly reflects the post-crop resolution.**
+  v0.1.30 fixed the underlying behaviour (Apply Crop resizes to target
+  dimensions) but the rendered preview didn't visibly change because
+  ``_refresh_preview`` called ``fitInView`` unconditionally — both the
+  800×600 original and the 320×240 cropped result are 4:3, so both
+  filled the viewport identically and the user still couldn't tell
+  anything had happened.  The view now resets its transform to 1:1
+  first and only falls back to ``fitInView`` when the scene genuinely
+  exceeds the viewport.  Small previews (any mode whose target fits
+  within the dialog's allocated view area) render at their actual
+  pixel size, centred in the viewport, so a post-Apply-Crop 320×240
+  image looks noticeably smaller than the pre-crop 800×600.
+- **Image editor info label styled for visibility.**  The "Image: W×H"
+  label now has a bold weight, padding, and a subtle bordered
+  background so the pixel count is an unmissable signal that the
+  working image has changed size.  Previously it rendered in the
+  same weight and colour as every other label in the right panel and
+  was easy to overlook.
+
+### Tests
+- ``TestRefreshPreviewSceneRect`` in ``tests/ui/test_image_editor.py``
+  — 3 tests covering the rendering contract: scene rect matches the
+  working image after Apply Crop; view transform is identity (1:1
+  scale) when the image fits; ``fitInView`` still runs when a large
+  target (PD-290 800×616) exceeds a small viewport.
+
+---
+
 ## [0.1.30] — 2026-04-16
 
 ### Fixed

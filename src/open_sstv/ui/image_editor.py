@@ -337,8 +337,22 @@ class ImageEditorDialog(QDialog):
         right.addWidget(text_group)
 
         # --- Preview info ---
+        # Styled with a slight background + bold so the current pixel
+        # size is obvious at a glance.  Users reported overlooking the
+        # plain label (same font weight as other labels) and thinking
+        # Apply Crop had done nothing when the numbers were the only
+        # visible indicator that the resolution had changed.
         self._info_label = QLabel("")
         self._info_label.setWordWrap(True)
+        self._info_label.setStyleSheet(
+            "QLabel { "
+            "  background: palette(alternate-base); "
+            "  border: 1px solid palette(mid); "
+            "  border-radius: 3px; "
+            "  padding: 6px 8px; "
+            "  font-weight: bold; "
+            "}"
+        )
         right.addWidget(self._info_label)
 
         right.addStretch()
@@ -381,7 +395,29 @@ class ImageEditorDialog(QDialog):
         self._scene.clear()
         self._pixmap_item = self._scene.addPixmap(pixmap)
         self._scene.setSceneRect(QRectF(pixmap.rect()))
-        self._view.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+
+        # Scale the view ONLY if the scene is bigger than the viewport.
+        # Using ``fitInView`` unconditionally scales both ways (up and
+        # down), which made a 320×240 cropped preview and the original
+        # 800×600 look identical in the viewport (both 4:3, both filling
+        # it).  Users reported that Apply Crop looked like it did nothing
+        # because of this — the dimensions changed in memory but the
+        # screen rendering did not.  Reset to 1:1 first, then only call
+        # fitInView when the pixmap genuinely won't fit.  Small previews
+        # now render at actual pixel size (centred by the scene's default
+        # alignment) so the visual size tracks the working image.
+        self._view.resetTransform()
+        vrect = self._view.viewport().rect()
+        if pixmap.width() > vrect.width() or pixmap.height() > vrect.height():
+            self._view.fitInView(
+                self._scene.sceneRect(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+            )
+        else:
+            # Keep the scene centred in the viewport so the user sees
+            # the image at 1:1 with empty margin around it, rather than
+            # flush to a corner.
+            self._view.centerOn(self._scene.sceneRect().center())
 
         # Restore crop rect from saved geometry
         if saved_rect is not None:

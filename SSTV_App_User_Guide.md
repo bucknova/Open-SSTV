@@ -1,6 +1,6 @@
 # Open-SSTV User Guide
 
-**Version 0.1.30** | GPL-3.0-or-later
+**Version 0.1.31** | GPL-3.0-or-later
 
 ---
 
