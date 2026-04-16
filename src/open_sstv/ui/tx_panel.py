@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 
 from PIL import Image, ImageDraw
 from PySide6.QtCore import Qt, Signal, Slot
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -112,6 +112,23 @@ class TxPanel(QWidget):
         self._preview.setStyleSheet("QLabel { border: 1px solid palette(mid); }")
         layout.addWidget(self._preview, stretch=1)
 
+        # v0.1.37: TX target status label — shows current image dims vs
+        # selected mode's target dims, colored green for aspect-match
+        # and amber for mismatch.  User-reported: "The TX window does
+        # not reflect the mode the user selected.  User selects Martin
+        # M1 and crops image.  User moves to Martin M2.  The TX window
+        # still shows the images for Martin M1."  The preview pixmap
+        # stays as-loaded (changing it on mode change would stretch/
+        # squash user content behind their back), but this label and
+        # the dashed outline drawn by ``_paint_target_outline`` make
+        # the mismatch visible at a glance.
+        self._tx_target_status = QLabel("")
+        self._tx_target_status.setWordWrap(True)
+        self._tx_target_status.setStyleSheet(
+            "QLabel { padding: 4px 8px; border-radius: 3px; }"
+        )
+        layout.addWidget(self._tx_target_status)
+
         # --- QSO template bar ---
         self._template_bar = QSOTemplateBar(self._templates, self)
         self._template_bar.template_activated.connect(self._on_template_activated)
@@ -141,6 +158,10 @@ class TxPanel(QWidget):
                     if item_value == default_mode:
                         self._mode_combo.setCurrentIndex(i)
                         break
+        # v0.1.37: refresh the outline + status label when the user
+        # changes modes so they can see the target dimensions and
+        # aspect match/mismatch before clicking Transmit.
+        self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         mode_row.addWidget(self._mode_combo, stretch=1)
         layout.addLayout(mode_row)
 
@@ -236,13 +257,147 @@ class TxPanel(QWidget):
     def _update_preview_pixmap(self) -> None:
         if self._preview_source is None or self._preview_source.isNull():
             return
-        self._preview.setPixmap(
-            self._preview_source.scaled(
-                self._preview.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
+        scaled = self._preview_source.scaled(
+            self._preview.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
         )
+        # v0.1.37: paint a dashed outline showing the selected mode's
+        # aspect-ratio box on top of the scaled preview.  Gives the
+        # user an at-a-glance indicator of how the TX target matches
+        # (or mismatches) the loaded image; complements the text
+        # status label below.
+        annotated = self._paint_target_outline(scaled)
+        self._preview.setPixmap(annotated)
+        self._update_tx_target_status()
+
+    def _paint_target_outline(self, pixmap: QPixmap) -> QPixmap:
+        """Return ``pixmap`` with a dashed rectangle painted to show
+        the target mode's aspect-ratio box, centered on the preview.
+
+        When the source image's aspect matches the target, the box
+        covers the full preview (drawn in a neutral colour).  When
+        aspects differ, the box is a smaller centered rectangle
+        (drawn in amber) so the user can see that the LANCZOS resize
+        to target will distort detail outside the box.
+        """
+        if self._current_image is None:
+            return pixmap
+
+        try:
+            mode = self.selected_mode()
+            spec = MODE_TABLE[mode]
+        except (ValueError, KeyError):
+            return pixmap
+
+        # Current image + target dimensions and aspects
+        iw, ih = self._current_image.width, self._current_image.height
+        tw, th = spec.width, spec.display_height
+        if iw <= 0 or ih <= 0 or tw <= 0 or th <= 0:
+            return pixmap
+
+        src_aspect = iw / ih
+        tgt_aspect = tw / th
+        # Tolerance: treat aspects within 1% as "matching".
+        aspect_match = abs(src_aspect - tgt_aspect) / tgt_aspect < 0.01
+
+        # Compute the target box's size in displayed-pixmap coords.
+        # The displayed pixmap has the same aspect as the source image
+        # (KeepAspectRatio scale).  Fit the target aspect inside it,
+        # centered.
+        pw = pixmap.width()
+        ph = pixmap.height()
+        if tgt_aspect > src_aspect:
+            # Target is wider than source → target box is full width,
+            # shorter height.
+            box_w = pw
+            box_h = int(round(pw / tgt_aspect))
+        else:
+            box_w = int(round(ph * tgt_aspect))
+            box_h = ph
+        box_x = (pw - box_w) // 2
+        box_y = (ph - box_h) // 2
+
+        # Draw.  Use a writable copy so we don't mutate the scaled
+        # original (which may be reused by a later resize).
+        out = QPixmap(pixmap)
+        painter = QPainter(out)
+        try:
+            if aspect_match:
+                # Subtle neutral outline — "you're good, this will TX
+                # without distortion."
+                pen_color = QColor(180, 220, 180, 180)  # soft green
+            else:
+                # Amber — aspect mismatch, LANCZOS will stretch.
+                pen_color = QColor(255, 170, 60, 220)
+            pen = QPen(pen_color)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            pen.setWidth(2)
+            painter.setPen(pen)
+            painter.drawRect(box_x, box_y, box_w - 1, box_h - 1)
+        finally:
+            painter.end()
+        return out
+
+    def _update_tx_target_status(self) -> None:
+        """Refresh the small status label beneath the preview.
+        Shows current image dims vs selected mode's target dims with
+        a match/mismatch verdict.  Colour-coded: green for aspect
+        match, amber for mismatch.
+        """
+        if self._current_image is None:
+            self._tx_target_status.setText("")
+            self._tx_target_status.setStyleSheet(
+                "QLabel { padding: 4px 8px; border-radius: 3px; }"
+            )
+            return
+        try:
+            mode = self.selected_mode()
+            spec = MODE_TABLE[mode]
+        except (ValueError, KeyError):
+            self._tx_target_status.setText("")
+            return
+        iw, ih = self._current_image.width, self._current_image.height
+        tw, th = spec.width, spec.display_height
+        src_aspect = iw / ih if ih else 0.0
+        tgt_aspect = tw / th if th else 0.0
+        if tgt_aspect == 0:
+            return
+        aspect_match = abs(src_aspect - tgt_aspect) / tgt_aspect < 0.01
+
+        if iw == tw and ih == th:
+            text = (
+                f"Image {iw}×{ih} matches {mode.value} target — "
+                "TX will encode at native resolution."
+            )
+            bg = "#e6f4ea"  # very light green
+            fg = "#1b5e20"
+        elif aspect_match:
+            text = (
+                f"Image {iw}×{ih} · {mode.value} target {tw}×{th} — "
+                "aspect matches; LANCZOS resize on TX, no distortion."
+            )
+            bg = "#e6f4ea"
+            fg = "#1b5e20"
+        else:
+            text = (
+                f"Image {iw}×{ih} · {mode.value} target {tw}×{th} — "
+                "aspect mismatch; image will be stretched.  Consider "
+                "re-editing for the new mode."
+            )
+            bg = "#fff4e5"  # light amber
+            fg = "#b26a00"
+        self._tx_target_status.setText(text)
+        self._tx_target_status.setStyleSheet(
+            f"QLabel {{ padding: 4px 8px; border-radius: 3px; "
+            f"background: {bg}; color: {fg}; }}"
+        )
+
+    @Slot(int)
+    def _on_mode_changed(self, _index: int) -> None:
+        """Mode combo changed: refresh the preview outline + status
+        so the user sees the new target dims right away."""
+        self._update_preview_pixmap()
 
     def set_transmitting(self, transmitting: bool) -> None:
         """Toggle button state for the in-flight TX cycle."""

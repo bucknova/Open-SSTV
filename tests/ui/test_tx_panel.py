@@ -224,3 +224,94 @@ class TestCustomPositionTemplateRendering:
         assert overlays[0]["position"] == "Custom"
         assert "K0TEST" in overlays[0]["text"]
         assert "W0AEZ" in overlays[0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# v0.1.37 — TX target outline + status label
+# ---------------------------------------------------------------------------
+
+
+class TestTxTargetStatus:
+    """The TX panel shows a small status label + dashed outline so the
+    user can see at a glance whether the loaded image matches the
+    currently-selected mode's aspect, or will be stretched on TX.
+    """
+
+    def test_no_image_no_status(self, panel: TxPanel) -> None:
+        """Before an image is loaded the status label is empty."""
+        assert panel._tx_target_status.text() == ""
+
+    def test_aspect_match_shows_green_status(
+        self, panel: TxPanel, tmp_path: Path
+    ) -> None:
+        """A 320×256 source against Martin M1 (320×256) is a perfect
+        match — status label mentions 'matches' and uses the
+        green-flavoured colour scheme."""
+        big = Image.new("RGB", (320, 256), color=(64, 128, 192))
+        path = tmp_path / "m1.png"
+        big.save(path)
+        panel.load_image(path)
+
+        # Pick Martin M1
+        for i in range(panel._mode_combo.count()):
+            if panel._mode_combo.itemData(i) == Mode.MARTIN_M1:
+                panel._mode_combo.setCurrentIndex(i)
+                break
+
+        status = panel._tx_target_status.text()
+        assert "matches" in status.lower()
+        assert "martin_m1" in status
+
+    def test_aspect_mismatch_shows_amber_status(
+        self, panel: TxPanel, tmp_path: Path
+    ) -> None:
+        """A 320×256 source (M1 aspect) against Martin M2 (160×256,
+        different aspect) warns that the image will be stretched."""
+        big = Image.new("RGB", (320, 256), color=(64, 128, 192))
+        path = tmp_path / "src.png"
+        big.save(path)
+        panel.load_image(path)
+
+        # Pick Martin M2
+        for i in range(panel._mode_combo.count()):
+            if panel._mode_combo.itemData(i) == Mode.MARTIN_M2:
+                panel._mode_combo.setCurrentIndex(i)
+                break
+
+        status = panel._tx_target_status.text()
+        assert "mismatch" in status.lower()
+        assert "stretched" in status.lower()
+        assert "martin_m2" in status
+
+    def test_mode_change_updates_status(
+        self, panel: TxPanel, tmp_path: Path
+    ) -> None:
+        """Changing modes after an image is loaded refreshes the
+        status label — the original bug (TX preview stays on M1
+        when user switches to M2) is fixed by the outline + status
+        update on mode change."""
+        big = Image.new("RGB", (320, 256), color=(64, 128, 192))
+        path = tmp_path / "src.png"
+        big.save(path)
+        panel.load_image(path)
+
+        # Select M1 → match
+        for i in range(panel._mode_combo.count()):
+            if panel._mode_combo.itemData(i) == Mode.MARTIN_M1:
+                panel._mode_combo.setCurrentIndex(i)
+                break
+        status_m1 = panel._tx_target_status.text()
+        assert "matches" in status_m1.lower()
+
+        # Select M2 → mismatch
+        for i in range(panel._mode_combo.count()):
+            if panel._mode_combo.itemData(i) == Mode.MARTIN_M2:
+                panel._mode_combo.setCurrentIndex(i)
+                break
+        status_m2 = panel._tx_target_status.text()
+        assert "mismatch" in status_m2.lower()
+
+        assert status_m1 != status_m2, (
+            "TX target status label must refresh on mode change — "
+            "this is the v0.1.37 user-reported bug regression guard."
+        )

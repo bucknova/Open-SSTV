@@ -11,6 +11,55 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.37] — 2026-04-16
+
+### Added
+- **TX preview target outline + status label.**  User-reported:
+  *"The TX window does not reflect the mode the user selected.
+  User selects Martin M1 and crops image.  User moves to Martin M2.
+  The TX window still shows the images for Martin M1."*  Root
+  cause: the TX panel stores the edited image at the editor-time
+  target's pixel dimensions and never re-preps it on mode change.
+  At TX time the image IS resized to the new mode's dimensions, but
+  the preview was misleading — and aspect-mismatch cases (M1 → M2,
+  M1 → M3) produce a distorted output that the preview didn't warn
+  about.
+
+  Two independent cues added:
+
+  * **Dashed outline** painted on top of the scaled preview pixmap
+    showing the selected mode's aspect-ratio box, centered on the
+    image.  Soft green when the source aspect matches the target,
+    amber when it doesn't.  Drawn with a 2-pixel dashed pen, no
+    dimming — the full source image remains visible underneath.
+
+  * **Status label** beneath the preview showing current image
+    dimensions, selected mode's target dimensions, and a match /
+    mismatch verdict.  Three variants:
+
+    * native-resolution match → green: "Image 320×240 matches
+      robot_36 target — TX will encode at native resolution."
+    * aspect match (different size) → green: "aspect matches;
+      LANCZOS resize on TX, no distortion."
+    * aspect mismatch → amber: "aspect mismatch; image will be
+      stretched.  Consider re-editing for the new mode."
+
+  The preview pixmap itself is NOT automatically re-prepped on
+  mode change — that would silently distort user content behind
+  their back.  The two cues keep the user informed without mutating
+  their data.
+
+### Tests
+- ``TestTxTargetStatus`` in ``tests/ui/test_tx_panel.py`` (4 new):
+  empty-state before image load; green status on aspect match
+  (M1 source in M1 slot); amber status on aspect mismatch (M1
+  source switched to M2); status-label refreshes when the mode
+  combo changes (the explicit user-reported-bug regression guard).
+
+Full suite: 544 → 548 (+4).
+
+---
+
 ## [0.1.36] — 2026-04-16
 
 ### Added
