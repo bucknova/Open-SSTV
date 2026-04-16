@@ -174,6 +174,14 @@ _RX_WATCHDOG_LINE_FLOOR_S: float = 5.0
 #: floor so there's no risk of doubling-up with flush-driven checks.
 _RX_WATCHDOG_TICK_MS: int = 2000
 
+#: After a watchdog trip, suppress the routine "Listening… Xs
+#: buffered, waiting for signal." status updates for this many
+#: seconds so the user has time to read the *"Decode timed out —
+#: kept partial N/M lines."* message before it gets overwritten by
+#: the next idle-state flush.  10 s is a comfortable reading
+#: window without stalling real user feedback indefinitely.
+_RX_POST_WATCHDOG_COOLDOWN_S: float = 10.0
+
 #: Hard upper bound on the encode / banner-stamp / CW-append stage.
 #: Encoding is CPU-bound and finishes in ~100 ms even for the longest
 #: mode we ship (Pasokon P7), so 30 s is wildly generous — its only job
@@ -808,6 +816,11 @@ class RxWorker(QObject):
         # Created lazily on the worker thread — see
         # ``_ensure_watchdog_timer`` for why.
         self._watchdog_timer: QTimer | None = None
+        # v0.2.2: wall-clock timestamp of the most recent watchdog
+        # trip.  Used by ``_flush`` to suppress routine "Listening…"
+        # status updates for a short cooldown so the user can read
+        # the timeout message before it gets overwritten.
+        self._watchdog_trip_time: float = 0.0
 
     def set_input_gain(self, gain: float) -> None:
         """Set the software input gain (1.0 = unity). Thread-safe."""
@@ -1000,6 +1013,9 @@ class RxWorker(QObject):
         # v0.1.36: clear watchdog state so a previous (possibly
         # stalled) decoding session doesn't leak into the next one.
         self._reset_watchdog_state()
+        # v0.2.2: also drop any post-trip cooldown so the user's
+        # explicit Clear immediately lets "Listening…" updates resume.
+        self._watchdog_trip_time = 0.0
         # v0.2.1: ensure the wall-clock tick is running so the
         # watchdog can fire even if audio flow pauses after reset
         # (e.g. user clicks Clear then doesn't send audio for a
@@ -1056,10 +1072,19 @@ class RxWorker(QObject):
 
         if not events and not self._decoding:
             # No decode yet — show progress so the user knows we're alive.
-            secs = self._total_samples / self._sample_rate
-            self.status_update.emit(
-                f"Listening… {secs:.0f}s buffered, waiting for signal."
+            # v0.2.2: suppress for a short cooldown after a watchdog
+            # trip so the user has time to read the timeout message
+            # before this overwrites it.
+            cooldown_active = (
+                self._watchdog_trip_time > 0.0
+                and (time.monotonic() - self._watchdog_trip_time)
+                < _RX_POST_WATCHDOG_COOLDOWN_S
             )
+            if not cooldown_active:
+                secs = self._total_samples / self._sample_rate
+                self.status_update.emit(
+                    f"Listening… {secs:.0f}s buffered, waiting for signal."
+                )
 
         decoded = False
         for event in events:
@@ -1168,6 +1193,11 @@ class RxWorker(QObject):
         self._decoding = False
         self._reset_watchdog_state()
         self._total_samples = 0
+        # v0.2.2: remember when this trip happened so the next few
+        # idle-state flushes suppress the routine "Listening…"
+        # status update — otherwise the timeout message is
+        # overwritten before the user can read it.
+        self._watchdog_trip_time = now
 
     def _reset_watchdog_state(self) -> None:
         """Clear the per-transmission watchdog tracking fields.

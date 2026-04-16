@@ -31,6 +31,7 @@ def _record_signals(worker: RxWorker) -> dict[str, list]:
         "image_started": [],
         "image_complete": [],
         "error": [],
+        "status_update": [],
     }
     worker.image_started.connect(
         lambda mode, code: log["image_started"].append((mode, code))
@@ -39,6 +40,7 @@ def _record_signals(worker: RxWorker) -> dict[str, list]:
         lambda img, mode, code: log["image_complete"].append((img, mode, code))
     )
     worker.error.connect(lambda msg: log["error"].append(msg))
+    worker.status_update.connect(lambda msg: log["status_update"].append(msg))
     return log
 
 
@@ -637,6 +639,70 @@ class TestRxWatchdog:
         assert worker._decoding_mode is None
         assert worker._decoding_start_time == 0.0
         assert worker._last_progress_lines == 0
+
+    def test_timeout_message_not_overwritten_by_listening_during_cooldown(
+        self, qapp
+    ) -> None:
+        """v0.2.2: after a watchdog trip, the next idle-state flush
+        used to immediately emit the routine "Listening…" status,
+        which clobbered the timeout message before the user could
+        read it.  The cooldown gate keeps idle-state chatter
+        suppressed for a short window so the user can actually see
+        the timeout message.
+        """
+        import time
+
+        from open_sstv.ui.workers import _RX_WATCHDOG_LINE_FLOOR_S
+
+        worker = RxWorker(sample_rate=48_000, flush_samples=1)
+        prog_image = Image.new("RGB", (320, 240), (10, 20, 30))
+
+        # Arm the decoder into DECODING, then trip the watchdog.
+        worker._decoder = MagicMock()
+        worker._decoder.feed.side_effect = [
+            [
+                ImageStarted(mode=Mode.ROBOT_36, vis_code=8),
+                ImageProgress(
+                    image=prog_image,
+                    mode=Mode.ROBOT_36,
+                    vis_code=8,
+                    lines_decoded=120,
+                    lines_total=240,
+                ),
+            ],
+            [],  # idle-state flush *after* trip
+        ]
+        log = _record_signals(worker)
+
+        worker.feed_chunk(np.zeros(10, dtype=np.float32))
+        worker._last_progress_time = time.monotonic() - (
+            _RX_WATCHDOG_LINE_FLOOR_S + 10.0
+        )
+        worker.feed_chunk(np.zeros(10, dtype=np.float32))  # trips watchdog
+
+        # Right after trip: only the timeout message in status_update
+        status_texts_after_trip = [
+            t for t in log["status_update"]
+            if "timed out" in t.lower()
+        ]
+        assert len(status_texts_after_trip) == 1, (
+            "watchdog trip should emit exactly one 'timed out' "
+            f"status; got: {log['status_update']}"
+        )
+
+        # Further idle flushes inside the cooldown window must NOT
+        # emit "Listening…" or the timeout message is clobbered.
+        worker._decoder.feed.side_effect = [[], [], []]
+        pre_count = len(log["status_update"])
+        worker.feed_chunk(np.zeros(10, dtype=np.float32))
+        worker.feed_chunk(np.zeros(10, dtype=np.float32))
+        post_count = len(log["status_update"])
+        new_texts = log["status_update"][pre_count:post_count]
+        listening = [t for t in new_texts if "Listening" in t]
+        assert listening == [], (
+            "Listening… status should be suppressed during the "
+            f"post-trip cooldown; got: {new_texts}"
+        )
 
     def test_wall_clock_tick_fires_watchdog_even_without_audio(
         self, qapp

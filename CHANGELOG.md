@@ -11,6 +11,41 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.2.2] — 2026-04-16
+
+### Fixed
+- **"Decode timed out" status message now stays visible long enough
+  to read.**  User-reported: *"RX watchdog works, I saw the decode
+  timeout message briefly.  Maybe allowing that message to stay a
+  little longer would be appreciated."*  Root cause: after the
+  watchdog reset the decoder to IDLE, the very next ``_flush``
+  (usually within ~1 s thanks to the flush cadence) ran into the
+  "no events + not decoding" branch and emitted the routine
+  ``"Listening… Xs buffered, waiting for signal."`` status update,
+  which overwrote the timeout message on the RX panel label before
+  the user could read it.
+
+  Fix: a 10 s post-trip cooldown
+  (``_RX_POST_WATCHDOG_COOLDOWN_S``) during which the idle-state
+  "Listening…" chatter is suppressed.  The timeout message stays
+  visible for its full reading window, after which routine status
+  updates resume.  A user-initiated ``reset()`` (Clear button)
+  clears the cooldown immediately so the "Listening…" updates
+  resume right away.
+
+### Tests
+- ``TestRxWatchdog.test_timeout_message_not_overwritten_by_listening_during_cooldown``
+  in ``tests/ui/test_rx_worker.py`` — trips the watchdog, asserts
+  the "timed out" status is emitted exactly once, then runs
+  several additional idle-state flushes and confirms no
+  "Listening…" updates are emitted during the cooldown window.
+- ``_record_signals`` helper extended to capture ``status_update``
+  so tests can assert on UI-bound status text directly.
+
+Full suite: 549 → 550 (+1).
+
+---
+
 ## [0.2.1] — 2026-04-16
 
 ### Fixed
