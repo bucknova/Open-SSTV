@@ -17,6 +17,7 @@ from PIL import Image
 from open_sstv.core.decoder import (
     DecodeError,
     ImageComplete,
+    ImageProgress,
     ImageStarted,
 )
 from open_sstv.core.modes import Mode
@@ -449,3 +450,190 @@ def test_final_slant_skips_robot36_keeps_progressive(qapp) -> None:
     img, mode, code = log["image_complete"][0]
     assert img is prog_image
     assert mode == Mode.ROBOT_36
+
+
+# ---------------------------------------------------------------------------
+# v0.1.36 — RX decoder watchdog
+# ---------------------------------------------------------------------------
+
+
+class TestRxWatchdog:
+    """The per-transmission RX watchdog resets the decoder when a
+    signal fades mid-image or a decode runs far past the mode's
+    expected duration.  Before v0.1.36, a signal that dropped out
+    after VIS detection left the decoder stuck in ``DECODING`` state
+    forever — the user had to click Clear manually.  Now the
+    watchdog trips after either (a) total elapsed > mode duration ×
+    1.5 (floor 15 s) or (b) no new line for 5 × line period (floor
+    5 s), emits the partial image to the gallery, and returns the
+    decoder to IDLE.
+    """
+
+    def test_watchdog_trips_on_no_progress(self, qapp) -> None:
+        """If no new ImageProgress arrives for ~5 × line period and
+        the line-floor (5 s), the watchdog synthesises a complete
+        event with the last partial image and resets the decoder."""
+        import time
+
+        from open_sstv.ui.workers import _RX_WATCHDOG_LINE_FLOOR_S
+
+        worker = RxWorker(sample_rate=48_000, flush_samples=1)
+        prog_image = Image.new("RGB", (320, 240), (10, 20, 30))
+
+        # Prime the decoder so the worker thinks it's DECODING
+        worker._decoder = MagicMock()
+        worker._decoder.feed.side_effect = [
+            [
+                ImageStarted(mode=Mode.ROBOT_36, vis_code=8),
+                ImageProgress(
+                    image=prog_image,
+                    mode=Mode.ROBOT_36,
+                    vis_code=8,
+                    lines_decoded=120,
+                    lines_total=240,
+                ),
+            ],
+            [],  # subsequent flushes — no progress
+        ]
+        log = _record_signals(worker)
+
+        # First flush: ImageStarted + ImageProgress → watchdog armed
+        worker.feed_chunk(np.zeros(10, dtype=np.float32))
+        assert worker._decoding is True
+        assert worker._last_progress_lines == 120
+
+        # Backdate the progress timestamp past the no-progress budget
+        # so the next flush trips the watchdog.
+        worker._last_progress_time = time.monotonic() - (
+            _RX_WATCHDOG_LINE_FLOOR_S + 10.0
+        )
+
+        # Second flush: no new events → watchdog should trip
+        worker.feed_chunk(np.zeros(10, dtype=np.float32))
+
+        # Partial image surfaced to the gallery
+        assert len(log["image_complete"]) == 1
+        img, mode, vis = log["image_complete"][0]
+        assert img is prog_image
+        assert mode == Mode.ROBOT_36
+        assert vis == 8
+
+        # Watchdog state cleared, decoder reset
+        assert worker._decoding is False
+        assert worker._decoding_mode is None
+        worker._decoder.reset.assert_called_once()
+
+    def test_watchdog_trips_on_total_elapsed(self, qapp) -> None:
+        """Catches the case where lines trickle in but the total
+        transmission time has blown past the expected mode duration
+        (fault tolerance against a decoder stuck in a bad sync grid
+        that keeps sliding)."""
+        import time
+
+        from open_sstv.ui.workers import _RX_WATCHDOG_TOTAL_MULTIPLIER
+
+        worker = RxWorker(sample_rate=48_000, flush_samples=1)
+        prog_image = Image.new("RGB", (320, 240), (10, 20, 30))
+        worker._decoder = MagicMock()
+        worker._decoder.feed.side_effect = [
+            [
+                ImageStarted(mode=Mode.ROBOT_36, vis_code=8),
+                ImageProgress(
+                    image=prog_image,
+                    mode=Mode.ROBOT_36,
+                    vis_code=8,
+                    lines_decoded=50,
+                    lines_total=240,
+                ),
+            ],
+            [],
+        ]
+        log = _record_signals(worker)
+        worker.feed_chunk(np.zeros(10, dtype=np.float32))
+
+        # Backdate the START timestamp past the total budget.  Keep
+        # the last-progress time fresh so only the total-elapsed
+        # branch trips.
+        from open_sstv.core.modes import MODE_TABLE
+
+        total_budget = MODE_TABLE[Mode.ROBOT_36].total_duration_s * _RX_WATCHDOG_TOTAL_MULTIPLIER
+        worker._decoding_start_time = time.monotonic() - (total_budget + 10.0)
+        worker._last_progress_time = time.monotonic()  # fresh
+
+        worker.feed_chunk(np.zeros(10, dtype=np.float32))
+
+        assert len(log["image_complete"]) == 1
+        assert worker._decoding is False
+
+    def test_watchdog_does_not_trip_during_normal_decode(self, qapp) -> None:
+        """A healthy in-progress decode with recent line events must
+        not trip the watchdog."""
+        worker = RxWorker(sample_rate=48_000, flush_samples=1)
+        prog_image = Image.new("RGB", (320, 240), (10, 20, 30))
+        worker._decoder = MagicMock()
+        worker._decoder.feed.side_effect = [
+            [
+                ImageStarted(mode=Mode.ROBOT_36, vis_code=8),
+                ImageProgress(
+                    image=prog_image,
+                    mode=Mode.ROBOT_36,
+                    vis_code=8,
+                    lines_decoded=100,
+                    lines_total=240,
+                ),
+            ],
+            [
+                ImageProgress(
+                    image=prog_image,
+                    mode=Mode.ROBOT_36,
+                    vis_code=8,
+                    lines_decoded=200,
+                    lines_total=240,
+                ),
+            ],
+        ]
+        log = _record_signals(worker)
+
+        worker.feed_chunk(np.zeros(10, dtype=np.float32))
+        worker.feed_chunk(np.zeros(10, dtype=np.float32))
+
+        # No spurious ImageComplete from the watchdog.  Progress
+        # events fire normally.
+        assert len(log["image_complete"]) == 0
+        assert worker._decoding is True
+
+    def test_watchdog_state_cleared_on_normal_complete(self, qapp) -> None:
+        """A clean ImageComplete event clears the watchdog state so
+        the next VIS starts with a fresh deadline."""
+        worker = RxWorker(sample_rate=48_000, flush_samples=1)
+        prog_image = Image.new("RGB", (320, 240), (10, 20, 30))
+        worker._decoder = MagicMock()
+        worker._decoder.feed.return_value = [
+            ImageStarted(mode=Mode.ROBOT_36, vis_code=8),
+            ImageComplete(
+                image=prog_image,
+                mode=Mode.ROBOT_36,
+                vis_code=8,
+            ),
+        ]
+        worker._decoder.consume_last_buffer.return_value = None
+
+        worker.feed_chunk(np.zeros(10, dtype=np.float32))
+
+        assert worker._decoding_mode is None
+        assert worker._decoding_start_time == 0.0
+        assert worker._last_progress_image is None
+
+    def test_watchdog_state_cleared_on_reset(self, qapp) -> None:
+        """Explicit reset() clears watchdog state so a stalled
+        session doesn't leak into the next one."""
+        worker = RxWorker(sample_rate=48_000, flush_samples=1)
+        worker._decoding_mode = Mode.ROBOT_36
+        worker._decoding_start_time = 1234.5
+        worker._last_progress_lines = 50
+
+        worker.reset()
+
+        assert worker._decoding_mode is None
+        assert worker._decoding_start_time == 0.0
+        assert worker._last_progress_lines == 0

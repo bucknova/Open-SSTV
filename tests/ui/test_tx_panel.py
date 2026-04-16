@@ -95,3 +95,132 @@ def test_mode_combo_lists_all_modes(panel: TxPanel) -> None:
 def test_selected_mode_returns_combo_choice(panel: TxPanel) -> None:
     panel._mode_combo.setCurrentIndex(0)
     assert isinstance(panel.selected_mode(), Mode)
+
+
+# ---------------------------------------------------------------------------
+# v0.1.36 — QSO template with Custom x/y applies correctly
+# ---------------------------------------------------------------------------
+
+
+class TestCustomPositionTemplateRendering:
+    """v0.1.36 regression: applying a QSO template whose overlay has
+    ``position="Custom"`` with explicit x/y must render the text at
+    those coordinates.
+
+    The bug: ``TxPanel._on_template_activated`` (no-user-input branch)
+    and ``QuickFillDialog.resolved_overlays`` both converted the
+    overlay to a plain ``dict`` but dropped the ``x`` / ``y`` fields.
+    When ``_apply_overlays`` later handed that dict to
+    ``draw_text_overlay``, the ``x is None`` check sent it down the
+    fallback path, ``position_to_xy("Custom", ...)`` returned
+    ``(margin, margin)`` (top-left), and the user's carefully-placed
+    text rendered at (8, 8).
+    """
+
+    def test_template_activation_forwards_xy(
+        self, qtbot, panel: TxPanel, tmp_path: Path
+    ) -> None:
+        """Direct-activation path (template with no placeholders that
+        require user input) must forward x/y to the rendered overlay.
+
+        Loads a 320×240 blue canvas, applies a Custom-position
+        template with red text at (200, 100), and asserts red pixels
+        appear near (200, 100) but NOT at top-left (where the bug
+        used to put them).
+        """
+        from open_sstv.config.templates import QSOTemplate, QSOTemplateOverlay
+
+        # Use a sized canvas that matches Robot 36's native resolution
+        # so the target coords (200, 100) land well inside.
+        big = Image.new("RGB", (320, 240), color=(64, 128, 192))
+        img_path = tmp_path / "big.png"
+        big.save(img_path)
+        panel.load_image(img_path)
+        panel._callsign = "W0AEZ"
+
+        tpl = QSOTemplate(
+            name="Custom Place",
+            overlays=[
+                QSOTemplateOverlay(
+                    text="CUSTOM",
+                    position="Custom",
+                    size=14,
+                    color=(255, 0, 0),
+                    x=200,
+                    y=100,
+                ),
+            ],
+        )
+
+        panel._on_template_activated(tpl)
+
+        # Any red pixel in the image proves the overlay rendered.
+        assert panel._current_image is not None
+        found_red_near_target = False
+        for dx in range(-10, 60):
+            for dy in range(-10, 30):
+                px = 200 + dx
+                py = 100 + dy
+                if 0 <= px < panel._current_image.width and 0 <= py < panel._current_image.height:
+                    r, g, b = panel._current_image.getpixel((px, py))[:3]
+                    if r > 200 and g < 80 and b < 80:
+                        found_red_near_target = True
+                        break
+            if found_red_near_target:
+                break
+
+        assert found_red_near_target, (
+            "Custom-position overlay did not render near (200, 100); "
+            "x/y are likely being dropped in the template-activation path."
+        )
+
+        # Negative check: top-left (where the bug rendered) should
+        # NOT have any red pixels.
+        top_left_has_red = False
+        for dx in range(0, 50):
+            for dy in range(0, 30):
+                if dx < panel._current_image.width and dy < panel._current_image.height:
+                    r, g, b = panel._current_image.getpixel((dx, dy))[:3]
+                    if r > 200 and g < 80 and b < 80:
+                        top_left_has_red = True
+                        break
+            if top_left_has_red:
+                break
+        assert not top_left_has_red, (
+            "Custom-position overlay leaked to top-left corner — "
+            "the x/y-dropping bug is back."
+        )
+
+    def test_quick_fill_dialog_forwards_xy(self, qtbot) -> None:
+        """QuickFillDialog's ``resolved_overlays`` (used for templates
+        with {theircall}/{rst} placeholders) must also forward x/y."""
+        from open_sstv.config.templates import QSOTemplate, QSOTemplateOverlay
+        from open_sstv.ui.quick_fill_dialog import QuickFillDialog
+
+        tpl = QSOTemplate(
+            name="Fill Me",
+            overlays=[
+                QSOTemplateOverlay(
+                    text="{theircall} DE {mycall}",
+                    position="Custom",
+                    size=20,
+                    color=(255, 255, 255),
+                    x=123,
+                    y=45,
+                ),
+            ],
+        )
+        dlg = QuickFillDialog(tpl, mycall="W0AEZ")
+        qtbot.addWidget(dlg)
+
+        # Fill in theircall
+        dlg._theircall_edit.setText("K0TEST")
+        dlg._on_accept()
+
+        overlays = dlg.resolved_overlays()
+        assert len(overlays) == 1
+        assert overlays[0]["x"] == 123
+        assert overlays[0]["y"] == 45
+        assert overlays[0]["position"] == "Custom"
+        assert "K0TEST" in overlays[0]["text"]
+        assert "W0AEZ" in overlays[0]["text"]

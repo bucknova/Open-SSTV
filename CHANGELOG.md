@@ -11,6 +11,66 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.36] — 2026-04-16
+
+### Added
+- **RX decoder watchdog.**  User-reported: *"someone sends an image
+  but the noise drops out enough to cause the decoder to get lost.
+  The decoder will forever try to decode the transmission long after
+  the source has stopped."*
+
+  The ``RxWorker`` now tracks how long it's been in the DECODING
+  state and how long since the last ``ImageProgress``.  If either
+  budget is blown, the decoder is reset and returned to IDLE so the
+  next VIS is caught normally.  Two independent trip conditions:
+
+  * **Total-elapsed** — more than
+    ``max(15 s, mode.total_duration_s × 1.5)`` since VIS detection.
+    A Pasokon P7 gets ~10 minutes of headroom; a Robot 36 gets a
+    15 s floor so a brief fade doesn't trip it.
+  * **Per-line no-progress** — no new line for
+    ``max(5 s, 5 × mode.line_time_ms)`` at a time.  Reacts to a
+    mid-image fade within a few seconds on fast modes, with a
+    floor so the fastest mode (Robot 36) isn't hair-triggered.
+
+  When the watchdog trips, whatever partial image the decoder has
+  accumulated is emitted as a normal ``image_complete`` so it still
+  lands in the gallery (truncated to the mode's resolution with
+  black rows for un-decoded lines).  A status-bar message quotes the
+  trip reason: "*Decode timed out (no progress for 23 s) — kept
+  partial 120/240 lines.*"  Mirrors the TX watchdog philosophy from
+  v0.1.28 (per-transmission budget + safety floor).
+
+### Fixed
+- **QSO template Custom-position x/y now apply correctly.**
+  User-reported: *"creating a new template with text at a custom
+  location does not function properly.  The text is all overlayed at
+  the top left of the image."*  Root cause: two separate code paths
+  that convert ``QSOTemplateOverlay`` objects to plain ``dict``s —
+  ``TxPanel._on_template_activated``'s no-user-input branch and
+  ``QuickFillDialog.resolved_overlays`` — both dropped the ``x`` and
+  ``y`` fields when building the dict.  When ``draw_text_overlay``
+  later received a dict with ``position="Custom"`` but ``x=None``,
+  it fell through to ``position_to_xy("Custom", ...)`` which returned
+  ``(margin, margin)`` and the text rendered at (8, 8) — top-left.
+  Both dict-builders now forward ``x`` / ``y``, so the user's
+  saved coordinates take effect on every template apply.
+
+### Tests
+- ``TestRxWatchdog`` in ``tests/ui/test_rx_worker.py`` (5 new):
+  trip on no-progress; trip on total-elapsed; no trip during healthy
+  decode; state cleared on clean ImageComplete; state cleared on
+  reset().
+- ``TestCustomPositionTemplateRendering`` in
+  ``tests/ui/test_tx_panel.py`` (2 new): end-to-end pixel check that
+  a Custom-position template renders at its saved coordinates (and
+  *not* at top-left); plus ``QuickFillDialog.resolved_overlays``
+  forwards x/y through the placeholder path.
+
+Full suite: 537 → 544 (+7 new, +0 regressions).
+
+---
+
 ## [0.1.35] — 2026-04-16
 
 ### Changed

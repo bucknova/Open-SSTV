@@ -92,7 +92,7 @@ from open_sstv.core.decoder import (
     decode_wav,
 )
 from open_sstv.core.encoder import DEFAULT_SAMPLE_RATE, encode
-from open_sstv.core.modes import Mode
+from open_sstv.core.modes import MODE_TABLE, Mode
 from open_sstv.radio.base import ManualRig, Rig
 from open_sstv.radio.exceptions import RigError
 
@@ -129,6 +129,36 @@ _DECODE_FLUSH_INTERVAL_S: float = 1.0
 #: ``sample_rate`` parameter, so this default is only used when
 #: ``flush_samples`` is not passed explicitly.
 _RX_FLUSH_SAMPLES_DEFAULT: int = int(_DECODE_FLUSH_INTERVAL_S * DEFAULT_SAMPLE_RATE)
+
+#: Per-transmission RX decoder watchdog: total-elapsed multiplier.
+#: If we've been in DECODING state for ``mode.total_duration_s × this``
+#: seconds without completing, the signal has almost certainly faded
+#: and the decoder is hunting for sync pulses that will never arrive.
+#: 1.5 gives a Pasokon P7 ~609 s (10 min) — enough slack for the slow
+#: modes while still bailing out on a stuck short-mode transmission.
+_RX_WATCHDOG_TOTAL_MULTIPLIER: float = 1.5
+
+#: Per-transmission RX decoder watchdog: total-elapsed floor.
+#: The multiplier is generous but still trips too aggressively on short
+#: modes (Robot 36 × 1.5 = 54 s).  Add a fixed floor so Robot 36 gets
+#: at least this many seconds of patience on a noisy signal.
+_RX_WATCHDOG_TOTAL_FLOOR_S: float = 15.0
+
+#: Per-line RX decoder watchdog: N × ``spec.line_time_ms`` without a
+#: new ``ImageProgress`` event ⇒ the signal has faded mid-image.
+#: Catches signal fade faster than the total-elapsed guard above:
+#: 3 line periods is ~1.3 s on Robot 36 (too short, will cause false
+#: resets on a brief fade), 5 line periods gives ~2.1 s on Robot 36
+#: and ~2.6 s on Scottie S1 — comfortable margin against a one-line
+#: dropout while still reacting to a real fade within a handful of
+#: seconds.
+_RX_WATCHDOG_LINE_MULTIPLIER: float = 5.0
+
+#: Minimum absolute "no-progress" timeout regardless of mode.  Protects
+#: the narrow fast modes from hair-trigger resets: 5 × 150 ms = 0.75 s
+#: on Robot 36 would be too twitchy, so 5 s gives breathing room even
+#: on the fastest mode.
+_RX_WATCHDOG_LINE_FLOOR_S: float = 5.0
 
 #: Hard upper bound on the encode / banner-stamp / CW-append stage.
 #: Encoding is CPU-bound and finishes in ~100 ms even for the longest
@@ -746,6 +776,20 @@ class RxWorker(QObject):
             if flush_samples is not None
             else _RX_FLUSH_SAMPLES_DEFAULT
         )
+        # v0.1.36: RX decoder watchdog state — see _check_rx_watchdog
+        # for the full logic.  ``_decoding_start_time`` is set when an
+        # ``ImageStarted`` event fires; ``_last_progress_time`` updates
+        # on every ``ImageProgress``.  ``_decoding_mode`` / ``_decoding_vis``
+        # / ``_last_progress_image`` / ``_last_progress_lines`` /
+        # ``_decoding_lines_total`` carry the data we need to synthesise
+        # a partial ``ImageComplete`` if the watchdog trips.
+        self._decoding_start_time: float = 0.0
+        self._last_progress_time: float = 0.0
+        self._decoding_mode: Mode | None = None
+        self._decoding_vis: int = 0
+        self._decoding_lines_total: int = 0
+        self._last_progress_image: "PILImage | None" = None
+        self._last_progress_lines: int = 0
 
     def set_input_gain(self, gain: float) -> None:
         """Set the software input gain (1.0 = unity). Thread-safe."""
@@ -928,6 +972,9 @@ class RxWorker(QObject):
         self._total_samples = 0
         self._decoding = False
         self._decoder.reset()
+        # v0.1.36: clear watchdog state so a previous (possibly
+        # stalled) decoding session doesn't leak into the next one.
+        self._reset_watchdog_state()
         # Re-arm after any cancel that was in flight.  This runs on the
         # worker thread so it's sequentially after _flush() has returned.
         self._cancel_event.clear()
@@ -995,10 +1042,143 @@ class RxWorker(QObject):
         if decoded:
             self._total_samples = 0
 
+        # v0.1.36: check the per-transmission watchdog *after* event
+        # dispatch so ``_last_progress_time`` reflects any progress
+        # in this flush.  If the signal has faded (no new lines in N
+        # line periods) or we've been decoding way past the expected
+        # mode duration, synthesise a partial completion from the
+        # last progress image we saw and reset to IDLE.
+        if self._decoding:
+            self._check_rx_watchdog()
+
+    def _check_rx_watchdog(self) -> None:
+        """Check the "decode stalled / signal faded" watchdog and
+        reset the decoder if tripped.
+
+        Two independent conditions; either trips the watchdog:
+
+        1. **Total elapsed** exceeds ``mode.total_duration_s × 1.5``
+           with a ``_RX_WATCHDOG_TOTAL_FLOOR_S`` floor — the whole
+           transmission would normally be done by now.
+
+        2. **No new progress** for
+           ``max(_RX_WATCHDOG_LINE_FLOOR_S, 5 × line_time_ms)`` — lines
+           have stopped arriving mid-image.
+
+        On trip, emit a truncated ``image_complete`` carrying whatever
+        lines we managed to decode so the user still gets the partial
+        image in their gallery, then call ``_decoder.reset()`` and
+        return the worker to IDLE for the next VIS.
+        """
+        if self._decoding_mode is None:
+            # Shouldn't happen — _decoding is True but no mode recorded.
+            # Defensive: just clear the flag.
+            self._decoding = False
+            return
+
+        now = time.monotonic()
+        spec = MODE_TABLE.get(self._decoding_mode)
+        if spec is None:
+            return
+
+        total_budget_s = max(
+            _RX_WATCHDOG_TOTAL_FLOOR_S,
+            spec.total_duration_s * _RX_WATCHDOG_TOTAL_MULTIPLIER,
+        )
+        line_budget_s = max(
+            _RX_WATCHDOG_LINE_FLOOR_S,
+            _RX_WATCHDOG_LINE_MULTIPLIER * spec.line_time_ms / 1000.0,
+        )
+
+        elapsed_total = now - self._decoding_start_time
+        elapsed_line = now - self._last_progress_time
+
+        total_trip = elapsed_total > total_budget_s
+        line_trip = elapsed_line > line_budget_s
+
+        if not (total_trip or line_trip):
+            return
+
+        reason = (
+            f"no progress for {elapsed_line:.0f} s"
+            if line_trip
+            else f"elapsed {elapsed_total:.0f} s exceeds "
+                 f"{total_budget_s:.0f} s budget"
+        )
+        _log.info(
+            "RX watchdog tripped on %s (%s); resetting decoder",
+            self._decoding_mode.value,
+            reason,
+        )
+
+        # Try to surface whatever partial image we've accumulated so
+        # the user still gets something in the gallery.  The image is
+        # truncated to the mode's native resolution (already is —
+        # every progressive image is full-sized with black rows for
+        # the un-decoded tail).
+        if self._last_progress_image is not None and self._last_progress_lines > 0:
+            self.image_complete.emit(
+                self._last_progress_image,
+                self._decoding_mode,
+                self._decoding_vis,
+            )
+            self.status_update.emit(
+                f"Decode timed out ({reason}) — kept partial "
+                f"{self._last_progress_lines}/{self._decoding_lines_total} lines."
+            )
+        else:
+            self.status_update.emit(
+                f"Decode timed out ({reason}) — no lines were decoded."
+            )
+
+        # Drop any buffered audio in the Decoder and return to IDLE.
+        # The RxWorker's own _scratch buffer was already drained at
+        # the start of this flush, so just reset the Decoder state.
+        self._decoder.reset()
+        self._decoding = False
+        self._reset_watchdog_state()
+        self._total_samples = 0
+
+    def _reset_watchdog_state(self) -> None:
+        """Clear the per-transmission watchdog tracking fields.
+        Called when decoding completes cleanly, when the watchdog
+        trips, and when the RxWorker is reset."""
+        self._decoding_start_time = 0.0
+        self._last_progress_time = 0.0
+        self._decoding_mode = None
+        self._decoding_vis = 0
+        self._decoding_lines_total = 0
+        self._last_progress_image = None
+        self._last_progress_lines = 0
+
     def _dispatch(self, event: object) -> None:
         if isinstance(event, ImageStarted):
+            # v0.1.36: start the per-transmission watchdog timer.
+            # ``_last_progress_time`` is also seeded so the no-progress
+            # budget starts counting from VIS detection, not from the
+            # first decoded line — which is the right behaviour when
+            # the first line takes unusually long on a marginal signal.
+            now = time.monotonic()
+            self._decoding_start_time = now
+            self._last_progress_time = now
+            self._decoding_mode = event.mode
+            self._decoding_vis = event.vis_code
+            self._last_progress_image = None
+            self._last_progress_lines = 0
+            # spec.height is the sync-pulse count (halved for PD modes);
+            # use display_height for the user-facing line count.
+            spec = MODE_TABLE.get(event.mode)
+            self._decoding_lines_total = (
+                spec.display_height if spec is not None else 0
+            )
             self.image_started.emit(event.mode, event.vis_code)
         elif isinstance(event, ImageProgress):
+            # v0.1.36: record the latest partial image + line count so
+            # the watchdog trip path has something to emit if the
+            # signal fades before ImageComplete.
+            self._last_progress_time = time.monotonic()
+            self._last_progress_image = event.image
+            self._last_progress_lines = event.lines_decoded
             self.image_progress.emit(
                 event.image,
                 event.mode,
@@ -1042,6 +1222,9 @@ class RxWorker(QObject):
                             exc_info=True,
                         )
             self.image_complete.emit(final_image, event.mode, event.vis_code)
+            # v0.1.36: clean completion — clear watchdog state so the
+            # next VIS starts with a fresh deadline.
+            self._reset_watchdog_state()
         elif isinstance(event, DecodeError):
             self.error.emit(event.message)
 

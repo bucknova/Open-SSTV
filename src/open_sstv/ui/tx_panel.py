@@ -371,7 +371,13 @@ class TxPanel(QWidget):
                 return
             overlays = dlg.resolved_overlays()
         else:
-            # No user input needed — resolve automatically
+            # No user input needed — resolve automatically.  x/y MUST
+            # be forwarded so Custom-position overlays render at the
+            # user's saved coordinates.  Previously omitted, which
+            # caused Custom templates to fall through the ``x is None``
+            # branch in ``draw_text_overlay`` and render at top-left
+            # via ``position_to_xy("Custom", ...)`` returning the
+            # default (margin, margin).  Fixed in v0.1.36.
             overlays = []
             for ov in tpl.overlays:
                 overlays.append({
@@ -381,6 +387,8 @@ class TxPanel(QWidget):
                     "position": ov.position,
                     "size": ov.size,
                     "color": ov.color,
+                    "x": ov.x,
+                    "y": ov.y,
                 })
 
         self._apply_overlays(overlays)

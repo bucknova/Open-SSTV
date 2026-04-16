@@ -102,6 +102,11 @@ class QuickFillDialog(QDialog):
         if self._rst_edit is not None:
             rst = self._rst_edit.text().strip()
 
+        # x/y MUST be forwarded — see the matching fix in
+        # ``TxPanel._on_template_activated``.  Dropping them caused
+        # Custom-position templates to render at top-left after
+        # fill-in rather than at the user's saved coordinates.
+        # Fixed in v0.1.36.
         result: list[dict] = []
         for ov in self._template.overlays:
             result.append({
@@ -114,6 +119,8 @@ class QuickFillDialog(QDialog):
                 "position": ov.position,
                 "size": ov.size,
                 "color": ov.color,
+                "x": ov.x,
+                "y": ov.y,
             })
         return result
 
