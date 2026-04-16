@@ -19,6 +19,9 @@ on:
     tags:
       - "v*"                  # v0.2.2, v0.3.0-beta, etc.
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # opt into Node 24 before it becomes mandatory (June 2026)
+
 jobs:
   build:
     name: PyInstaller → Windows EXE
