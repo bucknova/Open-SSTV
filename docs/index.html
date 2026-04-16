@@ -480,6 +480,47 @@
       margin-top: 48px;
     }
 
+    /* ── Roadmap ── */
+    .roadmap-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+    }
+
+    .roadmap-card {
+      display: flex;
+      gap: 20px;
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 28px;
+      transition: border-color 0.2s;
+    }
+
+    .roadmap-card:hover { border-color: var(--green); }
+
+    .roadmap-icon {
+      font-size: 28px;
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
+
+    .roadmap-card h3 {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .roadmap-card p {
+      font-size: 14px;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    @media (max-width: 700px) {
+      .roadmap-grid { grid-template-columns: 1fr; }
+    }
+
     /* ── Footer ── */
     footer {
       border-top: 1px solid var(--border);
@@ -720,6 +761,51 @@
       <div class="screenshot-placeholder">
         <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
         <span>Screenshot coming soon</span>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ── Roadmap ── -->
+<section id="roadmap">
+  <div class="section-inner">
+    <div class="section-label">What's Next</div>
+    <h2 class="section-title">Planned for future releases</h2>
+    <p class="section-sub">Open-SSTV is actively developed. Here's what's on the horizon.</p>
+
+    <div class="roadmap-grid">
+
+      <div class="roadmap-card">
+        <div class="roadmap-icon">🗂</div>
+        <div>
+          <h3>Expanded Template Library</h3>
+          <p>A full set of premade QSO templates inspired by MMSSTV and other popular SSTV clients — ready-to-use layouts for signal reports, contest exchanges, and general ragchewing.</p>
+        </div>
+      </div>
+
+      <div class="roadmap-card">
+        <div class="roadmap-icon">🔄</div>
+        <div>
+          <h3>Received Image Exchange</h3>
+          <p>One-click exchange workflow: the image you just decoded gets automatically inserted into your outgoing TX frame before sending, making back-and-forth QSOs much faster.</p>
+        </div>
+      </div>
+
+      <div class="roadmap-card">
+        <div class="roadmap-icon">🔤</div>
+        <div>
+          <h3>Expanded Font Support</h3>
+          <p>More typeface options for text overlays — from clean sans-serifs to classic amateur radio styles — so your callsign and captions look exactly how you want them.</p>
+        </div>
+      </div>
+
+      <div class="roadmap-card">
+        <div class="roadmap-icon">📐</div>
+        <div>
+          <h3>Advanced Text Layout</h3>
+          <p>Richer overlay positioning — multi-column layouts, text alignment controls, background fill options, and more — giving you full control over how information is arranged on your TX image.</p>
+        </div>
       </div>
 
     </div>
