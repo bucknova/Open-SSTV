@@ -85,5 +85,5 @@ jobs:
           # The release is created automatically from the tag if it doesn't
           # already exist.  Draft it so you can add release notes before
           # making it public.
-          draft: true
+          draft: false
           generate_release_notes: true
