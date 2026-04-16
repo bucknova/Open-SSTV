@@ -11,6 +11,68 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.26] — 2026-04-15
+
+### Fixed
+- **BZ-01 — rigctld orphaned on Settings Cancel.** `SettingsDialog.reject()` now
+  overrides `QDialog.reject()` to call `_stop_rigctld()` before delegating to
+  `super()`. Previously, cancelling the dialog after clicking "Launch rigctld Now"
+  left a dangling `hamlib` process running (port remained locked until the next
+  dialog open or app restart). `accept()` is unchanged — `rigctld_process` is
+  still transferred to `MainWindow._rigctld_proc` on OK so the connection persists.
+- **BZ-02 — TX banner preview showed stale callsign.** `_refresh_banner_preview`
+  now passes `self._callsign.text().strip().upper()` instead of
+  `self._config.callsign`, so the live preview reflects edits made to the Callsign
+  field without saving. `_callsign.textChanged` is also connected to
+  `_refresh_banner_preview_if_built` so the Images tab preview updates as the user
+  types in the Radio tab.
+- **BZ-03 — Crop X/Y spinboxes did not move the visual crop rectangle.**
+  `_crop_x.valueChanged` and `_crop_y.valueChanged` are now connected to
+  `_update_crop_rect` in `ImageEditorDialog`. Manually typing a crop position now
+  immediately repositions the yellow dashed crop overlay. The drag callback
+  (`_on_crop_rect_dragged`) already blocks these signals on drag-sync, so there is
+  no circular feedback loop.
+- **BZ-04 — Watchdog abort message hardcoded `300`.** `_on_tx_aborted` in
+  `MainWindow` now formats the watchdog duration from `_MAX_TX_DURATION_S`
+  (imported from `workers`) so the UI message stays in sync if the constant
+  is ever tuned.
+- **BZ-05 — Dead code `parentWidget()` call removed.** The vestigial
+  `self._civ_address_spin.parentWidget()  # trigger layout` line in
+  `_on_serial_protocol_changed` was a no-op (`parentWidget()` is a pure
+  getter with no side effects) and was deleted.
+- **BZ-06 — `save_templates` now logs before raising `OSError`.** Matches the
+  `save_config` pattern: `_log.error(...)` is emitted before re-raising so
+  the failure appears in the application log, not just in the caller's dialog.
+- **BZ-07 — Robot 36 wire-format detection is now O(total samples) instead of O(N²).**
+  `Robot36IncrementalDecoder._try_detect` previously re-ran bandpass + Hilbert
+  over the entire pending buffer on every `feed()` call during the ~450–900 ms
+  detection window. It now tracks `_detection_processed` and only processes new
+  audio (with a `_MIN_BP_SAMPLES` warm-up overlap), accumulating sync candidates
+  across calls in `_detection_cands`. Total DSP work during detection is bounded
+  by total samples + N × 256 (filter overlap) rather than N × total samples.
+- **BZ-08 — Stale "v0.2" comment on `_DECODE_FLUSH_INTERVAL_S` corrected.**
+  The comment now correctly attributes the revert to v0.1.25 instead of a future
+  "v0.2" that had already passed.
+- **BZ-09 — `_open_settings` `finally` block now disconnects all 7 signal
+  connections** (previously 4). Lambda references for `output_gain_changed` and
+  `rejected` are stored before connecting so they can be identified for
+  disconnection. `test_tone_requested` is also disconnected for symmetry.
+  Practically safe as-is (modal dialog can't emit after exec() returns), but
+  eliminates the asymmetry that could trap future signal additions.
+
+### Tests added
+- `tests/ui/test_settings_dialog.py` — BZ-01: verify `reject()` terminates a
+  launched rigctld process and clears `_rigctld_proc` to None; BZ-02: verify
+  `_refresh_banner_preview` passes the live callsign widget value to
+  `apply_tx_banner`, not the original config value.
+- `tests/ui/test_image_editor.py` — BZ-03: verify that setting X/Y spinboxes
+  updates the visual crop rectangle position.
+- `tests/core/test_incremental_decoder.py` — BZ-07: verify total samples passed
+  to `_bp_window` across N feeds is O(N × chunk) not O(N² × chunk), with the
+  bound checked against 2 × total pending size.
+
+---
+
 ## [0.1.25] — 2026-04-15
 
 ### Fixed

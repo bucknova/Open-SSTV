@@ -104,7 +104,7 @@ from open_sstv.ui.rx_panel import RxPanel
 from open_sstv.ui.settings_dialog import SettingsDialog
 from open_sstv.ui.tx_panel import TxPanel
 from open_sstv.core.modes import Mode
-from open_sstv.ui.workers import RxWorker, TxWorker
+from open_sstv.ui.workers import RxWorker, TxWorker, _MAX_TX_DURATION_S
 
 if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
@@ -420,27 +420,33 @@ class MainWindow(QMainWindow):
         self._tx_worker.transmission_complete.connect(dlg.on_tx_ended)
         self._tx_worker.transmission_aborted.connect(dlg.on_tx_ended)
         self._tx_worker.error.connect(dlg.on_tx_error)
+        # Store lambda references so the finally block can disconnect them
+        # explicitly — you can't disconnect an anonymous lambda by identity.
+        _gain_lambda = lambda gain: self._tx_worker.set_output_gain(gain)  # noqa: E731
+        _revert_lambda = lambda: self._tx_worker.set_output_gain(_original_output_gain)  # noqa: E731
         # Live-push TX gain on each slider tick (no disk write).
-        dlg.output_gain_changed.connect(
-            lambda gain: self._tx_worker.set_output_gain(gain)
-        )
+        dlg.output_gain_changed.connect(_gain_lambda)
         # Revert the live gain if the user cancels.
-        dlg.rejected.connect(
-            lambda: self._tx_worker.set_output_gain(_original_output_gain)
-        )
+        dlg.rejected.connect(_revert_lambda)
         try:
             result = dlg.exec()
         finally:
-            # Disconnect tx_worker → dlg signals immediately.  The dialog is
-            # about to go out of scope; if these connections linger, PySide6's
-            # C++ side holds a stale reference and the QDialogWrapper destructor
-            # segfaults during Python finalization (atexit → destroyQCoreApplication
-            # → PySide::destructionVisitor on an already-freed Python wrapper).
-            # The try/finally guarantees the disconnects fire even if exec() raises.
+            # Disconnect ALL wired signals immediately.  The dialog is about
+            # to go out of scope; if tx_worker → dlg connections linger,
+            # PySide6's C++ side holds a stale reference and the
+            # QDialogWrapper destructor segfaults during Python finalization
+            # (atexit → destroyQCoreApplication → PySide::destructionVisitor
+            # on an already-freed Python wrapper).  The try/finally guarantees
+            # the disconnects fire even if exec() raises.
+            # tx_worker → dlg (emitter outlives dialog)
             self._tx_worker.transmission_started.disconnect(dlg.on_tx_started)
             self._tx_worker.transmission_complete.disconnect(dlg.on_tx_ended)
             self._tx_worker.transmission_aborted.disconnect(dlg.on_tx_ended)
             self._tx_worker.error.disconnect(dlg.on_tx_error)
+            # dlg → self (emitter dies with dialog, but disconnect for symmetry)
+            dlg.test_tone_requested.disconnect(self._on_test_tone_requested)
+            dlg.output_gain_changed.disconnect(_gain_lambda)
+            dlg.rejected.disconnect(_revert_lambda)
 
         if result == SettingsDialog.DialogCode.Accepted:
             old_input_device = self._config.audio_input_device
@@ -610,7 +616,7 @@ class MainWindow(QMainWindow):
         if self._last_abort_was_watchdog:
             self._last_abort_was_watchdog = False
             msg = (
-                f"TX watchdog: exceeded {300:.0f} s — rig unkeyed automatically"
+                f"TX watchdog: exceeded {_MAX_TX_DURATION_S:.0f} s — rig unkeyed automatically"
             )
             self._tx_panel.set_status(msg)
             self.statusBar().showMessage(msg)

@@ -1311,6 +1311,10 @@ class Robot36IncrementalDecoder:
         self._total_fed: int = 0
         self._backend: IncrementalDecoderBase | None = None
         self._pending: list[NDArray] = []
+        # Incremental detection state — avoids re-running bandpass + Hilbert
+        # over the full buffer on every feed() call (O(N²) → O(N) total work).
+        self._detection_processed: int = 0  # samples of tail already processed
+        self._detection_cands: list[int] = []  # sync candidates (tail-relative)
         self._placeholder: NDArray[np.uint8] = np.zeros(
             (spec.height, spec.width, 3), dtype=np.uint8
         )
@@ -1375,7 +1379,14 @@ class Robot36IncrementalDecoder:
     # --- Internal ---
 
     def _try_detect(self) -> type[IncrementalDecoderBase] | None:
-        """Estimate median sync spacing over the buffered post-VIS tail."""
+        """Estimate median sync spacing over the buffered post-VIS tail.
+
+        Processes only the audio past the last detection checkpoint so the
+        total DSP work across all feed() calls is O(total samples) rather
+        than O(N × total samples).  A filter warm-up overlap of
+        ``_MIN_BP_SAMPLES`` is re-processed on each call so the sosfiltfilt
+        transient is negligible at the candidate-search boundary.
+        """
         if not self._pending:
             return None
         buf = (
@@ -1387,21 +1398,36 @@ class Robot36IncrementalDecoder:
         if buf.size <= vis_end_buf:
             return None
         tail = buf[vis_end_buf:]
-        if tail.size < _MIN_BP_SAMPLES:
-            return None
-        filtered = _bp_window(tail, self._fs)
+
+        # Only process audio that arrived since the last call, with a
+        # _MIN_BP_SAMPLES overlap so sosfiltfilt warm-up is covered.
+        slice_start = max(0, self._detection_processed - _MIN_BP_SAMPLES)
+        new_slice = tail[slice_start:]
+        if new_slice.size < _MIN_BP_SAMPLES:
+            return None  # not enough new data to run the filter reliably
+
+        filtered = _bp_window(new_slice, self._fs)
         inst = instantaneous_frequency(filtered, self._fs)
         line_samples = self._spec.line_time_ms / 1000.0 * self._fs
-        cands = find_sync_candidates(
+        cands_local = find_sync_candidates(
             inst,
             self._fs,
             self._spec.sync_pulse_ms,
             line_period_samples=line_samples,
             start_idx=0,
         )
-        if len(cands) < self._DETECT_SYNC_COUNT:
+
+        # Convert local positions to tail-relative coordinates, skipping
+        # any that fall inside the overlap region already counted last call.
+        for c in cands_local:
+            c_tail = c + slice_start
+            if c_tail >= self._detection_processed:
+                self._detection_cands.append(c_tail)
+        self._detection_processed = tail.size
+
+        if len(self._detection_cands) < self._DETECT_SYNC_COUNT:
             return None
-        diffs = np.diff(np.asarray(cands, dtype=np.float64))
+        diffs = np.diff(np.asarray(self._detection_cands, dtype=np.float64))
         if diffs.size == 0:
             return None
         median_diff = float(np.median(diffs))

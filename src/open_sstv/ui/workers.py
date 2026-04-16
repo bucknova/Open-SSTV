@@ -115,9 +115,9 @@ DEFAULT_PTT_DELAY_S = 0.2
 #: batch to ``Decoder.feed``.  The batch decoder reprocesses the entire
 #: growing buffer on every flush (O(N) per flush → O(N²) total), so a
 #: longer interval trades responsiveness for lower CPU load.  Reverted
-#: to 1 s in v0.2 for a more responsive "paint-as-you-go" feel —
-#: noticeably snappier on short modes (Robot 36, PD-50) and effectively
-#: free on the experimental incremental decoder (per-sync work, not
+#: from 2 s back to 1 s in v0.1.25 for a more responsive "paint-as-you-go"
+#: feel — noticeably snappier on short modes (Robot 36, PD-50) and
+#: effectively free on the incremental decoder (per-sync work, not
 #: per-flush).  The extra CPU cost vs. 2 s only matters for long
 #: Scottie-family receives on the batch path, and even there it stays
 #: well under real-time on any machine from the last decade.

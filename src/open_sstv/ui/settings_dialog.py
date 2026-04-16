@@ -493,6 +493,10 @@ class SettingsDialog(QDialog):
 
         self._callsign = QLineEdit(self._config.callsign)
         self._callsign.setPlaceholderText("e.g. W0AEZ")
+        # Live-update the banner preview when the callsign changes.
+        # The preview lives on the Images tab; this connection ensures it
+        # stays in sync without the user having to switch tabs first.
+        self._callsign.textChanged.connect(self._refresh_banner_preview_if_built)
         misc_form.addRow("Callsign:", self._callsign)
 
         layout.addWidget(misc_group)
@@ -566,7 +570,6 @@ class SettingsDialog(QDialog):
         is_icom = proto == "Icom CI-V"
         is_ptt_only = proto.startswith("PTT Only")
         self._civ_address_row_label.setVisible(is_icom)
-        self._civ_address_spin.parentWidget()  # trigger layout
         self._civ_address_spin.setVisible(is_icom)
         self._civ_preset_combo.setVisible(is_icom)
         self._ptt_line_row_label.setVisible(is_ptt_only)
@@ -759,7 +762,24 @@ class SettingsDialog(QDialog):
 
         return tab
 
+    # === QDialog overrides ===
+
+    def reject(self) -> None:
+        """Kill any rigctld we launched before closing, then super().reject()."""
+        self._stop_rigctld()
+        super().reject()
+
     # === Private slots ===
+
+    def _refresh_banner_preview_if_built(self) -> None:
+        """Refresh the banner preview only after the Images tab has been built.
+
+        ``_callsign.textChanged`` fires during ``_build_radio_tab`` before
+        ``_build_images_tab`` has run, so ``_banner_preview`` doesn't exist
+        yet.  The guard prevents an AttributeError on dialog construction.
+        """
+        if hasattr(self, "_banner_preview"):
+            self._refresh_banner_preview()
 
     def _test_connection(self) -> None:
         """Try to connect and ping the rigctld daemon at the current settings."""
@@ -870,7 +890,7 @@ class SettingsDialog(QDialog):
         banner = apply_tx_banner(
             source,
             _APP_VERSION,
-            self._config.callsign,
+            self._callsign.text().strip().upper(),
             self._banner_bg_color,
             self._banner_text_color,
             banner_height=bh,

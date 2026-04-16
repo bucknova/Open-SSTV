@@ -241,6 +241,11 @@ class ImageEditorDialog(QDialog):
         self._lock_aspect.setChecked(True)
         crop_form.addWidget(self._lock_aspect)
         self._crop_w.valueChanged.connect(self._on_crop_w_changed)
+        # Typing X or Y into the spinboxes must move the visual crop rect.
+        # _on_crop_rect_dragged blocks these signals on drag-sync so there
+        # is no circular feedback loop between the spinboxes and the item.
+        self._crop_x.valueChanged.connect(lambda _: self._update_crop_rect())
+        self._crop_y.valueChanged.connect(lambda _: self._update_crop_rect())
 
         right.addWidget(crop_group)
 

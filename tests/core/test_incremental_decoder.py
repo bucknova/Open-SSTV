@@ -937,3 +937,70 @@ def test_robot36_incremental_progress_is_monotonic() -> None:
 
     # Sanity: we should have decoded some lines.
     assert len(progress_events) > 0, "no ImageProgress events — Robot 36 per-line not decoding"
+
+
+# ---------------------------------------------------------------------------
+# BZ-07: Robot36IncrementalDecoder detection is O(total samples), not O(N²)
+# ---------------------------------------------------------------------------
+
+
+def test_robot36_detection_is_incremental() -> None:
+    """_try_detect must process only new audio per feed(), not the full buffer.
+
+    With the old implementation, _bp_window was called once per feed() with
+    the entire accumulated tail — O(N × total_samples) work total. The fixed
+    implementation processes only the new slice (+ a fixed warm-up overlap of
+    _MIN_BP_SAMPLES), so total DSP work is O(total_samples + N × 256).
+
+    We verify this by mocking _bp_window, accumulating the sum of all input
+    sizes, and asserting it is less than 2 × total_pending_size.  A regression
+    to the O(N²) path would send the sum well above that bound for N ≥ 4.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from open_sstv.core.incremental_decoder import (
+        Robot36IncrementalDecoder,
+        _bp_window,
+        _MIN_BP_SAMPLES,
+    )
+
+    spec = MODE_TABLE[Mode.ROBOT_36]
+    fs = 48_000
+    vis_end_abs = 1_000
+
+    # Create chunks that push just past _MIN_BP_SAMPLES on each call
+    # so _try_detect actually attempts detection on every feed.
+    chunk_size = _MIN_BP_SAMPLES + 50  # 306 samples — just over the threshold
+    n_chunks = 8
+    chunks = [np.random.default_rng(i).uniform(-0.1, 0.1, chunk_size) for i in range(n_chunks)]
+    total_pending = sum(c.size for c in chunks)
+
+    sizes_processed: list[int] = []
+
+    original_bp_window = _bp_window
+
+    def counting_bp_window(x, fs_):
+        sizes_processed.append(x.size)
+        return original_bp_window(x, fs_)
+
+    wrapper = Robot36IncrementalDecoder(spec, fs=fs, vis_end_abs=vis_end_abs, start_abs=0)
+
+    with patch(
+        "open_sstv.core.incremental_decoder._bp_window",
+        side_effect=counting_bp_window,
+    ):
+        for chunk in chunks:
+            wrapper.feed(chunk)
+
+    if not sizes_processed:
+        pytest.skip("_bp_window never called — all chunks below _MIN_BP_SAMPLES threshold")
+
+    total_processed = sum(sizes_processed)
+    # O(N²) would be roughly N * total_pending; O(N) is bounded by 2 * total_pending
+    # (factor of 2 accounts for the _MIN_BP_SAMPLES overlap on each call).
+    bound = 2 * total_pending
+    assert total_processed <= bound, (
+        f"_bp_window processed {total_processed} samples total across "
+        f"{len(sizes_processed)} calls, but total pending was {total_pending}. "
+        f"Bound is {bound}. Suggests O(N²) regression in _try_detect."
+    )

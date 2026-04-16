@@ -210,10 +210,6 @@ def save_templates(
     """
     if path is None:
         path = templates_path()
-    # Let OSError propagate so callers can surface it in a dialog rather
-    # than silently losing template edits.
-    path.parent.mkdir(parents=True, exist_ok=True)
-
     data: dict = {"template": []}
     for tpl in templates:
         tpl_dict: dict = {"name": tpl.name, "overlay": []}
@@ -231,8 +227,13 @@ def save_templates(
             tpl_dict["overlay"].append(ov_dict)
         data["template"].append(tpl_dict)
 
-    with path.open("wb") as f:
-        tomli_w.dump(data, f)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("wb") as f:
+            tomli_w.dump(data, f)
+    except OSError as exc:
+        _log.error("Failed to save templates to %s: %s", path, exc)
+        raise
 
 
 __all__ = [
