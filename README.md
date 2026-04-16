@@ -4,10 +4,10 @@ An open-source, cross-platform SSTV (Slow Scan Television) transceiver for amate
 radio. Receives and decodes SSTV images live off your radio, and encodes and
 transmits images back, with optional Hamlib or direct serial PTT and frequency control.
 
-**Status:** Pre-beta (v0.1.29). TX and RX paths work end-to-end across all 22 supported
+**Status:** Pre-beta (v0.1.30). TX and RX paths work end-to-end across all 22 supported
 modes. Rig control via rigctld or direct serial CAT is functional. Weak-signal decode
 is usable down to roughly 0 dB SNR on Robot 36. Live field testing in progress; beta
-release pending real-radio validation of the v0.1.27 / 0.1.28 / 0.1.29 audit fixes.
+release pending real-radio validation of the v0.1.27..v0.1.30 audit fixes.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
 [User Guide](SSTV_App_User_Guide.md)

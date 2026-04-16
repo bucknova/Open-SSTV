@@ -110,3 +110,97 @@ class TestCropXYSpinboxUpdatesRect:
         assert editor._crop_rect_item is before_item, (
             "drag must not rebuild the crop rect item"
         )
+
+
+# ---------------------------------------------------------------------------
+# v0.1.30 — Apply Crop resizes to target dimensions in one click
+# ---------------------------------------------------------------------------
+
+
+class TestApplyCropResizesToTarget:
+    """Apply Crop must both (a) crop to the selection *and* (b) resize to
+    the target SSTV mode's native dimensions in a single click, so the
+    preview matches what will actually be transmitted.
+
+    Prior to v0.1.30 the resize happened only in ``_on_accept``, so an
+    image whose aspect ratio already matched the target (e.g. an 800×600
+    photo into a 4:3 Robot 36 slot) came out of Apply Crop at its input
+    size — the button visibly did nothing, and users had to click OK and
+    reopen the editor to see the 320×240 result.
+    """
+
+    def test_same_aspect_image_resizes_to_target(self, qtbot) -> None:
+        """800×600 (4:3) cropped for Robot 36 (320×240, 4:3) must end up
+        at 320×240 after Apply Crop, not 800×600."""
+        src = Image.new("RGB", (800, 600), (100, 150, 200))
+        dlg = ImageEditorDialog(src, Mode.ROBOT_36)
+        qtbot.addWidget(dlg)
+
+        assert dlg._working_image.size == (800, 600), "initial load"
+
+        # Auto-fit Crop (runs in __init__) already produced a full-image
+        # crop box since the aspect matches; click Apply Crop.
+        dlg._apply_crop()
+
+        assert dlg._working_image.size == (320, 240), (
+            f"Apply Crop should resize to target 320×240, got "
+            f"{dlg._working_image.size}"
+        )
+
+    def test_wider_image_cropped_then_resized(self, qtbot) -> None:
+        """An 800×400 image (2:1 aspect) into Robot 36 (4:3) should crop
+        to 533×400 at the target aspect, then resize to 320×240."""
+        src = Image.new("RGB", (800, 400), (50, 50, 50))
+        dlg = ImageEditorDialog(src, Mode.ROBOT_36)
+        qtbot.addWidget(dlg)
+
+        # Auto-fit produced: crop_h=400, crop_w=533 (400 × 4/3)
+        dlg._apply_crop()
+
+        assert dlg._working_image.size == (320, 240)
+
+    def test_manual_small_crop_upscales_to_target(self, qtbot) -> None:
+        """If the user manually chooses a small crop region (160×120 out
+        of a 320×240 image), Apply Crop still resizes to target 320×240
+        even though that means upscaling.  This is the documented
+        behaviour — the editor's job is to produce a target-sized image.
+        """
+        src = Image.new("RGB", (320, 240), (0, 255, 0))
+        dlg = ImageEditorDialog(src, Mode.ROBOT_36)
+        qtbot.addWidget(dlg)
+
+        dlg._crop_x.setValue(80)
+        dlg._crop_y.setValue(60)
+        dlg._crop_w.setValue(160)
+        dlg._crop_h.setValue(120)
+        dlg._apply_crop()
+
+        assert dlg._working_image.size == (320, 240)
+
+    def test_apply_crop_then_ok_is_pixel_equivalent(self, qtbot) -> None:
+        """Apply-Crop-then-OK produces the same final image dimensions
+        as OK-without-Apply-Crop (the old path that did the resize
+        silently).  Guards against a regression where the double-resize
+        somehow ended up at wrong dimensions.
+        """
+        src = Image.new("RGB", (800, 600), (200, 100, 50))
+        dlg = ImageEditorDialog(src, Mode.ROBOT_36)
+        qtbot.addWidget(dlg)
+
+        dlg._apply_crop()
+        dlg._on_accept()
+
+        result = dlg.result_image()
+        assert result is not None
+        assert result.size == (320, 240)
+
+    def test_larger_target_mode_resizes_up(self, qtbot) -> None:
+        """An image smaller than the target gets upscaled to target dims
+        (PD-290 is 800×616). Apply Crop must end at target dims."""
+        src = Image.new("RGB", (400, 308), (50, 100, 200))  # half PD-290
+        dlg = ImageEditorDialog(src, Mode.PD_290)
+        qtbot.addWidget(dlg)
+
+        dlg._apply_crop()
+
+        assert dlg._working_image.size == (800, 616)

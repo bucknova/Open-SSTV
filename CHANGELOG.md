@@ -9,6 +9,25 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.1.30] — 2026-04-16
+
+### Fixed
+- **Image editor: Apply Crop now crops *and* resizes to the target mode's
+  native dimensions in one click.**  Prior to v0.1.30 the resize happened
+  silently in ``_on_accept`` when the dialog was closed.  If the loaded
+  image already matched the target aspect ratio (e.g. an 800×600 photo
+  into a 4:3 Robot 36 slot), Auto-fit Crop produced a full-image crop
+  box and Apply Crop then cropped-to-same-size — a visual no-op that
+  left the user thinking the button was broken, and required them to
+  hit OK and reopen the editor to see the 320×240 result.  The crop
+  now resizes to target (LANCZOS, same filter and call order as
+  ``_on_accept``) so what the user sees in the preview is exactly what
+  gets encoded and transmitted.  The info label updates to "…
+  (resized to target)" so the operation is explicit.  Apply-Crop-
+  then-OK is pixel-equivalent to the old OK-only path.
+
 ### Docs
 - **README and User Guide re-synced against current behaviour.** Both documents
   had accumulated stale content across v0.1.3..v0.1.29 — the User Guide in
@@ -22,9 +41,17 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (CW station ID, Test Tone, TX output overdrive, weak-signal mode, banner
   size selector + preview, incremental decoder). Every identified discrepancy
   from the Opus audit's doc-review pass (D-01..D-20) is addressed.
-- User Guide version header bumped from `Version 0.1.2` to `Version 0.1.29`.
-- README `Status` line updated to `Pre-beta (v0.1.29)` with a note about the
+- User Guide version header bumped from `Version 0.1.2` to `Version 0.1.30`.
+- README `Status` line updated to `Pre-beta (v0.1.30)` with a note about the
   v0.1.27/28/29 audit-fix field-testing gate.
+
+### Tests
+- ``TestApplyCropResizesToTarget`` in ``tests/ui/test_image_editor.py``
+  — 5 tests covering the common cases: same-aspect source (the
+  original bug), wider source that needs cropping before resize,
+  manual small crop that upscales, Apply-Crop-then-OK pixel
+  equivalence, and a larger target (PD-290 800×616) from a smaller
+  source.
 
 ---
 

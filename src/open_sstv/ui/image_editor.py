@@ -154,6 +154,11 @@ class ImageEditorDialog(QDialog):
         self._fit_btn.clicked.connect(self._auto_fit_crop)
         crop_toolbar.addWidget(self._fit_btn)
         self._apply_crop_btn = QPushButton("Apply Crop")
+        self._apply_crop_btn.setToolTip(
+            "Crop to the yellow selection and resize to the target mode's "
+            "native dimensions.  The preview updates immediately to the "
+            "exact pixel size that will be transmitted."
+        )
         self._apply_crop_btn.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
         )
@@ -499,7 +504,21 @@ class ImageEditorDialog(QDialog):
         self._crop_y.blockSignals(False)
 
     def _apply_crop(self) -> None:
-        """Crop the working image to the current selection."""
+        """Crop the working image to the current selection *and* resize
+        to the target SSTV mode's native dimensions.
+
+        Performs both operations at the button click so the editor
+        preview immediately reflects the final TX geometry.  Prior to
+        v0.1.30 the resize to target dimensions only happened silently
+        in ``_on_accept`` when the dialog was closed; if the loaded
+        image already matched the target aspect ratio (e.g. an 800×600
+        photo into a 4:3 Robot 36 slot), Auto-fit Crop produced a crop
+        box covering the whole image and Apply Crop then cropped to
+        the same size — a visual no-op that left the user thinking the
+        button was broken.  They had to hit OK and reopen the editor
+        to see the final resolution.  Now the resize happens in line
+        with the crop so "what you see is what gets encoded."
+        """
         x = self._crop_x.value()
         y = self._crop_y.value()
         w = self._crop_w.value()
@@ -515,10 +534,24 @@ class ImageEditorDialog(QDialog):
         if w < 1 or h < 1:
             return
 
-        self._working_image = self._working_image.crop((x, y, x + w, y + h))
+        # Crop to the user's selection, then resize to the target mode's
+        # native resolution with LANCZOS — same filter _on_accept uses,
+        # so an Apply-Crop-then-OK sequence is pixel-equivalent to the
+        # old OK-only path for any image whose cropped dimensions
+        # already matched the target.
+        cropped = self._working_image.crop((x, y, x + w, y + h))
+        self._working_image = cropped.resize(
+            (self._target_w, self._target_h),
+            Image.Resampling.LANCZOS,
+        )
         self._crop_rect_item = None
         self._refresh_preview()
         self._auto_fit_crop()
+        self._info_label.setText(
+            f"Image: {self._target_w}×{self._target_h} (resized to target)\n"
+            f"Target: {self._target_w}×{self._target_h} ({self._mode.value})\n"
+            f"Text layers: {len(self._text_overlays)}"
+        )
 
     def _reset_image(self) -> None:
         """Revert to the original image."""
