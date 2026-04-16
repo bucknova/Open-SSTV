@@ -11,6 +11,46 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.32] — 2026-04-16
+
+### Fixed
+- **Text overlays no longer spill off the image on narrow modes.**
+  User reported that the Exchange QSO-template preset's second overlay
+  (``UR {rst} {date}`` at 20 pt) rendered wider than the 160-pixel
+  width of Martin M2 / Scottie S2 / M4 / S4.  ``position_to_xy``'s
+  centring math produced a negative ``x`` (``(160 − 200) / 2 = −20``),
+  so PIL happily drew the first 20 px of the text off the left edge
+  and the remaining ~180 px trailed off to the right.  Two defences
+  added to ``draw_text.py``:
+
+  * **Auto-shrink** — ``draw_text_overlay`` now reduces the font size
+    one point at a time (down to ``_MIN_FONT_SIZE = 8``) until the
+    text fits inside ``image_width − 2 × _MARGIN``.  Common long-ish
+    Exchange strings drop from 20 pt to ~14 pt on 160-wide modes
+    and the full text is visible.
+  * **Bounds clamp** — a new ``clamp_xy_to_image`` helper pins the
+    final position so the 1 px drop-shadow ring always stays on-image,
+    even for text that's still too wide to fit at minimum font size
+    (extreme case: very long callsign on the narrowest mode).
+    Applies to both named presets and Custom X/Y coordinates, so the
+    image editor's manual placement also can't produce off-image text.
+
+### Tests
+- New ``tests/ui/test_draw_text.py`` with three test classes:
+  - ``TestClampXYToImage`` — unit tests for the clamp helper
+    (within-bounds unchanged, negative-x clamped, over-right-edge
+    clamped, text-wider-than-image falls back to 1 px).
+  - ``TestAutoShrinkAndClamp`` — integration tests that render to a
+    real PIL canvas and verify every white pixel falls inside the
+    image.  Explicitly covers the Exchange-on-160-wide case the user
+    reported, plus Martin M4 (160 × 128, the smallest mode we ship)
+    for both Exchange overlays.
+  - ``TestPositionToXY`` — pins the raw preset math (still allowed to
+    go out-of-bounds; clamping is the caller's job) so future tweaks
+    don't silently break the image editor's Position → X/Y auto-fill.
+
+---
+
 ## [0.1.31] — 2026-04-16
 
 ### Fixed
