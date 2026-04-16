@@ -138,6 +138,26 @@ class ImageEditorDialog(QDialog):
         self._view.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
+        # v0.1.34: always render the scene at 1:1 native pixel scale.
+        # Previously the view used ``fitInView`` (which stretches to
+        # fill the viewport) or a mixed-mode "fit if bigger, 1:1 if
+        # smaller" approach; both made Apply Crop's pixel-count change
+        # invisible because the viewport was filled either way.  With
+        # strict 1:1 display, a 800×600 source image is visibly bigger
+        # than a 320×240 cropped result in the same viewport, so the
+        # resolution change is unmissable.  Large images scroll via
+        # the native scrollbars; the image is centered in the viewport
+        # when it fits entirely.
+        self._view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._view.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self._view.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        # Darker canvas so the image edges are visibly distinct from
+        # the viewport background, especially after a shrink.
+        self._view.setBackgroundBrush(QBrush(QColor(40, 40, 40)))
         left.addWidget(self._view, stretch=1)
 
         # Toolbar rows: crop actions on row 1, transforms on row 2.
@@ -396,28 +416,23 @@ class ImageEditorDialog(QDialog):
         self._pixmap_item = self._scene.addPixmap(pixmap)
         self._scene.setSceneRect(QRectF(pixmap.rect()))
 
-        # Scale the view ONLY if the scene is bigger than the viewport.
-        # Using ``fitInView`` unconditionally scales both ways (up and
-        # down), which made a 320×240 cropped preview and the original
-        # 800×600 look identical in the viewport (both 4:3, both filling
-        # it).  Users reported that Apply Crop looked like it did nothing
-        # because of this — the dimensions changed in memory but the
-        # screen rendering did not.  Reset to 1:1 first, then only call
-        # fitInView when the pixmap genuinely won't fit.  Small previews
-        # now render at actual pixel size (centred by the scene's default
-        # alignment) so the visual size tracks the working image.
+        # v0.1.34: render the scene at 1:1 pixel scale unconditionally.
+        # ``fitInView`` and the prior mixed-mode approach both scaled
+        # the viewport to match the scene (or vice-versa), which made
+        # Apply Crop's resolution change visually invisible when the
+        # cropped image kept the same aspect ratio as the source.
+        # Resetting the transform to identity once per refresh and
+        # relying on the view's own ``AlignCenter`` alignment +
+        # ``ScrollBarAsNeeded`` policy (set in ``__init__``) means
+        # the image always occupies exactly ``image_width × image_height``
+        # pixels of the viewport.  A 320×240 preview after Apply Crop
+        # takes up noticeably less real estate than the 800×600
+        # source it came from, so the resolution change is visible
+        # at a glance without having to read the info label.
         self._view.resetTransform()
-        vrect = self._view.viewport().rect()
-        if pixmap.width() > vrect.width() or pixmap.height() > vrect.height():
-            self._view.fitInView(
-                self._scene.sceneRect(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-            )
-        else:
-            # Keep the scene centred in the viewport so the user sees
-            # the image at 1:1 with empty margin around it, rather than
-            # flush to a corner.
-            self._view.centerOn(self._scene.sceneRect().center())
+        # Force a redraw right away so the user doesn't have to wait
+        # for the next event-loop iteration to see the change.
+        self._view.viewport().update()
 
         # Restore crop rect from saved geometry
         if saved_rect is not None:

@@ -18,7 +18,23 @@ from open_sstv import __version__
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Entry point for the ``sstv-app`` console script and ``python -m open_sstv``."""
+    """Entry point for the ``open-sstv`` console script and ``python -m open_sstv``."""
+    # v0.1.34: log the runtime version and the module path immediately
+    # so a stale install vs current source mismatch is obvious.  If the
+    # terminal shows a different version than the About dialog, the
+    # open-sstv script on PATH is pointing at a different Python
+    # environment than the one pip install -e . ran against — usually
+    # a pre-existing site-packages install from before the editable
+    # install was set up.  ``open_sstv.__file__`` makes the source
+    # path unambiguous.
+    import open_sstv as _pkg
+    print(
+        f"Open-SSTV v{__version__} starting — module loaded from "
+        f"{_pkg.__file__}",
+        file=sys.stderr,
+        flush=True,
+    )
+
     # Qt is imported lazily so the encode/decode CLIs (which never
     # construct a QApplication) don't pay the import cost just because
     # they share a package with the GUI.
@@ -27,7 +43,7 @@ def main(argv: list[str] | None = None) -> int:
     except ImportError:
         print(
             "Error: PySide6 is not installed.\n"
-            "Install it with:  pip install 'sstv-app[dev]'  or  pip install PySide6",
+            "Install it with:  pip install 'open-sstv[dev]'  or  pip install PySide6",
             file=sys.stderr,
         )
         return 1

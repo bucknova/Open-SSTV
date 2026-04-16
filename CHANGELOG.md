@@ -11,6 +11,52 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.34] — 2026-04-16
+
+### Fixed
+- **Image editor renders at strict 1:1 pixel scale.**  v0.1.30 made
+  Apply Crop resize to target dimensions; v0.1.31 tried to show the
+  result without upscaling via ``resetTransform + centerOn``.  The
+  user-reported outcome was still broken: the cropped image continued
+  to look the same size as the source in the viewport.  Root cause:
+  the "fit if bigger, 1:1 if smaller" logic relied on
+  ``QGraphicsView``-level anchor and viewport semantics that didn't
+  actually produce a visible size change on the user's setup.
+
+  New approach: configure the view once in ``__init__`` with
+  ``AlignCenter`` alignment, ``ScrollBarAsNeeded`` scrollbars, and a
+  darker canvas background.  ``_refresh_preview`` then just resets
+  the transform to identity and calls ``viewport().update()``.  The
+  image now *always* occupies exactly ``image_width × image_height``
+  pixels of the viewport — Apply Crop visibly shrinks an 800×600
+  source to a 320×240 preview that takes up a quarter of the space,
+  so the resolution change is impossible to miss.  Large images
+  (PD-290 800×616, Pasokon P7 640×496) scroll via the native
+  scrollbars rather than scaling down.
+
+- **Startup version log** emitted on stderr when launching
+  ``open-sstv``: ``Open-SSTV v0.1.34 starting — module loaded from
+  /path/to/open_sstv/__init__.py``.  Diagnostic aid for the "About
+  dialog shows an old version" class of reports, which almost always
+  means the ``open-sstv`` script on ``PATH`` is pointing at a Python
+  environment different from the one ``pip install -e .`` ran
+  against (a stale ``site-packages/open_sstv/`` from before the
+  editable install was set up).  The log makes the live module
+  path unambiguous so the user can diff it against their venv.
+
+### Tests
+- ``TestRefreshPreviewSceneRect`` updated:
+  - ``test_view_transform_is_always_identity`` (renamed from
+    ``test_view_transform_is_identity_for_small_image``) — the view
+    is now at 1:1 for every image size, before and after Apply Crop.
+  - ``test_view_shows_scrollbars_for_oversized_image`` (renamed
+    from ``test_view_scales_down_when_image_exceeds_viewport``) —
+    large images stay at 1:1 too; oversized scenes get scrollbars
+    from the built-in ``ScrollBarAsNeeded`` policy instead of
+    triggering ``fitInView``.
+
+---
+
 ## [0.1.33] — 2026-04-16
 
 ### Fixed

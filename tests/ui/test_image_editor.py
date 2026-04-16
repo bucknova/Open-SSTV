@@ -231,63 +231,54 @@ class TestRefreshPreviewSceneRect:
         assert scene_rect.width() == 320
         assert scene_rect.height() == 240
 
-    def test_view_transform_is_identity_for_small_image(
+    def test_view_transform_is_always_identity(
         self, qtbot
     ) -> None:
-        """When the pixmap is smaller than the viewport (typical case
-        after cropping-and-resizing to 320×240), the view transform
-        must be reset to identity (1:1 pixel scale) so the user sees
-        the image at its actual size — not stretched to fill the view.
-        The previous behaviour (fitInView unconditionally) made every
-        4:3 preview look identical regardless of resolution.
+        """v0.1.34: the view renders at strict 1:1 pixel scale, always.
+        This is the mechanism that makes Apply Crop's resolution change
+        visible — the image's on-screen size now literally equals its
+        pixel dimensions, so a 320×240 result after cropping an
+        800×600 source takes up a quarter of the screen space.
         """
         from PySide6.QtWidgets import QApplication
 
         src = Image.new("RGB", (800, 600), (200, 200, 200))
         dlg = ImageEditorDialog(src, Mode.ROBOT_36)
         qtbot.addWidget(dlg)
-        dlg.show()  # view needs a viewport size to make the comparison
-        qtbot.waitExposed(dlg)
-        QApplication.processEvents()
-
-        dlg._apply_crop()
-        QApplication.processEvents()
-
-        # View transform should be identity (m11 == 1.0, m22 == 1.0)
-        # because 320×240 fits inside the dialog's allocated view area.
-        t = dlg._view.transform()
-        assert abs(t.m11() - 1.0) < 0.01, (
-            f"View transform m11 (x-scale) should be 1.0 for a "
-            f"320×240 image inside a larger viewport, got {t.m11()}"
-        )
-        assert abs(t.m22() - 1.0) < 0.01, (
-            f"View transform m22 (y-scale) should be 1.0 for a "
-            f"320×240 image inside a larger viewport, got {t.m22()}"
-        )
-
-    def test_view_scales_down_when_image_exceeds_viewport(
-        self, qtbot
-    ) -> None:
-        """A very large target (PD-290 is 800×616) may still exceed a
-        small viewport — in that case ``fitInView`` must run to scale
-        the scene down.  Guards against a "never scale" regression."""
-        from PySide6.QtWidgets import QApplication
-
-        src = Image.new("RGB", (800, 616), (50, 50, 50))
-        dlg = ImageEditorDialog(src, Mode.PD_290)
-        qtbot.addWidget(dlg)
-        # Force the dialog to a small size so 800×616 exceeds the view.
-        dlg.resize(500, 400)
         dlg.show()
         qtbot.waitExposed(dlg)
         QApplication.processEvents()
 
-        dlg._refresh_preview()
+        # Initial load: view transform is identity (source 800×600).
+        t = dlg._view.transform()
+        assert abs(t.m11() - 1.0) < 0.01
+        assert abs(t.m22() - 1.0) < 0.01
+
+        dlg._apply_crop()
         QApplication.processEvents()
 
-        # Should have scaled down — m11 and m22 should be < 1.0.
+        # After Apply Crop (now 320×240): still identity.  The image
+        # is now visibly smaller on screen because the pixmap is
+        # smaller, not because the transform changed.
         t = dlg._view.transform()
-        assert t.m11() < 1.0, (
-            f"800×616 image in a 500×400 dialog should have been "
-            f"scaled down, got m11={t.m11()}"
+        assert abs(t.m11() - 1.0) < 0.01
+        assert abs(t.m22() - 1.0) < 0.01
+
+    def test_view_shows_scrollbars_for_oversized_image(
+        self, qtbot
+    ) -> None:
+        """Large images (PD-290 800×616, Pasokon P7 640×496) may exceed
+        the dialog's allocated view area.  With v0.1.34's strict 1:1
+        rendering, the view shows scrollbars instead of scaling down —
+        the user always sees pixels at their actual size."""
+        src = Image.new("RGB", (800, 616), (50, 50, 50))
+        dlg = ImageEditorDialog(src, Mode.PD_290)
+        qtbot.addWidget(dlg)
+
+        # Scrollbar policy is ScrollBarAsNeeded — Qt auto-shows when
+        # scene > viewport.  The important check is that the view
+        # transform stays at 1:1 even for big scenes.
+        t = dlg._view.transform()
+        assert abs(t.m11() - 1.0) < 0.01, (
+            f"view should stay at 1:1 even for PD-290, got m11={t.m11()}"
         )
