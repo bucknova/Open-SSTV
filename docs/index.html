@@ -1,0 +1,822 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Open-SSTV — Open-Source SSTV Transceiver for Amateur Radio</title>
+  <style>
+    /* ── Reset & Base ── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0d1117;
+      --bg2:       #161b22;
+      --bg3:       #21262d;
+      --border:    #30363d;
+      --green:     #2ea043;
+      --green-lit: #3fb950;
+      --amber:     #d29922;
+      --text:      #e6edf3;
+      --muted:     #8b949e;
+      --radius:    8px;
+      --font: 'Inter', system-ui, -apple-system, sans-serif;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 16px;
+      line-height: 1.6;
+    }
+
+    a { color: var(--green-lit); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    img { max-width: 100%; display: block; }
+
+    /* ── Google Font ── */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+    /* ── Nav ── */
+    nav {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: rgba(13,17,23,0.85);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .nav-inner {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 0 24px;
+      height: 60px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .nav-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--text);
+      font-weight: 700;
+      font-size: 18px;
+    }
+
+    .nav-logo .dot { color: var(--green-lit); }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 24px;
+      list-style: none;
+    }
+
+    .nav-links a {
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 500;
+      transition: color 0.15s;
+    }
+
+    .nav-links a:hover { color: var(--text); text-decoration: none; }
+
+    .nav-links .btn-nav {
+      background: var(--green);
+      color: #fff;
+      padding: 6px 16px;
+      border-radius: var(--radius);
+      font-size: 13px;
+      font-weight: 600;
+      transition: background 0.15s;
+    }
+
+    .nav-links .btn-nav:hover { background: var(--green-lit); }
+
+    /* ── Hero ── */
+    .hero {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 96px 24px 80px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 64px;
+      align-items: center;
+    }
+
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(46,160,67,0.12);
+      border: 1px solid rgba(46,160,67,0.3);
+      border-radius: 20px;
+      padding: 4px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--green-lit);
+      margin-bottom: 20px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .hero-badge::before {
+      content: '';
+      width: 7px; height: 7px;
+      background: var(--green-lit);
+      border-radius: 50%;
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%,100% { opacity: 1; }
+      50%      { opacity: 0.3; }
+    }
+
+    .hero h1 {
+      font-size: clamp(36px, 5vw, 54px);
+      font-weight: 700;
+      line-height: 1.15;
+      letter-spacing: -0.02em;
+      margin-bottom: 20px;
+    }
+
+    .hero h1 span { color: var(--green-lit); }
+
+    .hero p {
+      font-size: 18px;
+      color: var(--muted);
+      margin-bottom: 32px;
+      max-width: 480px;
+    }
+
+    .hero-actions {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 22px;
+      border-radius: var(--radius);
+      font-weight: 600;
+      font-size: 15px;
+      cursor: pointer;
+      transition: all 0.15s;
+      border: none;
+    }
+
+    .btn-primary {
+      background: var(--green);
+      color: #fff;
+    }
+    .btn-primary:hover { background: var(--green-lit); text-decoration: none; }
+
+    .btn-secondary {
+      background: var(--bg3);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .btn-secondary:hover { background: var(--bg2); border-color: var(--muted); text-decoration: none; }
+
+    .hero-stats {
+      display: flex;
+      gap: 32px;
+      margin-top: 40px;
+      padding-top: 40px;
+      border-top: 1px solid var(--border);
+    }
+
+    .stat-num {
+      font-size: 28px;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .stat-label {
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .hero-visual {
+      position: relative;
+    }
+
+    .hero-screenshot {
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+      width: 100%;
+    }
+
+    .hero-screenshot-placeholder {
+      border-radius: 10px;
+      border: 2px dashed var(--border);
+      background: var(--bg2);
+      aspect-ratio: 16/10;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      font-size: 14px;
+      gap: 8px;
+    }
+
+    /* ── Section common ── */
+    section { padding: 80px 0; }
+
+    .section-inner {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    .section-label {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--green-lit);
+      margin-bottom: 12px;
+    }
+
+    .section-title {
+      font-size: clamp(26px, 3.5vw, 38px);
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-bottom: 16px;
+    }
+
+    .section-sub {
+      font-size: 17px;
+      color: var(--muted);
+      max-width: 600px;
+      margin-bottom: 48px;
+    }
+
+    /* ── Features ── */
+    .features-bg { background: var(--bg2); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 24px;
+    }
+
+    .feature-card {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 28px;
+      transition: border-color 0.2s;
+    }
+
+    .feature-card:hover { border-color: var(--green); }
+
+    .feature-icon {
+      width: 44px; height: 44px;
+      background: rgba(46,160,67,0.12);
+      border-radius: var(--radius);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 22px;
+      margin-bottom: 16px;
+    }
+
+    .feature-card h3 {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 10px;
+    }
+
+    .feature-card p {
+      font-size: 14px;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .feature-tag {
+      display: inline-block;
+      background: rgba(46,160,67,0.12);
+      color: var(--green-lit);
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 4px;
+      margin-bottom: 12px;
+      letter-spacing: 0.04em;
+    }
+
+    /* ── Modes ── */
+    .modes-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+      gap: 10px;
+      margin-top: 40px;
+    }
+
+    .mode-pill {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 10px 14px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px;
+      color: var(--muted);
+      text-align: center;
+      transition: all 0.15s;
+    }
+
+    .mode-pill:hover {
+      border-color: var(--green);
+      color: var(--green-lit);
+      background: rgba(46,160,67,0.06);
+    }
+
+    /* ── Screenshots ── */
+    .screenshots-bg { background: var(--bg2); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+
+    .screenshots-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+    }
+
+    .screenshot-item {
+      border-radius: var(--radius);
+      overflow: hidden;
+      border: 1px solid var(--border);
+      cursor: pointer;
+      transition: transform 0.2s, border-color 0.2s, box-shadow 0.2s;
+    }
+
+    .screenshot-item:hover {
+      transform: translateY(-3px);
+      border-color: var(--green);
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    }
+
+    .screenshot-item img {
+      width: 100%;
+      aspect-ratio: 16/10;
+      object-fit: cover;
+    }
+
+    .screenshot-placeholder {
+      aspect-ratio: 16/10;
+      background: var(--bg);
+      border: 2px dashed var(--border);
+      border-radius: var(--radius);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      font-size: 13px;
+      gap: 8px;
+    }
+
+    .screenshot-caption {
+      padding: 10px 12px;
+      background: var(--bg3);
+      font-size: 12px;
+      color: var(--muted);
+      border-top: 1px solid var(--border);
+    }
+
+    /* ── Lightbox ── */
+    .lightbox {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.92);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+      padding: 32px;
+    }
+    .lightbox.open { display: flex; }
+    .lightbox img { max-width: 90vw; max-height: 85vh; border-radius: var(--radius); border: 1px solid var(--border); }
+    .lightbox-close {
+      position: absolute;
+      top: 20px; right: 24px;
+      font-size: 28px;
+      color: var(--muted);
+      cursor: pointer;
+      background: none;
+      border: none;
+    }
+    .lightbox-close:hover { color: var(--text); }
+
+    /* ── Install ── */
+    .install-box {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 32px 36px;
+      max-width: 680px;
+    }
+
+    .install-box h3 {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-size: 12px;
+      margin-bottom: 16px;
+    }
+
+    .code-line {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px 16px;
+      margin-bottom: 10px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 14px;
+    }
+
+    .code-line .prompt { color: var(--green-lit); user-select: none; }
+    .code-line .cmd { color: var(--text); flex: 1; }
+    .copy-btn {
+      background: none;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 14px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      transition: color 0.15s, background 0.15s;
+    }
+    .copy-btn:hover { color: var(--text); background: var(--bg3); }
+
+    .install-note {
+      margin-top: 16px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .install-note strong { color: var(--text); }
+
+    .install-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+      margin-top: 48px;
+    }
+
+    /* ── Footer ── */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 48px 24px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .footer-inner {
+      max-width: 1100px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .footer-links {
+      display: flex;
+      gap: 24px;
+    }
+
+    .footer-links a { color: var(--muted); font-size: 14px; }
+    .footer-links a:hover { color: var(--text); }
+
+    /* ── Responsive ── */
+    @media (max-width: 900px) {
+      .hero { grid-template-columns: 1fr; gap: 48px; padding: 64px 24px; }
+      .hero-visual { order: -1; }
+      .features-grid { grid-template-columns: 1fr 1fr; }
+      .screenshots-grid { grid-template-columns: 1fr 1fr; }
+      .install-grid { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 600px) {
+      .features-grid { grid-template-columns: 1fr; }
+      .screenshots-grid { grid-template-columns: 1fr; }
+      .hero-stats { gap: 20px; }
+      .nav-links { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── Lightbox ── -->
+<div class="lightbox" id="lightbox" onclick="closeLightbox()">
+  <button class="lightbox-close" onclick="closeLightbox()">✕</button>
+  <img id="lightbox-img" src="" alt="" />
+</div>
+
+<!-- ── Nav ── -->
+<nav>
+  <div class="nav-inner">
+    <a class="nav-logo" href="#">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+        <rect width="24" height="24" rx="6" fill="#2ea043"/>
+        <path d="M6 8h12M6 12h12M6 16h8" stroke="white" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+      Open<span class="dot">-</span>SSTV
+    </a>
+    <ul class="nav-links">
+      <li><a href="#features">Features</a></li>
+      <li><a href="#modes">Modes</a></li>
+      <li><a href="#screenshots">Screenshots</a></li>
+      <li><a href="#install">Install</a></li>
+      <li><a href="https://github.com/bucknova/Open-SSTV" target="_blank" class="btn-nav">GitHub ↗</a></li>
+    </ul>
+  </div>
+</nav>
+
+<!-- ── Hero ── -->
+<div class="hero">
+  <div>
+    <div class="hero-badge">Pre-Beta · v0.1.37</div>
+    <h1>Open-Source<br /><span>SSTV Transceiver</span><br />for Amateur Radio</h1>
+    <p>Transmit and receive Slow Scan Television images live from your rig — no external software required. 22 modes, modern Qt 6 GUI, cross-platform.</p>
+    <div class="hero-actions">
+      <a class="btn btn-primary" href="#install">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0zm.5 4.5a.5.5 0 0 0-1 0v5.793L5.146 7.146a.5.5 0 1 0-.707.708l3 3a.5.5 0 0 0 .707 0l3-3a.5.5 0 0 0-.707-.708L8.5 10.293V4.5z"/></svg>
+        Download &amp; Install
+      </a>
+      <a class="btn btn-secondary" href="https://github.com/bucknova/Open-SSTV" target="_blank">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+        View on GitHub
+      </a>
+    </div>
+    <div class="hero-stats">
+      <div>
+        <div class="stat-num">22</div>
+        <div class="stat-label">SSTV Modes</div>
+      </div>
+      <div>
+        <div class="stat-num">GPL-3</div>
+        <div class="stat-label">Open Source</div>
+      </div>
+      <div>
+        <div class="stat-num">3 OS</div>
+        <div class="stat-label">Cross-Platform</div>
+      </div>
+    </div>
+  </div>
+  <div class="hero-visual">
+    <img
+      class="hero-screenshot"
+      src="screenshots/main-window.png"
+      alt="Open-SSTV main window"
+      onclick="openLightbox(this.src)"
+      style="cursor:zoom-in"
+    />
+  </div>
+</div>
+
+<!-- ── Features ── -->
+<section class="features-bg" id="features">
+  <div class="section-inner">
+    <div class="section-label">What it does</div>
+    <h2 class="section-title">Everything you need to operate SSTV</h2>
+    <p class="section-sub">A complete transceiver stack — from image editing to rig control — all in one open-source application.</p>
+
+    <div class="features-grid">
+
+      <div class="feature-card">
+        <div class="feature-icon">📡</div>
+        <span class="feature-tag">TX</span>
+        <h3>Transmit with Precision</h3>
+        <p>Live TX with real-time audio generation, per-mode watchdog timers, and output gain from 0–200%. Supports all 22 SSTV modes.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon">📻</div>
+        <span class="feature-tag">RX</span>
+        <h3>Progressive Decoding</h3>
+        <p>Incremental per-line decode with O(1) work per line. Weak-signal mode works down to ~0 dB SNR on Robot 36. Auto-saves with timestamped filenames.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon">🖼</div>
+        <span class="feature-tag">Editor</span>
+        <h3>Built-In Image Editor</h3>
+        <p>Aspect-ratio locked crop, rotate, flip, and text overlays that auto-shrink to fit. QSO templates with one-click callsign/exchange fill-in.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon">🎛</div>
+        <span class="feature-tag">Rig Control</span>
+        <h3>Full Hamlib Integration</h3>
+        <p>rigctld TCP client with auto-launch. Direct serial for Icom CI-V, Kenwood, Yaesu, and DTR/RTS PTT. Frequency &amp; S-meter polling at 1 Hz.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon">⚖️</div>
+        <span class="feature-tag">Compliance</span>
+        <h3>Part 97 CW ID</h3>
+        <p>Automatic Morse code station identification between transmissions. Configurable callsign, keeps you legal on the air without extra hardware.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon">🔧</div>
+        <span class="feature-tag">Config</span>
+        <h3>TOML-Based Settings</h3>
+        <p>Platform-native config directories. Persists callsign, audio devices, mic gain, CW settings, and TX mode across sessions with resilient fallbacks.</p>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ── Modes ── -->
+<section id="modes">
+  <div class="section-inner">
+    <div class="section-label">Supported Modes</div>
+    <h2 class="section-title">22 SSTV modes — all TX &amp; RX</h2>
+    <p class="section-sub">From the classic Robot 36 to the high-resolution PD-290, Open-SSTV has complete encode and decode support for every major SSTV mode in use today.</p>
+
+    <div class="modes-grid">
+      <div class="mode-pill">Robot 36</div>
+      <div class="mode-pill">Martin M1</div>
+      <div class="mode-pill">Martin M2</div>
+      <div class="mode-pill">Martin M3</div>
+      <div class="mode-pill">Martin M4</div>
+      <div class="mode-pill">Scottie S1</div>
+      <div class="mode-pill">Scottie S2</div>
+      <div class="mode-pill">Scottie S3</div>
+      <div class="mode-pill">Scottie S4</div>
+      <div class="mode-pill">Scottie DX</div>
+      <div class="mode-pill">PD-50</div>
+      <div class="mode-pill">PD-90</div>
+      <div class="mode-pill">PD-120</div>
+      <div class="mode-pill">PD-160</div>
+      <div class="mode-pill">PD-180</div>
+      <div class="mode-pill">PD-240</div>
+      <div class="mode-pill">PD-290</div>
+      <div class="mode-pill">Wraase SC2-120</div>
+      <div class="mode-pill">Wraase SC2-180</div>
+      <div class="mode-pill">Pasokon P3</div>
+      <div class="mode-pill">Pasokon P5</div>
+      <div class="mode-pill">Pasokon P7</div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Screenshots ── -->
+<section class="screenshots-bg" id="screenshots">
+  <div class="section-inner">
+    <div class="section-label">In Action</div>
+    <h2 class="section-title">See the interface</h2>
+    <p class="section-sub">Click any screenshot to enlarge. More screenshots coming soon as development continues.</p>
+
+    <div class="screenshots-grid">
+
+      <div class="screenshot-item" onclick="openLightbox('screenshots/main-window.png')">
+        <img src="screenshots/main-window.png" alt="Main Window" />
+        <div class="screenshot-caption">Main Window — TX &amp; RX</div>
+      </div>
+
+      <div class="screenshot-item" onclick="openLightbox('screenshots/qso-templates.png')">
+        <img src="screenshots/qso-templates.png" alt="QSO Templates" />
+        <div class="screenshot-caption">QSO Templates</div>
+      </div>
+
+      <div class="screenshot-item" onclick="openLightbox('screenshots/settings-audio.png')">
+        <img src="screenshots/settings-audio.png" alt="Audio Settings" />
+        <div class="screenshot-caption">Settings — Audio</div>
+      </div>
+
+      <div class="screenshot-item" onclick="openLightbox('screenshots/settings-radio.png')">
+        <img src="screenshots/settings-radio.png" alt="Radio Settings" />
+        <div class="screenshot-caption">Settings — Rig Control</div>
+      </div>
+
+      <div class="screenshot-item" onclick="openLightbox('screenshots/settings-images.png')">
+        <img src="screenshots/settings-images.png" alt="Image Settings" />
+        <div class="screenshot-caption">Settings — Images</div>
+      </div>
+
+      <!-- Placeholder for future screenshot -->
+      <div class="screenshot-placeholder">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+        <span>Screenshot coming soon</span>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ── Install ── -->
+<section id="install">
+  <div class="section-inner">
+    <div class="section-label">Get Started</div>
+    <h2 class="section-title">Install in seconds</h2>
+    <p class="section-sub">Open-SSTV installs via pip on macOS, Linux, and Windows. Python 3.11+ required.</p>
+
+    <div class="install-grid">
+      <div>
+        <div class="install-box">
+          <h3>Quick Install</h3>
+          <div class="code-line">
+            <span class="prompt">$</span>
+            <span class="cmd" id="cmd-install">pip install open-sstv</span>
+            <button class="copy-btn" onclick="copyCmd('cmd-install')" title="Copy">⎘</button>
+          </div>
+          <div class="code-line">
+            <span class="prompt">$</span>
+            <span class="cmd" id="cmd-run">open-sstv</span>
+            <button class="copy-btn" onclick="copyCmd('cmd-run')" title="Copy">⎘</button>
+          </div>
+          <p class="install-note">
+            Also includes <strong>open-sstv-encode</strong> and <strong>open-sstv-decode</strong> CLI tools for batch workflows and scripting.
+          </p>
+        </div>
+      </div>
+
+      <div>
+        <div class="install-box">
+          <h3>From Source</h3>
+          <div class="code-line">
+            <span class="prompt">$</span>
+            <span class="cmd" id="cmd-clone">git clone https://github.com/bucknova/Open-SSTV</span>
+            <button class="copy-btn" onclick="copyCmd('cmd-clone')" title="Copy">⎘</button>
+          </div>
+          <div class="code-line">
+            <span class="prompt">$</span>
+            <span class="cmd" id="cmd-pip">pip install -e .</span>
+            <button class="copy-btn" onclick="copyCmd('cmd-pip')" title="Copy">⎘</button>
+          </div>
+          <p class="install-note">
+            Requires <strong>Python 3.11+</strong>, <strong>PySide6 ≥ 6.6</strong>, and <strong>PortAudio</strong>. See the <a href="https://github.com/bucknova/Open-SSTV#readme">README</a> for full platform setup instructions.
+          </p>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ── Footer ── -->
+<footer>
+  <div class="footer-inner">
+    <div style="font-size:20px; font-weight:700; color: var(--text);">Open-SSTV</div>
+    <div class="footer-links">
+      <a href="https://github.com/bucknova/Open-SSTV" target="_blank">GitHub</a>
+      <a href="https://github.com/bucknova/Open-SSTV/blob/main/CHANGELOG.md" target="_blank">Changelog</a>
+      <a href="https://github.com/bucknova/Open-SSTV/blob/main/LICENSE" target="_blank">GPL-3.0 License</a>
+      <a href="https://github.com/bucknova/Open-SSTV/issues" target="_blank">Issues</a>
+    </div>
+    <div>Made by <a href="https://github.com/bucknova" target="_blank">W0AEZ</a> · Open source, always.</div>
+  </div>
+</footer>
+
+<script>
+  function openLightbox(src) {
+    document.getElementById('lightbox-img').src = src;
+    document.getElementById('lightbox').classList.add('open');
+    document.body.style.overflow = 'hidden';
+  }
+
+  function closeLightbox() {
+    document.getElementById('lightbox').classList.remove('open');
+    document.body.style.overflow = '';
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeLightbox();
+  });
+
+  function copyCmd(id) {
+    const text = document.getElementById(id).textContent;
+    navigator.clipboard.writeText(text).then(() => {
+      const btn = document.querySelector(`[onclick="copyCmd('${id}')"]`);
+      const orig = btn.textContent;
+      btn.textContent = '✓';
+      btn.style.color = 'var(--green-lit)';
+      setTimeout(() => { btn.textContent = orig; btn.style.color = ''; }, 1500);
+    });
+  }
+</script>
+
+</body>
+</html>
