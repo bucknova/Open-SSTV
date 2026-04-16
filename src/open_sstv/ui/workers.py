@@ -76,7 +76,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import sounddevice as sd
-from PySide6.QtCore import QObject, Signal, Slot
+from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
 _log = logging.getLogger(__name__)
 
@@ -159,6 +159,20 @@ _RX_WATCHDOG_LINE_MULTIPLIER: float = 5.0
 #: on Robot 36 would be too twitchy, so 5 s gives breathing room even
 #: on the fastest mode.
 _RX_WATCHDOG_LINE_FLOOR_S: float = 5.0
+
+#: Wall-clock tick interval for the independent watchdog check, in
+#: milliseconds.  The original v0.1.36 watchdog only ran inside
+#: ``_flush``, which in turn only runs when audio chunks arrive.  If
+#: the PortAudio stream goes quiet for any reason — USB device sleeps,
+#: Bluetooth link drops, the OS suspends the audio subsystem briefly,
+#: or simply a *very* deep signal fade where the driver produces long
+#: stretches of exactly-zero samples that don't fill a flush buffer —
+#: no flushes fire and the watchdog never ticks.  A dedicated QTimer
+#: on the RxWorker thread ensures the watchdog is checked on wall-
+#: clock time regardless of audio state.  2 s is snappy enough to
+#: deliver timely resets while staying well under the line-budget
+#: floor so there's no risk of doubling-up with flush-driven checks.
+_RX_WATCHDOG_TICK_MS: int = 2000
 
 #: Hard upper bound on the encode / banner-stamp / CW-append stage.
 #: Encoding is CPU-bound and finishes in ~100 ms even for the longest
@@ -790,6 +804,10 @@ class RxWorker(QObject):
         self._decoding_lines_total: int = 0
         self._last_progress_image: "PILImage | None" = None
         self._last_progress_lines: int = 0
+        # v0.2.1: independent wall-clock tick for the watchdog.
+        # Created lazily on the worker thread — see
+        # ``_ensure_watchdog_timer`` for why.
+        self._watchdog_timer: QTimer | None = None
 
     def set_input_gain(self, gain: float) -> None:
         """Set the software input gain (1.0 = unity). Thread-safe."""
@@ -914,7 +932,14 @@ class RxWorker(QObject):
         While TX is active (``_tx_active`` is ``True``) chunks are
         discarded silently so the radio's own transmitted signal is
         never fed into the decoder (self-decode prevention, bug R-2).
+
+        v0.2.1: the wall-clock watchdog timer is created here on
+        first call so it picks up the worker-thread affinity instead
+        of the constructor-time GUI thread.
         """
+        # v0.2.1: start the wall-clock watchdog tick on first feed.
+        self._ensure_watchdog_timer()
+
         if self._tx_active:
             return
 
@@ -975,6 +1000,11 @@ class RxWorker(QObject):
         # v0.1.36: clear watchdog state so a previous (possibly
         # stalled) decoding session doesn't leak into the next one.
         self._reset_watchdog_state()
+        # v0.2.1: ensure the wall-clock tick is running so the
+        # watchdog can fire even if audio flow pauses after reset
+        # (e.g. user clicks Clear then doesn't send audio for a
+        # while).  Idempotent — the second+ call is a no-op.
+        self._ensure_watchdog_timer()
         # Re-arm after any cancel that was in flight.  This runs on the
         # worker thread so it's sequentially after _flush() has returned.
         self._cancel_event.clear()
@@ -1150,6 +1180,40 @@ class RxWorker(QObject):
         self._decoding_lines_total = 0
         self._last_progress_image = None
         self._last_progress_lines = 0
+
+    def _ensure_watchdog_timer(self) -> None:
+        """Create the wall-clock watchdog ticker on first use.
+
+        The timer must live on the RxWorker's own thread (not the GUI
+        thread that constructed ``RxWorker``) so its ``timeout`` slot
+        runs on the decode thread where all watchdog state is owned.
+        Constructing it in ``__init__`` would bind it to the GUI
+        thread; creating it lazily on the first slot-invocation on
+        the worker thread picks up the correct thread affinity.  Same
+        pattern as ``InputStreamWorker`` uses for its drain timer.
+        """
+        if self._watchdog_timer is not None:
+            return
+        self._watchdog_timer = QTimer()
+        self._watchdog_timer.setInterval(_RX_WATCHDOG_TICK_MS)
+        self._watchdog_timer.timeout.connect(self._on_watchdog_tick)
+        self._watchdog_timer.start()
+
+    @Slot()
+    def _on_watchdog_tick(self) -> None:
+        """QTimer tick that runs the watchdog check on wall-clock
+        time regardless of whether audio is still flowing.
+
+        The original flush-driven watchdog (v0.1.36) only ran when a
+        chunk arrived — fine for deep fades that still have driver-
+        level noise floor coming through, but insufficient when the
+        audio stream goes genuinely quiet (USB sleep, Bluetooth
+        drop, brief OS audio-subsystem suspend).  This tick
+        guarantees a watchdog check every ``_RX_WATCHDOG_TICK_MS``
+        independent of audio flow.
+        """
+        if self._decoding:
+            self._check_rx_watchdog()
 
     def _dispatch(self, event: object) -> None:
         if isinstance(event, ImageStarted):

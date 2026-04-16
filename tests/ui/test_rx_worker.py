@@ -637,3 +637,55 @@ class TestRxWatchdog:
         assert worker._decoding_mode is None
         assert worker._decoding_start_time == 0.0
         assert worker._last_progress_lines == 0
+
+    def test_wall_clock_tick_fires_watchdog_even_without_audio(
+        self, qapp
+    ) -> None:
+        """v0.2.1: the wall-clock watchdog tick must fire the
+        watchdog check even when no audio is flowing.  Covers the
+        user-reported bug where a Martin M2 decode stuck at 93 %
+        for 5+ minutes without the watchdog tripping — root cause
+        was that the v0.1.36 watchdog only ran inside ``_flush``,
+        which only ran when audio chunks arrived.  If PortAudio
+        goes quiet (USB sleep, Bluetooth drop, deep fade with
+        exactly-zero samples) no flushes fire and the watchdog
+        never ticks.
+        """
+        import time
+
+        from open_sstv.ui.workers import _RX_WATCHDOG_LINE_FLOOR_S
+
+        worker = RxWorker(sample_rate=48_000, flush_samples=1)
+        prog_image = Image.new("RGB", (320, 240), (10, 20, 30))
+
+        # Feed one chunk so the timer is created and the decoder
+        # transitions into DECODING state.
+        worker._decoder = MagicMock()
+        worker._decoder.feed.return_value = [
+            ImageStarted(mode=Mode.ROBOT_36, vis_code=8),
+            ImageProgress(
+                image=prog_image,
+                mode=Mode.ROBOT_36,
+                vis_code=8,
+                lines_decoded=120,
+                lines_total=240,
+            ),
+        ]
+        log = _record_signals(worker)
+        worker.feed_chunk(np.zeros(10, dtype=np.float32))
+        assert worker._decoding is True
+        assert worker._watchdog_timer is not None
+
+        # Backdate last_progress_time past the no-progress budget
+        # so the very next tick should trip.  No more ``feed_chunk``
+        # calls — simulating a completely silent audio stream.
+        worker._last_progress_time = time.monotonic() - (
+            _RX_WATCHDOG_LINE_FLOOR_S + 10.0
+        )
+
+        # Fire the tick directly (equivalent to what QTimer does).
+        worker._on_watchdog_tick()
+
+        # Partial image surfaced even without any new flush.
+        assert len(log["image_complete"]) == 1
+        assert worker._decoding is False

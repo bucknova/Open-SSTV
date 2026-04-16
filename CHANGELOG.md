@@ -11,6 +11,43 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.2.1] — 2026-04-16
+
+### Fixed
+- **RX decoder watchdog now fires even when audio flow stops.**
+  User-reported: *"Its stuck on a decode for martin m2 at 93%.
+  The image faded 5 minutes ago.  I have no user feedback stating
+  the decode has been reset."*  Root cause: the v0.1.36 watchdog
+  check lived inside ``_flush()``, which only runs when audio
+  chunks arrive.  If PortAudio goes quiet for *any* reason — USB
+  audio device sleeps, Bluetooth link drops briefly, OS suspends
+  the audio subsystem during a suspend/resume, or a very deep fade
+  where the driver produces long stretches of exactly-zero samples
+  that don't fill a flush buffer — no flushes fire and the watchdog
+  never ticks.
+
+  Fix: an independent wall-clock ``QTimer`` on the RxWorker thread
+  now calls the watchdog check every ``_RX_WATCHDOG_TICK_MS = 2 s``
+  regardless of audio state.  The timer is created lazily on the
+  first ``feed_chunk`` (or ``reset``) so it picks up the worker-
+  thread affinity the same way ``InputStreamWorker`` does.  The
+  existing flush-driven check remains in place — the two are
+  redundant by design, and the timer is the belt.
+
+### Tests
+- ``TestRxWatchdog.test_wall_clock_tick_fires_watchdog_even_without_audio``
+  in ``tests/ui/test_rx_worker.py`` — sets up a decoder stuck
+  partway through an image, backdates the last-progress timestamp
+  past the budget, and calls ``_on_watchdog_tick`` directly
+  (equivalent to what QTimer does) without any further
+  ``feed_chunk`` calls.  Asserts the partial image reaches the
+  gallery and the decoder is reset.  Regression guard for the
+  user-reported Martin M2 stuck-at-93 % case.
+
+Full suite: 548 → 549 (+1).
+
+---
+
 ## [0.2.0] — 2026-04-16 — 🎉 Beta release
 
 Open-SSTV is now **Beta** and ready for user testing and feedback.
