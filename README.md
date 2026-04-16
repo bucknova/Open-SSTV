@@ -342,6 +342,10 @@ with what you tried and what happened.
 - **Drag-and-drop** image loading in the TX panel.
 
 ### Future
+- **Expanded template library** -- a full set of premade QSO templates inspired by MMSSTV and other popular SSTV clients (signal reports, contest exchanges, ragchew layouts).
+- **Received-image exchange** -- one-click workflow to auto-insert the last decoded image into the outgoing TX frame before sending.
+- **Expanded font support** -- more typeface options for text overlays, including styles common in amateur radio use.
+- **Advanced text layout** -- multi-column overlays, alignment controls, and background fill options for finer control over callsign and caption placement.
 - FSKID transmission (CW ID already shipping — see Features → Transmit).
 - ADIF QSO logging.
 - PSK Reporter / DX cluster spotting.
