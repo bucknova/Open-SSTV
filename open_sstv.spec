@@ -1,15 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# PyInstaller spec for Open-SSTV (Windows build)
+# PyInstaller spec for Open-SSTV — cross-platform (Windows / macOS / Linux)
 #
 # Build locally with:
-#   pip install pyinstaller
+#   pip install pyinstaller pyinstaller-hooks-contrib
 #   pyinstaller open_sstv.spec
 #
-# Output: dist/open-sstv/open-sstv.exe  (+ supporting DLLs)
-# Zip the whole dist/open-sstv/ folder and share it — the exe is the launcher.
+# Output: dist/open-sstv/  (folder containing the launcher + supporting libs)
+# Zip the whole dist/open-sstv/ folder and share it — the launcher is:
+#   Windows : open-sstv.exe
+#   macOS   : open-sstv  (run from terminal; or wrap in a .app manually)
+#   Linux   : open-sstv  (or package via appimagetool — see build.yml)
 
+import sys
 from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
 # scipy uses lazy/conditional imports internally; collect everything so
@@ -22,18 +26,27 @@ pyssty_hidden = collect_submodules("PySSTV")
 hidden_imports = [
     *scipy_hidden,
     *pyssty_hidden,
-    # sounddevice loads PortAudio through ctypes — the DLL is shipped with the
-    # sounddevice wheel and PyInstaller copies it automatically, but the module
-    # itself still needs to be on the hidden-import list.
+    # sounddevice loads PortAudio through ctypes — the shared library is
+    # shipped with the sounddevice wheel and PyInstaller copies it
+    # automatically, but the module itself still needs to be listed here.
     "sounddevice",
-    # platformdirs uses __import__ to pick the OS backend at runtime.
-    "platformdirs.windows",
-    # pyserial platform back-ends (serial.serialwin32 is the Windows one).
-    "serial.serialwin32",
-    "serial.win32",
     # tomllib is stdlib on 3.11+; tomli_w is a pure-Python write companion.
     "tomli_w",
 ]
+
+# platformdirs selects an OS-specific backend at runtime via __import__.
+if sys.platform == "win32":
+    hidden_imports += ["platformdirs.windows"]
+elif sys.platform == "darwin":
+    hidden_imports += ["platformdirs.macos"]
+else:
+    hidden_imports += ["platformdirs.unix"]
+
+# pyserial selects its I/O backend the same way.
+if sys.platform == "win32":
+    hidden_imports += ["serial.serialwin32", "serial.win32"]
+else:
+    hidden_imports += ["serial.serialposix"]
 
 # scipy ships .pyd/.dll data alongside its Python modules; include them.
 datas = collect_data_files("scipy")

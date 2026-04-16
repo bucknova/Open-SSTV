@@ -1,0 +1,190 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Build portable binaries for all supported platforms and attach them to
+# GitHub Releases.
+#
+# Triggers:
+#   • workflow_dispatch — "Run workflow" button in the Actions tab (beta builds)
+#   • push v* tag       — fires automatically on version tags
+#                         e.g. git tag v0.2.3 && git push --tags
+#
+# Artifacts produced per run (always downloadable for 30 days):
+#   open-sstv-windows          → open-sstv-windows.zip
+#   open-sstv-linux-x86_64     → open-sstv-linux-x86_64.zip
+#   open-sstv-linux-x86_64-appimage → Open-SSTV-x86_64.AppImage
+#   open-sstv-linux-arm64      → open-sstv-linux-arm64.zip
+#   open-sstv-linux-arm64-appimage  → Open-SSTV-aarch64.AppImage
+#   open-sstv-macos-intel      → open-sstv-macos-intel.zip
+#   open-sstv-macos-arm64      → open-sstv-macos-arm64.zip
+#
+# On tag pushes all of the above are also attached to a public GitHub Release.
+#
+# macOS note: unsigned binaries will trigger Gatekeeper on first launch.
+# Users should right-click → Open, or run:
+#   xattr -d com.apple.quarantine open-sstv
+
+name: Build & Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false   # let other platforms finish even if one fails
+      matrix:
+        include:
+
+          - name: Windows x86_64
+            runner: windows-latest
+            artifact: open-sstv-windows
+
+          - name: Linux x86_64
+            runner: ubuntu-22.04
+            artifact: open-sstv-linux-x86_64
+            appimage_arch: x86_64
+
+          - name: Linux ARM64
+            runner: ubuntu-22.04-arm
+            artifact: open-sstv-linux-arm64
+            appimage_arch: aarch64
+
+          - name: macOS Intel
+            runner: macos-13
+            artifact: open-sstv-macos-intel
+
+          - name: macOS Apple Silicon
+            runner: macos-14
+            artifact: open-sstv-macos-arm64
+
+    steps:
+      # ── 1. Source ──────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Python ──────────────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # ── 3. Dependencies ────────────────────────────────────────────────────
+      - name: Install project + PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pyinstaller pyinstaller-hooks-contrib
+
+      # ── 4. Build ───────────────────────────────────────────────────────────
+      - name: Build with PyInstaller
+        run: pyinstaller open_sstv.spec
+
+      # ── 5. Verify ──────────────────────────────────────────────────────────
+      - name: Verify build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exe = "dist\open-sstv\open-sstv.exe"
+          if (-not (Test-Path $exe)) { Write-Error "$exe not found"; exit 1 }
+          Write-Host "OK: $exe ($([math]::Round((Get-Item $exe).Length / 1MB, 1)) MB)"
+
+      - name: Verify build (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          exe="dist/open-sstv/open-sstv"
+          [ -f "$exe" ] || { echo "ERROR: $exe not found"; exit 1; }
+          echo "OK: $exe ($(du -sh "$exe" | cut -f1))"
+
+      # ── 6a. Package: Windows ───────────────────────────────────────────────
+      - name: Zip (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\open-sstv -DestinationPath dist\${{ matrix.artifact }}.zip
+          Write-Host "Archive: $([math]::Round((Get-Item dist\${{ matrix.artifact }}.zip).Length / 1MB, 1)) MB"
+
+      # ── 6b. Package: macOS / Linux zip ─────────────────────────────────────
+      - name: Zip (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd dist
+          zip -r ${{ matrix.artifact }}.zip open-sstv/
+          echo "Archive: $(du -sh ${{ matrix.artifact }}.zip | cut -f1)"
+
+      # ── 6c. Package: Linux AppImage ────────────────────────────────────────
+      - name: Build AppImage (Linux only)
+        if: runner.os == 'Linux'
+        env:
+          ARCH: ${{ matrix.appimage_arch }}
+        run: |
+          # Build AppDir from the PyInstaller onedir output
+          mkdir -p AppDir
+          cp -r dist/open-sstv/* AppDir/
+
+          # AppRun launcher — must be at the root of AppDir
+          cat > AppDir/AppRun << 'APPRUN'
+          #!/bin/bash
+          SELF="$(readlink -f "$0")"
+          HERE="${SELF%/*}"
+          exec "${HERE}/open-sstv" "$@"
+          APPRUN
+          chmod +x AppDir/AppRun
+
+          # .desktop file (required by appimagetool)
+          cat > AppDir/open-sstv.desktop << 'DESKTOP'
+          [Desktop Entry]
+          Name=Open-SSTV
+          Exec=open-sstv
+          Type=Application
+          Categories=HamRadio;Network;
+          Comment=Open-source SSTV transceiver for amateur radio
+          DESKTOP
+
+          # Download appimagetool for this architecture
+          TOOL="appimagetool-${ARCH}.AppImage"
+          wget -q "https://github.com/AppImage/appimagetool/releases/download/continuous/${TOOL}"
+          chmod +x "${TOOL}"
+
+          # Build the AppImage
+          ARCH="${ARCH}" ./"${TOOL}" AppDir "Open-SSTV-${ARCH}.AppImage"
+          echo "AppImage: $(du -sh Open-SSTV-${ARCH}.AppImage | cut -f1)"
+
+      # ── 7. Upload Actions artifacts (always available for 30 days) ──────────
+      - name: Upload zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}.zip
+          retention-days: 30
+
+      - name: Upload AppImage artifact (Linux only)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}-appimage
+          path: Open-SSTV-*.AppImage
+          retention-days: 30
+
+      # ── 8. Attach to GitHub Release (tag pushes only) ──────────────────────
+      - name: Attach zip to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ matrix.artifact }}.zip
+          draft: false
+          generate_release_notes: true
+
+      - name: Attach AppImage to release (Linux only)
+        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Linux'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Open-SSTV-*.AppImage
