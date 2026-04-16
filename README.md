@@ -200,14 +200,16 @@ Robot 12, Robot 24, Robot 72. Planned for a future release.
 
 ![Open-SSTV main window](docs/screenshots/main-window.png)
 
-*Main window: radio status toolbar (top), Transmit panel (left), Receive panel (right)*
+*Main window — image loaded, QSO template buttons, mode selector, RX panel*
 
 | | |
 |---|---|
 | ![Audio settings](docs/screenshots/settings-audio.png) | ![Radio settings](docs/screenshots/settings-radio.png) |
-| *Audio tab — device and gain settings* | *Radio tab — rig control, protocol, and PTT* |
+| *Audio tab — device, gain sliders, weak-signal mode* | *Radio tab — Direct Serial / Icom CI-V, PTT, CW Station ID* |
 | ![Images settings](docs/screenshots/settings-images.png) | ![QSO templates](docs/screenshots/qso-templates.png) |
-| *Images tab — default TX mode and auto-save* | *QSO templates — one-click callsign and exchange overlays* |
+| *Images tab — TX banner with live preview* | *QSO Templates — CQ DE W0AEZ overlay editor* |
+| ![Image editor](docs/screenshots/image-editor.png) | ![Main window idle](docs/screenshots/main-window-empty.png) |
+| *Image editor — crop, rotate, flip, text overlays* | *Main window — idle state at launch* |
 
 ## Architecture
 
