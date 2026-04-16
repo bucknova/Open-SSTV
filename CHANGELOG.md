@@ -11,6 +11,139 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.27] — 2026-04-16
+
+Fixes from the Opus 4.6 (1M ctx) audit (`docs/audit_opus_1m_v0.1.26.md`).
+Two P0s, eight P1s, six P2s, two P3s.
+
+### Fixed
+- **OP-01 (P0) — TX watchdog raised from 300 s to 600 s.** Pasokon P5
+  (304 s) and Pasokon P7 (406 s) used to trip the watchdog mid-image —
+  the receiving station saw a truncated transmission. The new ceiling
+  comfortably covers every shipping mode plus VIS leader, PTT delay,
+  and a 15 WPM CW tail. New regression test
+  `test_watchdog_covers_every_mode_with_headroom` asserts the invariant
+  against `MODE_TABLE` so a future longer mode fails loudly.
+- **OP-02 (P0) — Serial CAT backends translate `serial.SerialException`
+  to `RigConnectionError`.** Icom CI-V, Kenwood, and Yaesu `_command`
+  methods plus `SerialPttRig.{get,set}_ptt` now wrap pyserial exceptions.
+  Previously a mid-session USB unplug leaked a raw `SerialException`
+  past every `RigError` catch in the rig poll thread, killing the
+  thread silently — the rig panel froze and only an app restart
+  recovered. New `TestSerialExceptionWrapping` regression suite covers
+  all four backends.
+- **OP-03 (P1) — `TemplateEditorDialog` deep-copy preserves
+  `x` / `y` overlay coordinates.** The dialog used to silently strip
+  the optional pixel-position fields on every Open, then erase them
+  from disk on Save. Users who hand-edited `templates.toml` to add
+  precise placement lost their work the moment they opened the editor.
+  Two new regression tests in `tests/ui/test_template_editor_dialog.py`.
+- **OP-04 (P1) — BZ-03 regression tests are no longer skipped.** The
+  `TestCropXYSpinboxUpdatesRect` class was unconditionally skipped at
+  class level with the claim that it required a display, but it runs
+  fine under the offscreen Qt platform pytest-qt uses. Class is
+  unskipped and the four tests now actually guard the BZ-03 fix.
+- **OP-05 (P1) — RX start sequences reset → start_capture deterministically.**
+  Previously, `_request_rx_reset` (queued to rx_thread) and
+  `_request_start_capture` (queued to audio_thread) raced: a chunk from
+  an already-warm device could arrive at `feed_chunk` before the reset
+  slot ran, leaving stale state in the decoder. `RxWorker.reset()` now
+  emits a new `reset_done` signal; MainWindow connects a one-shot
+  callback that emits `_request_start_capture` only after `reset_done`
+  fires.
+- **OP-06 (P1) — TX progress bar honours the configured sample rate.**
+  `TxPanel.show_tx_progress` used to compute elapsed/total seconds
+  with a hardcoded `/ 48000`; on 44.1 kHz a 114 s Martin M1 transmission
+  showed *"124 s / 124 s"* at completion. New `TxPanel.set_sample_rate`
+  method called from `MainWindow._apply_config` keeps the panel in
+  sync with the active rate.
+- **OP-07 (P1) — Stale incremental-decode fallthrough comment removed.**
+  `Decoder._feed_idle` used to comment that an unknown mode would fall
+  through to the batch path — but `make_incremental_decoder` covers
+  every `Mode` value, so the path was dead. The fallthrough is replaced
+  with an explicit `assert` that fails loudly if a future Mode addition
+  forgets a backend.
+- **OP-08 (P1) — `emergency_unkey` runs in a daemon thread with a
+  bounded join.** On app shutdown, if the TX worker thread doesn't
+  finish within its 3 s budget, MainWindow used to call `emergency_unkey`
+  synchronously on the GUI thread — which would block for up to ~1.5 s
+  (serial write_timeout + read budget) on an unresponsive radio. Now
+  runs in a daemon thread with a 1.5 s join, so a dead-rig timeout can't
+  freeze the GUI past the close.
+- **OP-09 (P1) — All per-worker config changes flow through queued
+  signals.** `set_final_slant_correction` and `set_sample_rate` (TX)
+  used to be direct method calls from the GUI thread, relying on
+  GIL-atomic int/bool assignment for safety. Both now have `@Slot`
+  decorators and are dispatched via the new
+  `_rx_final_slant_correction_changed` and `_tx_sample_rate_changed`
+  signals, so every worker setting genuinely lands on its receiver's
+  own event loop. Symmetry > convenience.
+- **OP-11 (P1) — Audio input watchdog gets a 6 s cold-start grace.**
+  The 3 s watchdog used to fire spuriously on slow-to-open USB and
+  Bluetooth devices that took 1.5–2.5 s between `start()` and the
+  first PortAudio callback. The watchdog now starts at
+  `_DEVICE_WATCHDOG_COLD_START_MS = 6000` and switches to the
+  steady-state 3 s after the first chunk drains.
+- **OP-12 (P2) — `RxWorker.set_sample_rate` resets `_total_samples`.**
+  The "Xs buffered" status label used to be briefly off-by-rate after
+  a mid-session sample-rate change because the sample counter still
+  held the old-rate count.
+- **OP-15 (P2) — CW generator surfaces unsupported characters at
+  WARNING level.** Characters not in the Morse table (any non
+  A–Z / 0–9 / `/` / `-`) used to be silently skipped at DEBUG. The
+  WARNING tells the operator their station ID may be incomplete —
+  important for regulatory compliance.
+- **OP-17 (P2) — Robot 36 wire-format detection is bounded.** A
+  noise-locked input that never produces enough sync candidates used
+  to grow `Robot36IncrementalDecoder._pending` to an entire image's
+  worth of audio (~14 MB at 48 kHz). After 3 s of buffered audio
+  without enough candidates, the decoder falls back to the per-line
+  backend as a sane default.
+- **OP-18 (P2) — Status bar surfaces missing saved audio devices.**
+  Previously the app silently fell back to the system default when
+  the saved input/output device wasn't found (USB unplugged since
+  last run). The user now sees a 10 s status-bar message naming the
+  missing device(s).
+- **OP-19 (P2) — `_kill_rigctld` and `SettingsDialog._stop_rigctld`
+  handle already-dead processes.** `terminate()`/`wait()`/`kill()`
+  raises `ProcessLookupError` (POSIX) or `OSError` if the rigctld
+  process died on its own (bad CLI args, port collision). Both
+  cleanup paths now treat that as "already gone" rather than
+  propagating the exception out of `closeEvent`.
+- **OP-21 (P2) — `ImageGalleryWidget` uses `aboutToQuit` instead of
+  `atexit` for temp-dir cleanup.** Scoped to the Qt application
+  lifetime rather than the interpreter, avoiding the per-test atexit
+  callback accumulation that occurred under pytest-qt.
+- **OP-23 (P2) — `apply_tx_banner` raises `ValueError` for too-small
+  images.** Previously, when `image.height <= banner_height` the
+  resize was silently skipped and the entire output was a banner-
+  coloured rectangle with no image content. Today's smallest mode
+  (height 128 px) plus largest banner (40 px) leaves 88 px clearance,
+  so this never fires in practice — but it would be a worst-case
+  failure mode for any future small mode.
+- **OP-33 (P3) — S-meter sentinel comment.** Documents that
+  `strength_db == 0` is the "no reading" sentinel and that a genuine
+  0 dBm reading would be ~S9+73 (off the top of the meter), so the
+  collision is cosmetic. No behavioural change.
+
+### Tooling
+- **OP-34 (P3) — `pyproject.toml [tool.pytest.ini_options].pythonpath`
+  now includes `"."`** alongside `"src"`, so `pytest -q` at the repo
+  root works without a manual `PYTHONPATH=.` prefix
+  (`tests.radio.fake_rigctld` import was failing otherwise).
+
+### Tests
+- `tests/ui/test_tx_worker.py::test_watchdog_covers_every_mode_with_headroom`
+  — pins the OP-01 watchdog ≥ longest mode + 30 s slop invariant.
+- `tests/radio/test_serial_rig.py::TestSerialExceptionWrapping`
+  — verifies OP-02 wrapping for Icom / Kenwood / Yaesu / SerialPttRig.
+- `tests/ui/test_template_editor_dialog.py` — verifies OP-03 X/Y
+  round-trip and that the dialog's deep copy isolates the caller.
+- `tests/ui/test_image_editor.py::TestCropXYSpinboxUpdatesRect`
+  — unskipped; the four BZ-03 regression tests now actually run.
+
+---
+
 ## [0.1.26] — 2026-04-15
 
 ### Fixed

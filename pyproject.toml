@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "open-sstv"
-version = "0.1.26"
+version = "0.1.27"
 description = "Open-source cross-platform SSTV transceiver for amateur radio."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -72,7 +72,10 @@ include = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+# OP-34: include the repo root so ``tests/radio/test_rigctld_client.py``
+# can ``from tests.radio.fake_rigctld import FakeRigctld`` without a
+# manual ``PYTHONPATH=.`` prefix.
+pythonpath = [".", "src"]
 markers = [
     "gui: marks tests that require a Qt display (deselect with -m 'not gui')",
     "integration: marks tests that require external services (e.g. rigctld)",

@@ -116,15 +116,25 @@ class SerialPttRig:
         with self._lock:
             if self._ser is None:
                 return False
-            if self._ptt_line == "RTS":
-                return self._ser.rts
-            return self._ser.dtr
+            try:
+                if self._ptt_line == "RTS":
+                    return self._ser.rts
+                return self._ser.dtr
+            except serial.SerialException as exc:
+                raise RigConnectionError(
+                    f"Serial PTT read failed on {self._port}: {exc}"
+                ) from exc
 
     def set_ptt(self, on: bool) -> None:
         with self._lock:
             if self._ser is None:
                 raise RigConnectionError("Serial port not open")
-            self._set_ptt_line(on)
+            try:
+                self._set_ptt_line(on)
+            except serial.SerialException as exc:
+                raise RigConnectionError(
+                    f"Serial PTT write failed on {self._port}: {exc}"
+                ) from exc
 
     def get_strength(self) -> int:
         return 0
@@ -289,7 +299,14 @@ class IcomCIVRig:
     # === CI-V internals ===
 
     def _command(self, cmd_data: bytes) -> bytes:
-        """Send a CI-V command and return the response data payload."""
+        """Send a CI-V command and return the response data payload.
+
+        Serial I/O errors (unplug, device busy, timeout) are translated to
+        ``RigConnectionError`` so upstream callers that catch ``RigError``
+        can recover gracefully.  A mid-session USB unplug used to leak a
+        raw ``serial.SerialException`` past every ``RigError`` catch in
+        the poll thread, killing it silently (OP-02).
+        """
         with self._lock:
             if self._ser is None:
                 raise RigConnectionError("Serial port not open")
@@ -300,12 +317,23 @@ class IcomCIVRig:
                 + cmd_data
                 + _CIV_EOM
             )
-            self._ser.reset_input_buffer()
-            self._ser.write(frame)
-            return self._read_response()
+            try:
+                self._ser.reset_input_buffer()
+                self._ser.write(frame)
+                return self._read_response()
+            except serial.SerialException as exc:
+                raise RigConnectionError(
+                    f"Icom CI-V serial I/O failed on {self._port}: {exc}"
+                ) from exc
 
     def _read_response(self) -> bytes:
-        """Read and parse a CI-V response frame."""
+        """Read and parse a CI-V response frame.
+
+        ``serial.SerialException`` raised by ``in_waiting``/``read`` (e.g.
+        cable unplugged mid-read) propagates out; ``_command`` catches it
+        and re-raises as ``RigConnectionError`` so the ``Rig`` surface is
+        consistent.
+        """
         if self._ser is None:
             raise RigConnectionError("Serial port not open")
         buf = bytearray()
@@ -502,13 +530,25 @@ class KenwoodRig:
             raise RigConnectionError("No valid ID response from radio")
 
     def _command(self, cmd: str) -> str:
-        """Send a Kenwood command and return the response."""
+        """Send a Kenwood command and return the response.
+
+        Wraps ``serial.SerialException`` as ``RigConnectionError`` so a
+        mid-session unplug is observable to callers that catch
+        ``RigError`` (the poll thread, TX worker, settings test).  Without
+        this, the raw pyserial exception used to leak past every
+        ``RigError`` catch (OP-02).
+        """
         with self._lock:
             if self._ser is None:
                 raise RigConnectionError("Serial port not open")
-            self._ser.reset_input_buffer()
-            self._ser.write(f"{cmd};".encode("ascii"))
-            return self._read_response(expected_prefix=cmd[:2])
+            try:
+                self._ser.reset_input_buffer()
+                self._ser.write(f"{cmd};".encode("ascii"))
+                return self._read_response(expected_prefix=cmd[:2])
+            except serial.SerialException as exc:
+                raise RigConnectionError(
+                    f"Kenwood serial I/O failed on {self._port}: {exc}"
+                ) from exc
 
     def _read_response(self, expected_prefix: str = "") -> str:
         """Read until a ``;``-terminated response matching *expected_prefix*.
@@ -517,6 +557,10 @@ class KenwoodRig:
         turns knobs during polling) and keeps reading until a response
         whose first characters match *expected_prefix* arrives, or until
         the 1 s deadline expires.
+
+        ``serial.SerialException`` raised by ``in_waiting``/``read``
+        propagates out; ``_command`` catches it and re-raises as
+        ``RigConnectionError``.
         """
         if self._ser is None:
             raise RigConnectionError("Serial port not open")
@@ -659,20 +703,31 @@ class YaesuRig:
             raise RigConnectionError("No valid ID response from radio")
 
     def _command(self, cmd: str) -> str:
-        """Send a Yaesu command and return the response."""
+        """Send a Yaesu command and return the response.
+
+        Wraps ``serial.SerialException`` as ``RigConnectionError`` so a
+        mid-session unplug is observable to callers that catch
+        ``RigError`` (OP-02).
+        """
         with self._lock:
             if self._ser is None:
                 raise RigConnectionError("Serial port not open")
-            self._ser.reset_input_buffer()
-            self._ser.write(f"{cmd};".encode("ascii"))
-            return self._read_response(expected_prefix=cmd[:2])
+            try:
+                self._ser.reset_input_buffer()
+                self._ser.write(f"{cmd};".encode("ascii"))
+                return self._read_response(expected_prefix=cmd[:2])
+            except serial.SerialException as exc:
+                raise RigConnectionError(
+                    f"Yaesu serial I/O failed on {self._port}: {exc}"
+                ) from exc
 
     def _read_response(self, expected_prefix: str = "") -> str:
         """Read until a ``;``-terminated response matching *expected_prefix*.
 
         Discards unsolicited status messages and keeps reading until a
         response starting with *expected_prefix* arrives or the deadline
-        expires.
+        expires.  ``serial.SerialException`` propagates to ``_command``
+        which re-raises as ``RigConnectionError``.
         """
         if self._ser is None:
             raise RigConnectionError("Serial port not open")

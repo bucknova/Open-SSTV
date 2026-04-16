@@ -169,6 +169,11 @@ class MainWindow(QMainWindow):
     _rx_weak_signal_changed = Signal(bool)
     _rx_incremental_decode_changed = Signal(bool)
     _rx_sample_rate_changed = Signal(int)
+    #: OP-09: cover the previously-direct-call settings too so every
+    #: per-worker setting flows through a queued connection on its
+    #: receiver's event loop.  Symmetry > convenience.
+    _rx_final_slant_correction_changed = Signal(bool)
+    _tx_sample_rate_changed = Signal(int)
 
     def __init__(
         self,
@@ -192,14 +197,26 @@ class MainWindow(QMainWindow):
         # Resolve saved device names from config to real AudioDevice objects.
         # If the caller passed explicit devices, use those; otherwise look up
         # what the user last selected in Settings.
+        # OP-18: track whether a saved-but-missing device fell back to the
+        # system default so we can surface a status-bar notice once the
+        # status bar exists later in __init__.
+        self._missing_devices: list[str] = []
         if output_device is None:
             output_device = find_output_device_by_name(
                 self._config.audio_output_device
             )
+            if output_device is None and self._config.audio_output_device:
+                self._missing_devices.append(
+                    f"output '{self._config.audio_output_device}'"
+                )
         if input_device is None:
             input_device = find_input_device_by_name(
                 self._config.audio_input_device
             )
+            if input_device is None and self._config.audio_input_device:
+                self._missing_devices.append(
+                    f"input '{self._config.audio_input_device}'"
+                )
         self._input_device = input_device
         self._rigctld_proc: "subprocess.Popen | None" = None
         self._capture_running: bool = False
@@ -308,6 +325,11 @@ class MainWindow(QMainWindow):
         self._rx_weak_signal_changed.connect(self._rx_worker.set_weak_signal)
         self._rx_incremental_decode_changed.connect(self._rx_worker.set_incremental_decode)
         self._rx_sample_rate_changed.connect(self._rx_worker.set_sample_rate)
+        # OP-09: previously-direct calls now flow through queued signals too.
+        self._rx_final_slant_correction_changed.connect(
+            self._rx_worker.set_final_slant_correction
+        )
+        self._tx_sample_rate_changed.connect(self._tx_worker.set_sample_rate)
 
         # Panel -> window (we translate capture_requested into the
         # dispatch signals above, because ``start`` needs the device
@@ -359,7 +381,17 @@ class MainWindow(QMainWindow):
         save_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
         save_shortcut.activated.connect(self._on_save_shortcut)
 
-        self.statusBar().showMessage("Ready")
+        # OP-18: surface saved-but-missing audio devices so the user
+        # knows their previously-selected device fell back to system
+        # default rather than silently using the wrong one.
+        if self._missing_devices:
+            self.statusBar().showMessage(
+                f"Saved audio device(s) not found: {', '.join(self._missing_devices)}"
+                " — using system default. Open Settings → Audio to reselect.",
+                10000,
+            )
+        else:
+            self.statusBar().showMessage("Ready")
 
     # === Menu bar ===
 
@@ -500,9 +532,12 @@ class MainWindow(QMainWindow):
         self._input_device = new_input
         self._rx_worker.set_input_gain(self._config.audio_input_gain)
         # Emit via queued signals so decoder rebuilds happen on the worker
-        # thread, not the GUI thread (H-02 fix).
+        # thread, not the GUI thread (H-02 fix; OP-09 extended to cover
+        # set_final_slant_correction too).
         self._rx_weak_signal_changed.emit(self._config.rx_weak_signal_mode)
-        self._rx_worker.set_final_slant_correction(self._config.apply_final_slant_correction)
+        self._rx_final_slant_correction_changed.emit(
+            self._config.apply_final_slant_correction
+        )
         self._rx_incremental_decode_changed.emit(self._config.incremental_decode)
         self._tx_worker.set_tx_banner(
             self._config.tx_banner_enabled,
@@ -518,9 +553,13 @@ class MainWindow(QMainWindow):
             self._config.cw_id_tone_hz,
         )
         # Propagate sample rate to both workers (takes effect on the next
-        # encode/capture start).
-        self._tx_worker.set_sample_rate(self._config.sample_rate)
+        # encode/capture start).  Both go via queued signals so the
+        # change lands on the receiving worker's own event loop (OP-09).
+        self._tx_sample_rate_changed.emit(self._config.sample_rate)
         self._rx_sample_rate_changed.emit(self._config.sample_rate)
+        # TX panel needs the rate too so the progress-bar elapsed/total
+        # seconds label is correct at 44.1 kHz (OP-06).
+        self._tx_panel.set_sample_rate(self._config.sample_rate)
 
     # === TX slots ===
 
@@ -649,15 +688,37 @@ class MainWindow(QMainWindow):
         ``_request_stop_capture`` signals so the audio-worker slots
         actually run on the audio worker thread (queued connection)
         rather than on the GUI thread.
+
+        On start, the audio capture is deferred until the RxWorker's
+        ``reset_done`` fires (OP-05): emitting ``_request_rx_reset`` and
+        ``_request_start_capture`` simultaneously from the GUI thread
+        races on two different worker threads, and a pre-queued chunk
+        from an already-warm device can reach ``feed_chunk`` before the
+        reset slot runs.  The one-shot ``reset_done → start_capture``
+        connection sequences the two steps deterministically.
         """
         if start:
             # Reset the decoder + sample counter so each new capture session
             # starts from zero rather than accumulating across stop/restart
             # cycles (bug R-1: counter climbed past 127s with no image).
+            # Defer the start-capture request until reset_done arrives so
+            # the two worker threads are ordered correctly (OP-05).
+            device = self._input_device
+            sample_rate = self._config.sample_rate
+
+            def _start_once() -> None:
+                # Disconnect ourselves before emitting so a later reset()
+                # (e.g. user clicks Clear) doesn't retrigger start_capture.
+                try:
+                    self._rx_worker.reset_done.disconnect(_start_once)
+                except (RuntimeError, TypeError):
+                    pass
+                self._request_start_capture.emit(
+                    device, sample_rate, DEFAULT_BLOCKSIZE
+                )
+
+            self._rx_worker.reset_done.connect(_start_once)
             self._request_rx_reset.emit()
-            self._request_start_capture.emit(
-                self._input_device, self._config.sample_rate, DEFAULT_BLOCKSIZE
-            )
         else:
             # Cancel any in-flight decode before stopping audio so the tail
             # flush triggered by audio_worker.stopped doesn't block the worker
@@ -908,13 +969,30 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Rig disconnected.", 3000)
 
     def _kill_rigctld(self) -> None:
-        """Terminate any rigctld process we spawned."""
-        if self._rigctld_proc is not None:
+        """Terminate any rigctld process we spawned.
+
+        Defensive against a process that already exited on its own
+        (e.g. rigctld rejected its CLI args and quit) — ``terminate()``
+        / ``wait()`` / ``kill()`` can raise ``ProcessLookupError`` (POSIX)
+        or generic ``OSError`` in that case.  We always clear
+        ``_rigctld_proc`` so the next launch attempt starts fresh
+        regardless of how the cleanup went (OP-19).
+        """
+        if self._rigctld_proc is None:
+            return
+        try:
             self._rigctld_proc.terminate()
             try:
                 self._rigctld_proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
-                self._rigctld_proc.kill()
+                try:
+                    self._rigctld_proc.kill()
+                except (ProcessLookupError, OSError):
+                    pass
+        except (ProcessLookupError, OSError):
+            # Already gone — nothing to do.
+            pass
+        finally:
             self._rigctld_proc = None
 
     @Slot(int, str, int)
@@ -970,11 +1048,23 @@ class MainWindow(QMainWindow):
         self._tx_thread.quit()
         if not self._tx_thread.wait(3000):
             import logging as _logging
+            import threading as _threading
             _logging.getLogger(__name__).warning(
                 "TX worker thread did not finish within timeout — "
                 "attempting emergency PTT unkey"
             )
-            self._tx_worker.emergency_unkey()
+            # Run emergency_unkey in a daemon thread with a short join so
+            # a dead-rig serial timeout (~1.5 s) can't freeze the GUI for
+            # the full timeout while we're trying to quit (OP-08).  The
+            # thread is daemon=True so even if the unkey itself hangs,
+            # the interpreter exits cleanly.
+            t = _threading.Thread(
+                target=self._tx_worker.emergency_unkey,
+                name="sstv-app-emergency-unkey",
+                daemon=True,
+            )
+            t.start()
+            t.join(timeout=1.5)
 
         for thread in (
             self._audio_thread,

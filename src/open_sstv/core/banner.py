@@ -143,11 +143,25 @@ def apply_tx_banner(
     width, height = image.size
     content_height = height - banner_height
 
+    # OP-23: refuse to stamp a banner that would leave no room for the
+    # source image content.  Without this guard, a too-small image (or a
+    # too-large banner) would silently produce an output where the entire
+    # image is a banner-coloured rectangle and the user's image data is
+    # discarded.  Today every shipping mode is at least 128 px tall and
+    # the largest banner is 40 px (88 px content), so this never fires
+    # in practice — but it would be a worst-of-all-worlds failure mode
+    # for any future small mode or hand-edited preset.
+    if content_height <= 0:
+        raise ValueError(
+            f"apply_tx_banner: image height {height}px is not large enough "
+            f"for a {banner_height}px banner — at least "
+            f"{banner_height + 1}px image height required."
+        )
+
     # Build the output canvas: banner strip at top, resized content below.
     out = Image.new(image.mode or "RGB", (width, height), bg_color)
-    if content_height > 0:
-        shrunk = image.resize((width, content_height), Image.Resampling.LANCZOS)
-        out.paste(shrunk, (0, banner_height))
+    shrunk = image.resize((width, content_height), Image.Resampling.LANCZOS)
+    out.paste(shrunk, (0, banner_height))
 
     draw = ImageDraw.Draw(out)
     font = _load_font(font_size)

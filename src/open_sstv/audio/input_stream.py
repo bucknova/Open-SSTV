@@ -84,10 +84,21 @@ _POLL_INTERVAL_MS: int = 50
 
 
 #: How long the device watchdog waits for fresh audio before declaring the
-#: input device lost.  3 s gives ample slack for a brief system-level stall
-#: (suspend/resume, driver reset) while still catching a genuine unplug
-#: within a few seconds of the event.
+#: input device lost (steady-state, after the first chunk has arrived).
+#: 3 s gives ample slack for a brief system-level stall (suspend/resume,
+#: driver reset) while still catching a genuine unplug within a few
+#: seconds of the event.
 _DEVICE_WATCHDOG_MS: int = 3000
+
+#: Cold-start grace period before the watchdog engages.  Some USB audio
+#: devices and Bluetooth SCO links take 1.5–2.5 s between
+#: ``sd.InputStream.start()`` returning and the first PortAudio callback
+#: firing; under thermal throttling or competing audio clients on
+#: PipeWire/macOS this can push past 3 s and trip the watchdog spuriously
+#: (OP-11).  6 s of cold-start budget covers the measured worst cases
+#: while still catching a genuine "device never came up" failure well
+#: below a human-patience threshold.
+_DEVICE_WATCHDOG_COLD_START_MS: int = 6000
 
 
 class InputStreamWorker(QObject):
@@ -132,6 +143,9 @@ class InputStreamWorker(QObject):
         self._watchdog: QTimer | None = None
         self._sample_rate: int = DEFAULT_SAMPLE_RATE
         self._dropped_chunks: int = 0
+        # OP-11: first-chunk tracker for cold-start → steady-state
+        # watchdog interval switch.  Set back to False on stop().
+        self._first_chunk_seen: bool = False
 
     @property
     def is_running(self) -> bool:
@@ -206,11 +220,20 @@ class InputStreamWorker(QObject):
         # stopped by the OS. The timer is reset on every non-empty drain;
         # on expiry it emits stream_error and calls stop() so the UI returns
         # to the idle state instead of hanging in "Capturing" forever.
+        #
+        # Cold-start grace (OP-11): the first interval uses the longer
+        # ``_DEVICE_WATCHDOG_COLD_START_MS`` because PortAudio callbacks
+        # can take 1.5–2.5 s to fire on slow-to-open devices.  The
+        # regular ``_DEVICE_WATCHDOG_MS`` kicks in after the first chunk
+        # is drained in ``_drain_queue``.
         self._watchdog = QTimer()
         self._watchdog.setSingleShot(True)
-        self._watchdog.setInterval(_DEVICE_WATCHDOG_MS)
+        self._watchdog.setInterval(_DEVICE_WATCHDOG_COLD_START_MS)
         self._watchdog.timeout.connect(self._on_watchdog_timeout)
         self._watchdog.start()
+        # Tracks whether we've ever drained a chunk — used to switch the
+        # watchdog interval from cold-start to steady-state.
+        self._first_chunk_seen: bool = False
 
         self.started.emit()
 
@@ -233,6 +256,9 @@ class InputStreamWorker(QObject):
             self._watchdog.stop()
             self._watchdog.deleteLater()
             self._watchdog = None
+        # OP-11: reset the cold-start flag so the next start() gets
+        # another grace period.
+        self._first_chunk_seen = False
 
         try:
             self._stream.stop()
@@ -317,7 +343,13 @@ class InputStreamWorker(QObject):
             drained_any = True
 
         # Reset the device watchdog whenever we got real audio data.
+        # After the first drain switch from cold-start to steady-state
+        # interval so a momentary post-warm-up stall isn't misread as a
+        # device-lost event (OP-11).
         if drained_any and self._watchdog is not None:
+            if not self._first_chunk_seen:
+                self._first_chunk_seen = True
+                self._watchdog.setInterval(_DEVICE_WATCHDOG_MS)
             self._watchdog.start()
 
     @Slot()

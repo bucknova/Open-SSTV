@@ -1213,8 +1213,13 @@ class Decoder:
         ]
 
         # Incremental decode path — covers all 22 modes (Scottie, Martin,
-        # PD, Wraase, Pasokon, Robot 36).  Returns None only for an unknown
-        # mode; falls through to the batch path in that case.
+        # PD, Wraase, Pasokon, Robot 36).  ``make_incremental_decoder``
+        # has an entry for every Mode value, so when this branch is taken
+        # ``inc`` is never None — but we assert defensively to make any
+        # future Mode addition that misses the factory fail loudly at
+        # first RX rather than silently falling through to the batch
+        # path (OP-07: stale comment removed; the old fallthrough was
+        # dead code).
         if self._incremental_decode:
             # Lazy import avoids a circular dependency at module load time.
             from open_sstv.core.incremental_decoder import (  # noqa: PLC0415
@@ -1223,19 +1228,22 @@ class Decoder:
             inc = make_incremental_decoder(
                 spec, self._fs, vis_end_abs=vis_end, start_abs=0,
             )
-            if inc is not None:
-                self._incremental_dec = inc
-                # Pre-feed audio before VIS so the first line's window has
-                # the full FILTER_MARGIN of sosfiltfilt padding from the start.
-                pre_vis = joined[:vis_end]
-                if pre_vis.size > 0:
-                    self._incremental_dec.feed(pre_vis)
-                self._incremental_total_fed = vis_end
-                # Process any post-VIS audio already in the buffer so that
-                # callers who feed all samples in a single call still get
-                # progress/complete events (same behaviour as the batch path).
-                events.extend(self._feed_decoding_incremental(joined))
-                return events
+            assert inc is not None, (
+                f"make_incremental_decoder returned None for known mode "
+                f"{mode!r} — add a backend in incremental_decoder.py."
+            )
+            self._incremental_dec = inc
+            # Pre-feed audio before VIS so the first line's window has
+            # the full FILTER_MARGIN of sosfiltfilt padding from the start.
+            pre_vis = joined[:vis_end]
+            if pre_vis.size > 0:
+                self._incremental_dec.feed(pre_vis)
+            self._incremental_total_fed = vis_end
+            # Process any post-VIS audio already in the buffer so that
+            # callers who feed all samples in a single call still get
+            # progress/complete events (same behaviour as the batch path).
+            events.extend(self._feed_decoding_incremental(joined))
+            return events
 
         # Batch path: try an immediate partial decode — the buffer may already
         # contain a few scan lines (or even a full image if the caller

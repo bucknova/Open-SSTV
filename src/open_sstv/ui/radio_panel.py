@@ -182,6 +182,12 @@ class RadioPanel(QWidget):
         # Formula: S = (dBm + 127) // 6  (clamped 0–9).
         # Bug history: the old formula (dBm+73)//6 mapped S9→0, making the
         # bar appear empty for every real signal until S9+60 was exceeded.
+        # OP-33: ``strength_db == 0`` is treated as the "no reading"
+        # sentinel (ManualRig and the various rig backends return 0 when
+        # the rig hasn't been polled yet).  A genuine 0 dBm reading is
+        # ~S9+73 — well off the top of the meter — so this collision is
+        # cosmetic in practice.  When pollers gain a richer "no reading"
+        # signal (e.g. None) wire it through here.
         if strength_db != 0:
             s_unit = min(9, max(0, (strength_db + 127) // 6))
             self._smeter_bar.setValue(s_unit)

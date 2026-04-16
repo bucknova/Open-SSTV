@@ -120,11 +120,17 @@ def make_cw(
     chunks: list[NDArray[np.int16]] = []
     words = text.upper().split()
 
+    # OP-15: surface unsupported characters at WARNING (not DEBUG) so the
+    # operator notices when their callsign contains a glyph that won't be
+    # transmitted.  This matters for regulatory ID — a missing character
+    # means the CW tail does not actually identify the station.
+    skipped: list[str] = []
+
     for w_idx, word in enumerate(words):
         for c_idx, char in enumerate(word):
             pattern = _MORSE_TABLE.get(char)
             if pattern is None:
-                _log.debug("CW: %r has no Morse encoding — skipped", char)
+                skipped.append(char)
                 continue
 
             for e_idx, sym in enumerate(pattern):
@@ -145,6 +151,18 @@ def make_cw(
         # Inter-word gap: 7 units after every word except the last.
         if w_idx < len(words) - 1:
             chunks.append(silence_7)
+
+    if skipped:
+        # Deduplicate while preserving order so the log is short.
+        unique = list(dict.fromkeys(skipped))
+        _log.warning(
+            "CW: skipped %d unsupported character(s) %r in %r — "
+            "your station ID may be incomplete. Supported set is "
+            "A-Z, 0-9, '/', '-'.",
+            len(skipped),
+            "".join(unique),
+            text,
+        )
 
     if not chunks:
         return np.array([], dtype=np.int16)

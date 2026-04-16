@@ -132,10 +132,14 @@ _RX_FLUSH_SAMPLES_DEFAULT: int = int(_DECODE_FLUSH_INTERVAL_S * DEFAULT_SAMPLE_R
 
 #: Hard upper bound on a single transmission. If encode + playback have
 #: not finished within this many seconds the watchdog fires, forcing PTT
-#: off and aborting playback. The longest SSTV mode we ship (Martin M1)
-#: takes ~114 s; 300 s gives plenty of headroom while still protecting
-#: against a stuck encoder or hung audio driver.
-_MAX_TX_DURATION_S: float = 300.0
+#: off and aborting playback. The longest SSTV mode we ship is Pasokon P7
+#: at ~406 s body + VIS leader + CW ID tail; 600 s gives headroom for a
+#: full P7 transmission plus a 15 WPM CW tail plus future even-longer
+#: modes, while still protecting against a stuck encoder or hung audio
+#: driver. Cross-checked against every mode's
+#: ``ModeSpec.total_duration_s`` in
+#: ``tests/ui/test_tx_worker.py::test_watchdog_covers_every_mode``.
+_MAX_TX_DURATION_S: float = 600.0
 
 #: Default duration for the ALC/linearity test tone, in seconds.
 _TEST_TONE_DURATION_S: float = 5.0
@@ -247,11 +251,16 @@ class TxWorker(QObject):
         with self._rig_lock:
             self._rig = rig
 
+    @Slot(int)
     def set_sample_rate(self, sample_rate: int) -> None:
         """Update the sample rate used for encoding and playback.
 
-        Takes effect on the next ``transmit()`` call. Safe to call from
-        any thread (plain int assignment is atomic under the GIL).
+        Takes effect on the next ``transmit()`` call. Decorated
+        ``@Slot(int)`` so MainWindow can dispatch via a queued signal
+        connection, sequencing the change onto the TX worker's own
+        event loop (OP-09).  In practice the Settings dialog disables
+        Settings during TX so a mid-TX rate change can't happen, but
+        the queued slot makes the invariant explicit.
         """
         self._sample_rate = sample_rate
 
@@ -591,6 +600,11 @@ class RxWorker(QObject):
     image_complete = Signal(object, object, int)  # (PIL.Image, Mode, vis_code)
     status_update = Signal(str)  # periodic progress text
     error = Signal(str)
+    #: Emitted after ``reset()`` finishes on the worker thread.  MainWindow
+    #: uses this to order "reset → start_capture" across the two worker
+    #: threads (OP-05): without it, a fresh chunk from an already-open
+    #: audio stream could be fed into the decoder before the reset slot ran.
+    reset_done = Signal()
 
     def __init__(
         self,
@@ -666,6 +680,7 @@ class RxWorker(QObject):
         )
         self._decoder.set_cancel_event(self._cancel_event)
 
+    @Slot(bool)
     def set_final_slant_correction(self, enabled: bool) -> None:
         """Enable or disable final one-shot re-decode with slant correction.
 
@@ -676,7 +691,10 @@ class RxWorker(QObject):
         from weak/noisy signals where false-positive sync candidates corrupt
         the polyfit.  Off by default (progressive decode is used as-is).
 
-        Thread-safe: plain bool assignment is atomic under the GIL.
+        Decorated ``@Slot(bool)`` (OP-09) so MainWindow can dispatch via a
+        queued signal connection, keeping the "all config changes run on
+        the worker's own thread" invariant true and consistent with the
+        sibling ``set_weak_signal`` / ``set_incremental_decode`` slots.
         """
         self._final_slant_correction = enabled
 
@@ -711,6 +729,9 @@ class RxWorker(QObject):
 
         Decorated ``@Slot(int)`` so the GUI thread can dispatch this via a
         queued signal, guaranteeing the rebuild happens on the worker thread.
+
+        OP-12: ``_total_samples`` is also zeroed so the "Xs buffered"
+        status label isn't briefly off-by-rate after a mid-session change.
         """
         self._sample_rate = sample_rate
         self._decoder = Decoder(
@@ -721,6 +742,7 @@ class RxWorker(QObject):
         self._decoder.set_cancel_event(self._cancel_event)
         self._scratch.clear()
         self._scratch_samples = 0
+        self._total_samples = 0
 
     @property
     def sample_rate(self) -> int:
@@ -786,6 +808,12 @@ class RxWorker(QObject):
         Called when the user clicks "Clear" or switches input device.
         After ``reset`` the next ``feed_chunk`` begins a fresh hunt
         for a VIS header.
+
+        Emits ``reset_done`` after the state machine is reset, so callers
+        that need to order a subsequent action (e.g. starting a new audio
+        capture) against the reset can connect to that signal.  Without
+        this ordering hook, the "start capture" request can race the
+        reset slot on the worker's own queue (OP-05).
         """
         self._scratch.clear()
         self._scratch_samples = 0
@@ -795,6 +823,7 @@ class RxWorker(QObject):
         # Re-arm after any cancel that was in flight.  This runs on the
         # worker thread so it's sequentially after _flush() has returned.
         self._cancel_event.clear()
+        self.reset_done.emit()
 
     @Slot()
     def flush(self) -> None:

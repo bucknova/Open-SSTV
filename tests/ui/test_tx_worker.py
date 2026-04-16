@@ -437,3 +437,27 @@ def test_cw_id_output_gain_applied_to_cw(
     cw_portion = sent[len(fake_samples) + gap_n:]
     # All CW samples should be ~5000 (10000 * 0.5).
     assert int(np.abs(cw_portion).max()) <= 5001
+
+
+# === Watchdog covers every mode (OP-01 regression guard) ===
+
+
+def test_watchdog_covers_every_mode_with_headroom() -> None:
+    """_MAX_TX_DURATION_S must cover every supported mode with margin.
+
+    Each transmission carries the mode body + VIS leader (~0.7 s) + PTT
+    delay (up to 2 s) + CW station ID (up to ~15 s for a long callsign at
+    15 WPM).  A 30 s slop comfortably covers all of that.  Without this
+    test, adding a new long mode (Pasokon P7 at 406 s) silently broke
+    when ``_MAX_TX_DURATION_S = 300`` in v0.1.21–v0.1.26.  Raising the
+    watchdog to 600 s in v0.1.27 cleared every currently-shipping mode;
+    this assertion pins the invariant for future modes too.
+    """
+    from open_sstv.core.modes import MODE_TABLE
+    from open_sstv.ui.workers import _MAX_TX_DURATION_S
+
+    longest = max(spec.total_duration_s for spec in MODE_TABLE.values())
+    assert _MAX_TX_DURATION_S >= longest + 30, (
+        f"Watchdog {_MAX_TX_DURATION_S:.0f}s < longest mode "
+        f"{longest:.0f}s + 30s slop — will abort long-mode TX mid-flight."
+    )

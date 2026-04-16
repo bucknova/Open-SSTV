@@ -31,11 +31,13 @@ def editor(qtbot, test_image: Image.Image) -> ImageEditorDialog:
 # ---------------------------------------------------------------------------
 # BZ-03: X/Y spinbox drives the visual crop rectangle
 # ---------------------------------------------------------------------------
+#
+# Previously this class was @pytest.mark.skip'd with the claim that it
+# required a display. It doesn't — the QGraphicsScene/QGraphicsRectItem
+# machinery runs fine under the offscreen Qt platform used by pytest-qt.
+# OP-04 (v0.1.27) unskipped the class.
 
 
-@pytest.mark.skip(
-    reason="requires display for QGraphicsScene interaction — verify visually"
-)
 class TestCropXYSpinboxUpdatesRect:
     """Setting the X or Y crop spinbox must reposition the crop overlay."""
 
@@ -84,24 +86,27 @@ class TestCropXYSpinboxUpdatesRect:
         assert int(round(rect.x())) == editor._crop_x.value()
         assert int(round(rect.y())) == target_y
 
-    def test_drag_does_not_trigger_rect_rebuild_loop(
+    def test_drag_syncs_spinboxes_to_rect_position(
         self, editor: ImageEditorDialog
     ) -> None:
-        """Dragging must not cause an infinite rect rebuild via spinbox signals.
+        """_on_crop_rect_dragged must update the spinboxes to match the
+        drag position, with signals blocked so the rect isn't rebuilt.
 
-        The drag callback blocks spinbox signals while writing X/Y, so
-        _update_crop_rect must not fire again from the drag path.  We
-        verify the rect item is stable after simulating a drag.
+        The previous version of this test asserted the rect item identity
+        stayed the same (no rebuild), which is the actual contract of
+        _on_crop_rect_dragged: it only writes the spinboxes with signals
+        blocked.
         """
         assert editor._crop_rect_item is not None
         before_item = editor._crop_rect_item
 
         # Simulate drag: _on_crop_rect_dragged writes spinboxes with signals blocked
-        editor._on_crop_rect_dragged(editor._crop_x.value(), editor._crop_y.value())
+        editor._on_crop_rect_dragged(42, 37)
 
-        # Spinboxes should reflect the drag position
-        assert editor._crop_x.value() == editor._crop_x.value()  # unchanged
-        # Rect item should be the same object (no unintended rebuild from drag)
+        # Spinboxes reflect the drag position
+        assert editor._crop_x.value() == 42
+        assert editor._crop_y.value() == 37
+        # Rect item is the same object (no unintended rebuild from drag)
         assert editor._crop_rect_item is before_item, (
             "drag must not rebuild the crop rect item"
         )

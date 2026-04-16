@@ -175,3 +175,99 @@ def test_get_strength_fixed_raw_without_fix_would_be_constant(rig: IcomCIVRig) -
     # Echo byte 0x15, subcmd 0x02
     old_raw = (0x15 << 8) | 0x02
     assert old_raw == 0x1502  # 5378 — always the same
+
+
+# ---------------------------------------------------------------------------
+# OP-02 — serial.SerialException is wrapped as RigConnectionError
+# ---------------------------------------------------------------------------
+
+
+class TestSerialExceptionWrapping:
+    """Regression tests for OP-02: CAT backends must translate pyserial
+    exceptions to ``RigConnectionError`` so a mid-session USB unplug
+    doesn't kill the rig poll thread with a raw ``serial.SerialException``.
+    """
+
+    def test_icom_command_wraps_serial_exception(self) -> None:
+        """IcomCIVRig._command raising SerialException → RigConnectionError."""
+        import threading
+
+        import serial as _pyserial
+
+        from open_sstv.radio.exceptions import RigConnectionError
+
+        r = IcomCIVRig.__new__(IcomCIVRig)
+        r._port = "/dev/null"
+        r._baud_rate = 19200
+        r._addr = 0x94
+        r._lock = threading.Lock()
+        r._ser = MagicMock()
+        r._ser.reset_input_buffer.side_effect = _pyserial.SerialException("device disconnected")
+
+        with pytest.raises(RigConnectionError, match="Icom CI-V serial I/O failed"):
+            r._command(b"\x03")
+
+    def test_kenwood_command_wraps_serial_exception(self) -> None:
+        import threading
+
+        import serial as _pyserial
+
+        from open_sstv.radio.exceptions import RigConnectionError
+        from open_sstv.radio.serial_rig import KenwoodRig
+
+        r = KenwoodRig.__new__(KenwoodRig)
+        r._port = "/dev/null"
+        r._baud_rate = 9600
+        r._lock = threading.Lock()
+        r._ser = MagicMock()
+        r._ser.write.side_effect = _pyserial.SerialException("pipe broken")
+
+        with pytest.raises(RigConnectionError, match="Kenwood serial I/O failed"):
+            r._command("FA")
+
+    def test_yaesu_command_wraps_serial_exception(self) -> None:
+        import threading
+
+        import serial as _pyserial
+
+        from open_sstv.radio.exceptions import RigConnectionError
+        from open_sstv.radio.serial_rig import YaesuRig
+
+        r = YaesuRig.__new__(YaesuRig)
+        r._port = "/dev/null"
+        r._baud_rate = 38400
+        r._lock = threading.Lock()
+        r._ser = MagicMock()
+        r._ser.reset_input_buffer.side_effect = _pyserial.SerialException("readiness error")
+
+        with pytest.raises(RigConnectionError, match="Yaesu serial I/O failed"):
+            r._command("FA")
+
+    def test_serial_ptt_set_ptt_wraps_serial_exception(self) -> None:
+        """SerialPttRig.set_ptt must also wrap SerialException."""
+        import threading
+
+        import serial as _pyserial
+
+        from open_sstv.radio.exceptions import RigConnectionError
+        from open_sstv.radio.serial_rig import SerialPttRig
+
+        r = SerialPttRig.__new__(SerialPttRig)
+        r._port = "/dev/null"
+        r._baud_rate = 9600
+        r._ptt_line = "DTR"
+        r._lock = threading.Lock()
+
+        class _BadSer:
+            @property
+            def dtr(self) -> bool:
+                return False
+
+            @dtr.setter
+            def dtr(self, value: bool) -> None:
+                raise _pyserial.SerialException("serial write failed")
+
+        r._ser = _BadSer()
+
+        with pytest.raises(RigConnectionError, match="Serial PTT write failed"):
+            r.set_ptt(True)

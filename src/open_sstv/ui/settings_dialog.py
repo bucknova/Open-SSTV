@@ -852,13 +852,26 @@ class SettingsDialog(QDialog):
             )
 
     def _stop_rigctld(self) -> None:
-        """Terminate the rigctld process we launched."""
+        """Terminate the rigctld process we launched.
+
+        Defensive against a process that already exited on its own
+        (rigctld rejected its CLI args, port collision, etc.) — the
+        ``terminate``/``wait``/``kill`` chain can raise
+        ``ProcessLookupError`` or ``OSError`` and we treat that as
+        "already stopped" so the dialog state stays consistent (OP-19).
+        """
         if self._rigctld_proc is not None:
-            self._rigctld_proc.terminate()
             try:
-                self._rigctld_proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self._rigctld_proc.kill()
+                self._rigctld_proc.terminate()
+                try:
+                    self._rigctld_proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    try:
+                        self._rigctld_proc.kill()
+                    except (ProcessLookupError, OSError):
+                        pass
+            except (ProcessLookupError, OSError):
+                pass
             self._rigctld_proc = None
             self._rigctld_status.setText("rigctld stopped.")
             self._rigctld_status.setStyleSheet("color: gray;")

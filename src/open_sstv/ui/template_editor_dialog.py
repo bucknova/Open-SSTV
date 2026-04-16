@@ -52,6 +52,9 @@ class TemplateEditorDialog(QDialog):
 
         self._mycall = mycall
         # Deep copy so edits don't mutate the caller's list until Accept.
+        # ``x`` / ``y`` MUST be round-tripped (OP-03): templates saved with
+        # explicit pixel coordinates (via hand-edited TOML) would otherwise
+        # be silently stripped by the dialog and erased from disk on Accept.
         self._templates = [
             QSOTemplate(
                 name=t.name,
@@ -61,6 +64,8 @@ class TemplateEditorDialog(QDialog):
                         position=o.position,
                         size=o.size,
                         color=o.color,
+                        x=o.x,
+                        y=o.y,
                     )
                     for o in t.overlays
                 ],

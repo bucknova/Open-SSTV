@@ -13,7 +13,6 @@ in a save dialog. Auto-save-to-disk is a Phase 3 setting.
 """
 from __future__ import annotations
 
-import atexit
 import logging
 import shutil
 import tempfile
@@ -86,10 +85,17 @@ class ImageGalleryWidget(QListView):
 
         # Try to create a per-instance temp directory for disk-backed storage.
         # On failure, _tmpdir is None and we fall back to in-memory PIL images.
+        # OP-21: cleanup is wired to QCoreApplication.aboutToQuit (scoped to
+        # the app lifetime) instead of atexit (scoped to the interpreter).
+        # This avoids accumulating one atexit callback per widget instance
+        # in long test sessions, and runs cleanup at the proper moment in
+        # Qt's shutdown sequence.
         self._tmpdir: str | None = None
         try:
             self._tmpdir = tempfile.mkdtemp(prefix="open-sstv-gallery-")
-            atexit.register(self._cleanup_tmpdir)
+            app = QApplication.instance()
+            if app is not None:
+                app.aboutToQuit.connect(self._cleanup_tmpdir)
         except OSError:
             _log.warning(
                 "Could not create gallery temp directory — "

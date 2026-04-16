@@ -50,6 +50,7 @@ from open_sstv.config.templates import (
     resolve_placeholders,
     save_templates,
 )
+from open_sstv.core.encoder import DEFAULT_SAMPLE_RATE
 from open_sstv.core.modes import MODE_TABLE, Mode
 from open_sstv.ui.draw_text import draw_text_overlay
 from open_sstv.ui.image_editor import ImageEditorDialog
@@ -89,6 +90,12 @@ class TxPanel(QWidget):
         self._current_path: Path | None = None
         self._callsign: str = ""
         self._templates: list[QSOTemplate] = templates or load_templates()
+        # Sample rate used for converting samples_played → seconds in the
+        # progress label.  Defaulted to the encoder default; ``MainWindow``
+        # calls ``set_sample_rate()`` whenever the user changes the rate
+        # in Settings (OP-06).  Without this the progress label was hard-
+        # coded to 48 kHz and showed the wrong elapsed seconds at 44.1 kHz.
+        self._sample_rate: int = DEFAULT_SAMPLE_RATE
         # Full-resolution source pixmap kept so ``resizeEvent`` can
         # rescale from the original instead of from the already-scaled
         # label pixmap (which would progressively blur on upscale).
@@ -253,15 +260,28 @@ class TxPanel(QWidget):
 
     @Slot(int, int)
     def show_tx_progress(self, samples_played: int, samples_total: int) -> None:
-        """Update the progress bar during transmission."""
+        """Update the progress bar during transmission.
+
+        Uses the panel's configured sample rate (set via ``set_sample_rate``)
+        rather than the hardcoded 48 kHz that the original implementation
+        assumed.  At 44.1 kHz a 114 s Martin M1 transmission used to display
+        "124 s / 124 s" at completion (OP-06).
+        """
         if samples_total > 0:
             pct = int(samples_played * 100 / samples_total)
-            elapsed_s = int(samples_played / 48000)
-            total_s = int(samples_total / 48000)
+            elapsed_s = int(samples_played / self._sample_rate)
+            total_s = int(samples_total / self._sample_rate)
             self._progress_bar.setValue(pct)
             self._progress_bar.setFormat(
                 f"{pct}% — {elapsed_s}s / {total_s}s"
             )
+
+    def set_sample_rate(self, sample_rate: int) -> None:
+        """Update the rate used to convert samples → seconds in the
+        progress label.  Called from ``MainWindow._apply_config`` so the
+        label tracks Settings changes (OP-06)."""
+        if sample_rate > 0:
+            self._sample_rate = sample_rate
 
     def set_status(self, text: str) -> None:
         self._status.setText(text)
