@@ -118,3 +118,25 @@ def test_stop_button_calls_request_stop(
     window._tx_panel.set_transmitting(True)
     window._tx_panel._stop_btn.click()
     patched_audio["stop"].assert_called()
+
+
+# ---------------------------------------------------------------------------
+# v0.1.33 note: startup applies persisted config
+# ---------------------------------------------------------------------------
+#
+# The source fix (``main_window.py`` seeds each worker from ``self._config``
+# before moving it to its thread, for output_gain / input_gain / PTT delay /
+# TX banner / CW ID / sample rate) is manually verified end-to-end via the
+# app itself — the user's persisted settings now take effect on first launch.
+#
+# No automated regression test is included here because constructing a
+# second MainWindow with an explicit ``config=AppConfig(...)`` kwarg inside
+# pytest-qt on macOS produces a deterministic teardown segfault in a worker
+# thread.  It reproduces even with the simplest possible test
+# (``MainWindow(rig=ManualRig(), config=AppConfig())``), even with
+# ``sounddevice`` fully monkey-patched, and it does *not* reproduce when
+# called from a plain Python script that exercises the exact same code.
+# The issue appears to be a PySide6 / pytest-qt interaction specific to
+# passing a non-``None`` config to the existing ``MainWindow`` constructor
+# in a test harness on Darwin.  Tracked for a follow-up dedicated
+# investigation — the user-impact fix ships without it.

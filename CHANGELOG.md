@@ -11,6 +11,48 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.33] — 2026-04-16
+
+### Fixed
+- **Persisted settings are now applied at startup, not only after the
+  Settings dialog closes.**  User-reported: *"the app does not respect
+  previously set mic gain levels."*  Every worker-owned setting in
+  ``AppConfig`` (RX input gain, TX output gain, PTT delay, CW ID
+  enable/WPM/tone, TX banner enable/colours/size, TX panel sample rate
+  label) was loaded from TOML into ``AppConfig`` but the workers
+  themselves were constructed with their hard-coded defaults
+  (``_input_gain = 1.0``, ``_output_gain = 1.0``, ``_cw_id_enabled =
+  False``, etc.) and never received the user's values until the user
+  opened Settings and clicked OK — which invoked ``_apply_config``
+  that has always pushed every field to the right worker.
+
+  Fix: ``MainWindow.__init__`` now seeds each worker from
+  ``self._config`` **before** moving it to its thread.  Direct setter
+  calls (``set_output_gain``, ``set_cw_id``, ``set_tx_banner``,
+  ``set_input_gain``) run while the worker is still on the GUI thread
+  and write plain Python attributes — no queued cross-thread signals
+  emitted from ``__init__``.  The RX input gain, TX output gain, CW
+  ID, TX banner, PTT delay (now a ``TxWorker`` constructor kwarg),
+  and TX panel sample-rate/default-mode labels now all take effect on
+  the first launch after a Settings save.
+
+### Tests
+- Verified manually end-to-end: spinning up Open-SSTV with a
+  pre-existing ``config.toml`` containing ``audio_input_gain = 0.75``,
+  ``audio_output_gain = 0.13``, ``ptt_delay_s = 0.5``,
+  ``cw_id_enabled = true``, and ``tx_banner_enabled = true`` now
+  shows every value applied before any Settings interaction.
+- No automated regression test was committed: constructing a second
+  ``MainWindow`` with an explicit ``config=AppConfig(...)`` kwarg
+  inside pytest-qt on macOS produces a deterministic teardown
+  segfault in a worker thread that reproduces even with
+  ``sounddevice`` fully monkey-patched.  Plain-Python invocation of
+  the same code works perfectly.  Tracked in ``tests/ui/
+  test_main_window.py`` as a block comment; the fix ships without
+  the automated guard pending a pytest-qt / macOS investigation.
+
+---
+
 ## [0.1.32] — 2026-04-16
 
 ### Fixed

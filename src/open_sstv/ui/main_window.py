@@ -270,6 +270,31 @@ class MainWindow(QMainWindow):
             rig=self._rig,
             output_device=output_device,
             sample_rate=self._config.sample_rate,
+            ptt_delay_s=self._config.ptt_delay_s,
+        )
+        # v0.1.33: seed worker state from the persisted config BEFORE
+        # moveToThread so the workers are born in the state the user
+        # left them in.  Prior to this, ``_apply_config`` only ran on
+        # Settings dialog save, so the first launch after a fresh edit
+        # ignored every field that doesn't have a constructor kwarg
+        # (output gain, CW ID, TX banner, etc).  User-reported as "the
+        # app does not respect previously set mic gain levels."
+        # Direct setter calls while the worker is still on the GUI
+        # thread avoid the queued-signal-during-teardown segfault that
+        # emitting via ``_apply_config`` from ``__init__`` produced.
+        self._tx_worker.set_output_gain(self._config.audio_output_gain)
+        self._tx_worker.set_cw_id(
+            self._config.cw_id_enabled,
+            self._config.callsign,
+            self._config.cw_id_wpm,
+            self._config.cw_id_tone_hz,
+        )
+        self._tx_worker.set_tx_banner(
+            self._config.tx_banner_enabled,
+            self._config.callsign,
+            self._config.tx_banner_bg_color,
+            self._config.tx_banner_text_color,
+            self._config.tx_banner_size,
         )
         self._tx_worker.moveToThread(self._tx_thread)
         # Standard Qt cleanup pattern: when the thread finishes, schedule
@@ -297,6 +322,14 @@ class MainWindow(QMainWindow):
             final_slant_correction=self._config.apply_final_slant_correction,
             incremental_decode=self._config.incremental_decode,
         )
+        # v0.1.33: seed RX input gain from config BEFORE moveToThread
+        # (see matching TX block above for the full rationale).  This is
+        # the direct user-reported symptom — "the app does not respect
+        # previously set mic gain levels" — because audio_input_gain
+        # wasn't a RxWorker constructor kwarg and the only code path
+        # that pushed it to the worker was ``_apply_config``, which
+        # only fired when the user re-opened Settings.
+        self._rx_worker.set_input_gain(self._config.audio_input_gain)
         self._rx_worker.moveToThread(self._rx_thread)
         self._rx_thread.finished.connect(self._rx_worker.deleteLater)
         self._rx_thread.start()
@@ -386,6 +419,15 @@ class MainWindow(QMainWindow):
         # --- Keyboard shortcuts ---
         save_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
         save_shortcut.activated.connect(self._on_save_shortcut)
+
+        # v0.1.33: the TX/RX panel-level defaults (sample-rate label,
+        # default TX mode) were previously only applied through
+        # ``_apply_config`` on Settings save.  Seeding them directly
+        # here so the first launch already reflects the persisted
+        # config without emitting queued cross-thread signals from
+        # __init__ (which caused a teardown-race segfault in tests).
+        self._tx_panel.set_sample_rate(self._config.sample_rate)
+        self._tx_panel.set_default_mode(self._config.default_tx_mode)
 
         # OP-18: surface saved-but-missing audio devices so the user
         # knows their previously-selected device fell back to system
