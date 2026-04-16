@@ -9,6 +9,23 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Docs
+- **README and User Guide re-synced against current behaviour.** Both documents
+  had accumulated stale content across v0.1.3..v0.1.29 — the User Guide in
+  particular still carried the pre-rename `sstv-app-*` command names, claimed
+  the app supports "three SSTV modes", had four wrong Hamlib model numbers
+  (IC-7300, TS-590SG, FT-991A, FT-817/818 — all shuffled), and described the
+  TX banner as overwriting the top 24 rows (the v0.1.23 push-down behaviour
+  means it never does). The README claimed a fixed 300 s TX watchdog (now
+  per-transmission as of v0.1.28), described final slant correction as
+  unconditional (opt-in since v0.1.18), and omitted six shipping features
+  (CW station ID, Test Tone, TX output overdrive, weak-signal mode, banner
+  size selector + preview, incremental decoder). Every identified discrepancy
+  from the Opus audit's doc-review pass (D-01..D-20) is addressed.
+- User Guide version header bumped from `Version 0.1.2` to `Version 0.1.29`.
+- README `Status` line updated to `Pre-beta (v0.1.29)` with a note about the
+  v0.1.27/28/29 audit-fix field-testing gate.
+
 ---
 
 ## [0.1.29] — 2026-04-16

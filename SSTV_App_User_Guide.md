@@ -1,6 +1,6 @@
 # Open-SSTV User Guide
 
-**Version 0.1.2** | GPL-3.0-or-later
+**Version 0.1.29** | GPL-3.0-or-later
 
 ---
 
@@ -54,8 +54,8 @@
     - [Placeholder Reference](#134-placeholder-reference)
 14. [Image Editor Reference](#14-image-editor-reference)
 15. [Command-Line Interface](#15-command-line-interface)
-    - [sstv-app-encode](#151-sstv-app-encode)
-    - [sstv-app-decode](#152-sstv-app-decode)
+    - [open-sstv-encode](#151-open-sstv-encode)
+    - [open-sstv-decode](#152-open-sstv-decode)
 16. [Configuration Files](#16-configuration-files)
 17. [Troubleshooting](#17-troubleshooting)
 18. [Glossary](#18-glossary)
@@ -112,12 +112,12 @@ git clone https://github.com/bucknova/Open-SSTV.git
 cd Open-SSTV
 python -m venv .venv
 source .venv/bin/activate    # On Windows: .venv\Scripts\activate
-pip install -e .
+pip install -e ".[dev]"
 ```
 
-This installs the `sstv-app` command (the GUI), plus `sstv-app-encode` and `sstv-app-decode` (the command-line tools).
+This installs the `open-sstv` command (the GUI), plus `open-sstv-encode` and `open-sstv-decode` (the command-line tools). Omit `[dev]` if you don't need the test/lint/type-check extras.
 
-**Dependencies installed automatically**: PySide6, NumPy, SciPy, sounddevice (PortAudio), PySSTV, Pillow, pyserial, platformdirs, tomli-w.
+**Dependencies installed automatically**: PySide6 ≥ 6.6, NumPy ≥ 1.26, SciPy ≥ 1.11, sounddevice ≥ 0.4.6 (PortAudio), PySSTV ≥ 0.5.6, Pillow ≥ 10.1, pyserial ≥ 3.5, platformdirs ≥ 4.0, tomli-w ≥ 1.0. Python 3.11 or later is required.
 
 On Linux you may also need PortAudio development headers. On Debian/Ubuntu:
 
@@ -128,7 +128,7 @@ sudo apt install libportaudio2
 To launch the GUI:
 
 ```bash
-sstv-app
+open-sstv
 ```
 
 Or run as a Python module:
@@ -141,8 +141,8 @@ python -m open_sstv
 
 Two headless CLI tools are available for use without the GUI, useful on headless machines, Raspberry Pi devices, or in automated scripts:
 
-- `sstv-app-encode` — Render an image to an SSTV WAV file
-- `sstv-app-decode` — Decode an SSTV WAV file back into an image
+- `open-sstv-encode` — Render an image to an SSTV WAV file
+- `open-sstv-decode` — Decode an SSTV WAV file back into an image
 
 These tools do not require PySide6 or a display and can run in any terminal.
 
@@ -150,7 +150,7 @@ These tools do not require PySide6 or a display and can run in any terminal.
 
 ## 4. Quick Start
 
-1. **Launch the app**: Run `sstv-app` from a terminal.
+1. **Launch the app**: Run `open-sstv` from a terminal.
 2. **Set your callsign**: Go to **File > Settings**, open the **Radio** tab, and enter your callsign in the Callsign field. Click OK.
 3. **Choose your audio devices**: In **File > Settings > Audio**, select the input device your radio feeds audio into and the output device that feeds audio to your radio. If you are just testing, leave both on "System default."
 4. **To receive**: Click **Start Capture** on the right-side Receive panel. The app will listen for SSTV signals. When it detects a VIS header, it will automatically identify the mode and begin decoding the image line by line.
@@ -284,19 +284,28 @@ Click **Edit Image** to open the image editor dialog. The editor provides the fo
 
 **Transform**: Four buttons let you rotate left (90 degrees counterclockwise), rotate right (90 degrees clockwise), flip horizontally, and flip vertically.
 
-**Text Overlays**: Enter text (such as your callsign) in the text field, set the font size (8 to 120 pixels), pick a color via the color picker, choose a position (Top Left, Top Center, Top Right, Center, Bottom Left, Bottom Center, or Bottom Right), and click "Add Text." You can stack multiple overlays — each one appears in the overlay list. Select an overlay and click "Remove" to delete it. Text is rendered with a dark shadow for readability on any background.
+**Text Overlays**: Enter text (such as your callsign) in the text field, set the font size (8 to 120 pixels), and pick a colour via the colour picker. For placement you have two options:
+
+- **Named presets** — pick from the Position dropdown: Top Left, Top Center, Top Right, Center, Bottom Left, Bottom Center, Bottom Right. The X and Y spin boxes auto-fill to the preset's computed pixel coordinates.
+- **Custom X/Y** — type exact pixel values into the X and Y spin boxes (5-pixel step) for precise placement. The Position dropdown automatically switches to "Custom" when you edit the spin boxes manually.
+
+Click "Add Text" to stack overlays. Each one appears in the overlay list. Select an overlay and click "Remove" to delete it. Text is rendered with a dark shadow for readability on any background.
 
 An info label at the bottom of the editor shows the current image dimensions, the target dimensions for the selected mode, and the number of text layers. When you click OK, all overlays are burned into the image and it is resized to the mode's native dimensions with high-quality LANCZOS resampling.
 
 ### 8.3 Choosing an SSTV Mode
 
-The Mode dropdown on the Transmit panel lists all supported modes. Each entry shows the mode name, resolution, and approximate transmission duration:
+The Mode dropdown on the Transmit panel lists every supported mode — all 22 of them. Each entry shows the mode name, resolution, and approximate transmission duration. Common choices:
 
-- **Robot 36** — 320x240, about 36 seconds
-- **Martin M1** — 320x256, about 114 seconds
-- **Scottie S1** — 320x256, about 110 seconds
+- **Robot 36** — 320 × 240, ~36 s. The fastest and most commonly used mode for casual QSOs worldwide.
+- **Martin M1** — 320 × 256, ~114 s. The most popular mode in Europe. Higher colour fidelity than Robot 36 but ~3× longer.
+- **Scottie S1** — 320 × 256, ~110 s. The most popular mode in the United States. Sync sits mid-line (between blue and red channels).
+- **PD-90 / PD-120** — 320 × 256 / 640 × 496, ~90 s / ~126 s. Popular for high-quality exchanges; PD uses Y′CbCr with line-pair chroma sub-sampling.
+- **Pasokon P3** — 640 × 496, ~203 s. Largest common mode still under 4 minutes.
 
-Robot 36 is the fastest and most commonly used mode for casual QSOs. Martin M1 and Scottie S1 produce larger images with more detail but take roughly three times as long.
+See [Section 9: SSTV Modes Reference](#9-sstv-modes-reference) for the complete table of all 22 modes with durations, VIS codes, resolutions, and colour systems.
+
+Robot 36 is the fastest mode and is the default choice for calling CQ. The longer Martin, Scottie, PD, Wraase, and Pasokon modes produce larger, sharper images at the cost of transmission time — worth it for QSL-card-style exchanges where you want the detail.
 
 You can set a default TX mode in **File > Settings > Images** so that it is pre-selected each time you launch the app.
 
@@ -329,21 +338,52 @@ If no rig control is connected (Manual mode), the app simply plays the audio and
 
 ## 9. SSTV Modes Reference
 
-Open-SSTV supports three SSTV transmission modes. Every SSTV transmission begins with a VIS (Vertical Interval Signaling) header — a short sequence of tones that identifies the mode so the receiving station's software can decode it automatically.
+Open-SSTV supports **22 SSTV transmission modes** across six families. Every SSTV transmission begins with a VIS (Vertical Interval Signaling) header — a short sequence of tones that identifies the mode so the receiving station's software can decode it automatically.
 
-| Mode | VIS Code | Resolution | Duration | Color System | Sync Position |
-|------|----------|------------|----------|--------------|---------------|
-| Robot 36 | 8 | 320 x 240 | ~36 s | Y/C (luminance + chroma) | Line start |
-| Martin M1 | 44 | 320 x 256 | ~114 s | RGB (G, B, R order) | Line start |
-| Scottie S1 | 60 | 320 x 256 | ~110 s | RGB (G, B, R order) | Before red channel (mid-line) |
+| Mode | VIS (dec / hex) | Resolution | Duration | Colour System | Sync Position |
+|------|-----------------|------------|----------|---------------|---------------|
+| Robot 36 | 8 / 0x08 | 320 × 240 | ~36 s | YCbCr (line-pair) | Line start |
+| Martin M1 | 44 / 0x2C | 320 × 256 | ~114 s | RGB (G, B, R order) | Line start |
+| Martin M2 | 40 / 0x28 | 160 × 256 | ~58 s | RGB (G, B, R order) | Line start |
+| Martin M3 | 36 / 0x24 | 320 × 128 | ~57 s | RGB (G, B, R order) | Line start |
+| Martin M4 | 32 / 0x20 | 160 × 128 | ~29 s | RGB (G, B, R order) | Line start |
+| Scottie S1 | 60 / 0x3C | 320 × 256 | ~110 s | RGB (G, B, R order) | Before red (mid-line) |
+| Scottie S2 | 56 / 0x38 | 160 × 256 | ~71 s | RGB (G, B, R order) | Before red (mid-line) |
+| Scottie DX | 76 / 0x4C | 320 × 256 | ~269 s | RGB (G, B, R order) | Before red (mid-line) |
+| Scottie S3 | 52 / 0x34 | 320 × 128 | ~55 s | RGB (G, B, R order) | Before red (mid-line) |
+| Scottie S4 | 48 / 0x30 | 160 × 128 | ~36 s | RGB (G, B, R order) | Before red (mid-line) |
+| PD-50 | 93 / 0x5D | 320 × 256 | ~50 s | YCbCr (line-pair) | Line start |
+| PD-90 | 99 / 0x63 | 320 × 256 | ~90 s | YCbCr (line-pair) | Line start |
+| PD-120 | 95 / 0x5F | 640 × 496 | ~126 s | YCbCr (line-pair) | Line start |
+| PD-160 | 98 / 0x62 | 512 × 400 | ~161 s | YCbCr (line-pair) | Line start |
+| PD-180 | 96 / 0x60 | 640 × 496 | ~187 s | YCbCr (line-pair) | Line start |
+| PD-240 | 97 / 0x61 | 640 × 496 | ~248 s | YCbCr (line-pair) | Line start |
+| PD-290 | 94 / 0x5E | 800 × 616 | ~289 s | YCbCr (line-pair) | Line start |
+| Wraase SC2-120 | 63 / 0x3F | 320 × 256 | ~121 s | RGB (R, G, B order) | Line start |
+| Wraase SC2-180 | 55 / 0x37 | 320 × 256 | ~182 s | RGB (R, G, B order) | Line start |
+| Pasokon P3 | 113 / 0x71 | 640 × 496 | ~203 s | RGB (R, G, B order) | Line start |
+| Pasokon P5 | 114 / 0x72 | 640 × 496 | ~305 s | RGB (R, G, B order) | Line start |
+| Pasokon P7 | 115 / 0x73 | 640 × 496 | ~406 s | RGB (R, G, B order) | Line start |
 
-**Robot 36** uses a luminance/chrominance color system similar to analog television. Each "super-line" encodes two image rows: the even row's luminance, a shared Cr (red chroma) component, the odd row's luminance, and a shared Cb (blue chroma) component. This chroma subsampling is what makes Robot 36 fast — it sends color information at half resolution. Robot 36 is the most popular mode worldwide for quick exchanges.
+### 9.1 Mode Families
 
-**Martin M1** is the most popular mode in Europe. It sends full RGB color (green, then blue, then red for each line) with a sync pulse at the start of each line. Each line takes about 146 ms for each color channel, resulting in higher color fidelity than Robot 36 but a longer total transmission time.
+**Robot 36** uses a Y′CbCr colour system similar to analog television. One sync pulse covers two image rows ("line-pair" format): the even row's luminance, a shared Cr (red chroma) component, the odd row's luminance, and a shared Cb (blue chroma) component. The chroma sub-sampling is what makes Robot 36 fast — it sends colour information at half vertical resolution. Open-SSTV's encoder emits the canonical line-pair format (the same format MMSSTV / SimpleSSTV / QSSTV / slowrx produce and expect); PySSTV's upstream `Robot36` class emits a non-standard per-line format that most real-world decoders cannot decode, so Open-SSTV transparently substitutes its own encoder. On receive, both wire formats are auto-detected from the inter-sync spacing (150 ms per-line vs 300 ms line-pair).
 
-**Scottie S1** is the most popular mode in the United States. Like Martin M1, it sends full RGB, but the sync pulse sits in the middle of the line (between the blue and red channels) rather than at the start. Each line's layout is: green scan, blue scan, sync pulse, red scan.
+**Martin** family (M1, M2, M3, M4) sends full RGB with a sync pulse at the start of each line. Channel order is G → B → R, separated by short 0.572 ms porches. M1 is the most popular mode in Europe; M2 is the half-width variant (160 × 256); M3 and M4 are 128-row versions of M1 and M2 respectively.
 
-All three modes use the same frequency-to-brightness mapping: 1500 Hz is black and 2300 Hz is white, with a linear scale between them. Sync pulses are at 1200 Hz.
+**Scottie** family (S1, S2, DX, S3, S4) also sends full RGB, but the sync pulse sits mid-line, *between* the blue and red channels rather than at the start. Each line's layout is: green scan → blue scan → sync pulse → red scan. This mid-line sync is historically the most common source of off-by-one bugs in SSTV decoders and is handled explicitly in Open-SSTV's Scottie decoder. S1 is the most popular mode in the United States. DX is a wide-scan, high-quality variant at ~269 s.
+
+**PD** family (PD-50, 90, 120, 160, 180, 240, 290) is a line-pair Y′CbCr mode like Robot 36, but with four equal-duration channel scans per super-line (Y0, Cr, Cb, Y1) instead of two plus alternating chroma. PD modes produce larger images with smoother chroma than the Martin/Scottie/Wraase RGB modes at the same duration. PD-290 is 800 × 616 — the highest-resolution mode Open-SSTV supports.
+
+**Wraase SC2** family (SC2-120, SC2-180) sends full RGB back-to-back after a single porch at the start of the line — no inter-channel gaps. Channel order is R → G → B. Less common than Martin / Scottie but still seen on air.
+
+**Pasokon** family (P3, P5, P7) sends full RGB with four equal gaps flanking three equal-width RGB scans. Pasokon P7 at 406 s is the longest mode Open-SSTV ships and produces very high-detail 640 × 496 images.
+
+All modes use the same frequency-to-brightness mapping: **1500 Hz is black and 2300 Hz is white**, with a linear scale between them. **Sync pulses are at 1200 Hz.** The VIS leader is 1900 Hz.
+
+### 9.2 Modes Not Yet Supported
+
+The Robot 8, Robot 12, Robot 24, and Robot 72 modes are not yet supported because they use a YCbCr 4:2:2 sub-sampling that differs from Robot 36's 4:2:0-ish pattern and requires a custom encoder PySSTV doesn't provide. These are tracked for a future release.
 
 ---
 
@@ -410,7 +450,15 @@ The following radios have been tested or have built-in presets in the settings d
 
 **Via Direct Serial (Yaesu)**: FT-991A, FT-891, FT-710, FTDX10, FTDX101, FT-950.
 
-**Via rigctld (Hamlib)**: Hundreds of additional models — any radio supported by Hamlib. Run `rigctld --list` in a terminal for the full list. Common models included in the dropdown: IC-7300 (model 3073), TS-590SG (model 2028), FT-991A (model 1036), FT-817/818 (model 1020), plus a Hamlib Dummy model (1) for testing.
+**Via rigctld (Hamlib)**: Hundreds of additional models — any radio supported by Hamlib. Run `rigctld --list` in a terminal for the full list. Common models included in the Open-SSTV dropdown are (Hamlib model IDs as of v4.5+):
+
+- Icom IC-7300 = **1035**, IC-7610 = **1036**, IC-9700 = **1037**, IC-705 = **1039**, IC-7100 = **1029**, IC-7200 = **1034**
+- Kenwood TS-590SG = **3073**, TS-890S = **3085**, TS-480 = **3077**, TS-2000 = **3061**
+- Yaesu FT-991A = **2057**, FT-891 = **2055**, FTDX10 = **2063**, FT-710 = **2053**, FTDX101 = **2060**, FT-817/818 = **2028**, FT-950 = **2040**
+- Elecraft K3 = **4010**, KX3 = **4013**, KX2 = **4014**, K4 = **4015**
+- Hamlib Dummy (for testing without hardware) = **1**, NET rigctl (for daemon-to-daemon) = **2**
+
+If your radio isn't in the Open-SSTV preset list, enter the Hamlib model number directly in the "Custom Model ID" field.
 
 **PTT-only serial**: Works with any radio that has a serial PTT interface — no CAT protocol required.
 
@@ -437,6 +485,8 @@ The device list is refreshed each time you open the Settings dialog, so hot-plug
 ### 11.2 Sample Rate
 
 Choose between **48,000 Hz** (48 kHz) and **44,100 Hz** (44.1 kHz). The default is 48 kHz, which is the standard for SSTV applications and matches the encoder's native sample rate. Most USB audio interfaces support both rates. Use 44.1 kHz only if your audio device does not support 48 kHz.
+
+> **Note:** If you change the sample rate while a capture is running, the active PortAudio stream is still using the old rate. The app shows a status-bar notice asking you to stop and restart capture; until you do, the RX path's sample count will be wrong and any progress label will be slightly off. TX encoding uses the new rate on the next Transmit.
 
 ### 11.3 Input and Output Gain
 
@@ -518,12 +568,17 @@ Open the settings dialog via **File > Settings** (or the menu shortcut). It has 
 | Auto-save | Automatically save every decoded image to the save directory | Off |
 | Save Directory | Folder for saved and auto-saved images (browse button to pick) | ~/Pictures/open_sstv |
 | **TX Banner — Enable** | Stamp a header strip on every transmitted image | Off |
-| **TX Banner — Background** | Banner background colour (click swatch to pick) | #202020 |
-| **TX Banner — Text** | Banner text colour (click swatch to pick) | #FFFFFF |
+| **TX Banner — Background** | Banner background colour (click swatch to pick) | `#202020` |
+| **TX Banner — Text** | Banner text colour (click swatch to pick) | `#FFFFFF` |
+| **TX Banner — Size** | Named preset: Small (24 px / 18 pt), Medium (32 px / 24 pt), Large (40 px / 30 pt) | Small |
+| **TX Banner — Preview (strip)** | Live preview of the banner strip with the current colour and size selections | — |
+| **TX Banner — Preview on image…** | Opens a file picker and shows the banner composited onto the chosen photo (scaled to fit the screen) | — |
 
-**TX Banner** stamps a 24-pixel-tall strip across the top of every transmitted image (not the test tone). The strip shows "Open-SSTV v{version}" centred and your callsign flush-right. It is applied after all image-editor crops and text overlays, immediately before SSTV encoding — so the strip is always the outermost layer.
+**TX Banner** stamps an identification strip across the top of every transmitted image (not the test tone). The strip shows your callsign flush-left and "Open-SSTV v{version}" flush-right. It is applied after all image-editor crops and text overlays, immediately before SSTV encoding — so the strip is always the outermost layer.
 
-> **Note:** The banner overlays the top 24 rows of the image, not additional rows. SSTV mode dimensions are unchanged.
+> **Note (v0.1.23+):** The source image is gently resized to fit *below* the banner strip so user content is never overwritten. Output dimensions match the SSTV mode's native size exactly — the banner occupies the top `banner_height` rows and the image content occupies the remaining rows. A 320 × 240 Robot 36 image with a 24 px banner becomes a 320 × 240 output consisting of a 24-row banner atop 216 rows of your resized image.
+
+The live strip preview in Settings updates as you edit colours, callsign, or size — what you see is exactly what will be stamped on air. The "Preview on image…" button lets you see the banner composited against a real photo (scaled to 80 % of the screen if the image is huge) so you can check readability before committing to TX.
 
 ![Images settings tab](docs/screenshots/settings-images.png)
 
@@ -540,13 +595,15 @@ Open-SSTV can automatically append a Morse code station identification to every 
 | Tone | Sidetone frequency in Hz (400–1200 Hz, step 50) | 800 Hz |
 | Callsign used | Read-only; shows the callsign from PTT / Identity above | — |
 
-**How it works:** After the SSTV image audio completes, Open-SSTV inserts 500 ms of silence (to let receiver AGC settle), then plays the CW sidetone. PTT remains keyed throughout the entire SSTV + silence + CW sequence — there is no unkey between the image and the ID. The Stop button cancels at any point; the watchdog timer (5 minutes) applies to the total TX duration.
+**How it works:** After the SSTV image audio completes, Open-SSTV inserts 500 ms of silence (to let receiver AGC settle), then plays the CW sidetone. PTT remains keyed throughout the entire SSTV + silence + CW sequence — there is no unkey between the image and the ID. The Stop button cancels at any point; the per-transmission TX watchdog (introduced in v0.1.28 and covered in Settings → Radio) covers the full SSTV + gap + CW duration.
 
 **Test Tone is exempt** — the ALC calibration signal does not append a CW ID because it is not a communication transmission.
 
 **If callsign is empty:** CW ID is skipped with a warning in the log. TX is not blocked — but you should set your callsign in PTT / Identity before going on the air.
 
-> **Regulatory note:** Part 97.119 requires identification at the end of each communication and at least every 10 minutes during a communication. SSTV images typically take 36 seconds to 5 minutes to transmit, so the end-of-transmission CW ID satisfies the requirement for a single SSTV QSO exchange.
+**Unsupported characters:** The CW encoder supports A–Z, 0–9, `/`, and `-`. Any other character in the callsign field (spaces within a word, punctuation other than `/` and `-`, non-ASCII glyphs) is skipped and a WARNING log entry lists what was dropped. If you see this warning, double-check that your callsign matches the set the Morse encoder knows — a partial ID does not satisfy the regulatory requirement.
+
+> **Regulatory note:** US Part 97.119 and equivalent ITU rules require identification at the end of each communication and at least every 10 minutes during a communication. Most SSTV modes fit comfortably under 10 minutes (Pasokon P7 at ~406 s = ~6.8 minutes is the longest Open-SSTV ships), so the end-of-transmission CW ID satisfies the requirement for a single SSTV QSO exchange. For very long modes or multi-image runs, consider sending a voice or additional CW ID between transmissions to re-start the 10-minute clock.
 
 ---
 
@@ -602,11 +659,11 @@ The image editor (opened by clicking **Edit Image** on the Transmit panel) provi
 
 **Flip**: Mirror the image horizontally or vertically.
 
-**Text Overlays**: Add text at any of 7 positions (Top Left/Center/Right, Center, Bottom Left/Center/Right) with configurable size (8–120px) and color. Multiple overlays can be stacked. Text is rendered with a dark shadow outline for readability. The overlay list shows each entry as "text" followed by its size and position.
+**Text Overlays**: Add text at any of 7 named positions (Top Left/Center/Right, Center, Bottom Left/Center/Right) plus a **Custom** mode where X and Y spin boxes let you place text at any pixel position (5-pixel step). The named presets auto-fill the X/Y spin boxes; manual edits to the spin boxes switch the Position dropdown to Custom automatically. Font size is configurable (8–120 px) with a colour picker. Multiple overlays can be stacked. Text is rendered with a dark shadow outline for readability. The overlay list shows each entry as `"text" SIZE @ POSITION` (or `"text" SIZE @ (x,y)` for Custom positions).
 
 The info label shows: current image dimensions, target dimensions for the selected mode, and the number of text layers.
 
-When you click OK, all overlays are composited onto the image, and the result is resized to the SSTV mode's native resolution using high-quality LANCZOS resampling.
+When you click OK, all overlays are composited onto the image, and the result is resized to the SSTV mode's native resolution using high-quality LANCZOS resampling. A separate "clean" copy of the image without text overlays is also retained so the Transmit panel's **Clear Text** button can revert to the base image without losing your crop, rotation, or flip.
 
 ---
 
@@ -614,35 +671,35 @@ When you click OK, all overlays are composited onto the image, and the result is
 
 Open-SSTV includes two CLI tools that work without a graphical display. They are useful for scripting, Raspberry Pi deployments, and testing.
 
-### 15.1 sstv-app-encode
+### 15.1 open-sstv-encode
 
 Encode an image into an SSTV WAV file.
 
 ```
-sstv-app-encode IMAGE -o OUTPUT.wav --mode MODE [--sample-rate RATE]
+open-sstv-encode IMAGE -o OUTPUT.wav --mode MODE [--sample-rate RATE]
 ```
 
 **Arguments**:
 
 - `IMAGE` — Path to the input image (any format Pillow can read: PNG, JPEG, BMP, TIFF, WebP, etc.)
 - `-o, --output` — Path to the output WAV file (required)
-- `--mode` — SSTV mode: `robot_36`, `martin_m1`, or `scottie_s1` (required)
-- `--sample-rate` — Output sample rate in Hz (default: 48000)
+- `--mode` — SSTV mode (required). One of: `robot_36`, `martin_m1`, `martin_m2`, `martin_m3`, `martin_m4`, `scottie_s1`, `scottie_s2`, `scottie_dx`, `scottie_s3`, `scottie_s4`, `pd_50`, `pd_90`, `pd_120`, `pd_160`, `pd_180`, `pd_240`, `pd_290`, `wraase_sc2_120`, `wraase_sc2_180`, `pasokon_p3`, `pasokon_p5`, `pasokon_p7`.
+- `--sample-rate` — Output sample rate in Hz (default: 48000, or pass `44100` for CD-rate WAVs)
 
 **Example**:
 
 ```bash
-sstv-app-encode my_photo.jpg --mode robot_36 -o output.wav
+open-sstv-encode my_photo.jpg --mode robot_36 -o output.wav
 ```
 
 The output is a mono 16-bit PCM WAV file ready to be played through a sound card or piped to your radio.
 
-### 15.2 sstv-app-decode
+### 15.2 open-sstv-decode
 
 Decode an SSTV WAV file into an image.
 
 ```
-sstv-app-decode INPUT.wav -o OUTPUT.png [--quiet]
+open-sstv-decode INPUT.wav -o OUTPUT.png [--quiet]
 ```
 
 **Arguments**:
@@ -654,10 +711,12 @@ sstv-app-decode INPUT.wav -o OUTPUT.png [--quiet]
 **Example**:
 
 ```bash
-sstv-app-decode recording.wav -o decoded_image.png
+open-sstv-decode recording.wav -o decoded_image.png
 ```
 
 The decoder auto-detects the SSTV mode from the VIS header. If no valid VIS header is found, it exits with code 1 and prints an error to stderr.
+
+> **Note:** `open-sstv-decode` uses the batch decoder (median + PIL colour pipeline for Robot 36). The GUI uses the newer incremental decoder with slowrx-style integer YCbCr → RGB matrix, so Robot 36 colours may differ slightly between `open-sstv-decode` output and the GUI's live decode. Other modes produce bit-identical results across both paths.
 
 ---
 
@@ -689,7 +748,7 @@ If either file is missing or empty, the app creates it with default values on fi
 
 - A moderate slant is normal and should be corrected automatically. Severe slant may indicate a very large sample rate mismatch between your sound card and the transmitting station.
 - Garbled images can result from interference, weak signals, or multipath. Try again with a stronger signal.
-- Wrong colors may indicate a mode mismatch. The app auto-detects mode via the VIS header, but if the VIS was corrupted by noise, the wrong decoder may be applied. Try decoding from a saved WAV file using `sstv-app-decode`.
+- Wrong colors may indicate a mode mismatch. The app auto-detects mode via the VIS header, but if the VIS was corrupted by noise, the wrong decoder may be applied. Try decoding from a saved WAV file using `open-sstv-decode`.
 - If you are receiving from a station using an unusual Robot 36 variant, the app auto-detects between the two common Robot 36 layouts (PySSTV single-line and canonical broadcast line-pair).
 
 **Rig not connecting (rigctld)**
@@ -738,7 +797,7 @@ If either file is missing or empty, the app creates it with default values on fi
 **Application crashes or freezes**
 
 - File a bug report at [github.com/bucknova/Open-SSTV/issues](https://github.com/bucknova/Open-SSTV/issues) with your operating system, Python version, and the error traceback from the terminal.
-- Try running from a terminal (`sstv-app`) to see error messages that may not appear in the GUI.
+- Try running from a terminal (`open-sstv`) to see error messages that may not appear in the GUI.
 - Ensure you are running Python 3.11 or later and that all dependencies are up to date: `pip install -e . --upgrade`.
 
 **Image saves as black or incomplete**

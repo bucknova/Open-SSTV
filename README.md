@@ -4,9 +4,10 @@ An open-source, cross-platform SSTV (Slow Scan Television) transceiver for amate
 radio. Receives and decodes SSTV images live off your radio, and encodes and
 transmits images back, with optional Hamlib or direct serial PTT and frequency control.
 
-**Status:** Alpha (v0.1.22). TX and RX paths work end-to-end across all 22 supported
+**Status:** Pre-beta (v0.1.29). TX and RX paths work end-to-end across all 22 supported
 modes. Rig control via rigctld or direct serial CAT is functional. Weak-signal decode
-is usable down to roughly 0 dB SNR on Robot 36.
+is usable down to roughly 0 dB SNR on Robot 36. Live field testing in progress; beta
+release pending real-radio validation of the v0.1.27 / 0.1.28 / 0.1.29 audit fixes.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
 [User Guide](SSTV_App_User_Guide.md)
@@ -31,7 +32,9 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
 - **22 SSTV modes** -- Robot 36, Martin M1/M2/M3/M4, Scottie S1/S2/DX/S3/S4, PD-50/90/120/160/180/240/290,
   Wraase SC2-120/180, and Pasokon P3/P5/P7. See the Supported Modes table below.
 - **Image editor** -- crop, rotate, flip, and add text overlays (callsign, labels)
-  before transmitting. Crop is locked to the target mode's aspect ratio.
+  before transmitting. Crop is locked to the target mode's aspect ratio. Text
+  overlays support both named position presets (Top/Center/Bottom × Left/Center/Right)
+  and pixel-precise X/Y spin boxes for fine placement.
 - **QSO templates** -- one-click text overlays for common QSO phases (CQ, Exchange,
   73). Placeholder variables (`{mycall}`, `{theircall}`, `{rst}`, `{date}`, `{time}`)
   auto-fill from settings or prompt only for what's needed. Custom templates can be
@@ -44,32 +47,77 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
 - **PTT sequencing** -- keys the rig, waits for a configurable relay-settle delay
   (0–2 s, default 200 ms), plays SSTV audio, then de-keys. Works with rigctld,
   direct serial CAT, DTR/RTS, or manual (VOX).
-- **TX banner** -- optional thin identification strip stamped across the top of every
-  transmitted image. Shows your callsign flush-left and "Open-SSTV v{version}" flush-right.
+- **CW station ID** -- optional Morse code callsign appended to every SSTV
+  transmission (keyed under the same PTT). Satisfies the Part 97 identification
+  requirement automatically. 15–30 WPM, 400–1200 Hz sidetone, 5 ms ramps to
+  suppress key clicks. Test Tone is exempt (it's a calibration signal, not a
+  communication). On by default; skipped silently with a warning if the callsign
+  field is empty.
+- **Test Tone** -- a 700 Hz + 1900 Hz two-tone signal at −1 dBFS peak for 5 s,
+  triggered from the Radio panel or the Audio Settings tab. Used for ALC
+  calibration; the TX output gain slider remains live during playback so the
+  operator can tune without stopping the tone.
+- **TX output gain** -- 0–100% slider with an optional "Enable overdrive"
+  checkbox that expands the ceiling to 200% for setups where ALC won't move at
+  100%. Most USB-audio rigs (IC-7300, FT-991A, etc.) sit in the 10–15% range
+  with overdrive off.
+- **TX banner** -- optional identification strip stamped across the top of every
+  transmitted image. Shows your callsign flush-left and "Open-SSTV v{version}"
+  flush-right. Three size presets (Small 24 px / Medium 32 px / Large 40 px)
+  with matching font sizes, live preview in Settings, plus a "Preview on image…"
+  button that shows the banner composited against a real photo before committing
+  to TX. The source image is gently shrunk to fit below the strip so user content
+  is never overwritten; output dimensions match the SSTV mode exactly.
   Configurable background and text colours; off by default.
-- **TX watchdog** -- a 300-second hard-limit timer forces PTT off and aborts playback
-  if an encode + playback cycle exceeds the limit, preventing accidental extended
-  transmissions.
+- **Per-transmission TX watchdog** -- two-stage timer bounds PTT exposure on a
+  stuck encoder or hung audio driver. Stage 1 (encode) is a fixed 30 s budget;
+  stage 2 (playback) is computed from the actual encoded sample count plus PTT
+  delay with a 20 % margin and a 30 s floor, so a stuck Robot 36 aborts in under
+  a minute while Pasokon P7 still gets its ~500 s.
 - **Rig-swap lockout** -- rig connect/disconnect controls are disabled for the full
   duration of a transmission so a mid-TX backend change cannot corrupt PTT state.
-- **TX progress bar** with elapsed/total time and percentage.
+- **TX progress bar** with elapsed/total time (at the active sample rate) and percentage.
 - **Stop button** -- abort mid-transmission; PTT is always de-keyed cleanly.
 
 ### Receive (RX)
 - **Live decode** -- start capturing from any audio input, and decoded images appear
   in a scrollable gallery strip as they arrive.
-- **Progressive decode** -- partial image preview updates during reception so you
-  can see the image building line by line.
-- **One-shot re-decode** -- after progressive decode completes, the full audio buffer
-  is re-decoded in a single pass for best quality (better bandpass and sync grid).
-- **Auto-save** -- optionally save every completed decode automatically to a
-  configurable directory, with timestamped filenames.
-- **Save images** -- save decoded images manually via Save button or Ctrl+S.
-- **Slant correction** -- least-squares clock-drift compensation so images from
-  slightly off-frequency TX stations don't skew.
+- **Per-line incremental decoder** (default since v0.1.24) -- each scan line is
+  decoded as soon as its sync pulse arrives rather than reprocessing the full
+  growing audio buffer on every flush. O(1) work per line instead of O(N²) total,
+  so the decoder stays ahead of real-time on Pi-class hardware even on the longest
+  modes (Pasokon P7, Scottie DX). Covers all 22 modes including Robot 36's auto-
+  detected per-line and line-pair wire formats. The legacy batch decoder is still
+  available via a Settings toggle as a diagnostic fallback.
+- **Progressive image preview** -- the partial image updates line-by-line during
+  reception so you can see it build in real time.
+- **Optional final slant correction** -- when enabled, a single-pass re-decode
+  runs on the completed buffer with a global least-squares timing fit to
+  compensate for TX/RX sound-card clock drift. Off by default: on weak or noisy
+  signals the polyfit has no outlier rejection and can worsen the image. Robot 36
+  is explicitly skipped (different color pipeline between the incremental and
+  batch paths).
+- **Weak-signal mode** -- optional relaxation of the VIS detection thresholds
+  (leader presence 40 % → 25 %, start-bit minimum 20 ms → 15 ms) for signals
+  audible in the noise that aren't triggering decode. False-positive VIS
+  detections are handled gracefully (silent IDLE reset, no user-visible error).
 - **Weak-signal robustness** -- bandpass prefilter, median-filter click rejection,
   and adaptive rolling-threshold sync detection. Usable decode down to ~0 dB SNR
-  on Robot 36; partial decode at -5 dB.
+  on Robot 36; partial decode at −5 dB.
+- **RX-during-TX gate** -- the decoder is paused for the duration of every
+  transmission, so the radio's own audio loopback never feeds back into the
+  receive path. A 50 ms gate-off delay drains trailing RF before decode
+  resumes; decoder state is reset between sessions to avoid stale residue.
+- **Image gallery** -- horizontal thumbnail strip of the 20 most-recent decodes,
+  newest first, with context-menu Save-As / Copy-to-Clipboard actions. Images
+  are persisted to a per-session temp directory to release PIL buffers from
+  memory immediately after the thumbnail is rendered (in-memory fallback if
+  temp-dir creation fails).
+- **Auto-save** -- optionally save every completed decode automatically to a
+  configurable directory, with timestamped filenames
+  (`sstv_<mode>_YYYYMMDD_HHMMSS.png`).
+- **Save images** -- manual Save button, Ctrl+S shortcut, gallery double-click,
+  or right-click → Save As…
 
 ### Radio Control
 - **rigctld (Hamlib)** -- TCP client for `rigctld`, supporting PTT, frequency,
@@ -84,17 +132,24 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
   Graceful disconnect: non-modal status bar message, auto-reconnect on next poll.
 
 ### Settings & Configuration
-- **Audio device selection** -- separate input/output device pickers with
-  input/output gain sliders (0–200%). Device changes take effect immediately.
+- **Audio device selection** -- separate input/output device pickers. RX input
+  gain slider is 0–200 %; TX output gain slider is 0–100 % by default, expandable
+  to 200 % with an "Enable overdrive" checkbox for setups where ALC won't move at
+  100 %. Device changes take effect immediately; a saved-but-missing device
+  surfaces a status-bar notice on startup rather than silently falling back.
 - **Cross-platform serial port enumeration** -- uses `serial.tools.list_ports` for
-  reliable port detection on Linux, macOS, and Windows.
+  reliable port detection on Linux, macOS, and Windows. Port list is cached for
+  5 s so repeated Settings opens don't re-enumerate USB hardware.
 - **TOML-based config** -- all settings persist across sessions in a
   platform-appropriate config directory (`~/.config/open_sstv/` on Linux,
-  `~/Library/Application Support/open_sstv/` on macOS).
+  `~/Library/Application Support/open_sstv/` on macOS,
+  `%APPDATA%\open_sstv\` on Windows).
 - **Resilient config loading** -- malformed or missing config and template files
-  fall back to built-in defaults instead of crashing.
+  fall back to built-in defaults instead of crashing. Legacy key names
+  (e.g. pre-v0.1.24 `experimental_incremental_decode`) are migrated automatically.
 - **Callsign** -- saved in settings, pre-populated in the image editor's text
-  overlay tool for quick QSO card creation.
+  overlay tool for quick QSO card creation, and used by both CW station ID and
+  the TX banner.
 - **Default TX mode** -- pre-select your preferred mode so it is ready each session.
 
 ### CLI Tools
@@ -254,7 +309,7 @@ open-sstv-decode in.wav -o out.png                    # CLI decoder
 - **Drag-and-drop** image loading in the TX panel.
 
 ### Future
-- FSKID / CW ID transmission.
+- FSKID transmission (CW ID already shipping — see Features → Transmit).
 - ADIF QSO logging.
 - PSK Reporter / DX cluster spotting.
 - Installer packaging (.deb, .dmg, Flatpak).
