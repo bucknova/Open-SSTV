@@ -11,6 +11,53 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.35] — 2026-04-16
+
+### Changed
+- **Image editor pre-shrinks oversized sources on entry.**  User
+  feedback: "I'm not a fan of the new crop system, some extremely
+  large images can be quite awkward to try and crop."  v0.1.34's
+  strict-1:1 rendering made a 4032 × 3024 phone photo overwhelm the
+  viewport — the crop rectangle lived mostly off-screen and the
+  user had to pan-and-scroll constantly to select a region.
+
+  The ``ImageEditorDialog`` now passes incoming images through a
+  new ``_shrink_source_for_editor`` helper before using them as the
+  working copy.  The editor working image is capped at the smaller
+  of 3 × target dimensions or 1280 × 960 absolute, preserving aspect
+  ratio, never upscaling.  A 4032 × 3024 phone photo editing for
+  Robot 36 (320 × 240) becomes a 960 × 720 working copy — comfortable
+  to interact with — while the final LANCZOS resize to target at OK
+  time produces output that's visually indistinguishable from
+  resizing the raw source (a Robot 36 image is 320 × 240, so the
+  source pixels above ~3 × target are all discarded anyway).
+
+### Added
+- **Template editor X/Y spin boxes.**  The template editor now has
+  the same pixel-precise placement UX as the image editor got in
+  v0.1.23: a "Custom" entry in the Position combo, X / Y spin
+  boxes (5-pixel step, ranging 0–320 × 0–240 in the editor's
+  preview-canvas coordinate space), and a helper label explaining
+  the portable coordinate system.  Matches the existing image editor
+  pattern: manually editing X/Y flips the combo to Custom; selecting
+  a named preset clears X/Y and re-seeds the spin boxes from the
+  preset's computed position.  Values written out to ``templates.toml``
+  are preview-relative; at TX time the renderer auto-shrinks and
+  clamps via the v0.1.32 ``clamp_xy_to_image`` helper so the
+  placement is portable across all 22 target modes.
+
+### Tests
+- ``TestTemplateEditorXYSpinboxes`` (4 new tests in
+  ``tests/ui/test_template_editor_dialog.py``):
+  - loading a Custom overlay populates the combo + spin boxes;
+  - loading a named-preset overlay seeds the spin boxes from the
+    preset's computed position;
+  - editing X or Y flips the combo to Custom and the change
+    persists through ``result_templates()``;
+  - selecting a named preset clears x/y.
+
+---
+
 ## [0.1.34] — 2026-04-16
 
 ### Fixed

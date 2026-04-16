@@ -34,7 +34,16 @@ from open_sstv.config.templates import (
     resolve_placeholders,
     save_templates,
 )
-from open_sstv.ui.draw_text import POSITIONS, draw_text_overlay
+from open_sstv.ui.draw_text import POSITIONS, draw_text_overlay, position_to_xy
+
+
+#: Preview canvas size used by the template editor.  X/Y spin boxes are
+#: scoped to this coordinate space so the values the user sees match
+#: the live preview below.  At render time the real target image may
+#: be larger or smaller — ``draw_text_overlay`` auto-shrinks and
+#: ``clamp_xy_to_image`` keeps the text on-image regardless.
+_PREVIEW_W: int = 320
+_PREVIEW_H: int = 240
 
 
 class TemplateEditorDialog(QDialog):
@@ -141,7 +150,13 @@ class TemplateEditorDialog(QDialog):
         self._position_combo = QComboBox()
         for p in POSITIONS:
             self._position_combo.addItem(p)
-        self._position_combo.currentTextChanged.connect(self._on_overlay_field_changed)
+        # v0.1.35: Custom option lets the user drive placement from the
+        # X/Y spin boxes below.  Matches the ImageEditorDialog UX so
+        # QSO templates can place text at precise pixel coordinates.
+        self._position_combo.addItem("Custom")
+        self._position_combo.currentTextChanged.connect(
+            self._on_position_changed
+        )
         pos_size_row.addWidget(self._position_combo)
 
         pos_size_row.addWidget(QLabel("Size:"))
@@ -152,6 +167,38 @@ class TemplateEditorDialog(QDialog):
         self._size_spin.valueChanged.connect(self._on_overlay_field_changed)
         pos_size_row.addWidget(self._size_spin)
         detail_layout.addLayout(pos_size_row)
+
+        # X/Y spin boxes — mirrors the ImageEditorDialog's placement
+        # UX.  Range is the live preview canvas (_PREVIEW_W × _PREVIEW_H
+        # = 320 × 240); at TX time ``draw_text_overlay`` auto-shrinks
+        # and clamps for the real target mode so the values are
+        # portable across all 22 modes.
+        xy_row = QHBoxLayout()
+        xy_row.addWidget(QLabel("X:"))
+        self._text_x = QSpinBox()
+        self._text_x.setRange(0, _PREVIEW_W)
+        self._text_x.setSingleStep(5)
+        self._text_x.setSuffix(" px")
+        self._text_x.valueChanged.connect(self._on_xy_changed)
+        xy_row.addWidget(self._text_x, stretch=1)
+        xy_row.addWidget(QLabel("Y:"))
+        self._text_y = QSpinBox()
+        self._text_y.setRange(0, _PREVIEW_H)
+        self._text_y.setSingleStep(5)
+        self._text_y.setSuffix(" px")
+        self._text_y.valueChanged.connect(self._on_xy_changed)
+        xy_row.addWidget(self._text_y, stretch=1)
+        detail_layout.addLayout(xy_row)
+
+        # Helper text explaining the preview-relative coord system.
+        xy_help = QLabel(
+            "X/Y are preview-pixel coordinates (0,0 = top-left).  "
+            "Values are portable across modes — the renderer "
+            "auto-shrinks and clamps at transmit time."
+        )
+        xy_help.setWordWrap(True)
+        xy_help.setStyleSheet("color: #888; font-size: 10pt;")
+        detail_layout.addWidget(xy_help)
 
         # Color
         color_row = QHBoxLayout()
@@ -279,9 +326,23 @@ class TemplateEditorDialog(QDialog):
         ov = tpl.overlays[row]
         self._updating_fields = True
         self._text_edit.setText(ov.text)
-        idx = self._position_combo.findText(ov.position)
-        if idx >= 0:
-            self._position_combo.setCurrentIndex(idx)
+        # An overlay with explicit X/Y is shown as Custom; otherwise
+        # the stored named preset.  X/Y spin boxes populate either
+        # from the saved coords or from the preset's computed position
+        # so the user always has a meaningful starting point to nudge.
+        if ov.x is not None and ov.y is not None:
+            idx = self._position_combo.findText("Custom")
+            if idx >= 0:
+                self._position_combo.setCurrentIndex(idx)
+            self._text_x.setValue(ov.x)
+            self._text_y.setValue(ov.y)
+        else:
+            idx = self._position_combo.findText(ov.position)
+            if idx >= 0:
+                self._position_combo.setCurrentIndex(idx)
+            # Seed X/Y from the named preset so "Custom" clicks from a
+            # preset start at a sensible location.
+            self._seed_xy_from_preset(ov.position, ov.text, ov.size)
         self._size_spin.setValue(ov.size)
         self._current_color = ov.color
         self._update_color_swatch()
@@ -293,9 +354,39 @@ class TemplateEditorDialog(QDialog):
         self._text_edit.clear()
         self._position_combo.setCurrentIndex(0)
         self._size_spin.setValue(24)
+        self._text_x.setValue(0)
+        self._text_y.setValue(0)
         self._current_color = (255, 255, 255)
         self._update_color_swatch()
         self._updating_fields = False
+
+    def _seed_xy_from_preset(
+        self, position: str, text: str, size: int,
+    ) -> None:
+        """Compute the named-preset ``(x, y)`` for *text* at *size* and
+        write it into the X/Y spin boxes.  Called from
+        ``_on_overlay_selected`` and ``_on_position_changed`` so the
+        spin boxes always show where the preset would land.  Caller is
+        expected to have ``_updating_fields`` True so the spin-box
+        writes don't re-trigger ``_on_xy_changed``.
+        """
+        from PIL import Image as _PILImage, ImageDraw, ImageFont
+
+        if position == "Custom":
+            return
+        try:
+            font = ImageFont.load_default(size=size)
+        except TypeError:
+            font = ImageFont.load_default()
+        tmp = _PILImage.new("RGB", (_PREVIEW_W, _PREVIEW_H))
+        draw = ImageDraw.Draw(tmp)
+        bbox = draw.textbbox((0, 0), text or "Ag", font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        px, py = position_to_xy(
+            position, (_PREVIEW_W, _PREVIEW_H), (tw, th),
+        )
+        self._text_x.setValue(max(0, px))
+        self._text_y.setValue(max(0, py))
 
     @Slot()
     def _add_overlay(self) -> None:
@@ -339,12 +430,51 @@ class TemplateEditorDialog(QDialog):
         ov.position = self._position_combo.currentText()
         ov.size = self._size_spin.value()
         ov.color = self._current_color
+        # x/y persist only when the user picked Custom; for named
+        # presets they'd be stale the moment text/size changes and
+        # shift the preset position, so we clear them.
+        if ov.position == "Custom":
+            ov.x = self._text_x.value()
+            ov.y = self._text_y.value()
+        else:
+            ov.x = None
+            ov.y = None
         # Update overlay list label
         item = self._overlay_list.item(ov_row)
         if item:
             label = ov.text[:40] + ("\u2026" if len(ov.text) > 40 else "")
             item.setText(label or "(empty)")
         self._update_preview()
+
+    @Slot(str)
+    def _on_position_changed(self, text: str) -> None:
+        """Position-combo change: re-seed X/Y spin boxes from the
+        named preset so the user can see where it lands and nudge
+        from there.  Routes through ``_on_overlay_field_changed`` at
+        the end to save the new position."""
+        if self._updating_fields:
+            return
+        # Reseed X/Y from the preset for UX clarity.
+        if text != "Custom":
+            self._updating_fields = True
+            ov_text = self._text_edit.text() or "Ag"
+            self._seed_xy_from_preset(text, ov_text, self._size_spin.value())
+            self._updating_fields = False
+        self._on_overlay_field_changed()
+
+    @Slot()
+    def _on_xy_changed(self) -> None:
+        """User edited the X or Y spin box.  Flip the position combo
+        to Custom (so the change sticks) and save."""
+        if self._updating_fields:
+            return
+        if self._position_combo.currentText() != "Custom":
+            self._updating_fields = True
+            idx = self._position_combo.findText("Custom")
+            if idx >= 0:
+                self._position_combo.setCurrentIndex(idx)
+            self._updating_fields = False
+        self._on_overlay_field_changed()
 
     @Slot()
     def _pick_color(self) -> None:
@@ -371,9 +501,9 @@ class TemplateEditorDialog(QDialog):
             return
         tpl = self._templates[tpl_row]
 
-        # Render a small sample image
-        w, h = 320, 240
-        img = Image.new("RGB", (w, h), (34, 34, 34))
+        # Render a small sample image at the canonical preview size
+        # (same coordinate space the X/Y spin boxes operate in).
+        img = Image.new("RGB", (_PREVIEW_W, _PREVIEW_H), (34, 34, 34))
         draw = ImageDraw.Draw(img)
         for ov in tpl.overlays:
             resolved = resolve_placeholders(
@@ -382,7 +512,18 @@ class TemplateEditorDialog(QDialog):
                 theircall="N0CALL",
                 rst="59",
             )
-            draw_text_overlay(draw, (w, h), resolved, ov.position, ov.size, ov.color)
+            # Pass explicit x/y when the overlay has them (Custom
+            # position); otherwise the preset-based path runs.
+            draw_text_overlay(
+                draw,
+                (_PREVIEW_W, _PREVIEW_H),
+                resolved,
+                ov.position,
+                ov.size,
+                ov.color,
+                x=ov.x,
+                y=ov.y,
+            )
 
         # Convert to QPixmap
         from open_sstv.ui.image_gallery import _pil_to_pixmap

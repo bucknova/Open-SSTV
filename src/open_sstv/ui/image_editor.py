@@ -60,6 +60,67 @@ if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
 
 
+#: Editor working-image cap.  A phone photograph (4032 × 3024, say)
+#: overwhelmed the viewport under the v0.1.34 strict-1:1 rendering —
+#: the crop rectangle lived far outside the visible area and the user
+#: had to pan-and-scroll constantly to select a region.
+#:
+#: We pre-shrink oversized sources on entry to the editor so the
+#: working image never exceeds either 3× the target mode's dimensions
+#: or a hard absolute ceiling.  LANCZOS preserves enough detail for
+#: the final target-size resize to be visually indistinguishable from
+#: resizing the raw source: 2–3× the target gives the filter plenty of
+#: headroom, and the user's cropping coordinates only need to pick a
+#: semantically-meaningful region of the image — sub-pixel precision
+#: at the source resolution is not useful for a 320 × 240 or 640 × 496
+#: transmission.
+_EDITOR_MAX_SOURCE_W: int = 1280
+_EDITOR_MAX_SOURCE_H: int = 960
+_EDITOR_TARGET_MULTIPLIER: int = 3
+
+
+def _shrink_source_for_editor(
+    image: "PILImage",
+    target_w: int,
+    target_h: int,
+) -> "PILImage":
+    """Return a copy of *image* scaled down to a size that's comfortable
+    to edit at, preserving aspect ratio and never upscaling.
+
+    The cap is the smaller of ``_EDITOR_TARGET_MULTIPLIER × target``
+    and the absolute ``_EDITOR_MAX_SOURCE_W × _EDITOR_MAX_SOURCE_H``.
+    If the source already fits inside both caps, a plain copy is
+    returned.
+
+    Output quality is not a concern here: the working image is what
+    the user crops and manipulates; the final transmission is always
+    produced by a separate LANCZOS resize to the target mode's
+    dimensions, which would discard most of the source's pixels
+    anyway.
+
+    Examples
+    --------
+    4032 × 3024 phone photo → Robot 36 (320 × 240): capped at
+    ``min(3 × 320, 1280) = 960`` wide and ``min(3 × 240, 960) = 720``
+    tall.  Source scales by ``min(960 / 4032, 720 / 3024) = 0.238``
+    → 960 × 720 working image.
+    """
+    iw, ih = image.size
+    max_w = min(_EDITOR_TARGET_MULTIPLIER * target_w, _EDITOR_MAX_SOURCE_W)
+    max_h = min(_EDITOR_TARGET_MULTIPLIER * target_h, _EDITOR_MAX_SOURCE_H)
+    # Never make the editor working image smaller than the target
+    # itself — the user still needs at least target-resolution pixels
+    # to pick a meaningful crop region from.
+    max_w = max(target_w, max_w)
+    max_h = max(target_h, max_h)
+    if iw <= max_w and ih <= max_h:
+        return image.copy()
+    scale = min(max_w / iw, max_h / ih)
+    new_w = max(1, int(iw * scale))
+    new_h = max(1, int(ih * scale))
+    return image.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+
 class _CropRect(QGraphicsRectItem):
     """Draggable crop rectangle constrained to an aspect ratio.
 
@@ -110,8 +171,6 @@ class ImageEditorDialog(QDialog):
         self.setMinimumSize(800, 600)
         self.resize(1000, 700)
 
-        self._original_image = image.copy()
-        self._working_image = image.copy()
         self._mode = mode
         self._spec = MODE_TABLE[mode]
         self._callsign = callsign
@@ -124,6 +183,22 @@ class ImageEditorDialog(QDialog):
         self._target_w = self._spec.width
         self._target_h = self._spec.display_height
         self._aspect = self._target_w / self._target_h
+
+        # Pre-shrink oversized sources so the editor viewport stays
+        # comfortable to work in.  Phone photos routinely come in at
+        # 4000+ pixels wide; strict-1:1 rendering of those was the
+        # user's "scrolling nightmare" complaint.  The working image
+        # is capped at the smaller of 3× target or 1280 × 960, which
+        # is plenty of resolution for the final LANCZOS resize to
+        # target to produce an indistinguishable result.  The original
+        # (pre-shrink) image is kept only implicitly — Reset reverts
+        # to the shrunk copy, because everything the editor does
+        # (crop, rotate, flip, text overlays) operates in working-image
+        # coordinates that already get down-scaled to target on OK.
+        self._original_image = _shrink_source_for_editor(
+            image, self._target_w, self._target_h,
+        )
+        self._working_image = self._original_image.copy()
 
         layout = QHBoxLayout(self)
 
