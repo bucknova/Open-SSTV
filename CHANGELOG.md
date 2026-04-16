@@ -11,6 +11,65 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.29] — 2026-04-16
+
+Second-pass polish on the Opus 1M audit findings that were deferred in
+v0.1.27.  Five items: two P2, three P3, plus dependency pin bump and
+associated tests.
+
+### Fixed
+- **OP-13 (P2) — rigctld launcher rejects leading-dash serial-port
+  values.** New ``is_safe_rigctld_arg`` helper in ``radio/rigctld.py``
+  returns ``False`` for values that start with ``-`` (after lstrip),
+  which closes the arg-smuggling gap at the ``subprocess.Popen``
+  boundary: a hand-edited config could otherwise pass
+  ``rig_serial_port = "--help"`` (or worse) as a positional arg and
+  rigctld would parse it as a flag.  Both launch sites
+  (``MainWindow._connect_rigctld`` and
+  ``SettingsDialog._launch_rigctld``) now validate before assembling
+  the argv and show a user-visible error when the validation fails.
+- **OP-22 (P2) — ``RxWorker._flush`` asserts at most one
+  ``ImageComplete`` per feed.** The ``Decoder.feed`` contract is
+  one-complete-per-call (it auto-resets to IDLE after emitting one),
+  but the dispatch loop didn't enforce it.  A future change that
+  violated the contract would have silently emitted the progressive
+  image instead of the slant-corrected re-decode on the second and
+  later completes because ``consume_last_buffer()`` drains on the
+  first.  Fail loudly instead.
+- **OP-28 (P3) — ``RigConnectionMode`` StrEnum.** Replaces three
+  ad-hoc string literals (``"manual"`` / ``"serial"`` / ``"rigctld"``)
+  that lived separately in ``config/schema.py``, ``ui/settings_dialog.py``,
+  and ``ui/main_window.py``.  StrEnum preserves wire compatibility with
+  existing TOML configs while giving a single source of truth.
+
+### Changed
+- **OP-32 — ``Pillow>=10.1,<12``** (was ``>=10.0,<12``).  Bumped the
+  minimum so the ``ImageFont.load_default(size=...)`` kwarg is
+  always available; dropped the ``TypeError`` fallback in three
+  places (``core/banner.py``, ``ui/draw_text.py``,
+  ``ui/image_editor.py``).  Pillow 10.1 was released in October 2023,
+  so this is safely below the realistic deployment floor for a 2026
+  app.
+
+### Tests
+- **OP-30 — Focused tests for ``TxWorker.emergency_unkey`` /
+  ``wait_for_stop``.**  Previously exercised only indirectly by
+  ``closeEvent`` integration tests.  New ``TestEmergencyUnkey``
+  covers the single-PTT-call contract, ``RigError`` and arbitrary-
+  exception suppression, and verifies the rig lock is held so a
+  concurrent ``set_rig`` can't race.  ``TestWaitForStop`` covers
+  timeout-returns-False, flag-already-set, and flag-set-during-wait
+  from another thread.
+- **OP-13 — ``TestIsSafeRigctldArg``** in
+  ``tests/radio/test_rigctld_client.py`` covers every-case of the new
+  validator: device paths accepted, empty/None accepted, leading
+  dash rejected, whitespace-padded dash rejected, mid-value dash
+  accepted.
+
+Test run: 498 → 510 passed (+12 net) in the same ~5.5 minute budget.
+
+---
+
 ## [0.1.28] — 2026-04-16
 
 ### Changed

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "open-sstv"
-version = "0.1.28"
+version = "0.1.29"
 description = "Open-source cross-platform SSTV transceiver for amateur radio."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -31,7 +31,7 @@ dependencies = [
     "scipy>=1.11,<2",        # signal.hilbert, butter, sosfiltfilt, resample_poly
     "sounddevice>=0.4.6,<1", # PortAudio I/O (MIT) — wheels for Linux x86_64 + macOS
     "PySSTV>=0.5.6,<1",      # TX encoder (MIT) — covers Martin/Scottie/Robot/PD
-    "Pillow>=10.0,<12",      # Image load/resize for TX, save for RX
+    "Pillow>=10.1,<12",      # Image load/resize for TX, save for RX (>=10.1 for ImageFont.load_default(size=...))
     "platformdirs>=4.0,<5",  # XDG-correct config and data dirs
     "tomli-w>=1.0,<2",       # TOML write (stdlib tomllib only reads)
     "pyserial>=3.5,<4",      # Direct serial CAT/PTT without external daemons

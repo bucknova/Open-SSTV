@@ -564,18 +564,18 @@ class ImageEditorDialog(QDialog):
 
     def _sync_xy_from_preset(self) -> None:
         """Compute X/Y from the current Position preset and update the
-        spin boxes.  Called when the dropdown changes to a named preset."""
+        spin boxes.  Called when the dropdown changes to a named preset.
+
+        Pillow >= 10.1 (pinned in pyproject) supports ``size=`` on
+        ``load_default``; the pre-10.1 TypeError fallback was dropped
+        in v0.1.29 (OP-32).
+        """
         pos = self._text_position.currentText()
         if pos == "Custom":
             return
         text = self._text_input.text().strip() or "Ag"  # placeholder for bbox
-        try:
-            from PIL import ImageDraw, ImageFont
-            font = ImageFont.load_default(size=self._font_size.value())
-        except TypeError:
-            from PIL import ImageDraw, ImageFont
-            font = ImageFont.load_default()
-        from PIL import Image as _PILImage
+        from PIL import Image as _PILImage, ImageDraw, ImageFont
+        font = ImageFont.load_default(size=self._font_size.value())
         tmp = _PILImage.new("RGB", (self._target_w, self._target_h))
         draw = ImageDraw.Draw(tmp)
         bbox = draw.textbbox((0, 0), text, font=font)

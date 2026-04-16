@@ -17,6 +17,8 @@ from pathlib import Path
 
 import platformdirs
 
+from open_sstv.radio.base import RigConnectionMode
+
 _log = logging.getLogger(__name__)
 
 
@@ -43,8 +45,12 @@ class AppConfig:
     default_tx_mode: str = "martin_m1"
 
     # --- Radio ---
-    # Connection mode: "manual", "rigctld", "serial"
-    rig_connection_mode: str = "manual"
+    # Connection mode: one of ``RigConnectionMode.MANUAL`` / ``.SERIAL`` /
+    # ``.RIGCTLD`` (string values "manual" / "serial" / "rigctld"; kept
+    # as ``str`` on the dataclass for TOML forward-compat).  OP-28 in
+    # v0.1.29 centralised these literals into the enum so schema,
+    # settings dialog, and main-window dispatch no longer drift.
+    rig_connection_mode: str = RigConnectionMode.MANUAL.value
     rigctld_host: str = "127.0.0.1"
     rigctld_port: int = 4532
     ptt_delay_s: float = 0.2

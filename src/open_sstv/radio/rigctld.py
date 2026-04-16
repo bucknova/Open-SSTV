@@ -257,4 +257,38 @@ def _parse_value(line: str) -> str:
     return line.strip()
 
 
-__all__ = ["RigctldClient"]
+def is_safe_rigctld_arg(value: str | None) -> bool:
+    """Return True if ``value`` is safe to pass as a rigctld CLI argument.
+
+    Rejects values that start with ``-`` so a hand-edited or otherwise
+    unexpected config value (e.g. ``rig_serial_port = "--help"``) can't
+    be promoted from a positional argument into an arbitrary rigctld
+    flag when the launcher assembles a ``Popen`` argv (OP-13).  The
+    attack surface is low in practice — the config file is per-user and
+    not world-writable — but treating the port string as untrusted
+    input at the subprocess boundary is the right defensive posture.
+
+    Empty / ``None`` values are considered safe (the callers are
+    expected to skip adding the corresponding ``-r`` / ``-s`` pair when
+    they're empty) so this helper focuses narrowly on the
+    leading-dash case.
+
+    Examples
+    --------
+    >>> is_safe_rigctld_arg("/dev/cu.usbserial-1410")
+    True
+    >>> is_safe_rigctld_arg("")
+    True
+    >>> is_safe_rigctld_arg(None)
+    True
+    >>> is_safe_rigctld_arg("--help")
+    False
+    >>> is_safe_rigctld_arg("-rf")
+    False
+    """
+    if value is None:
+        return True
+    return not value.lstrip().startswith("-")
+
+
+__all__ = ["RigctldClient", "is_safe_rigctld_arg"]

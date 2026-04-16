@@ -526,6 +526,122 @@ class TestComputePlaybackWatchdog:
         )
 
 
+class TestEmergencyUnkey:
+    """OP-30: focused tests for ``TxWorker.emergency_unkey``.
+
+    The method is the last-resort PTT-off path from ``MainWindow.closeEvent``
+    when the TX worker thread fails to join within its 3 s budget.  It
+    must (a) call ``rig.set_ptt(False)`` exactly once, (b) hold
+    ``_rig_lock`` so a concurrent ``set_rig`` swap can't race, and
+    (c) swallow every exception — this is the shutdown path, any leaked
+    exception would block the GUI from closing cleanly.
+    """
+
+    def test_calls_set_ptt_false_once(self, qapp) -> None:
+        rig = MagicMock(spec=["set_ptt"])
+        worker = TxWorker(rig=rig, ptt_delay_s=0)
+
+        worker.emergency_unkey()
+
+        rig.set_ptt.assert_called_once_with(False)
+
+    def test_swallows_rig_error(self, qapp) -> None:
+        """A RigConnectionError from set_ptt must not propagate —
+        we're already on the shutdown path."""
+        rig = MagicMock(spec=["set_ptt"])
+        rig.set_ptt.side_effect = RigConnectionError("rig dead")
+        worker = TxWorker(rig=rig, ptt_delay_s=0)
+
+        # Must not raise.
+        worker.emergency_unkey()
+
+        rig.set_ptt.assert_called_once_with(False)
+
+    def test_swallows_arbitrary_exception(self, qapp) -> None:
+        """Non-RigError exceptions must also be swallowed — we bail
+        out rather than risk blocking closeEvent."""
+        rig = MagicMock(spec=["set_ptt"])
+        rig.set_ptt.side_effect = RuntimeError("kaboom")
+        worker = TxWorker(rig=rig, ptt_delay_s=0)
+
+        # Must not raise.
+        worker.emergency_unkey()
+
+    def test_holds_rig_lock(self, qapp) -> None:
+        """The lock is acquired so a concurrent set_rig() can't swap
+        the backend out from under us mid-unkey.  We verify by
+        observing that set_rig() called from a different thread while
+        emergency_unkey holds the lock is observably blocked."""
+        import threading as _threading
+        import time as _time
+
+        rig = MagicMock(spec=["set_ptt"])
+        swap_happened_during_unkey: list[bool] = []
+
+        def _slow_set_ptt(on: bool) -> None:
+            # Attempt to swap the rig from another thread while we
+            # hold the lock.  It should NOT be able to proceed until
+            # we return.
+            swap_t = _threading.Thread(
+                target=worker.set_rig, args=(MagicMock(spec=["set_ptt"]),),
+                daemon=True,
+            )
+            swap_t.start()
+            _time.sleep(0.05)
+            # After 50 ms the swap must NOT have completed because the
+            # lock is held by this thread.
+            swap_happened_during_unkey.append(not swap_t.is_alive())
+            # Don't block here forever — let the test complete.
+            swap_t.join(timeout=1.0)
+
+        rig.set_ptt.side_effect = _slow_set_ptt
+        worker = TxWorker(rig=rig, ptt_delay_s=0)
+
+        worker.emergency_unkey()
+
+        assert swap_happened_during_unkey == [False], (
+            "set_rig() must block on _rig_lock while emergency_unkey holds it"
+        )
+
+
+class TestWaitForStop:
+    """OP-30: focused tests for ``TxWorker.wait_for_stop``."""
+
+    def test_returns_false_on_timeout(self, qapp) -> None:
+        """wait_for_stop returns False if the flag stays clear."""
+        worker = TxWorker(rig=ManualRig(), ptt_delay_s=0)
+        assert worker.wait_for_stop(timeout=0.05) is False
+
+    def test_returns_true_when_flag_already_set(self, qapp) -> None:
+        """wait_for_stop returns True immediately when stop was requested."""
+        worker = TxWorker(rig=ManualRig(), ptt_delay_s=0)
+        worker.request_stop()
+        assert worker.wait_for_stop(timeout=0.05) is True
+
+    def test_returns_true_when_flag_set_during_wait(self, qapp) -> None:
+        """wait_for_stop unblocks when the flag is set from another thread.
+
+        This is the production use case: ``closeEvent`` calls
+        ``wait_for_stop(timeout=1.0)`` after ``request_stop()`` is
+        called indirectly (via the stop_event set from another path).
+        """
+        import threading as _threading
+        import time as _time
+
+        worker = TxWorker(rig=ManualRig(), ptt_delay_s=0)
+
+        def _set_later() -> None:
+            _time.sleep(0.02)
+            worker.request_stop()
+
+        t = _threading.Thread(target=_set_later, daemon=True)
+        t.start()
+        try:
+            assert worker.wait_for_stop(timeout=0.5) is True
+        finally:
+            t.join(timeout=0.5)
+
+
 class TestTwoStageWatchdogIntegration:
     """Integration tests: transmit() creates both watchdog stages with
     the right durations and cancels them on clean exit."""

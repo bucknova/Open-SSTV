@@ -93,11 +93,10 @@ def draw_text_overlay(
         *position* preset.  When either is ``None``, the position preset
         is used.
     """
-    try:
-        font = ImageFont.load_default(size=size)
-    except TypeError:
-        # Pillow < 10.1 doesn't support size= on load_default
-        font = ImageFont.load_default()
+    # Pillow >= 10.1 (pinned in pyproject) supports the size kwarg.
+    # The TypeError fallback that used to guard 10.0 was dropped in
+    # v0.1.29 when the minimum was bumped (OP-32).
+    font = ImageFont.load_default(size=size)
 
     bbox = draw.textbbox((0, 0), text, font=font)
     tw = bbox[2] - bbox[0]

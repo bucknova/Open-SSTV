@@ -95,9 +95,9 @@ from open_sstv.audio.input_stream import (
 from open_sstv.config.schema import AppConfig
 from open_sstv.config.store import load_config, save_config
 from open_sstv.config.templates import load_templates
-from open_sstv.radio.base import ManualRig, Rig
+from open_sstv.radio.base import ManualRig, Rig, RigConnectionMode
 from open_sstv.radio.exceptions import RigError
-from open_sstv.radio.rigctld import RigctldClient
+from open_sstv.radio.rigctld import RigctldClient, is_safe_rigctld_arg
 from open_sstv.radio.serial_rig import create_serial_rig
 from open_sstv.ui.radio_panel import RadioPanel
 from open_sstv.ui.rx_panel import RxPanel
@@ -846,14 +846,17 @@ class MainWindow(QMainWindow):
         """
         mode = self._config.rig_connection_mode
 
-        if mode == "manual":
+        # OP-28: dispatch via RigConnectionMode rather than string literals
+        # so a future enum rename can't silently break one of the three
+        # call sites that used to carry bare strings.
+        if mode == RigConnectionMode.MANUAL:
             # Shouldn't normally reach here, but handle gracefully
             self.statusBar().showMessage(
                 "Rig mode set to Manual — configure a connection in Settings first.", 5000,
             )
             return
 
-        if mode == "serial":
+        if mode == RigConnectionMode.SERIAL:
             self._connect_serial()
         else:
             self._connect_rigctld()
@@ -911,6 +914,16 @@ class MainWindow(QMainWindow):
             and self._config.rig_model_id > 0
             and self._rigctld_proc is None
         ):
+            # OP-13: reject leading-dash values so a hand-edited config
+            # can't slip an arbitrary rigctld flag into the argv.
+            if not is_safe_rigctld_arg(self._config.rig_serial_port):
+                self.statusBar().showMessage(
+                    f"Refusing to launch rigctld with unsafe serial port "
+                    f"{self._config.rig_serial_port!r} — "
+                    "edit Settings → Radio → Serial port.",
+                    8000,
+                )
+                return
             cmd = [
                 "rigctld",
                 "-m", str(self._config.rig_model_id),

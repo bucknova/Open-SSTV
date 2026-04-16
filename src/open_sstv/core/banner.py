@@ -80,16 +80,14 @@ def banner_size_params(size: str) -> tuple[int, int]:
 
 
 def _load_font(size: int) -> ImageFont.ImageFont | ImageFont.FreeTypeFont:
-    """Return the best available embedded font at *size* points.
+    """Return the embedded default font at *size* points.
 
-    Pillow >= 10.1 accepts a ``size`` argument to ``load_default()``; older
-    10.x releases do not.  We try the size-aware form first and fall back to
-    the tiny legacy bitmap font if it is not available.
+    Requires Pillow >= 10.1 (pinned in ``pyproject.toml``); the size
+    kwarg on ``ImageFont.load_default`` landed in that release.  The
+    try/except fallback that used to guard pre-10.1 installs was
+    removed in v0.1.29 now that the minimum is bumped (OP-32).
     """
-    try:
-        return ImageFont.load_default(size=size)  # type: ignore[call-arg]
-    except TypeError:
-        return ImageFont.load_default()
+    return ImageFont.load_default(size=size)
 
 
 # ---------------------------------------------------------------------------

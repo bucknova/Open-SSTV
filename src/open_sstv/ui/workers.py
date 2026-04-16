@@ -962,6 +962,21 @@ class RxWorker(QObject):
             self.error.emit(f"Decoder exception: {exc}")
             return
 
+        # OP-22 defensive guard: ``Decoder.feed`` auto-resets to IDLE
+        # after emitting one ``ImageComplete`` so at most one per feed
+        # is the contract.  If a future change violates that, the
+        # second complete would reach ``_dispatch`` with
+        # ``consume_last_buffer()`` already drained to None and would
+        # silently emit the progressive image instead of the (possibly
+        # slant-corrected) re-decode.  Fail loudly instead.
+        complete_count = sum(1 for e in events if isinstance(e, ImageComplete))
+        assert complete_count <= 1, (
+            f"Decoder.feed returned {complete_count} ImageComplete events "
+            "in a single flush — the Decoder contract is at most one per "
+            "feed (it auto-resets to IDLE).  Investigate core.decoder "
+            "before weakening this assertion."
+        )
+
         if not events and not self._decoding:
             # No decode yet — show progress so the user knows we're alive.
             secs = self._total_samples / self._sample_rate

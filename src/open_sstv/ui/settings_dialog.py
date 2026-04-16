@@ -43,8 +43,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from open_sstv.radio.base import RigConnectionMode
 from open_sstv.radio.exceptions import RigError
-from open_sstv.radio.rigctld import RigctldClient
+from open_sstv.radio.rigctld import RigctldClient, is_safe_rigctld_arg
 from open_sstv.radio.serial_rig import (
     ICOM_ADDRESSES,
     SERIAL_RIG_PROTOCOLS,
@@ -306,9 +307,17 @@ class SettingsDialog(QDialog):
         mode_form = QFormLayout(mode_group)
 
         self._conn_mode_combo = QComboBox()
-        self._conn_mode_combo.addItem("Manual (no rig control)", "manual")
-        self._conn_mode_combo.addItem("Direct Serial (built-in)", "serial")
-        self._conn_mode_combo.addItem("rigctld (Hamlib daemon)", "rigctld")
+        # OP-28: StrEnum values replace ad-hoc string literals so renames
+        # are caught at the enum, not silently via combo→dispatch drift.
+        self._conn_mode_combo.addItem(
+            "Manual (no rig control)", RigConnectionMode.MANUAL.value,
+        )
+        self._conn_mode_combo.addItem(
+            "Direct Serial (built-in)", RigConnectionMode.SERIAL.value,
+        )
+        self._conn_mode_combo.addItem(
+            "rigctld (Hamlib daemon)", RigConnectionMode.RIGCTLD.value,
+        )
         idx = self._conn_mode_combo.findData(self._config.rig_connection_mode)
         if idx >= 0:
             self._conn_mode_combo.setCurrentIndex(idx)
@@ -559,9 +568,9 @@ class SettingsDialog(QDialog):
     def _on_conn_mode_changed(self) -> None:
         """Show/hide the serial and rigctld groups based on the selected mode."""
         mode = self._conn_mode_combo.currentData()
-        self._serial_group.setVisible(mode == "serial")
-        self._rigctld_group.setVisible(mode == "rigctld")
-        if mode == "serial":
+        self._serial_group.setVisible(mode == RigConnectionMode.SERIAL)
+        self._rigctld_group.setVisible(mode == RigConnectionMode.RIGCTLD)
+        if mode == RigConnectionMode.SERIAL:
             self._on_serial_protocol_changed()
 
     def _on_serial_protocol_changed(self) -> None:
@@ -819,6 +828,21 @@ class SettingsDialog(QDialog):
             QMessageBox.warning(
                 self, "No radio selected",
                 "Please select a radio model before launching rigctld.",
+            )
+            return
+
+        # OP-13: reject a serial-port string that could be mis-parsed as
+        # a rigctld flag.  The editable combo allows free-form entry,
+        # so a paste of "--help" or similar would otherwise end up as a
+        # positional arg to Popen.  List-form argv already blocks shell
+        # injection; this closes the arg-smuggling gap.
+        if not is_safe_rigctld_arg(serial_port):
+            QMessageBox.warning(
+                self, "Unsafe serial port",
+                f"Refusing to launch rigctld with serial port "
+                f"{serial_port!r} — values starting with '-' are not "
+                "accepted because they would be interpreted as rigctld "
+                "flags.  Select a real device path.",
             )
             return
 
@@ -1082,13 +1106,15 @@ class SettingsDialog(QDialog):
 
         Call after ``exec()`` returns ``QDialog.Accepted``.
         """
-        conn_mode = self._conn_mode_combo.currentData() or "manual"
+        conn_mode = self._conn_mode_combo.currentData() or RigConnectionMode.MANUAL.value
 
-        # Serial port and baud come from the mode-specific widgets
-        if conn_mode == "serial":
+        # Serial port and baud come from the mode-specific widgets.  String
+        # equality against RigConnectionMode values (StrEnum → str) keeps
+        # this branch dense and immune to typos vs. bare literals (OP-28).
+        if conn_mode == RigConnectionMode.SERIAL:
             serial_port = self._serial_port_combo.currentText().strip()
             baud_rate = self._baud_rate_combo.currentData() or 9600
-        elif conn_mode == "rigctld":
+        elif conn_mode == RigConnectionMode.RIGCTLD:
             serial_port = self._rigctld_serial_combo.currentText().strip()
             baud_rate = self._rigctld_baud_combo.currentData() or 9600
         else:

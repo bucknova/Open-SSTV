@@ -18,7 +18,7 @@ from collections.abc import Iterator
 import pytest
 
 from open_sstv.radio.exceptions import RigCommandError, RigConnectionError
-from open_sstv.radio.rigctld import RigctldClient
+from open_sstv.radio.rigctld import RigctldClient, is_safe_rigctld_arg
 from tests.radio.fake_rigctld import FakeRigctld
 
 
@@ -204,3 +204,42 @@ def test_serializes_calls_under_threading(
         t.join()
 
     assert errors == []
+
+
+# ---------------------------------------------------------------------------
+# OP-13 — is_safe_rigctld_arg
+# ---------------------------------------------------------------------------
+
+
+class TestIsSafeRigctldArg:
+    """Regression tests for the leading-dash validator (OP-13).
+
+    Values that start with ``-`` must be rejected so a hand-edited
+    config can't smuggle an arbitrary rigctld flag into the argv the
+    launcher constructs.  Empty / None is explicitly safe (callers
+    skip adding the corresponding ``-r`` pair when the port is blank).
+    """
+
+    def test_accepts_real_device_paths(self) -> None:
+        assert is_safe_rigctld_arg("/dev/cu.usbserial-1410") is True
+        assert is_safe_rigctld_arg("/dev/ttyUSB0") is True
+        assert is_safe_rigctld_arg("COM3") is True
+
+    def test_accepts_empty_and_none(self) -> None:
+        assert is_safe_rigctld_arg("") is True
+        assert is_safe_rigctld_arg(None) is True
+
+    def test_rejects_leading_dash(self) -> None:
+        assert is_safe_rigctld_arg("-rf") is False
+        assert is_safe_rigctld_arg("--help") is False
+        assert is_safe_rigctld_arg("-") is False
+
+    def test_rejects_whitespace_then_dash(self) -> None:
+        """Whitespace-padded flag-like values are still rejected."""
+        assert is_safe_rigctld_arg("  --help") is False
+        assert is_safe_rigctld_arg("\t-r") is False
+
+    def test_dash_mid_value_is_safe(self) -> None:
+        """Dashes inside a value (e.g. device path) are fine."""
+        assert is_safe_rigctld_arg("/dev/cu.usbserial-1410") is True
+        assert is_safe_rigctld_arg("mid-dash-value") is True

@@ -20,7 +20,29 @@ without inheriting from us.
 """
 from __future__ import annotations
 
+from enum import StrEnum, unique
 from typing import Protocol, runtime_checkable
+
+
+@unique
+class RigConnectionMode(StrEnum):
+    """How the application talks to the radio.
+
+    Values match the strings historically stored in ``AppConfig.rig_connection_mode``
+    (``"manual"`` / ``"serial"`` / ``"rigctld"``) and emitted by the Settings
+    dialog's connection-mode combo box, so ``StrEnum`` gives us a drop-in
+    replacement for the bare-string dispatch without touching the TOML
+    on-disk format.
+
+    Introduced in v0.1.29 (OP-28): the three string literals used to live in
+    three separate places — ``config/schema.py`` default, ``ui/settings_dialog.py``
+    combo, and ``ui/main_window.py._on_rig_connect`` dispatch — and renaming
+    any one without the others would silently break rig connection.
+    """
+
+    MANUAL = "manual"
+    SERIAL = "serial"
+    RIGCTLD = "rigctld"
 
 
 @runtime_checkable
@@ -112,4 +134,4 @@ class ManualRig:
         return None
 
 
-__all__ = ["ManualRig", "Rig"]
+__all__ = ["ManualRig", "Rig", "RigConnectionMode"]
