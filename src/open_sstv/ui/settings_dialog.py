@@ -267,32 +267,29 @@ class SettingsDialog(QDialog):
         self._final_slant_check.setChecked(self._config.apply_final_slant_correction)
         rx_layout.addRow(self._final_slant_check)
 
-        # Experimental: per-line incremental decoder.  Off by default —
-        # the batch decoder is the tested / stable path.  When enabled,
-        # every mode routes through the incremental decoder for roughly
-        # O(n) rather than O(n²) CPU cost.  Robot 36 additionally runs
-        # the experimental linear-chroma + interpolating upsampler path
-        # on the incremental side.
+        # Per-line incremental decoder — on by default since v0.1.24.
+        # Every mode routes through the incremental decoder for roughly
+        # O(n) rather than O(n²) CPU cost.  Robot 36 additionally uses
+        # the linear-chroma + interpolating upsampler path.
         self._exp_incremental_check = QCheckBox(
-            "Experimental: per-line incremental decode (all modes)"
+            "Per-line incremental decode (all modes)"
         )
         self._exp_incremental_check.setToolTip(
-            "EXPERIMENTAL — every mode.\n\n"
+            "Decodes each line as its sync pulse arrives instead of\n"
+            "reprocessing the whole buffer on every flush.\n\n"
             "Covers Scottie, Martin, PD, Wraase SC2, Pasokon, and Robot 36\n"
             "(both per-line and line-pair wire formats, auto-detected).\n"
-            "Decodes each line as its sync pulse arrives instead of\n"
-            "reprocessing the whole buffer on every flush.  Roughly a\n"
-            "50× CPU reduction on long receives, and keeps the decoder\n"
-            "ahead of real-time on slower machines where the batch path\n"
-            "falls behind mid-image.\n\n"
-            "Robot 36 also gets experimental linear (mean) chroma sampling\n"
-            "and linear inter-row chroma upsampling — softer chroma edges\n"
-            "vs. the batch decoder's median + nearest-neighbor copy.\n\n"
-            "Off by default.  If a decode looks wrong, turn this off and\n"
-            "file an issue with the saved audio."
+            "Roughly a 50× CPU reduction on long receives, and keeps the\n"
+            "decoder ahead of real-time on slower machines where the batch\n"
+            "path falls behind mid-image.\n\n"
+            "Robot 36 also uses linear (mean) chroma sampling and linear\n"
+            "inter-row chroma upsampling — softer chroma edges vs. the\n"
+            "batch decoder's median + nearest-neighbor copy.\n\n"
+            "On by default.  Uncheck to fall back to the legacy batch\n"
+            "decoder if a decode looks wrong."
         )
         self._exp_incremental_check.setChecked(
-            self._config.experimental_incremental_decode
+            self._config.incremental_decode
         )
         rx_layout.addRow(self._exp_incremental_check)
 
@@ -1086,7 +1083,7 @@ class SettingsDialog(QDialog):
             tx_output_overdrive=self._overdrive_check.isChecked(),
             rx_weak_signal_mode=self._weak_signal_check.isChecked(),
             apply_final_slant_correction=self._final_slant_check.isChecked(),
-            experimental_incremental_decode=self._exp_incremental_check.isChecked(),
+            incremental_decode=self._exp_incremental_check.isChecked(),
             cw_id_enabled=self._cw_enabled.isChecked(),
             cw_id_wpm=self._cw_wpm.value(),
             cw_id_tone_hz=self._cw_tone_hz.value(),

@@ -45,6 +45,12 @@ def load_config(path: Path | None = None) -> AppConfig:
     try:
         with path.open("rb") as f:
             raw = tomllib.load(f)
+        # v0.1.24: renamed experimental_incremental_decode -> incremental_decode.
+        # Migrate old config files that still carry the previous key so users
+        # who explicitly set it to False keep that preference.
+        if "experimental_incremental_decode" in raw and "incremental_decode" not in raw:
+            raw["incremental_decode"] = raw["experimental_incremental_decode"]
+
         # Only pass keys that AppConfig actually defines, so a TOML file
         # from a newer version with extra keys doesn't blow up construction.
         known = {f.name for f in fields(AppConfig)}

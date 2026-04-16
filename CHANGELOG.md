@@ -11,6 +11,33 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.24] — 2026-04-15
+
+### Changed
+- **Progressive per-line decoding is now the default for all modes.**
+  The incremental decoder (previously opt-in via "Experimental: per-line
+  incremental decode") is now enabled out of the box. Covers all 22
+  supported modes: Scottie, Martin, PD, Wraase SC2, Pasokon, and Robot 36.
+  The legacy batch decoder remains available — uncheck "Per-line incremental
+  decode (all modes)" in Settings → Audio → Receive to revert.
+- Config field `experimental_incremental_decode` renamed to
+  `incremental_decode`. Existing TOML configs with the old key are
+  automatically migrated (a `False` setting is preserved).
+- UI label updated: "Experimental: per-line incremental decode (all modes)"
+  → "Per-line incremental decode (all modes)".
+
+### Added
+- **Robot 36 slowrx-port rewrite** — new line-pair decoder using linear
+  (mean) chroma sampling and linear inter-row chroma upsampling for softer,
+  more accurate colour rendering vs. the old median + nearest-neighbour copy.
+- **Streaming decoders for Martin, PD, Wraase SC2, and Pasokon families** —
+  each mode now has a dedicated incremental subclass that decodes O(1 line
+  period) per sync pulse instead of reprocessing the full buffer on every
+  flush (~50× CPU reduction on long modes; Martin M1 now stays ahead of
+  real-time on laptop-class hardware).
+
+---
+
 ## [0.1.23] — 2026-04-15
 
 ### Fixed

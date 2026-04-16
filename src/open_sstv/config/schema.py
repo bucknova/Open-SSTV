@@ -97,13 +97,12 @@ class AppConfig:
     cw_id_wpm: int = 20     # valid range 15–30
     cw_id_tone_hz: int = 800  # valid range 400–1200
 
-    # --- Experimental ---
-    # v0.1.17 (experimental/incremental-decode branch): streaming O(1-per-line)
-    # Scottie S1 decoder instead of the O(N²) batch flush path.  Off by
-    # default; flip to True in settings or TOML to test the PoC.  Only
-    # Scottie S1 is accelerated; all other modes fall through to the batch
-    # decoder unchanged.
-    experimental_incremental_decode: bool = False
+    # --- Receive decoder ---
+    # v0.1.24: per-line incremental decoder promoted to default.  Covers all
+    # 22 supported modes (Scottie, Martin, PD, Wraase SC2, Pasokon, Robot 36).
+    # Set to False to fall back to the legacy batch decoder.
+    # Old config key "experimental_incremental_decode" is migrated in store.py.
+    incremental_decode: bool = True
 
     # --- Identity ---
     callsign: str = ""

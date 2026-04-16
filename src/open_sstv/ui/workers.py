@@ -596,22 +596,19 @@ class RxWorker(QObject):
         flush_samples: int | None = None,
         weak_signal: bool = False,
         final_slant_correction: bool = False,
-        experimental_incremental_decode: bool = False,
+        incremental_decode: bool = True,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._sample_rate = sample_rate
         self._weak_signal = weak_signal
         self._final_slant_correction = final_slant_correction
-        # v0.1.x-experimental: route Scottie S1 (and later BEFORE_RED modes)
-        # through ScottieS1IncrementalDecoder instead of the batch decoder.
-        # Off by default — the batch path is the tested / stable one.
-        self._exp_incremental = experimental_incremental_decode
+        self._exp_incremental = incremental_decode
         self._cancel_event = threading.Event()
         self._decoder = Decoder(
             sample_rate,
             weak_signal=weak_signal,
-            experimental_incremental_decode=experimental_incremental_decode,
+            incremental_decode=incremental_decode,
         )
         self._decoder.set_cancel_event(self._cancel_event)
         self._scratch: list["NDArray[np.float64]"] = []
@@ -636,12 +633,12 @@ class RxWorker(QObject):
         self._decoder = Decoder(
             self._sample_rate,
             weak_signal=enabled,
-            experimental_incremental_decode=self._exp_incremental,
+            incremental_decode=self._exp_incremental,
         )
         self._decoder.set_cancel_event(self._cancel_event)
 
-    def set_experimental_incremental_decode(self, enabled: bool) -> None:
-        """Enable or disable the experimental per-line incremental decoder.
+    def set_incremental_decode(self, enabled: bool) -> None:
+        """Enable or disable the per-line incremental decoder.
 
         Rebuilds the internal ``Decoder`` so the change takes effect on the
         next incoming VIS.  Any partial decode in flight is discarded with
@@ -652,7 +649,7 @@ class RxWorker(QObject):
         self._decoder = Decoder(
             self._sample_rate,
             weak_signal=self._weak_signal,
-            experimental_incremental_decode=enabled,
+            incremental_decode=enabled,
         )
         self._decoder.set_cancel_event(self._cancel_event)
 
@@ -702,7 +699,7 @@ class RxWorker(QObject):
         self._decoder = Decoder(
             sample_rate,
             weak_signal=self._weak_signal,
-            experimental_incremental_decode=self._exp_incremental,
+            incremental_decode=self._exp_incremental,
         )
         self._decoder.set_cancel_event(self._cancel_event)
         self._scratch.clear()

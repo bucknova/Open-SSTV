@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Experimental streaming SSTV decoder — covers every mode in the app.
+"""Per-line streaming SSTV decoder — covers every mode in the app (default).
 
-**Status**: Experimental. Enable via
-``AppConfig.experimental_incremental_decode = True`` (off by default).
+Enabled by default via ``AppConfig.incremental_decode = True``
+(set to False to fall back to the legacy batch decoder).
 
 Problem solved
 --------------

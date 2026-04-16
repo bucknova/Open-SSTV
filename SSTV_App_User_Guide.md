@@ -473,6 +473,7 @@ Open the settings dialog via **File > Settings** (or the menu shortcut). It has 
 | Test Tone | Transmit a 700 Hz + 1900 Hz two-tone signal for 5 s (enabled when a rig is connected) | — |
 | Weak-signal mode | Relaxes VIS leader detection (40% → 25%) and start-bit minimum (20 ms → 15 ms) | Off |
 | Apply slant correction to final image | Re-decodes the completed image with a global least-squares timing correction. Helpful for clean signals with clock drift; can corrupt weak/marginal signals. | Off |
+| Per-line incremental decode (all modes) | Decodes each scan line as its sync pulse arrives instead of reprocessing the full audio buffer on every flush. Default since v0.1.24. Uncheck to fall back to the legacy batch decoder. | On |
 
 **TX gain calibration workflow:** With a rig connected, raise Output Gain → click Test Tone → watch your radio's ALC meter → adjust Output Gain up or down → repeat until ALC just barely flickers on peaks. The gain slider remains live while the tone is playing so you can tune without stopping. For typical IC-7300 / USB-audio setups, ~10–15% is the sweet spot.
 
@@ -483,6 +484,8 @@ Open the settings dialog via **File > Settings** (or the menu shortcut). It has 
 **Weak-signal RX mode:** Tick "Weak-signal mode" if you can hear an SSTV signal in the static but VIS decoding never triggers. This relaxes two internal detection thresholds (leader presence fraction 40% → 25%, minimum start-bit duration 20 ms → 15 ms) so faint or intermittently fading signals can lock on. The trade-off is slightly more false-positive VIS detections; these reset cleanly to IDLE and don't produce decode errors.
 
 **Apply slant correction to final image:** After a complete image is received, the app normally uses the progressive decode result as-is. With this option enabled, a second single-pass decode runs over the full retained audio buffer and applies a global least-squares timing correction (slant correction) to compensate for slight clock-drift between the transmitting station's soundcard and yours. This can straighten images that arrive slightly skewed. However, on weak or noisy signals the correction algorithm has no outlier rejection — false-positive sync detections corrupt the timing fit and produce a result *worse* than the progressive image. Leave this off unless you are receiving strong, clean signals from a station with a known timing drift problem.
+
+**Per-line incremental decode (all modes):** The default decoder since v0.1.24. Instead of reprocessing the full growing audio buffer on every flush (O(N²) CPU), this path decodes each scan line as soon as its sync pulse arrives — roughly 50× less CPU on long modes like Martin M1. All 22 supported modes are covered: Scottie, Martin, PD, Wraase SC2, Pasokon, and Robot 36. Robot 36 additionally benefits from linear (mean) chroma sampling and linear inter-row chroma upsampling, which produces softer, more accurate colour edges than the batch decoder's median + nearest-neighbour copy. The legacy batch decoder is still available as a fallback — uncheck this box if a decode looks wrong and file a bug with the saved audio.
 
 ![Audio settings tab](docs/screenshots/settings-audio.png)
 

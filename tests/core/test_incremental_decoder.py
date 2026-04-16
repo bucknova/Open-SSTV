@@ -13,7 +13,7 @@ Three acceptance criteria:
    strategy (FILTER_MARGIN = 4096 → startup transient is negligible) and
    confirms ``_sample_pixels_inc`` is in sync with ``decoder._sample_pixels``.
 
-3. **Decoder integration** — ``Decoder(experimental_incremental_decode=True)``
+3. **Decoder integration** — ``Decoder(incremental_decode=True)``
    routes Scottie S1 through the incremental path and emits the same
    ``ImageProgress / ImageComplete`` event stream as the batch decoder.
 """
@@ -146,7 +146,7 @@ def test_incremental_vs_batch_pixel_quality_scottie_s1() -> None:
     """ScottieS1IncrementalDecoder produces a high-quality image on a clean signal.
 
     Compares the incremental decoder against the batch *progressive* path
-    (``Decoder`` with ``experimental_incremental_decode=False``), which also
+    (``Decoder`` with ``incremental_decode=False``), which also
     uses ``walk_sync_grid``.
 
     **Why byte-exact comparison is not expected:**
@@ -170,7 +170,7 @@ def test_incremental_vs_batch_pixel_quality_scottie_s1() -> None:
     audio = _encode_scottie_s1(img, fs)
 
     # --- Batch progressive decode (walk_sync_grid on full signal) ---
-    dec = Decoder(fs, experimental_incremental_decode=False)
+    dec = Decoder(fs, incremental_decode=False)
     batch_events: list = []
     CHUNK = 96_000
     pos = 0
@@ -238,13 +238,13 @@ def test_incremental_vs_batch_pixel_quality_scottie_s1() -> None:
 
 
 def test_decoder_incremental_flag_routes_scottie_s1() -> None:
-    """Decoder(experimental_incremental_decode=True) emits ImageProgress and
+    """Decoder(incremental_decode=True) emits ImageProgress and
     ImageComplete for a Scottie S1 signal via the incremental path."""
     fs = 48_000
     img = _make_gradient_256()
     audio = _encode_scottie_s1(img, fs)
 
-    dec = Decoder(fs, experimental_incremental_decode=True)
+    dec = Decoder(fs, incremental_decode=True)
 
     events = []
     CHUNK = 96_000
@@ -268,7 +268,7 @@ def test_decoder_incremental_flag_routes_scottie_s1() -> None:
 
 
 def test_decoder_incremental_robot36_end_to_end() -> None:
-    """experimental_incremental_decode=True routes Robot 36 through the
+    """incremental_decode=True routes Robot 36 through the
     auto-detecting incremental wrapper and produces a complete image.
 
     The default Robot 36 encoder emits the canonical line-pair format,
@@ -279,7 +279,7 @@ def test_decoder_incremental_robot36_end_to_end() -> None:
     samples_int16 = encode(img, Mode.ROBOT_36, sample_rate=fs)
     audio = samples_int16.astype(np.float64) / 32768.0
 
-    dec = Decoder(fs, experimental_incremental_decode=True)
+    dec = Decoder(fs, incremental_decode=True)
 
     events = []
     CHUNK = 96_000
@@ -304,13 +304,13 @@ def test_decoder_incremental_robot36_end_to_end() -> None:
 
 
 def test_decoder_incremental_flag_false_uses_batch_for_scottie_s1() -> None:
-    """When experimental_incremental_decode=False (default), Scottie S1 still
+    """When incremental_decode=False (default), Scottie S1 still
     goes through the batch path and produces a complete image."""
     fs = 48_000
     img = _make_gradient_256()
     audio = _encode_scottie_s1(img, fs)
 
-    dec = Decoder(fs, experimental_incremental_decode=False)
+    dec = Decoder(fs, incremental_decode=False)
 
     events = []
     CHUNK = 96_000
@@ -348,7 +348,7 @@ def test_incremental_decoder_empty_feeds_return_no_lines() -> None:
 #
 # The same three acceptance criteria as Scottie, now parametrised across
 # the modes that the incremental path covers.  We exercise the full
-# Decoder pipeline (``experimental_incremental_decode=True``) rather than
+# Decoder pipeline (``incremental_decode=True``) rather than
 # instantiating the subclasses directly — this is the path that matters
 # to users and it catches routing regressions for free.
 
@@ -366,7 +366,7 @@ def _solid_image(width: int, height: int) -> Image.Image:
 def _run_decoder_events(
     audio: np.ndarray, fs: int, *, incremental: bool,
 ) -> list:
-    dec = Decoder(fs, experimental_incremental_decode=incremental)
+    dec = Decoder(fs, incremental_decode=incremental)
     events: list = []
     CHUNK = 96_000
     pos = 0

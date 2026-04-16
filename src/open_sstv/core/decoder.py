@@ -1072,13 +1072,13 @@ class Decoder:
         fs: int,
         *,
         weak_signal: bool = False,
-        experimental_incremental_decode: bool = False,
+        incremental_decode: bool = True,
     ) -> None:
         if fs <= 0:
             raise ValueError(f"Sample rate must be positive (got {fs})")
         self._fs = fs
         self._weak_signal = weak_signal
-        self._exp_incremental = experimental_incremental_decode
+        self._exp_incremental = incremental_decode
         self._buffer: list[np.ndarray] = []
         self._state = _DecoderState.IDLE
         # Set when VIS is detected (DECODING state):
@@ -1092,8 +1092,7 @@ class Decoder:
         # Optional cancellation event — set from the GUI thread to interrupt
         # an in-flight decode.  The RxWorker owns the Event and wires it here.
         self._cancel: threading.Event | None = None
-        # Incremental decoder instance — used when experimental_incremental_decode
-        # is True and mode is SCOTTIE_S1 (or another BEFORE_RED mode).
+        # Incremental decoder instance — used when incremental_decode is True.
         self._incremental_dec: ScottieS1IncrementalDecoder | None = None
         # How many samples of joined[] have been fed to the incremental decoder.
         self._incremental_total_fed: int = 0
@@ -1201,7 +1200,7 @@ class Decoder:
             ImageStarted(mode=mode, vis_code=vis_code)
         ]
 
-        # Experimental incremental decode path — Scottie / Martin / PD.
+        # Incremental decode path — Scottie / Martin / PD.
         # Robot 36 returns None from the factory and falls through to batch.
         if self._exp_incremental:
             # Lazy import avoids a circular dependency at module load time.
@@ -1219,7 +1218,11 @@ class Decoder:
                 if pre_vis.size > 0:
                     self._incremental_dec.feed(pre_vis)
                 self._incremental_total_fed = vis_end
-                return events  # immediate decode deferred to _feed_decoding
+                # Process any post-VIS audio already in the buffer so that
+                # callers who feed all samples in a single call still get
+                # progress/complete events (same behaviour as the batch path).
+                events.extend(self._feed_decoding_incremental(joined))
+                return events
 
         # Batch path: try an immediate partial decode — the buffer may already
         # contain a few scan lines (or even a full image if the caller

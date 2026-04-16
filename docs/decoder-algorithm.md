@@ -27,12 +27,14 @@ detect_vis               (vis: 1900 Hz leader → 1200 Hz start bit
 mode dispatch            (lookup in core.modes.MODE_TABLE)
         │
         ▼
-find_line_starts         (sync: per-line 1200 Hz pulse + porch)
-        │
+find_line_starts / incremental sync
+        │                (per-line 1200 Hz pulse + porch; incremental path
+        │                 feeds lines as sync pulses arrive instead of
+        │                 reprocessing the full buffer on every flush)
         ▼
-per-mode pixel decode    (decoder._decode_robot36 / _decode_martin /
-        │                 _decode_scottie — each maps frequency to luma /
-        │                 chroma per the mode's line layout)
+per-mode pixel decode    (incremental_decoder for all modes by default;
+        │                 decoder._decode_robot36 / _decode_martin /
+        │                 _decode_scottie available as legacy batch fallback)
         ▼
 slant correction         (slant: re-time based on observed line spacing)
         │
