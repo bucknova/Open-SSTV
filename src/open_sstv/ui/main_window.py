@@ -164,6 +164,11 @@ class MainWindow(QMainWindow):
     _request_test_tone = Signal()
     #: Gates the RX decoder on/off during TX (queued → RxWorker thread).
     _request_rx_gate = Signal(bool)
+    #: Settings-change dispatchers — queued to RxWorker so decoder rebuilds
+    #: happen on the worker thread, never racing with feed_chunk.
+    _rx_weak_signal_changed = Signal(bool)
+    _rx_incremental_decode_changed = Signal(bool)
+    _rx_sample_rate_changed = Signal(int)
 
     def __init__(
         self,
@@ -297,6 +302,12 @@ class MainWindow(QMainWindow):
         self._request_start_capture.connect(self._audio_worker.start)
         self._request_stop_capture.connect(self._audio_worker.stop)
         self._request_rx_reset.connect(self._rx_worker.reset)
+        # Settings dispatchers — connect BEFORE _apply_config is ever called.
+        # Because rx_worker lives on rx_thread, Qt auto-promotes these to
+        # QueuedConnection, so the decoder rebuilds happen on the worker thread.
+        self._rx_weak_signal_changed.connect(self._rx_worker.set_weak_signal)
+        self._rx_incremental_decode_changed.connect(self._rx_worker.set_incremental_decode)
+        self._rx_sample_rate_changed.connect(self._rx_worker.set_sample_rate)
 
         # Panel -> window (we translate capture_requested into the
         # dispatch signals above, because ``start`` needs the device
@@ -384,8 +395,8 @@ class MainWindow(QMainWindow):
             "About Open-SSTV",
             f"<h3>Open-SSTV v{__version__}</h3>"
             "<p>Open-source SSTV transceiver for amateur radio.</p>"
-            "<p>17 modes: Robot 36, Martin M1/M2, Scottie S1/S2/DX, "
-            "PD-90/120/160/180/240/290, Wraase SC2-120/180, Pasokon P3/P5/P7.</p>"
+            "<p>22 modes: Robot 36, Martin M1/M2/M3/M4, Scottie S1/S2/S3/S4/DX, "
+            "PD-50/90/120/160/180/240/290, Wraase SC2-120/SC2-180, Pasokon P3/P5/P7.</p>"
             "<p>Created by Kevin &mdash; W0AEZ</p>"
             '<p><a href="https://github.com/bucknova/Open-SSTV">'
             "github.com/bucknova/Open-SSTV</a></p>"
@@ -417,17 +428,19 @@ class MainWindow(QMainWindow):
         dlg.rejected.connect(
             lambda: self._tx_worker.set_output_gain(_original_output_gain)
         )
-        result = dlg.exec()
-
-        # Disconnect tx_worker → dlg signals immediately.  The dialog is
-        # about to go out of scope; if these connections linger, PySide6's
-        # C++ side holds a stale reference and the QDialogWrapper destructor
-        # segfaults during Python finalization (atexit → destroyQCoreApplication
-        # → PySide::destructionVisitor on an already-freed Python wrapper).
-        self._tx_worker.transmission_started.disconnect(dlg.on_tx_started)
-        self._tx_worker.transmission_complete.disconnect(dlg.on_tx_ended)
-        self._tx_worker.transmission_aborted.disconnect(dlg.on_tx_ended)
-        self._tx_worker.error.disconnect(dlg.on_tx_error)
+        try:
+            result = dlg.exec()
+        finally:
+            # Disconnect tx_worker → dlg signals immediately.  The dialog is
+            # about to go out of scope; if these connections linger, PySide6's
+            # C++ side holds a stale reference and the QDialogWrapper destructor
+            # segfaults during Python finalization (atexit → destroyQCoreApplication
+            # → PySide::destructionVisitor on an already-freed Python wrapper).
+            # The try/finally guarantees the disconnects fire even if exec() raises.
+            self._tx_worker.transmission_started.disconnect(dlg.on_tx_started)
+            self._tx_worker.transmission_complete.disconnect(dlg.on_tx_ended)
+            self._tx_worker.transmission_aborted.disconnect(dlg.on_tx_ended)
+            self._tx_worker.error.disconnect(dlg.on_tx_error)
 
         if result == SettingsDialog.DialogCode.Accepted:
             old_input_device = self._config.audio_input_device
@@ -480,11 +493,11 @@ class MainWindow(QMainWindow):
         new_input = find_input_device_by_name(self._config.audio_input_device)
         self._input_device = new_input
         self._rx_worker.set_input_gain(self._config.audio_input_gain)
-        self._rx_worker.set_weak_signal(self._config.rx_weak_signal_mode)
+        # Emit via queued signals so decoder rebuilds happen on the worker
+        # thread, not the GUI thread (H-02 fix).
+        self._rx_weak_signal_changed.emit(self._config.rx_weak_signal_mode)
         self._rx_worker.set_final_slant_correction(self._config.apply_final_slant_correction)
-        self._rx_worker.set_incremental_decode(
-            self._config.incremental_decode
-        )
+        self._rx_incremental_decode_changed.emit(self._config.incremental_decode)
         self._tx_worker.set_tx_banner(
             self._config.tx_banner_enabled,
             self._config.callsign,
@@ -499,9 +512,9 @@ class MainWindow(QMainWindow):
             self._config.cw_id_tone_hz,
         )
         # Propagate sample rate to both workers (takes effect on the next
-        # encode/capture start; see H-02 fix for full context).
+        # encode/capture start).
         self._tx_worker.set_sample_rate(self._config.sample_rate)
-        self._rx_worker.set_sample_rate(self._config.sample_rate)
+        self._rx_sample_rate_changed.emit(self._config.sample_rate)
 
     # === TX slots ===
 

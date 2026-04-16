@@ -12,6 +12,11 @@ encode→decode round-trip on the command line without bringing up Qt
 or audio hardware. This is the headless smoke test for the entire
 RX pipeline.
 
+Note: Robot 36 images decoded here use the batch median+PIL color
+pipeline rather than the slowrx-style integer matrix used by the GUI's
+incremental decoder. Output colors may differ slightly between the two
+paths.
+
 We read WAVs with stdlib ``wave`` rather than ``scipy.io.wavfile`` so
 the CLI works on a stripped-down install (someone running on a Pi
 with only the bare minimum). Multi-channel WAVs are mixed down to
@@ -41,7 +46,10 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "Decode an SSTV WAV file into an image. The mode is detected "
             "automatically from the VIS header. Returns a non-zero exit "
-            "code if no SSTV header is found in the audio."
+            "code if no SSTV header is found in the audio. "
+            "Note: Robot 36 images are decoded with the batch (median+PIL) "
+            "pipeline; the GUI live decoder uses the slowrx-style path and "
+            "may produce slightly different colors for Robot 36."
         ),
     )
     parser.add_argument(

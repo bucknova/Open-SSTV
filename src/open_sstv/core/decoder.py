@@ -110,7 +110,7 @@ _BANDPASS_MIN_SAMPLES: int = 256
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
-    from open_sstv.core.incremental_decoder import ScottieS1IncrementalDecoder
+    from open_sstv.core.incremental_decoder import IncrementalDecoder
 
 
 @dataclass(frozen=True, slots=True)
@@ -1056,15 +1056,22 @@ class Decoder:
     The decoder is a two-state machine:
 
     * **IDLE** — hunting for a VIS header. Each ``feed`` runs bandpass +
-      ``detect_vis`` on the growing buffer. On success, emits
+      ``detect_vis`` on the rolling window. On success, emits
       ``ImageStarted`` and transitions to DECODING.
-    * **DECODING** — VIS is locked, accumulating scan lines. Each
-      ``feed`` runs bandpass + demod + sync + partial pixel decode on the
-      growing buffer. Emits ``ImageProgress`` as new lines become
-      decodable (the image is full-size with black rows for undecoded
-      lines). Emits ``ImageComplete`` when all lines are present, then
-      auto-resets to IDLE so the next transmission is picked up without
-      an explicit ``reset()`` call.
+    * **DECODING** — VIS is locked, accumulating scan lines.
+
+      *Default path* (``incremental_decode=True``): each ``feed`` passes
+      only the new audio tail to the per-mode ``IncrementalDecoder``.
+      The decoder emits one ``ImageProgress`` per newly completed row,
+      so the image appears line-by-line in O(1 line period) per flush.
+      All 22 supported modes use this path.
+
+      *Batch fallback* (``incremental_decode=False``): each ``feed``
+      reruns bandpass + demod + sync + pixel decode over the full
+      growing buffer. CPU cost is O(N) per flush → O(N²) total.
+
+      In both cases the decoder emits ``ImageComplete`` when all scan
+      lines are present, then auto-resets to IDLE.
     """
 
     def __init__(
@@ -1078,7 +1085,7 @@ class Decoder:
             raise ValueError(f"Sample rate must be positive (got {fs})")
         self._fs = fs
         self._weak_signal = weak_signal
-        self._exp_incremental = incremental_decode
+        self._incremental_decode = incremental_decode
         self._buffer: list[np.ndarray] = []
         self._state = _DecoderState.IDLE
         # Set when VIS is detected (DECODING state):
@@ -1093,9 +1100,14 @@ class Decoder:
         # an in-flight decode.  The RxWorker owns the Event and wires it here.
         self._cancel: threading.Event | None = None
         # Incremental decoder instance — used when incremental_decode is True.
-        self._incremental_dec: ScottieS1IncrementalDecoder | None = None
+        # Annotated against the IncrementalDecoder Protocol so mypy accepts
+        # any concrete backend (Scottie, Martin, PD, Wraase, Pasokon, Robot 36).
+        self._incremental_dec: "IncrementalDecoder | None" = None
         # How many samples of joined[] have been fed to the incremental decoder.
         self._incremental_total_fed: int = 0
+        # High-water mark for lines_decoded; prevents backward progress events
+        # from Robot 36 per-line back-fill re-emissions.
+        self._incremental_max_row: int = 0
 
     @property
     def sample_rate(self) -> int:
@@ -1200,9 +1212,10 @@ class Decoder:
             ImageStarted(mode=mode, vis_code=vis_code)
         ]
 
-        # Incremental decode path — Scottie / Martin / PD.
-        # Robot 36 returns None from the factory and falls through to batch.
-        if self._exp_incremental:
+        # Incremental decode path — covers all 22 modes (Scottie, Martin,
+        # PD, Wraase, Pasokon, Robot 36).  Returns None only for an unknown
+        # mode; falls through to the batch path in that case.
+        if self._incremental_decode:
             # Lazy import avoids a circular dependency at module load time.
             from open_sstv.core.incremental_decoder import (  # noqa: PLC0415
                 make_incremental_decoder,
@@ -1234,7 +1247,7 @@ class Decoder:
 
     def _feed_decoding(self, joined: "NDArray") -> list[DecoderEvent]:
         """Decode available lines from the growing audio buffer."""
-        if self._exp_incremental and self._incremental_dec is not None:
+        if self._incremental_decode and self._incremental_dec is not None:
             return self._feed_decoding_incremental(joined)
 
         filtered = _bandpass(joined, self._fs)
@@ -1268,17 +1281,26 @@ class Decoder:
 
         events: list[DecoderEvent] = []
         image_height = self._incremental_dec.image_height
+        max_row = self._incremental_max_row
         for row_idx, _rgb in line_tuples:
+            # Only emit progress when lines_decoded would advance.  Robot 36
+            # per-line back-fill re-emits the previous row after each new row
+            # arrives (chroma neighbour update); without this guard the
+            # progress counter ticks backward, causing UI flicker.
+            if row_idx + 1 <= max_row:
+                continue
+            max_row = row_idx + 1
             img = self._incremental_dec.get_image()
             events.append(
                 ImageProgress(
                     image=img.copy(),
                     mode=self._mode,
                     vis_code=self._vis_code,
-                    lines_decoded=row_idx + 1,
+                    lines_decoded=max_row,
                     lines_total=image_height,
                 )
             )
+        self._incremental_max_row = max_row
 
         if self._incremental_dec.complete:
             img = self._incremental_dec.get_image()
@@ -1345,6 +1367,7 @@ class Decoder:
         self._last_lines = 0
         self._incremental_dec = None
         self._incremental_total_fed = 0
+        self._incremental_max_row = 0
 
     def _joined(self) -> "NDArray":
         if not self._buffer:

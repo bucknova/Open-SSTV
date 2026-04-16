@@ -845,3 +845,95 @@ def test_sample_scan_slowrx_constant_freq() -> None:
         f"constant-freq scan produced non-uniform output: "
         f"min={out.min()}, max={out.max()}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 7. Robot 36 round-trip quality (v0.1.25)
+# ---------------------------------------------------------------------------
+#
+# Verifies that the incremental (slowrx) path produces a usable image for a
+# clean synthetic Robot 36 signal in the line-pair wire format (the format
+# emitted by our own encoder and by most over-the-air encoders).
+#
+# Unlike Scottie/Martin/PD, the incremental and batch decoders for Robot 36
+# use different color pipelines (slowrx integer matrix vs median+PIL), so
+# byte-exact comparison is intentionally NOT required.  The bound is the
+# same ∞-SNR luma/chroma MAE threshold from the decoder algorithm spec:
+# luma MAE < 5 %, chroma MAE < 15 %.  On a solid-colour source the round-
+# trip should clear those bounds comfortably.
+
+
+def test_robot36_incremental_roundtrip_quality() -> None:
+    """Robot 36 line-pair format through the incremental decoder stays within
+    the ∞-SNR quality bound: luma MAE < 5 %, chroma MAE < 15 %.
+
+    Uses the line-pair wire format (our encoder / MMSSTV / iOS SimpleSSTV).
+    Per-channel mean absolute error is computed over a solid-colour source
+    so the true pixel value is known exactly.
+    """
+    fs = 48_000
+    # Use a non-trivial colour that exercises Cb and Cr (not just luma).
+    src_rgb = (180, 50, 230)  # purple-ish: R-heavy + blue
+    img = Image.new("RGB", (320, 240), color=src_rgb)
+
+    from open_sstv.core.encoder import encode  # noqa: PLC0415 — already imported at top
+
+    samples_int16 = encode(img, Mode.ROBOT_36, sample_rate=fs)
+    audio = samples_int16.astype(np.float64) / 32768.0
+
+    events = _run_decoder_events(audio, fs, incremental=True)
+    completes = [e for e in events if isinstance(e, ImageComplete)]
+    assert len(completes) == 1, "Robot 36 line-pair: expected exactly 1 ImageComplete"
+
+    decoded = np.array(completes[0].image, dtype=np.float64)
+    src = np.array(img.resize((320, 240)), dtype=np.float64)
+
+    # Luma MAE in [0, 255]: use BT.601 luma weights (same as YCbCr path).
+    def _luma(a: np.ndarray) -> np.ndarray:
+        return 0.299 * a[..., 0] + 0.587 * a[..., 1] + 0.114 * a[..., 2]
+
+    luma_mae = float(np.abs(_luma(decoded) - _luma(src)).mean()) / 255.0
+    assert luma_mae < 0.05, (
+        f"Robot 36 incremental luma MAE {luma_mae:.2%} exceeds 5% bound"
+    )
+
+    # Chroma MAE (per-channel, R and B which carry most chroma error).
+    for ch_idx, ch_name in [(0, "R"), (2, "B")]:
+        ch_mae = float(np.abs(decoded[..., ch_idx] - src[..., ch_idx]).mean()) / 255.0
+        assert ch_mae < 0.15, (
+            f"Robot 36 incremental {ch_name}-channel MAE {ch_mae:.2%} exceeds 15% bound"
+        )
+
+
+def test_robot36_incremental_progress_is_monotonic() -> None:
+    """lines_decoded in ImageProgress events must never decrease.
+
+    Robot 36 per-line back-fill re-emits the previous row, which used to
+    cause a backward tick in the progress counter.  This test drives the
+    Decoder (not the bare incremental decoder) to confirm the M-03 fix
+    holds end-to-end.
+    """
+    fs = 48_000
+    # Encode via PySSTV's vanilla per-line Robot36 to exercise the back-fill
+    # code path (line-pair format never back-fills).
+    img = Image.new("RGB", (320, 240), color=(100, 180, 60))
+    from pysstv.color import Robot36 as PySSTVRobot36  # noqa: PLC0415
+
+    prepared = img.resize((320, 240))
+    sstv = PySSTVRobot36(prepared.convert("RGB"), fs, 16)
+    samples_int16 = np.fromiter(sstv.gen_samples(), dtype=np.int16)
+    audio = samples_int16.astype(np.float64) / 32768.0
+
+    events = _run_decoder_events(audio, fs, incremental=True)
+    progress_events = [e for e in events if isinstance(e, ImageProgress)]
+
+    # lines_decoded must be strictly non-decreasing across all progress events.
+    lines_seen = [e.lines_decoded for e in progress_events]
+    for i in range(1, len(lines_seen)):
+        assert lines_seen[i] >= lines_seen[i - 1], (
+            f"lines_decoded went backward at event {i}: "
+            f"{lines_seen[i-1]} → {lines_seen[i]} (back-fill leaking through filter?)"
+        )
+
+    # Sanity: we should have decoded some lines.
+    assert len(progress_events) > 0, "no ImageProgress events — Robot 36 per-line not decoding"

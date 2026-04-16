@@ -357,3 +357,95 @@ def test_set_final_slant_correction_toggles_behavior(qapp) -> None:
     assert worker._final_slant_correction is True
     worker.set_final_slant_correction(False)
     assert worker._final_slant_correction is False
+
+
+# === decoder rebuild tests (H-02) ===
+
+
+def test_set_weak_signal_rebuilds_decoder(qapp) -> None:
+    """set_weak_signal() must replace _decoder with a fresh Decoder that has
+    weak_signal=True, preserving the current incremental_decode setting.
+
+    This validates the @Slot(bool) rebuild path.  Threading correctness is
+    the responsibility of the queued signal connection set up in MainWindow;
+    here we verify the rebuild semantics are right.
+    """
+    worker = RxWorker(sample_rate=48_000, incremental_decode=True)
+    old_decoder = worker._decoder
+
+    worker.set_weak_signal(True)
+
+    assert worker._decoder is not old_decoder, "decoder must be replaced"
+    assert worker._decoder._weak_signal is True
+    # incremental_decode setting is preserved across the rebuild
+    assert worker._decoder._incremental_decode is True
+
+
+def test_set_weak_signal_preserves_incremental_false(qapp) -> None:
+    """set_weak_signal() preserves incremental_decode=False if that was set."""
+    worker = RxWorker(sample_rate=48_000, incremental_decode=False)
+    worker.set_weak_signal(True)
+    assert worker._decoder._incremental_decode is False
+
+
+def test_set_incremental_decode_rebuilds_decoder(qapp) -> None:
+    """set_incremental_decode(False) must replace _decoder with a Decoder
+    that has incremental_decode=False, preserving weak_signal.
+    """
+    worker = RxWorker(sample_rate=48_000, incremental_decode=True, weak_signal=False)
+    old_decoder = worker._decoder
+
+    worker.set_incremental_decode(False)
+
+    assert worker._decoder is not old_decoder, "decoder must be replaced"
+    assert worker._decoder._incremental_decode is False
+    # weak_signal setting is preserved
+    assert worker._decoder._weak_signal is False
+
+
+def test_set_incremental_decode_round_trip(qapp) -> None:
+    """Toggling incremental_decode on and off replaces decoder each time."""
+    worker = RxWorker(sample_rate=48_000, incremental_decode=True)
+    d0 = worker._decoder
+
+    worker.set_incremental_decode(False)
+    d1 = worker._decoder
+    assert d1 is not d0
+    assert d1._incremental_decode is False
+
+    worker.set_incremental_decode(True)
+    d2 = worker._decoder
+    assert d2 is not d1
+    assert d2._incremental_decode is True
+
+
+# === Robot 36 slant-correction skip (H-03) ===
+
+
+def test_final_slant_skips_robot36_keeps_progressive(qapp) -> None:
+    """With final_slant_correction=True and mode=ROBOT_36, decode_wav must
+    NOT be called — the incremental and batch Robot 36 paths use different
+    color pipelines and mixing them would silently degrade image quality.
+    """
+    worker = RxWorker(sample_rate=48_000, flush_samples=1, final_slant_correction=True)
+    prog_image = Image.new("RGB", (320, 240), color=(10, 20, 30))
+    event = ImageComplete(image=prog_image, mode=Mode.ROBOT_36, vis_code=8)
+    raw_audio = np.zeros(100, dtype=np.float64)
+
+    worker._decoder = MagicMock()
+    worker._decoder.feed.return_value = [
+        ImageStarted(mode=Mode.ROBOT_36, vis_code=8),
+        event,
+    ]
+    worker._decoder.consume_last_buffer.return_value = raw_audio
+
+    log = _record_signals(worker)
+
+    with patch("open_sstv.ui.workers.decode_wav") as mock_dw:
+        worker.feed_chunk(np.zeros(10, dtype=np.float32))
+
+    mock_dw.assert_not_called()
+    assert len(log["image_complete"]) == 1
+    img, mode, code = log["image_complete"][0]
+    assert img is prog_image
+    assert mode == Mode.ROBOT_36

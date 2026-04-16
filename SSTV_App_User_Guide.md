@@ -79,7 +79,7 @@ Open-SSTV is a free, open-source, cross-platform SSTV transceiver for amateur ra
 Key features at a glance:
 
 - **Transmit and receive** SSTV images with a modern Qt 6 interface
-- **Three popular SSTV modes**: Robot 36, Martin M1, Scottie S1
+- **22 SSTV modes** across the Robot, Martin, Scottie, PD, Wraase SC2, and Pasokon families
 - **Real-time progressive decode** — watch the image appear line by line as it is received
 - **Automatic VIS detection** — the app identifies the incoming SSTV mode automatically
 - **Built-in image editor** with crop, rotate, flip, and text overlays

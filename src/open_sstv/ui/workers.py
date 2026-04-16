@@ -50,15 +50,17 @@ RxWorker
 
 The RX flow is the inverse of TX: chunks stream in from
 ``InputStreamWorker.chunk_ready`` on a worker thread and the worker
-hands them to ``core.decoder.Decoder``. The decoder's ``feed`` call
-runs ``decode_wav`` over the accumulated buffer every time, which is
-O(buffer) and therefore prohibitive if called on every ~20 ms audio
-chunk. The worker absorbs that by accumulating chunks locally and
-only flushing to ``Decoder.feed`` every ``_RX_FLUSH_SAMPLES_DEFAULT``
-samples of audio (1 s at 48 kHz). This turns a 36 s Robot 36
-transmission from ~1800 decode attempts into ~36, each of which
-fails fast until the full image is present — leaving plenty of
-headroom on a Pi-class machine.
+hands them to ``core.decoder.Decoder``. The worker accumulates chunks
+locally and flushes to ``Decoder.feed`` every ``_RX_FLUSH_SAMPLES_DEFAULT``
+samples (1 s at 48 kHz default). This caps the VIS-hunt overhead in IDLE
+state while keeping latency low enough that the first decoded row appears
+well within one flush cycle of the sync pulse.
+
+In DECODING state (``incremental_decode=True``, the default since v0.1.24)
+the ``Decoder`` passes only new audio to the per-mode incremental backend,
+so each flush is O(1 line period) regardless of transmission length. A
+36 s Robot 36 or 110 s Scottie S1 stays comfortably ahead of real-time
+on Pi-class hardware.
 
 ``DecoderEvent`` values from ``Decoder.feed`` are translated into
 Qt signals (``image_started``, ``image_complete``, ``error``) so UI
@@ -603,7 +605,7 @@ class RxWorker(QObject):
         self._sample_rate = sample_rate
         self._weak_signal = weak_signal
         self._final_slant_correction = final_slant_correction
-        self._exp_incremental = incremental_decode
+        self._incremental_decode = incremental_decode
         self._cancel_event = threading.Event()
         self._decoder = Decoder(
             sample_rate,
@@ -627,16 +629,24 @@ class RxWorker(QObject):
         """Set the software input gain (1.0 = unity). Thread-safe."""
         self._input_gain = gain
 
+    @Slot(bool)
     def set_weak_signal(self, enabled: bool) -> None:
-        """Enable or disable weak-signal VIS detection mode. Thread-safe."""
+        """Enable or disable weak-signal VIS detection mode.
+
+        Decorated ``@Slot(bool)`` so the GUI thread can dispatch this
+        via a queued signal connection, guaranteeing the decoder rebuild
+        happens on the worker's own event loop (never racing with
+        ``feed_chunk``).
+        """
         self._weak_signal = enabled
         self._decoder = Decoder(
             self._sample_rate,
             weak_signal=enabled,
-            incremental_decode=self._exp_incremental,
+            incremental_decode=self._incremental_decode,
         )
         self._decoder.set_cancel_event(self._cancel_event)
 
+    @Slot(bool)
     def set_incremental_decode(self, enabled: bool) -> None:
         """Enable or disable the per-line incremental decoder.
 
@@ -644,8 +654,11 @@ class RxWorker(QObject):
         next incoming VIS.  Any partial decode in flight is discarded with
         the old Decoder instance — callers should toggle this between
         transmissions, not mid-RX.
+
+        Decorated ``@Slot(bool)`` so the GUI thread can dispatch this via a
+        queued signal, guaranteeing the rebuild happens on the worker thread.
         """
-        self._exp_incremental = enabled
+        self._incremental_decode = enabled
         self._decoder = Decoder(
             self._sample_rate,
             weak_signal=self._weak_signal,
@@ -687,19 +700,23 @@ class RxWorker(QObject):
             # Clear any audio that bled in from the TX period and start fresh.
             self.reset()
 
+    @Slot(int)
     def set_sample_rate(self, sample_rate: int) -> None:
         """Update the sample rate and reconstruct the internal Decoder.
 
         Should be called only when capture is not running — the new
         Decoder discards any in-flight buffered audio. The caller
-        (``MainWindow._open_settings``) shows a status-bar notice asking
+        (``MainWindow._apply_config``) shows a status-bar notice asking
         the user to restart capture when the rate changes mid-session.
+
+        Decorated ``@Slot(int)`` so the GUI thread can dispatch this via a
+        queued signal, guaranteeing the rebuild happens on the worker thread.
         """
         self._sample_rate = sample_rate
         self._decoder = Decoder(
             sample_rate,
             weak_signal=self._weak_signal,
-            incremental_decode=self._exp_incremental,
+            incremental_decode=self._incremental_decode,
         )
         self._decoder.set_cancel_event(self._cancel_event)
         self._scratch.clear()
@@ -847,17 +864,31 @@ class RxWorker(QObject):
                 # least-squares slant correction.  Helpful for clean signals
                 # with clock drift; harmful for weak/noisy signals where
                 # false-positive syncs corrupt the polyfit.
-                try:
-                    if raw is not None and isinstance(raw, np.ndarray) and raw.size > 0:
-                        result = decode_wav(raw, self._sample_rate)
-                        if result is not None and result.mode == event.mode:
-                            final_image = result.image
-                except Exception as exc:  # noqa: BLE001
+                #
+                # Robot 36 is explicitly excluded: the incremental path uses
+                # the slowrx color pipeline (direct integer YCbCr→RGB matrix)
+                # while decode_wav/_decode_robot36 uses the older median+PIL
+                # path.  Substituting the batch result would silently swap
+                # pipelines, producing visibly different colors.  Users who
+                # need slant correction for Robot 36 should use a hardware or
+                # software sample-rate lock instead.
+                if event.mode == Mode.ROBOT_36:
                     _log.debug(
-                        "re-decode (slant correction) failed, using progressive result: %s",
-                        exc,
-                        exc_info=True,
+                        "slant-correction re-decode skipped for Robot 36 "
+                        "(batch and incremental paths use different color pipelines)"
                     )
+                else:
+                    try:
+                        if raw is not None and isinstance(raw, np.ndarray) and raw.size > 0:
+                            result = decode_wav(raw, self._sample_rate)
+                            if result is not None and result.mode == event.mode:
+                                final_image = result.image
+                    except Exception as exc:  # noqa: BLE001
+                        _log.debug(
+                            "re-decode (slant correction) failed, using progressive result: %s",
+                            exc,
+                            exc_info=True,
+                        )
             self.image_complete.emit(final_image, event.mode, event.vis_code)
         elif isinstance(event, DecodeError):
             self.error.emit(event.message)

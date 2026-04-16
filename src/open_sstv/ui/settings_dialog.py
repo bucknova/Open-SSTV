@@ -271,10 +271,10 @@ class SettingsDialog(QDialog):
         # Every mode routes through the incremental decoder for roughly
         # O(n) rather than O(n²) CPU cost.  Robot 36 additionally uses
         # the linear-chroma + interpolating upsampler path.
-        self._exp_incremental_check = QCheckBox(
+        self._incremental_check = QCheckBox(
             "Per-line incremental decode (all modes)"
         )
-        self._exp_incremental_check.setToolTip(
+        self._incremental_check.setToolTip(
             "Decodes each line as its sync pulse arrives instead of\n"
             "reprocessing the whole buffer on every flush.\n\n"
             "Covers Scottie, Martin, PD, Wraase SC2, Pasokon, and Robot 36\n"
@@ -288,10 +288,10 @@ class SettingsDialog(QDialog):
             "On by default.  Uncheck to fall back to the legacy batch\n"
             "decoder if a decode looks wrong."
         )
-        self._exp_incremental_check.setChecked(
+        self._incremental_check.setChecked(
             self._config.incremental_decode
         )
-        rx_layout.addRow(self._exp_incremental_check)
+        rx_layout.addRow(self._incremental_check)
 
         form.addRow(rx_group)
 
@@ -1083,7 +1083,7 @@ class SettingsDialog(QDialog):
             tx_output_overdrive=self._overdrive_check.isChecked(),
             rx_weak_signal_mode=self._weak_signal_check.isChecked(),
             apply_final_slant_correction=self._final_slant_check.isChecked(),
-            incremental_decode=self._exp_incremental_check.isChecked(),
+            incremental_decode=self._incremental_check.isChecked(),
             cw_id_enabled=self._cw_enabled.isChecked(),
             cw_id_wpm=self._cw_wpm.value(),
             cw_id_tone_hz=self._cw_tone_hz.value(),

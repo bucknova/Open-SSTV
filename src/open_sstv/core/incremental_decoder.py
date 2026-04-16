@@ -66,7 +66,7 @@ use this helper at all — it has its own slowrx-style sampler.
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import numpy as np
 from PIL import Image
@@ -84,6 +84,41 @@ from open_sstv.core.sync import find_sync_candidates, walk_sync_grid
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
+
+
+# ---------------------------------------------------------------------------
+# Public Protocol
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class IncrementalDecoder(Protocol):
+    """Structural type shared by all per-line streaming decoder backends.
+
+    ``IncrementalDecoderBase`` subclasses (Scottie, Martin, PD, Wraase,
+    Pasokon) and ``Robot36IncrementalDecoder`` (which duck-types this
+    interface rather than inheriting it) both satisfy this Protocol.
+
+    Use this as the annotation for variables that may hold any concrete
+    incremental decoder — e.g. ``_incremental_dec: IncrementalDecoder | None``.
+    """
+
+    @property
+    def complete(self) -> bool: ...
+
+    @property
+    def image_height(self) -> int: ...
+
+    @property
+    def lines_decoded(self) -> int: ...
+
+    @property
+    def total_fed(self) -> int: ...
+
+    def feed(self, chunk: "NDArray") -> "list[tuple[int, NDArray[np.uint8]]]": ...
+
+    def get_image(self) -> Image.Image: ...
+
 
 # Bandpass edges — identical to decoder._BANDPASS_LOW/HIGH/ORDER.
 _BP_LOW_HZ: float = 1000.0
@@ -972,10 +1007,10 @@ class PDIncrementalDecoder(IncrementalDecoderBase):
 #      PIL's convert-YCbCr but gives explicit, reproducible output
 #      matching the reference bit-for-bit.
 #
-# The batch Robot 36 decoder in ``decoder.py`` is still the old
-# median / PIL / nearest-neighbour path — intentional, so the
-# experimental flag lets users A/B between batch and slowrx-style from
-# a single build.
+# The batch Robot 36 decoder in ``decoder.py`` retains the old
+# median / PIL / nearest-neighbour path.  It is used only by the
+# optional final slant-correction re-decode (which skips Robot 36 to
+# avoid a pipeline mismatch) and the ``decode_wav`` / CLI entry point.
 #
 # slowrx itself does not implement the PySSTV per-line wire format,
 # but the sampling model transfers cleanly; we support both wire
@@ -1437,6 +1472,7 @@ def make_incremental_decoder(
 
 
 __all__ = [
+    "IncrementalDecoder",
     "IncrementalDecoderBase",
     "ScottieIncrementalDecoder",
     "ScottieS1IncrementalDecoder",  # back-compat alias

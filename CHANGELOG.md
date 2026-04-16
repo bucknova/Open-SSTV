@@ -11,6 +11,57 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.25] — 2026-04-15
+
+### Fixed
+- **Thread safety: decoder rebuilds now happen on the worker thread.**
+  `RxWorker.set_weak_signal`, `set_incremental_decode`, and `set_sample_rate`
+  are now `@Slot`-decorated; `MainWindow._apply_config` dispatches them via
+  queued signals instead of direct calls, so decoder reconstruction never
+  races with `feed_chunk` on the RX worker thread. (H-02)
+- **Robot 36 + final slant correction no longer silently swaps color pipelines.**
+  The final single-pass re-decode (opt-in setting) now skips Robot 36 and
+  logs a debug note. The incremental path uses the slowrx integer-matrix
+  pipeline; the batch path uses median+PIL — substituting the batch result
+  would degrade color quality without warning. (H-03)
+- **Settings dialog signal disconnects guarded by try/finally.** If
+  `dlg.exec()` raises, the four `TxWorker → SettingsDialog` connections
+  are now always severed, preventing a stale-wrapper segfault during
+  Python finalization. (H-04)
+- **Robot 36 progressive decode no longer flickers backward.** Per-line
+  back-fill re-emissions (chroma neighbour updates) are now suppressed in
+  `_feed_decoding_incremental` via a high-water-mark guard; `lines_decoded`
+  in `ImageProgress` events is strictly non-decreasing. (M-03)
+
+### Changed
+- **`IncrementalDecoder` Protocol added** to `incremental_decoder.py`.
+  `Decoder._incremental_dec` is now annotated as
+  `IncrementalDecoder | None` — covers all six concrete backends instead
+  of the stale `ScottieS1IncrementalDecoder` annotation. (H-01)
+- Internal field `_exp_incremental` renamed to `_incremental_decode` in
+  `decoder.py` and `workers.py`; widget `_exp_incremental_check` renamed
+  to `_incremental_check` in `settings_dialog.py`. (M-02)
+- About dialog updated: mode count 17 → 22; mode list now includes Martin
+  M3/M4, Scottie S3/S4, PD-50, and PD-160 which were missing. (M-04)
+- `RxWorker` module docstring updated to describe the incremental decode
+  path as the primary path since v0.1.24. (M-05)
+- User guide "Three popular SSTV modes" updated to "22 SSTV modes across
+  the Robot, Martin, Scottie, PD, Wraase SC2, and Pasokon families". (L-02)
+- CLI `open-sstv-decode` help text now notes that Robot 36 output may
+  differ slightly from the GUI (different color pipelines). (L-03)
+
+### Tests added
+- `test_set_weak_signal_rebuilds_decoder` / `test_set_incremental_decode_rebuilds_decoder`
+  — verify the Decoder is replaced with correct settings after each call.
+- `test_final_slant_skips_robot36_keeps_progressive` — verify `decode_wav`
+  is never called for Robot 36 when final slant correction is enabled.
+- `test_robot36_incremental_roundtrip_quality` — Robot 36 line-pair round-trip
+  via the incremental decoder; luma MAE < 5%, chroma MAE < 15%.
+- `test_robot36_incremental_progress_is_monotonic` — `lines_decoded` never
+  decreases across `ImageProgress` events for per-line Robot 36 audio.
+
+---
+
 ## [0.1.24] — 2026-04-15
 
 ### Changed
