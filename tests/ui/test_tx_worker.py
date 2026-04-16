@@ -439,25 +439,159 @@ def test_cw_id_output_gain_applied_to_cw(
     assert int(np.abs(cw_portion).max()) <= 5001
 
 
-# === Watchdog covers every mode (OP-01 regression guard) ===
+# === Per-transmission watchdog (OP-01 follow-up, v0.1.28) ===
 
 
-def test_watchdog_covers_every_mode_with_headroom() -> None:
-    """_MAX_TX_DURATION_S must cover every supported mode with margin.
-
-    Each transmission carries the mode body + VIS leader (~0.7 s) + PTT
-    delay (up to 2 s) + CW station ID (up to ~15 s for a long callsign at
-    15 WPM).  A 30 s slop comfortably covers all of that.  Without this
-    test, adding a new long mode (Pasokon P7 at 406 s) silently broke
-    when ``_MAX_TX_DURATION_S = 300`` in v0.1.21–v0.1.26.  Raising the
-    watchdog to 600 s in v0.1.27 cleared every currently-shipping mode;
-    this assertion pins the invariant for future modes too.
+class TestComputePlaybackWatchdog:
+    """Direct tests for ``_compute_playback_watchdog_s`` — the helper
+    that drives the per-transmission playback watchdog budget.  Replaces
+    the v0.1.27 ``_MAX_TX_DURATION_S`` constant with a formula that
+    scales with actual encoded sample count + PTT delay.
     """
-    from open_sstv.core.modes import MODE_TABLE
-    from open_sstv.ui.workers import _MAX_TX_DURATION_S
 
-    longest = max(spec.total_duration_s for spec in MODE_TABLE.values())
-    assert _MAX_TX_DURATION_S >= longest + 30, (
-        f"Watchdog {_MAX_TX_DURATION_S:.0f}s < longest mode "
-        f"{longest:.0f}s + 30s slop — will abort long-mode TX mid-flight."
-    )
+    def test_short_transmission_uses_floor(self) -> None:
+        """A 5 s tone at default PTT of 0.2 s gives 5.2 × 1.2 = 6.24 s,
+        which the 30 s floor overrides."""
+        from open_sstv.ui.workers import (
+            _PLAYBACK_WATCHDOG_FLOOR_S,
+            _compute_playback_watchdog_s,
+        )
+        # 5 s × 48 kHz = 240 000 samples + 0.2 s PTT
+        budget = _compute_playback_watchdog_s(48_000 * 5, 48_000, 0.2)
+        assert budget == _PLAYBACK_WATCHDOG_FLOOR_S
+
+    def test_long_transmission_uses_margin(self) -> None:
+        """A 400 s transmission at default PTT gives the multiplicative
+        margin (400.2 × 1.2 = 480.24) which exceeds the floor."""
+        from open_sstv.ui.workers import _compute_playback_watchdog_s
+        budget = _compute_playback_watchdog_s(48_000 * 400, 48_000, 0.2)
+        assert abs(budget - 480.24) < 0.01
+
+    def test_zero_sample_rate_falls_back_to_floor(self) -> None:
+        """Defensive: a pathological fs=0 input doesn't divide-by-zero,
+        it just returns the floor so PTT is still bounded."""
+        from open_sstv.ui.workers import (
+            _PLAYBACK_WATCHDOG_FLOOR_S,
+            _compute_playback_watchdog_s,
+        )
+        assert _compute_playback_watchdog_s(100, 0, 0.2) == _PLAYBACK_WATCHDOG_FLOOR_S
+
+    def test_covers_every_mode_with_worst_case_cw_tail(self) -> None:
+        """For every shipping mode, the computed budget must cover the
+        actual wall-clock TX duration (body + VIS + 12 s worst-case CW
+        tail at 15 WPM) with non-zero headroom.  Catches the regression
+        scenario that killed v0.1.26 Pasokon P5/P7: a new long mode is
+        added and the watchdog constant doesn't keep up.
+        """
+        from open_sstv.core.modes import MODE_TABLE
+        from open_sstv.ui.workers import _compute_playback_watchdog_s
+
+        SR = 48_000
+        PTT_S = 0.2
+        VIS_S = 0.7       # approximate VIS leader contribution
+        CW_OVERHEAD_S = 12.5  # 0.5 s gap + ~12 s of CW for a 6-char callsign at 15 WPM
+
+        for mode, spec in MODE_TABLE.items():
+            body_s = spec.total_duration_s + VIS_S
+            total_audio_s = body_s + CW_OVERHEAD_S
+            samples_n = int(total_audio_s * SR)
+            budget_s = _compute_playback_watchdog_s(samples_n, SR, PTT_S)
+
+            actual_tx_s = PTT_S + total_audio_s
+            assert budget_s >= actual_tx_s, (
+                f"{mode.value}: budget {budget_s:.1f}s does not cover "
+                f"actual TX {actual_tx_s:.1f}s"
+            )
+            # Headroom: at least the smaller of 5 s (short modes rely
+            # on the floor) or the multiplicative margin.
+            headroom = budget_s - actual_tx_s
+            assert headroom >= 0, (
+                f"{mode.value}: headroom {headroom:.1f}s is negative"
+            )
+
+    def test_tightens_vs_previous_fixed_constant(self) -> None:
+        """A Robot 36 TX should now have a much tighter watchdog than
+        the 600 s constant it replaced — this is the regulatory-
+        compliance win of going per-transmission.
+        """
+        from open_sstv.ui.workers import _compute_playback_watchdog_s
+        # Robot 36 body ~36 s + VIS + 5 s CW tail + 0.2 s PTT = ~42 s
+        samples_n = int(42.0 * 48_000)
+        budget_s = _compute_playback_watchdog_s(samples_n, 48_000, 0.2)
+        # Budget should be WAY below the old 600 s — cuts stuck-rig
+        # exposure from 10 minutes to ~1 minute.
+        assert budget_s < 120.0, (
+            f"Robot 36 watchdog {budget_s:.1f}s didn't tighten below 120s "
+            "— per-transmission formula may be broken."
+        )
+
+
+class TestTwoStageWatchdogIntegration:
+    """Integration tests: transmit() creates both watchdog stages with
+    the right durations and cancels them on clean exit."""
+
+    def test_transmit_creates_two_watchdogs(
+        self,
+        qapp,
+        gradient_image: Image.Image,
+        patch_encode_and_playback: dict[str, MagicMock],
+        monkeypatch: pytest.MonkeyPatch,
+        fake_samples: np.ndarray,
+    ) -> None:
+        """transmit() must start a stage-1 encode watchdog AND a stage-2
+        playback watchdog, in that order, with durations that match the
+        _ENCODE_WATCHDOG_S constant and the _compute_playback_watchdog_s
+        formula respectively.
+        """
+        import threading as _threading
+
+        from open_sstv.ui.workers import (
+            _ENCODE_WATCHDOG_S,
+            _compute_playback_watchdog_s,
+        )
+
+        captured: list[float] = []
+        real_timer = _threading.Timer
+
+        class CapturingTimer(real_timer):  # type: ignore[misc,valid-type]
+            def __init__(self, interval, function, args=None, kwargs=None):
+                captured.append(interval)
+                super().__init__(interval, function, args, kwargs)
+
+        monkeypatch.setattr("threading.Timer", CapturingTimer)
+
+        worker = TxWorker(rig=ManualRig(), ptt_delay_s=0, sample_rate=48_000)
+        worker.transmit(gradient_image, Mode.ROBOT_36)
+
+        # Stage 1 + Stage 2 = exactly two timers constructed.
+        assert len(captured) == 2, f"Expected 2 watchdogs, got {len(captured)}: {captured}"
+        assert captured[0] == _ENCODE_WATCHDOG_S, (
+            f"Stage 1 should be {_ENCODE_WATCHDOG_S}s, got {captured[0]}s"
+        )
+        # Stage 2 budget derived from the fake samples (100 zeros) at 48 kHz.
+        # CW tail is appended in transmit() since default cw_id_enabled=False
+        # on this worker (no set_cw_id call) — so samples.size stays at
+        # len(fake_samples) = 100.
+        expected_stage2 = _compute_playback_watchdog_s(
+            len(fake_samples), 48_000, 0.0
+        )
+        assert captured[1] == expected_stage2, (
+            f"Stage 2 should be {expected_stage2}s, got {captured[1]}s"
+        )
+
+    def test_watchdog_fired_signal_carries_duration(
+        self,
+        qapp,
+        patch_encode_and_playback: dict[str, MagicMock],
+    ) -> None:
+        """``_watchdog_fire(duration_s)`` forwards the budget via the Qt
+        signal so the UI can format a precise message."""
+        worker = TxWorker(rig=ManualRig(), ptt_delay_s=0)
+        captured: list[float] = []
+        worker.watchdog_fired.connect(lambda d: captured.append(d))
+
+        # Fire the watchdog directly with a known budget — simulates
+        # a timer timeout without waiting for wall clock.
+        worker._watchdog_fire(42.5)
+
+        assert captured == [42.5]

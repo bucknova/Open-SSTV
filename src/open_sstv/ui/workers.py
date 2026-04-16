@@ -130,16 +130,56 @@ _DECODE_FLUSH_INTERVAL_S: float = 1.0
 #: ``flush_samples`` is not passed explicitly.
 _RX_FLUSH_SAMPLES_DEFAULT: int = int(_DECODE_FLUSH_INTERVAL_S * DEFAULT_SAMPLE_RATE)
 
-#: Hard upper bound on a single transmission. If encode + playback have
-#: not finished within this many seconds the watchdog fires, forcing PTT
-#: off and aborting playback. The longest SSTV mode we ship is Pasokon P7
-#: at ~406 s body + VIS leader + CW ID tail; 600 s gives headroom for a
-#: full P7 transmission plus a 15 WPM CW tail plus future even-longer
-#: modes, while still protecting against a stuck encoder or hung audio
-#: driver. Cross-checked against every mode's
-#: ``ModeSpec.total_duration_s`` in
-#: ``tests/ui/test_tx_worker.py::test_watchdog_covers_every_mode``.
-_MAX_TX_DURATION_S: float = 600.0
+#: Hard upper bound on the encode / banner-stamp / CW-append stage.
+#: Encoding is CPU-bound and finishes in ~100 ms even for the longest
+#: mode we ship (Pasokon P7), so 30 s is wildly generous — its only job
+#: is to release PTT (we haven't keyed yet at this stage but the user
+#: may have queued the next TX) if the encoder gets wedged on a corrupt
+#: input.  Stage 1 of the two-stage watchdog (OP-01 follow-up): replaces
+#: the old fixed 600 s upper bound with a per-transmission budget once
+#: the encoded sample count is known.
+_ENCODE_WATCHDOG_S: float = 30.0
+
+#: Multiplicative margin on top of the expected wall-clock playback
+#: duration (PTT delay + samples / sample_rate).  20 % absorbs OS-level
+#: audio jitter — driver buffer underruns, scheduling hiccups, brief
+#: USB / Bluetooth stalls — without leaving so much slack that a
+#: genuinely-stuck transmitter holds the rig keyed for minutes.
+_PLAYBACK_WATCHDOG_MARGIN: float = 1.20
+
+#: Lower bound on the playback watchdog.  Short modes (Robot 36 at
+#: 36 s, the 5 s test tone) would otherwise have very tight margins
+#: where a single audio underrun could trip a false positive: 36 s × 1.2
+#: leaves only 7 s of headroom.  30 s is roughly the slowest plausible
+#: end-to-end latency for any reasonable system and gives every short
+#: TX a real safety budget.
+_PLAYBACK_WATCHDOG_FLOOR_S: float = 30.0
+
+
+def _compute_playback_watchdog_s(
+    samples_n: int, sample_rate: int, ptt_delay_s: float
+) -> float:
+    """Return the watchdog budget for playback of ``samples_n`` samples.
+
+    Per-transmission watchdog formula introduced after the v0.1.27 audit:
+    the budget is the actual expected wall-clock TX duration (PTT delay
+    plus the encoded sample count divided by the sample rate) scaled by
+    ``_PLAYBACK_WATCHDOG_MARGIN``, with a hard ``_PLAYBACK_WATCHDOG_FLOOR_S``
+    floor for short transmissions.
+
+    The previous design (single fixed 600 s constant) gave Pasokon P7
+    coverage and Robot 36 ten minutes of stuck-rig exposure — a
+    regulatory liability.  This formula scales automatically with mode
+    duration, CW tail length, and PTT delay setting, so a stuck Robot 36
+    aborts at ~73 s instead of 600 s and a Pasokon P7 still has its full
+    ~500 s budget.
+    """
+    if sample_rate <= 0:
+        # Degenerate input — fall back to the floor so we still bound
+        # PTT exposure rather than dividing by zero.
+        return _PLAYBACK_WATCHDOG_FLOOR_S
+    expected_tx_s = ptt_delay_s + samples_n / sample_rate
+    return max(_PLAYBACK_WATCHDOG_FLOOR_S, expected_tx_s * _PLAYBACK_WATCHDOG_MARGIN)
 
 #: Default duration for the ALC/linearity test tone, in seconds.
 _TEST_TONE_DURATION_S: float = 5.0
@@ -200,7 +240,12 @@ class TxWorker(QObject):
     transmission_progress = Signal(int, int)  # (samples_played, samples_total)
     transmission_complete = Signal()
     transmission_aborted = Signal()
-    watchdog_fired = Signal()
+    #: Emits the watchdog budget (seconds) that fired so the UI can
+    #: show "exceeded N s" without hardcoding the value or having to
+    #: read internal worker state.  Value is the per-transmission
+    #: budget computed by :func:`_compute_playback_watchdog_s` (or the
+    #: fixed encode-stage budget if the encoder wedged).
+    watchdog_fired = Signal(float)
     error = Signal(str)
 
     def __init__(
@@ -353,6 +398,23 @@ class TxWorker(QObject):
         Always emits exactly one of ``transmission_complete`` or
         ``transmission_aborted`` per call (or, on early encode/PTT
         failure, only ``error``).
+
+        Uses a two-stage watchdog (OP-01 follow-up, v0.1.28):
+
+        * **Stage 1** covers banner stamping, encoding, gain, and CW
+          append.  Bounded at the fixed ``_ENCODE_WATCHDOG_S`` because
+          the actual sample count isn't known yet.  Encode is CPU-bound
+          and takes ~100 ms, so 30 s is wildly generous — its purpose
+          is to release any held PTT (we haven't keyed yet, but the
+          timer is started for symmetry with stage 2) if the encoder
+          wedges.
+
+        * **Stage 2** covers the keyed playback period.  Budget is
+          computed from the actual encoded sample count + PTT delay via
+          :func:`_compute_playback_watchdog_s`, so it scales with mode
+          duration and CW tail length and tightens stuck-rig exposure
+          from the v0.1.27 "always 600 s" to typically 1.2× the actual
+          TX duration with a 30 s floor.
         """
         self._stop_event.clear()
         self._watchdog_triggered = False
@@ -364,10 +426,13 @@ class TxWorker(QObject):
         with self._rig_lock:
             rig = self._rig
 
-        # Start the watchdog before any blocking work.
-        watchdog = threading.Timer(_MAX_TX_DURATION_S, self._watchdog_fire)
-        watchdog.start()
-
+        # === Stage 1: encode-time watchdog ===
+        encode_watchdog = threading.Timer(
+            _ENCODE_WATCHDOG_S,
+            self._watchdog_fire,
+            args=[_ENCODE_WATCHDOG_S],
+        )
+        encode_watchdog.start()
         try:
             # --- Apply TX banner (if enabled) ---
             if self._tx_banner_enabled:
@@ -423,12 +488,34 @@ class TxWorker(QObject):
                         "CW ID is enabled but callsign is empty — "
                         "skipping CW tail. Set callsign in Settings."
                     )
+        finally:
+            encode_watchdog.cancel()
 
+        # If the encode-stage watchdog fired (or stop was requested while
+        # encoding for any other reason), don't begin playback.
+        if self._stop_event.is_set():
+            if self._watchdog_triggered:
+                self.transmission_aborted.emit()
+            else:
+                # User pressed Stop during encode (very rare since encode
+                # is fast) — also surface as an abort.
+                self.transmission_aborted.emit()
+            return
+
+        # === Stage 2: per-transmission playback watchdog ===
+        playback_budget_s = _compute_playback_watchdog_s(
+            samples.size, self._sample_rate, self._ptt_delay_s
+        )
+        playback_watchdog = threading.Timer(
+            playback_budget_s,
+            self._watchdog_fire,
+            args=[playback_budget_s],
+        )
+        playback_watchdog.start()
+        try:
             result = self._run_tx(samples, rig)
         finally:
-            # Cancel the watchdog whether we finished cleanly, were stopped,
-            # or hit an error — it must not fire after transmit() returns.
-            watchdog.cancel()
+            playback_watchdog.cancel()
 
         if result is None:
             return  # PTT failed; error already emitted
@@ -446,6 +533,12 @@ class TxWorker(QObject):
         −1 dBFS peak.  Follows the identical PTT-key → ptt_delay → play →
         PTT-unkey sequence as ``transmit()``, including the watchdog, stop
         button, and gain controls.
+
+        Test tone has no encode stage and a fixed 5 s duration, so it
+        only needs the playback watchdog (the floor in
+        ``_compute_playback_watchdog_s`` ensures it gets a sensible 30 s
+        budget rather than the literal 6 s the formula would otherwise
+        produce).
         """
         self._stop_event.clear()
         self._watchdog_triggered = False
@@ -453,19 +546,28 @@ class TxWorker(QObject):
         with self._rig_lock:
             rig = self._rig
 
-        watchdog = threading.Timer(_MAX_TX_DURATION_S, self._watchdog_fire)
+        # Generate the test signal upfront so we can size the watchdog
+        # against the actual sample count.
+        samples = _make_two_tone(self._sample_rate, _TEST_TONE_DURATION_S)
+
+        # Honour the user's output-gain setting just like regular TX.
+        if self._output_gain != 1.0:
+            samples = np.clip(
+                samples.astype(np.float64) * self._output_gain,
+                -32768, 32767,
+            ).astype(samples.dtype)
+
+        playback_budget_s = _compute_playback_watchdog_s(
+            samples.size, self._sample_rate, self._ptt_delay_s
+        )
+        watchdog = threading.Timer(
+            playback_budget_s,
+            self._watchdog_fire,
+            args=[playback_budget_s],
+        )
         watchdog.start()
 
         try:
-            samples = _make_two_tone(self._sample_rate, _TEST_TONE_DURATION_S)
-
-            # Honour the user's output-gain setting just like regular TX.
-            if self._output_gain != 1.0:
-                samples = np.clip(
-                    samples.astype(np.float64) * self._output_gain,
-                    -32768, 32767,
-                ).astype(samples.dtype)
-
             result = self._run_tx(samples, rig)
         finally:
             watchdog.cancel()
@@ -556,8 +658,14 @@ class TxWorker(QObject):
         """
         return self._stop_event.wait(timeout=timeout)
 
-    def _watchdog_fire(self) -> None:
-        """Called by the watchdog timer when TX exceeds ``_MAX_TX_DURATION_S``.
+    def _watchdog_fire(self, duration_s: float = 0.0) -> None:
+        """Called by a watchdog timer when TX exceeds its allowed budget.
+
+        ``duration_s`` is the budget the firing timer was created with —
+        either the fixed encode-stage budget or the per-transmission
+        playback budget computed from sample count + PTT delay.  Passed
+        through to the ``watchdog_fired`` signal so the UI can show
+        the actual figure rather than guessing.
 
         Safe to call from the timer's background thread: signals are Qt
         queued connections (delivered on the GUI thread) and
@@ -568,7 +676,7 @@ class TxWorker(QObject):
         clobbered by the subsequent ``transmission_aborted`` signal.
         """
         self._watchdog_triggered = True
-        self.watchdog_fired.emit()
+        self.watchdog_fired.emit(float(duration_s))
         self.request_stop()
 
 

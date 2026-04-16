@@ -104,7 +104,7 @@ from open_sstv.ui.rx_panel import RxPanel
 from open_sstv.ui.settings_dialog import SettingsDialog
 from open_sstv.ui.tx_panel import TxPanel
 from open_sstv.core.modes import Mode
-from open_sstv.ui.workers import RxWorker, TxWorker, _MAX_TX_DURATION_S
+from open_sstv.ui.workers import RxWorker, TxWorker
 
 if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
@@ -221,6 +221,12 @@ class MainWindow(QMainWindow):
         self._rigctld_proc: "subprocess.Popen | None" = None
         self._capture_running: bool = False
         self._last_abort_was_watchdog: bool = False
+        #: Watchdog budget (seconds) of the most recently fired TX watchdog,
+        #: forwarded by ``TxWorker.watchdog_fired``.  Used by
+        #: ``_on_tx_aborted`` to format a precise "exceeded N s" message
+        #: instead of hardcoding the value (the budget is now per-
+        #: transmission, see ``_compute_playback_watchdog_s``).
+        self._last_watchdog_duration_s: float = 0.0
         self._last_tx_was_test_tone: bool = False
 
         # --- Menu bar ---
@@ -643,11 +649,18 @@ class MainWindow(QMainWindow):
         self._unlock_rig_controls()
         self._schedule_rx_resume()
 
-    @Slot()
-    def _on_watchdog_fired(self) -> None:
+    @Slot(float)
+    def _on_watchdog_fired(self, duration_s: float) -> None:
         """Watchdog tripped: record the fact so _on_tx_aborted can display
-        a persistent message instead of the generic "Ready"."""
+        a persistent message instead of the generic "Ready".
+
+        ``duration_s`` is the budget (seconds) the firing timer was
+        created with — stage 1 (encode) or stage 2 (per-transmission
+        playback).  Forwarded from ``TxWorker.watchdog_fired`` so the
+        UI message can quote the actual number.
+        """
         self._last_abort_was_watchdog = True
+        self._last_watchdog_duration_s = duration_s
 
     @Slot()
     def _on_tx_aborted(self) -> None:
@@ -655,7 +668,8 @@ class MainWindow(QMainWindow):
         if self._last_abort_was_watchdog:
             self._last_abort_was_watchdog = False
             msg = (
-                f"TX watchdog: exceeded {_MAX_TX_DURATION_S:.0f} s — rig unkeyed automatically"
+                f"TX watchdog: exceeded {self._last_watchdog_duration_s:.0f} s "
+                "— rig unkeyed automatically"
             )
             self._tx_panel.set_status(msg)
             self.statusBar().showMessage(msg)

@@ -11,6 +11,61 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.1.28] — 2026-04-16
+
+### Changed
+- **TX watchdog is now per-transmission instead of a fixed 600 s.**
+  Follow-up to OP-01 in v0.1.27, which raised the old 300 s constant
+  to 600 s to cover Pasokon P7 (406 s).  Keeping a 600 s constant left
+  short modes with up to 10 minutes of stuck-rig exposure — a
+  regulatory liability on a 36 s Robot 36 that should never need
+  more than ~1 minute of headroom.  The new design is a two-stage
+  watchdog:
+
+  * **Stage 1 (encode-time, fixed 30 s via ``_ENCODE_WATCHDOG_S``)**
+    covers banner stamping, encoding, gain, and CW append.  Encode is
+    CPU-bound and takes ~100 ms even for Pasokon P7, so 30 s is just
+    a defence against a wedged encoder.
+  * **Stage 2 (playback, per-transmission)** is computed after the
+    encoded sample array is known, via
+    ``_compute_playback_watchdog_s(samples_n, sample_rate, ptt_delay_s)``:
+    ``max(_PLAYBACK_WATCHDOG_FLOOR_S, (ptt_delay_s + samples_n/sample_rate) × _PLAYBACK_WATCHDOG_MARGIN)``
+    with a 30 s floor and a 1.20 multiplicative margin.  Because
+    ``samples_n`` already includes the VIS leader and any appended
+    CW tail, the formula scales automatically with mode duration,
+    CW WPM setting, and callsign length — no per-mode tables to
+    maintain.
+
+  Result: a stuck Robot 36 transmission aborts at ~51 s instead of
+  600 s; a stuck Pasokon P7 still gets its full ~500 s budget.
+  Test tone (5 s tone + PTT delay) gets the 30 s floor.
+
+- **``TxWorker.watchdog_fired`` now emits the budget that fired
+  (``Signal(float)``).**  MainWindow formats the persistent status
+  message from the signal payload instead of a hardcoded constant,
+  so "TX watchdog: exceeded N s" always quotes the actual value —
+  useful diagnostic for a user wondering why their long TX was cut
+  short.
+
+### Tests
+- Replaced the v0.1.27 ``test_watchdog_covers_every_mode_with_headroom``
+  constant-floor check with ``TestComputePlaybackWatchdog``:
+  - Floor engages on short transmissions (5 s tone → 30 s budget).
+  - Multiplicative margin on long ones (400 s → 480.24 s budget).
+  - Every ``Mode`` in ``MODE_TABLE`` gets non-negative headroom over
+    its worst-case TX (body + VIS + 12 s CW tail + PTT delay).
+  - Robot 36 budget now < 120 s (regulatory tightening vs. the old
+    600 s), regression guard against reverting the formula.
+  - Defensive: ``fs=0`` returns the floor instead of dividing by zero.
+- New ``TestTwoStageWatchdogIntegration`` that patches
+  ``threading.Timer`` to capture construction durations and verifies
+  ``transmit()`` creates both stages in the right order with the
+  right budgets.
+- ``watchdog_fired`` signal test confirms the duration payload is
+  forwarded correctly.
+
+---
+
 ## [0.1.27] — 2026-04-16
 
 Fixes from the Opus 4.6 (1M ctx) audit (`docs/audit_opus_1m_v0.1.26.md`).
