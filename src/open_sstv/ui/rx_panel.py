@@ -22,9 +22,10 @@ clear_requested():
     User clicked Clear. The MainWindow resets the ``RxWorker`` so the
     decoder starts hunting for a fresh VIS.
 image_saved(PIL.Image.Image, Mode):
-    User double-clicked a gallery thumbnail. Phase 3 will wire this
-    to a ``QFileDialog`` save dialog; v1 just re-emits for the
-    MainWindow to display a status bar confirmation.
+    User double-clicked a gallery thumbnail (or invoked Save As from
+    the context menu). Wired by ``MainWindow`` to a ``QFileDialog``.
+    Single-click on a thumbnail instead loads it into the main preview
+    via ``_show_gallery_image`` — no save dialog, no disk round-trip.
 """
 from __future__ import annotations
 
@@ -113,6 +114,11 @@ class RxPanel(QWidget):
         # --- Gallery strip ---
         self._gallery = ImageGalleryWidget(self)
         self._gallery.image_activated.connect(self.image_saved.emit)
+        # v0.2.7: single-click (and context-menu *View*) on a gallery
+        # thumbnail loads that image into the main preview above so the
+        # user can review older decodes at full size without first
+        # saving them to disk.
+        self._gallery.image_preview_requested.connect(self._show_gallery_image)
         layout.addWidget(self._gallery)
 
     # === public API used by MainWindow ===
@@ -210,6 +216,40 @@ class RxPanel(QWidget):
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
+        )
+
+    @Slot(object, object)
+    def _show_gallery_image(self, image: "PILImage", mode: Mode) -> None:
+        """Load a gallery thumbnail into the main preview (v0.2.7).
+
+        Wired to ``ImageGalleryWidget.image_preview_requested`` so a
+        single-click (or context-menu *View*) on an older decode swaps
+        the big preview pixmap and rebinds the "current image" fields.
+        Rebinding ``_current_pil_image`` / ``_current_mode`` means
+        ``Save Image`` and ``Ctrl+S`` act on the image the user is
+        actually looking at — if they just clicked a thumb to inspect
+        it, Save saves that one, not whatever was most-recently decoded.
+
+        ``mode`` may arrive as a plain ``str`` because Qt unwraps
+        ``StrEnum`` when storing/retrieving via ``QStandardItem.data()``
+        in the gallery.  Same coercion pattern as
+        ``MainWindow._on_rx_image_saved``.
+
+        Note: a live in-progress decode will clobber the preview on the
+        next ``show_image_progress`` tick. That's intentional — the
+        latest data should always win when capture is active — and the
+        user will typically pause capture before browsing history.
+        """
+        # Re-hydrate StrEnum if Qt flattened it to a bare string.
+        mode_enum = mode if isinstance(mode, Mode) else Mode(str(mode))
+        self._preview_source = _pil_to_pixmap(image)
+        self._update_preview_pixmap()
+        self._preview.setText("")
+        self._current_mode = mode_enum
+        self._current_pil_image = image
+        self._save_btn.setEnabled(True)
+        self._status.setText(
+            f"Viewing {mode_enum.value} ({image.width}×{image.height})"
         )
 
     # === private slots ===

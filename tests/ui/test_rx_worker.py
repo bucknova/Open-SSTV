@@ -806,3 +806,52 @@ class TestRxWatchdog:
         # Partial image surfaced even without any new flush.
         assert len(log["image_complete"]) == 1
         assert worker._decoding is False
+
+
+# === shutdown ===
+
+
+def test_shutdown_stops_watchdog_timer(qapp) -> None:
+    """``shutdown`` must stop and clear the wall-clock watchdog QTimer.
+
+    Without this, the timer is still active when the RX thread's event
+    loop quits and the QTimer destructor later runs on the wrong thread,
+    emitting::
+
+        QObject::killTimer: Timers cannot be stopped from another thread
+        QObject::~QObject: Timers cannot be stopped from another thread
+    """
+    worker = RxWorker(sample_rate=48_000, flush_samples=1)
+
+    # Force the lazy watchdog QTimer into existence.
+    worker._ensure_watchdog_timer()
+    assert worker._watchdog_timer is not None
+    assert worker._watchdog_timer.isActive() is True
+
+    worker.shutdown()
+
+    assert worker._watchdog_timer is None
+
+
+def test_shutdown_is_idempotent(qapp) -> None:
+    """Calling ``shutdown`` twice must not raise (e.g. double closeEvent)."""
+    worker = RxWorker(sample_rate=48_000, flush_samples=1)
+    worker._ensure_watchdog_timer()
+
+    worker.shutdown()
+    worker.shutdown()  # must not raise
+
+
+def test_shutdown_before_timer_created(qapp) -> None:
+    """``shutdown`` before any audio has been fed must be a safe no-op.
+
+    ``_ensure_watchdog_timer`` is lazy; if the user opens then immediately
+    closes the app without ever reaching the RX loop, the timer was never
+    created.  ``shutdown`` must tolerate that.
+    """
+    worker = RxWorker(sample_rate=48_000, flush_samples=1)
+    assert worker._watchdog_timer is None
+
+    worker.shutdown()  # must not raise
+
+    assert worker._watchdog_timer is None

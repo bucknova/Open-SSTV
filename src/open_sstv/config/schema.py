@@ -112,6 +112,13 @@ class AppConfig:
 
     # --- Identity ---
     callsign: str = ""
+    # v0.2.7: one-shot flag for the welcome-callsign dialog.  False on a
+    # truly fresh install (no config file on disk); True for any user
+    # upgrading from ≤ v0.2.6 (see ``store.load_config`` — the migration
+    # auto-grandfathers anyone who already has a config file).  The
+    # dialog flips this to True whether the user saves their callsign
+    # or clicks *Skip*, so we never nag on subsequent launches.
+    first_launch_seen: bool = False
 
     # --- Directories ---
     images_save_dir: str = field(default_factory=_default_images_dir)

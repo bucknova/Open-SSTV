@@ -50,6 +50,13 @@ def load_config(path: Path | None = None) -> AppConfig:
         # who explicitly set it to False keep that preference.
         if "experimental_incremental_decode" in raw and "incremental_decode" not in raw:
             raw["incremental_decode"] = raw["experimental_incremental_decode"]
+        # v0.2.7: the first-launch callsign dialog is gated on
+        # ``first_launch_seen``.  The mere presence of a config file
+        # means the user has opened the app before (≤ v0.2.6 didn't
+        # emit this key), so grandfather them in — don't show the
+        # welcome prompt to an existing user just because they upgraded.
+        if "first_launch_seen" not in raw:
+            raw["first_launch_seen"] = True
 
         # Only pass keys that AppConfig actually defines, so a TOML file
         # from a newer version with extra keys doesn't blow up construction.

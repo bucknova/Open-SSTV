@@ -6,10 +6,16 @@ images. New images are prepended so the newest decode is always
 left-most. Listens to nothing directly — the parent panel calls
 ``add_image`` in response to ``RxWorker.image_complete``.
 
-v1 keeps interaction minimal: single-click selects a thumbnail (so the
-user can see which one they've picked) and double-click fires the
-``image_activated(PIL.Image, Mode)`` signal for the parent to surface
-in a save dialog. Auto-save-to-disk is a Phase 3 setting.
+Interaction model:
+
+* Single-click: fires ``image_preview_requested(PIL.Image, Mode)`` so
+  the parent panel can swap its main preview to the clicked image —
+  lets the user review older decodes at full size without having to
+  save them to disk first (v0.2.7).
+* Double-click: fires ``image_activated(PIL.Image, Mode)`` for the
+  parent to surface in a save dialog.
+* Right-click: context menu with *View* (same as single-click),
+  *Save As…*, and *Copy to Clipboard*.
 """
 from __future__ import annotations
 
@@ -61,7 +67,12 @@ class ImageGalleryWidget(QListView):
     the same behaviour as before v0.1.5, with a logged warning.
     """
 
-    image_activated = Signal(object, object)  # (PIL.Image, Mode)
+    image_activated = Signal(object, object)  # (PIL.Image, Mode) — save dialog
+    #: v0.2.7: emitted on single-click (or context-menu *View*) so the
+    #: parent panel can swap its main preview to the clicked thumbnail.
+    #: Lets the user review prior decodes at full size without the
+    #: previous save-and-reopen dance.
+    image_preview_requested = Signal(object, object)  # (PIL.Image, Mode)
 
     def __init__(self, parent: QListView | None = None) -> None:
         super().__init__(parent)
@@ -80,6 +91,7 @@ class ImageGalleryWidget(QListView):
 
         self._model = QStandardItemModel(self)
         self.setModel(self._model)
+        self.clicked.connect(self._on_clicked)
         self.doubleClicked.connect(self._on_double_clicked)
         self.customContextMenuRequested.connect(self._on_context_menu)
 
@@ -165,12 +177,50 @@ class ImageGalleryWidget(QListView):
     def count(self) -> int:
         return self._model.rowCount()
 
+    @staticmethod
+    def _coerce_mode(mode: object) -> Mode | None:
+        """Rehydrate a ``Mode`` from Qt item data.
+
+        Qt's ``QStandardItem.setData`` flattens ``StrEnum`` values to
+        plain ``str``, so ``item.data(_MODE_ROLE)`` returns ``"robot_36"``
+        rather than ``Mode.ROBOT_36``.  Coerce back here so every signal
+        this widget emits carries a real ``Mode`` — consumers shouldn't
+        have to know about Qt's unwrapping quirk.  Returns ``None`` if
+        the stored value isn't a recognised mode (defensive — should
+        never happen in practice).
+        """
+        if mode is None:
+            return None
+        if isinstance(mode, Mode):
+            return mode
+        try:
+            return Mode(str(mode))
+        except ValueError:
+            return None
+
+    def _on_clicked(self, index) -> None:
+        """Single-click: surface the thumbnail in the parent's main preview.
+
+        Emits ``image_preview_requested`` so ``RxPanel`` can swap the
+        large preview pixmap to the clicked image (v0.2.7).  Double-click
+        still routes to ``image_activated`` → save dialog; the two
+        signals are intentionally distinct so a user who just wants to
+        look at an older decode doesn't get a save dialog in their face.
+        """
+        item = self._model.itemFromIndex(index)
+        if item is None:
+            return
+        image = _load_item_image(item)
+        mode = self._coerce_mode(item.data(_MODE_ROLE))
+        if image is not None and mode is not None:
+            self.image_preview_requested.emit(image, mode)
+
     def _on_double_clicked(self, index) -> None:
         item = self._model.itemFromIndex(index)
         if item is None:
             return
         image = _load_item_image(item)
-        mode = item.data(_MODE_ROLE)
+        mode = self._coerce_mode(item.data(_MODE_ROLE))
         if image is not None and mode is not None:
             self.image_activated.emit(image, mode)
 
@@ -181,23 +231,44 @@ class ImageGalleryWidget(QListView):
         item = self._model.itemFromIndex(index)
         if item is None:
             return
-        mode = item.data(_MODE_ROLE)
-        if mode is None:
+        if self._coerce_mode(item.data(_MODE_ROLE)) is None:
             return
 
         menu = QMenu(self)
-        save_action = menu.addAction("Save As\u2026")
-        copy_action = menu.addAction("Copy to Clipboard")
+        # v0.2.7: *View* mirrors the single-click behaviour so the
+        # interaction is discoverable via the context menu too.  Kept
+        # as the first entry because "look at it" is the most common
+        # intent after "what images do I have?".
+        menu.addAction("View")
+        menu.addAction("Save As\u2026")
+        menu.addAction("Copy to Clipboard")
         action = menu.exec(self.mapToGlobal(pos))
+        if action is not None:
+            self._dispatch_context_action(item, action.text())
 
-        if action == save_action or action == copy_action:
-            image = _load_item_image(item)
-            if image is None:
-                return
-            if action == save_action:
-                self.image_activated.emit(image, mode)
-            else:
-                QApplication.clipboard().setPixmap(_pil_to_pixmap(image))
+    def _dispatch_context_action(
+        self, item: QStandardItem, label: str
+    ) -> None:
+        """Run a context-menu action on ``item``.
+
+        Extracted from ``_on_context_menu`` so the action handling is
+        testable without having to drive a live ``QMenu`` — monkey-
+        patching ``QMenu.exec`` at the Python level doesn't replace the
+        C++-backed slot, so tests call this helper directly with the
+        desired action label.
+        """
+        mode = self._coerce_mode(item.data(_MODE_ROLE))
+        if mode is None:
+            return
+        image = _load_item_image(item)
+        if image is None:
+            return
+        if label == "View":
+            self.image_preview_requested.emit(image, mode)
+        elif label.startswith("Save As"):
+            self.image_activated.emit(image, mode)
+        elif label == "Copy to Clipboard":
+            QApplication.clipboard().setPixmap(_pil_to_pixmap(image))
 
 
 def _load_item_image(item: QStandardItem) -> "PILImage | None":

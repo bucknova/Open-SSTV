@@ -35,7 +35,37 @@ def patched_audio(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, MagicMo
 
 
 @pytest.fixture
-def window(qtbot, patched_audio: dict[str, MagicMock]) -> MainWindow:
+def _suppress_first_launch_dialog(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force ``first_launch_seen=True`` on the loaded config.
+
+    v0.2.7 added a welcome-callsign dialog that fires as a modal on
+    first launch. Without this fixture, any CI machine without a
+    pre-existing config file (or a dev running in a clean XDG dir)
+    would block indefinitely on the modal during ``qtbot.waitExposed``.
+    We preserve whatever the real ``load_config`` returns (tests may
+    depend on the dev's actual audio/rig defaults) and only stamp the
+    seen-flag before handing the config to ``MainWindow``.
+
+    Passing an explicit ``config=`` kwarg to ``MainWindow`` is avoided
+    because that path triggered a separate teardown segfault on
+    Darwin — see the v0.1.33 note further down this file.
+    """
+    from open_sstv.config.store import load_config as _real_load_config
+
+    def _patched() -> object:
+        cfg = _real_load_config()
+        cfg.first_launch_seen = True
+        return cfg
+
+    monkeypatch.setattr("open_sstv.ui.main_window.load_config", _patched)
+
+
+@pytest.fixture
+def window(
+    qtbot,
+    patched_audio: dict[str, MagicMock],
+    _suppress_first_launch_dialog: None,
+) -> MainWindow:
     w = MainWindow(rig=ManualRig())
     qtbot.addWidget(w)  # ensures pytest-qt cleans up the window on test exit
     return w

@@ -99,6 +99,7 @@ from open_sstv.radio.base import ManualRig, Rig, RigConnectionMode
 from open_sstv.radio.exceptions import RigError
 from open_sstv.radio.rigctld import RigctldClient, is_safe_rigctld_arg
 from open_sstv.radio.serial_rig import create_serial_rig
+from open_sstv.ui.first_launch_dialog import FirstLaunchDialog
 from open_sstv.ui.radio_panel import RadioPanel
 from open_sstv.ui.rx_panel import RxPanel
 from open_sstv.ui.settings_dialog import SettingsDialog
@@ -158,6 +159,12 @@ class MainWindow(QMainWindow):
     #: Routes the "Clear" action to RxWorker.reset() via a queued connection
     #: so the reset runs on the RX decode thread, not the GUI thread.
     _request_rx_reset = Signal()
+    #: Fires on app close to stop the RxWorker's wall-clock watchdog QTimer
+    #: on its owning thread. Without it, the timer is still active when
+    #: ``_rx_thread.quit()`` returns and the later destructor on the GUI
+    #: thread prints "QObject::killTimer: Timers cannot be stopped from
+    #: another thread".
+    _request_rx_shutdown = Signal()
     #: Dispatch TX calls to the TX worker thread via queued connection.
     #: Direct method calls from the GUI thread would run on the wrong thread.
     _request_transmit = Signal(object, object)  # (PIL.Image, Mode)
@@ -368,6 +375,7 @@ class MainWindow(QMainWindow):
         self._request_start_capture.connect(self._audio_worker.start)
         self._request_stop_capture.connect(self._audio_worker.stop)
         self._request_rx_reset.connect(self._rx_worker.reset)
+        self._request_rx_shutdown.connect(self._rx_worker.shutdown)
         # Settings dispatchers — connect BEFORE _apply_config is ever called.
         # Because rx_worker lives on rx_thread, Qt auto-promotes these to
         # QueuedConnection, so the decoder rebuilds happen on the worker thread.
@@ -451,6 +459,15 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().showMessage("Ready")
 
+        # v0.2.7: fresh install → prompt for callsign.  Deferred via
+        # ``QTimer.singleShot(0, …)`` so the main window paints first
+        # and the dialog layers on top.  ``load_config`` grandfathers
+        # pre-v0.2.7 users by injecting ``first_launch_seen = True``
+        # whenever a TOML file exists without the key, so upgraders
+        # never see this dialog.
+        if not self._config.first_launch_seen:
+            QTimer.singleShot(0, self._show_first_launch_dialog)
+
     # === Menu bar ===
 
     def _build_menu_bar(self) -> None:
@@ -492,6 +509,52 @@ class MainWindow(QMainWindow):
             "github.com/bucknova/Open-SSTV</a></p>"
             "<p>GPL-3.0-or-later</p>",
         )
+
+    @Slot()
+    def _show_first_launch_dialog(self) -> None:
+        """Prompt the operator for their callsign on a truly fresh install.
+
+        Scheduled via ``QTimer.singleShot(0, …)`` from ``__init__`` so
+        this fires on the next event-loop tick — the main window has
+        already painted by that point and the modal layers on top
+        instead of preceding the UI.
+
+        Either button dismisses the dialog permanently:
+
+        * *Save* with a non-empty callsign → persist it, push to the
+          radio and TX panels, mark ``first_launch_seen``.
+        * *Save* with an empty field, or *Skip for now* → leave the
+          existing callsign untouched (which on a fresh install is
+          also empty), mark ``first_launch_seen`` anyway so we don't
+          re-prompt on the next launch.
+
+        If ``save_config`` fails (read-only config dir, etc.) the
+        status bar carries the failure — we don't block startup and
+        we don't re-raise, the user just gets the dialog again next
+        launch.
+        """
+        dlg = FirstLaunchDialog(self)
+        accepted = dlg.exec() == FirstLaunchDialog.DialogCode.Accepted
+        typed = dlg.callsign() if accepted else ""
+
+        self._config.first_launch_seen = True
+        if typed:
+            self._config.callsign = typed
+
+        try:
+            save_config(self._config)
+        except OSError as exc:
+            self.statusBar().showMessage(
+                f"Welcome settings could not be saved to disk: {exc}", 8000
+            )
+            return
+
+        if typed:
+            # Push the newly-set callsign into the panels that embed
+            # it (TX banner, CW ID, image editor overlay default).
+            self._radio_panel.set_callsign(typed)
+            self._tx_panel.set_callsign(typed)
+            self.statusBar().showMessage(f"Callsign set to {typed}.", 5000)
 
     @Slot()
     def _open_settings(self) -> None:
@@ -1151,6 +1214,15 @@ class MainWindow(QMainWindow):
         # raises warnings). The queued stop lands on the audio
         # thread's event loop before ``quit()`` drains it.
         self._request_stop_capture.emit()
+        # Same reasoning for RxWorker's wall-clock watchdog QTimer —
+        # it lives on the RX decode thread (created lazily in
+        # ``_ensure_watchdog_timer``) and has no implicit stop path.
+        # The queued shutdown slot runs before the event loop quits
+        # below; without it, the timer is still active on worker-
+        # thread destruction and the GUI-thread destructor emits
+        # "QObject::killTimer: Timers cannot be stopped from another
+        # thread".
+        self._request_rx_shutdown.emit()
 
         self._tx_thread.quit()
         if not self._tx_thread.wait(3000):

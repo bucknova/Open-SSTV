@@ -1129,6 +1129,27 @@ class RxWorker(QObject):
         if self._scratch_samples > 0:
             self._flush()
 
+    @Slot()
+    def shutdown(self) -> None:
+        """Stop and release the wall-clock watchdog QTimer.
+
+        Must be invoked on this worker's own thread (queued) before the
+        host thread's event loop is quit.  The watchdog timer is created
+        lazily in ``_ensure_watchdog_timer`` with RX-thread affinity and
+        has no explicit stop path elsewhere; without this slot, the timer
+        is still active when ``_rx_thread.quit()`` returns and the later
+        destructor on the GUI thread prints::
+
+            QObject::killTimer: Timers cannot be stopped from another thread
+            QObject::~QObject: Timers cannot be stopped from another thread
+
+        Idempotent: calling ``shutdown`` a second time is a no-op.
+        """
+        if self._watchdog_timer is not None:
+            self._watchdog_timer.stop()
+            self._watchdog_timer.deleteLater()
+            self._watchdog_timer = None
+
     # === internal ===
 
     def _flush(self) -> None:
