@@ -121,23 +121,55 @@ jobs:
           Write-Host "Archive: $([math]::Round((Get-Item dist\${{ matrix.artifact }}.zip).Length / 1MB, 1)) MB"
 
       # ── 6a½. Re-apply ad-hoc codesign (macOS only) ─────────────────────────
-      # PyInstaller ad-hoc signs Mach-O binaries during the build, but the
-      # signatures can be invalidated by intermediate steps (UPX if present,
-      # strip, file-copy / attribute stripping in the runner's fs) and by
-      # the time the user unzips on their Mac, AMFI rejects them with
-      # ``library load disallowed by system policy``.  Re-signing every
-      # .dylib / .so / Python interpreter ad-hoc before zipping is cheap
-      # and guarantees every Mach-O in the bundle carries a fresh, valid
-      # ad-hoc signature.  The zip + download round-trip preserves these
-      # (signatures live in the Mach-O header, not xattrs).
+      # PyInstaller ad-hoc signs Mach-O binaries during the build, but two
+      # failure modes still bite end users on Apple Silicon:
+      #
+      #   1. Intermediate build steps can leave dylib signatures in a
+      #      state AMFI won't accept when the user unzips.  Re-signing
+      #      every .dylib / .so / Python framework binary with a fresh
+      #      ad-hoc signature fixes that.
+      #
+      #   2. PyInstaller's launcher bootloader ships with the hardened-
+      #      runtime Mach-O flag baked in.  ``codesign --force --sign -``
+      #      preserves that flag, so the ad-hoc-signed launcher enforces
+      #      hardened-runtime library validation on its own dylibs at
+      #      load time — and since the dylibs are ad-hoc-signed (team ID
+      #      ``-``) the validation fails with::
+      #
+      #          code signature in <...> '/.../ _internal/Python' not
+      #          valid for use in process: library load disallowed by
+      #          system policy
+      #
+      #      Fix: re-sign the launcher with ``--options=runtime`` plus
+      #      the ``packaging/macos-entitlements.plist`` entitlements that
+      #      include ``com.apple.security.cs.disable-library-validation``.
+      #      That keeps the bundle notarization-ready while telling AMFI
+      #      it's OK to load the ad-hoc-signed children from the same
+      #      bundle.
+      #
+      # Mach-O signatures live in the binary header (not xattrs) so they
+      # survive the zip → download → unzip round-trip unchanged.
       - name: Re-sign bundle ad-hoc (macOS)
         if: runner.os == 'macOS'
         run: |
           cd dist/open-sstv
+          # Strip old signatures from every Mach-O, then re-apply a fresh
+          # plain ad-hoc signature.  --remove-signature also drops any
+          # stale runtime / entitlement flags that would block reload.
+          find . -type f \( -name "*.dylib" -o -name "*.so" -o -name "Python" \) \
+            -exec codesign --remove-signature {} \; 2>/dev/null || true
           find . -type f \( -name "*.dylib" -o -name "*.so" -o -name "Python" \) \
             -exec codesign --force --sign - {} \;
-          codesign --force --sign - open-sstv
-          echo "Ad-hoc signed: $(find . -type f \( -name '*.dylib' -o -name '*.so' \) | wc -l) dylibs/so + Python + launcher"
+          # Launcher gets hardened runtime + entitlements that disable
+          # library validation so it can dlopen its own ad-hoc children.
+          codesign --remove-signature open-sstv 2>/dev/null || true
+          codesign --force --sign - \
+            --options=runtime \
+            --entitlements "$GITHUB_WORKSPACE/packaging/macos-entitlements.plist" \
+            open-sstv
+          echo "Ad-hoc signed: $(find . -type f \( -name '*.dylib' -o -name '*.so' \) | wc -l) dylibs/so + Python + launcher (entitlements applied)"
+          echo "--- launcher signature verification ---"
+          codesign -dv --entitlements - open-sstv 2>&1 | head -20
 
       # ── 6b. Package: macOS / Linux zip ─────────────────────────────────────
       - name: Zip (Unix)

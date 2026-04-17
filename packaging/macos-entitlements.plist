@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: GPL-3.0-or-later
+
+  macOS codesign entitlements for Open-SSTV's PyInstaller bundle.
+
+  Applied by ``.github/workflows/build.yml`` during the macOS build, to
+  the ad-hoc-signed launcher (``dist/open-sstv/open-sstv``).  These
+  entitlements are what tell AMFI (Apple Mobile File Integrity) that
+  it's OK to load the ad-hoc-signed Python framework and ~200 Python
+  extension ``.so`` files under ``_internal/`` from the same bundle.
+
+  Without at minimum ``com.apple.security.cs.disable-library-validation``
+  the launcher fails at first dlopen with::
+
+      code signature in <...> '/path/to/_internal/Python' not valid for
+      use in process: library load disallowed by system policy
+
+  The JIT / unsigned-memory / dyld-env entitlements are standard for a
+  PyInstaller-packaged Python application and match the set recommended
+  by PyInstaller's own macOS documentation.  They are harmless on
+  builds that don't actually rely on JIT.
+
+  This file is NOT a substitute for proper Developer ID signing +
+  notarization — it just makes ad-hoc signing viable on modern macOS.
+  See the "macOS codesigning" follow-up task for the notarized path.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+</dict>
+</plist>

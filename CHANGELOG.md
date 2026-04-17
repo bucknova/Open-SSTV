@@ -11,6 +11,52 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.2.5] — 2026-04-16
+
+### Fixed
+- **macOS binary actually loads on Apple Silicon (for real this time).**
+  v0.2.4 still failed at first dlopen with the same AMFI error::
+
+      code signature in <...> '/.../_internal/Python' not valid for use
+      in process: library load disallowed by system policy
+
+  Root cause narrowed down: PyInstaller's launcher bootloader ships
+  with the hardened-runtime Mach-O flag baked in.  ``codesign --force
+  --sign -`` preserves that flag, so the ad-hoc-signed launcher
+  enforces library validation on its own dylibs at dlopen time — and
+  since the ~200 ``.so`` files under ``_internal/`` are also ad-hoc
+  signed (team ID ``-``), library validation refuses them.
+
+  Fix in ``.github/workflows/build.yml``:
+
+  - ``codesign --remove-signature`` every Mach-O *before* the ad-hoc
+    re-sign, so stale hardened-runtime flags on child dylibs don't
+    carry through.
+  - Re-sign the launcher with ``--options=runtime`` plus new
+    ``packaging/macos-entitlements.plist`` entitlements including
+    ``com.apple.security.cs.disable-library-validation`` — AMFI then
+    accepts the ad-hoc children from the same bundle.
+
+  Users of v0.2.3 / v0.2.4 who hit the AMFI error on download can
+  recover their existing bundle without redownloading by stripping the
+  stale signatures and re-signing locally::
+
+      cd /path/to/open-sstv
+      xattr -cr .
+      codesign --remove-signature open-sstv 2>/dev/null
+      find . -type f \( -name "*.dylib" -o -name "*.so" -o -name "Python" \) \
+        -exec codesign --remove-signature {} \; 2>/dev/null
+      find . -type f \( -name "*.dylib" -o -name "*.so" -o -name "Python" \) \
+        -exec codesign --force --sign - {} \;
+      codesign --force --sign - open-sstv
+
+### Added
+- ``packaging/macos-entitlements.plist`` — entitlements file applied by
+  the macOS job so ad-hoc-signed bundles survive AMFI's library
+  validation pass without requiring Developer ID signing.
+
+---
+
 ## [0.2.4] — 2026-04-16
 
 ### Fixed
