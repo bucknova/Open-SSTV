@@ -537,6 +537,33 @@
       color: var(--text);
     }
 
+    .platform-note {
+      background: rgba(210,153,34,0.08);
+      border: 1px solid rgba(210,153,34,0.3);
+      border-left: 3px solid var(--amber);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+      margin-top: 16px;
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.7;
+    }
+
+    .platform-note strong { color: var(--text); }
+
+    .platform-note .platform-title {
+      display: block;
+      color: var(--amber);
+      font-weight: 600;
+      font-size: 13px;
+      letter-spacing: 0.02em;
+      margin-bottom: 6px;
+    }
+
+    .platform-note .code-line {
+      margin: 10px 0 8px;
+    }
+
     /* ── Roadmap ── */
     .roadmap-grid {
       display: grid;
@@ -904,7 +931,33 @@
             </li>
           </ul>
           <p class="install-note">
-            Extract the zip (or <code>chmod +x</code> the AppImage) and launch — no Python required. macOS Intel is not currently built; use the source install below or see <a href="https://github.com/bucknova/Open-SSTV/releases">all releases</a>.
+            Extract the zip (or <code>chmod +x</code> the AppImage) and launch — no Python required.
+          </p>
+
+          <div class="platform-note">
+            <span class="platform-title">🍎 macOS — clear quarantine first</span>
+            The bundle is ad-hoc signed (Apple notarization is on the roadmap), so macOS Gatekeeper
+            will refuse to launch it until you clear the quarantine flag that Safari/Chrome/Finder
+            stamps on every download. Run this once per download:
+            <div class="code-line">
+              <span class="prompt">$</span>
+              <span class="cmd" id="cmd-macos-xattr">cd ~/Downloads &amp;&amp; unzip -o open-sstv-macos-arm64.zip &amp;&amp; xattr -cr open-sstv &amp;&amp; ./open-sstv/open-sstv</span>
+              <button class="copy-btn" onclick="copyCmd('cmd-macos-xattr')" title="Copy">⎘</button>
+            </div>
+            Skipping <code>xattr -cr</code> causes cascading <em>"'python' is damaged and can't be opened"</em>
+            popups or a <code>library load disallowed by system policy</code> error — the bundle is fine,
+            Gatekeeper is just refusing to verify an ad-hoc signature against Apple's notarization catalog.
+          </div>
+
+          <div class="platform-note" style="background: rgba(46,160,67,0.06); border-color: rgba(46,160,67,0.25); border-left-color: var(--green);">
+            <span class="platform-title" style="color: var(--green-lit);">🪟 Windows — SmartScreen</span>
+            On first launch Windows may show a <em>"Windows protected your PC"</em> dialog because the
+            binary is unsigned. Click <strong>More info → Run anyway</strong>.
+          </div>
+
+          <p class="install-note">
+            macOS Intel is not currently built; use the source install to the right, or see
+            <a href="https://github.com/bucknova/Open-SSTV/releases">all releases</a>.
           </p>
         </div>
       </div>
