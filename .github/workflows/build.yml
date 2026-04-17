@@ -39,6 +39,13 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+# Needed so softprops/action-gh-release@v2 can create the release and
+# upload the built zips / AppImage as release assets on tag push.  Without
+# ``contents: write`` the attach step fails with HTTP 403 "Resource not
+# accessible by integration" and no release gets published.
+permissions:
+  contents: write
+
 jobs:
   build:
     name: ${{ matrix.name }}
