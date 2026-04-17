@@ -11,6 +11,44 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.2.4] — 2026-04-16
+
+### Fixed
+- **macOS binary now actually launches on Apple Silicon.**  The v0.2.3
+  ``open-sstv-macos-arm64.zip`` failed at first load with ``code
+  signature in <...> not valid for use in process: library load
+  disallowed by system policy`` — AMFI (the Apple Mobile File
+  Integrity subsystem) was rejecting the ad-hoc signatures on every
+  Python extension and dylib inside ``_internal/``.  Two fixes landed
+  together:
+  - ``open_sstv.spec`` had ``upx=True`` on both the ``EXE()`` and
+    ``COLLECT()`` stages.  UPX rewrites Mach-O binaries *after*
+    PyInstaller's ad-hoc codesign pass, which invalidates every
+    affected ``.dylib`` / ``.so`` signature.  Now gated on
+    ``sys.platform != "darwin"`` — UPX stays on Linux and Windows
+    where it's safe, and is disabled on Darwin unconditionally.
+  - ``.github/workflows/build.yml`` gains a belt-and-suspenders
+    ad-hoc re-sign step for the macOS job, between the PyInstaller
+    build and the zip.  ``find ... -exec codesign --force --sign -``
+    over every ``.dylib``, ``.so``, the embedded ``Python`` binary,
+    and the ``open-sstv`` launcher.  Mach-O signatures live in the
+    binary header (not xattrs) so they survive the zip → download →
+    unzip round-trip; AMFI accepts them on the user's machine.
+  Users who already downloaded the broken v0.2.3 macOS bundle can
+  recover it locally without redownloading by running the same
+  commands: ``xattr -cr`` the extracted folder, then re-sign every
+  Mach-O ad-hoc.  The next tag push produces a working macOS zip out
+  of the box.
+
+### Known issues
+- macOS binaries are still **ad-hoc signed, not Developer ID signed**,
+  so first launch still triggers a single Gatekeeper "unverified
+  developer" prompt on the launcher.  Proper Developer ID signing +
+  notarization is tracked as a separate follow-up (requires a paid
+  Apple Developer account).
+
+---
+
 ## [0.2.3] — 2026-04-16
 
 ### Added
