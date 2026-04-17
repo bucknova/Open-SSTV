@@ -490,6 +490,53 @@
       margin-top: 48px;
     }
 
+    .download-list {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .download-list li {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 10px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 10px 14px;
+      font-size: 13px;
+    }
+
+    .download-list li strong {
+      color: var(--text);
+      flex: 1;
+      min-width: 170px;
+    }
+
+    .download-list li a {
+      color: var(--green-lit);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      word-break: break-all;
+    }
+
+    .download-list li .sep {
+      color: var(--muted);
+    }
+
+    .install-box code {
+      background: var(--bg3);
+      border-radius: 4px;
+      padding: 1px 6px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      color: var(--text);
+    }
+
     /* ── Roadmap ── */
     .roadmap-grid {
       display: grid;
@@ -602,7 +649,7 @@
 <!-- ── Hero ── -->
 <div class="hero">
   <div>
-    <div class="hero-badge" id="version-badge">Beta · v0.2.0</div>
+    <div class="hero-badge" id="version-badge">Beta · v0.2.3</div>
     <h1>Open-Source<br /><span>SSTV Transceiver</span><br />for Amateur Radio</h1>
     <p>Transmit and receive Slow Scan Television images live from your rig — no external software required. 22 modes, modern Qt 6 GUI, cross-platform.</p>
     <div class="hero-actions">
@@ -654,7 +701,7 @@
         <div class="feature-icon">📡</div>
         <span class="feature-tag">TX</span>
         <h3>Transmit with Precision</h3>
-        <p>Live TX with real-time audio generation, per-mode watchdog timers, and output gain from 0–200%. Supports all 22 SSTV modes.</p>
+        <p>Live TX with real-time audio generation, per-mode watchdog timers, and 0–100% output gain (expandable to 200% with overdrive). Supports all 22 SSTV modes.</p>
       </div>
 
       <div class="feature-card">
@@ -827,32 +874,44 @@
 <section id="install">
   <div class="section-inner">
     <div class="section-label">Get Started</div>
-    <h2 class="section-title">Install in seconds</h2>
-    <p class="section-sub">Open-SSTV installs via pip on macOS, Linux, and Windows. Python 3.11+ required.</p>
+    <h2 class="section-title">Download &amp; Install</h2>
+    <p class="section-sub">Pre-built binaries for Windows, macOS, and Linux — no Python install required. Or run from source for development.</p>
 
     <div class="install-grid">
       <div>
         <div class="install-box">
-          <h3>Quick Install</h3>
-          <div class="code-line">
-            <span class="prompt">$</span>
-            <span class="cmd" id="cmd-install">pip install open-sstv</span>
-            <button class="copy-btn" onclick="copyCmd('cmd-install')" title="Copy">⎘</button>
-          </div>
-          <div class="code-line">
-            <span class="prompt">$</span>
-            <span class="cmd" id="cmd-run">open-sstv</span>
-            <button class="copy-btn" onclick="copyCmd('cmd-run')" title="Copy">⎘</button>
-          </div>
+          <h3>Download a Binary (Recommended)</h3>
+          <ul class="download-list">
+            <li>
+              <strong>Windows (x86_64)</strong>
+              <a href="https://github.com/bucknova/Open-SSTV/releases/latest/download/open-sstv-windows.zip">open-sstv-windows.zip</a>
+            </li>
+            <li>
+              <strong>macOS (Apple Silicon)</strong>
+              <a href="https://github.com/bucknova/Open-SSTV/releases/latest/download/open-sstv-macos-arm64.zip">open-sstv-macos-arm64.zip</a>
+            </li>
+            <li>
+              <strong>Linux (x86_64)</strong>
+              <a href="https://github.com/bucknova/Open-SSTV/releases/latest/download/Open-SSTV-x86_64.AppImage">.AppImage</a>
+              <span class="sep">·</span>
+              <a href="https://github.com/bucknova/Open-SSTV/releases/latest/download/open-sstv-linux-x86_64.zip">.zip</a>
+            </li>
+            <li>
+              <strong>Linux (ARM64)</strong>
+              <a href="https://github.com/bucknova/Open-SSTV/releases/latest/download/Open-SSTV-aarch64.AppImage">.AppImage</a>
+              <span class="sep">·</span>
+              <a href="https://github.com/bucknova/Open-SSTV/releases/latest/download/open-sstv-linux-arm64.zip">.zip</a>
+            </li>
+          </ul>
           <p class="install-note">
-            Also includes <strong>open-sstv-encode</strong> and <strong>open-sstv-decode</strong> CLI tools for batch workflows and scripting.
+            Extract the zip (or <code>chmod +x</code> the AppImage) and launch — no Python required. macOS Intel is not currently built; use the source install below or see <a href="https://github.com/bucknova/Open-SSTV/releases">all releases</a>.
           </p>
         </div>
       </div>
 
       <div>
         <div class="install-box">
-          <h3>From Source</h3>
+          <h3>From Source (Developers)</h3>
           <div class="code-line">
             <span class="prompt">$</span>
             <span class="cmd" id="cmd-clone">git clone https://github.com/bucknova/Open-SSTV</span>
@@ -860,11 +919,16 @@
           </div>
           <div class="code-line">
             <span class="prompt">$</span>
-            <span class="cmd" id="cmd-pip">pip install -e .</span>
+            <span class="cmd" id="cmd-pip">pip install -e ".[dev]"</span>
             <button class="copy-btn" onclick="copyCmd('cmd-pip')" title="Copy">⎘</button>
           </div>
+          <div class="code-line">
+            <span class="prompt">$</span>
+            <span class="cmd" id="cmd-run">open-sstv</span>
+            <button class="copy-btn" onclick="copyCmd('cmd-run')" title="Copy">⎘</button>
+          </div>
           <p class="install-note">
-            Requires <strong>Python 3.11+</strong>, <strong>PySide6 ≥ 6.6</strong>, and <strong>PortAudio</strong>. See the <a href="https://github.com/bucknova/Open-SSTV#readme">README</a> for full platform setup instructions.
+            Requires <strong>Python 3.11+</strong>, <strong>PySide6 ≥ 6.6</strong>, and <strong>PortAudio</strong>. Also installs the <strong>open-sstv-encode</strong> and <strong>open-sstv-decode</strong> CLI tools for headless / batch workflows. See the <a href="https://github.com/bucknova/Open-SSTV#readme">README</a> for Hamlib setup and Windows notes.
           </p>
         </div>
       </div>
