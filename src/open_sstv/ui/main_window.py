@@ -228,6 +228,16 @@ class MainWindow(QMainWindow):
         #: transmission, see ``_compute_playback_watchdog_s``).
         self._last_watchdog_duration_s: float = 0.0
         self._last_tx_was_test_tone: bool = False
+        #: OP-47: remembers whether the 1 Hz rig-poll timer was running when
+        #: TX started, so ``_unlock_rig_controls`` can resume it only if the
+        #: rig is still connected. The poll is *suspended* for the duration
+        #: of every TX — without this, CAT reads (get_freq / get_mode /
+        #: get_strength) can interleave with PTT writes on the same serial
+        #: port, which on Windows triggers a USB-CODEC renegotiation that
+        #: drops both the virtual COM port and the rig's USB audio device.
+        #: Same issue is why WSJT-X / JS8Call / MMSSTV all gate polling
+        #: during TX.
+        self._rig_poll_was_active: bool = False
 
         # --- Menu bar ---
         self._build_menu_bar()
@@ -652,14 +662,42 @@ class MainWindow(QMainWindow):
         # can't swap or disconnect the rig while PTT is keyed.
         self._radio_panel.set_tx_active(True)
         self._settings_action.setEnabled(False)
+        # OP-47: suspend the 1 Hz rig-status poll while TX is active.
+        # Otherwise get_freq / get_mode / get_strength reads race against
+        # the PTT write on the same serial port. pyserial's lock serialises
+        # them at the Python level, but on Windows the rapid CAT + PTT
+        # interleave while the radio is mid-transmit causes the USB CODEC
+        # (IC-7300, IC-705, FT-991A etc.) to renegotiate and drop both
+        # the virtual COM port *and* the USB audio device — which surfaces
+        # to the user as "the radio dropped out and I got a connection
+        # error". RX works fine before this point because no concurrent
+        # writer exists. Remember the pre-TX state so we only resume if
+        # the rig was connected to begin with.
+        self._rig_poll_was_active = self._rig_poll_timer.isActive()
+        if self._rig_poll_was_active:
+            self._rig_poll_timer.stop()
         # Gate the RX decoder to prevent self-decode through loopback (R-2).
         self._request_rx_gate.emit(True)
         self._rx_panel.set_status("RX paused during TX.")
 
     def _unlock_rig_controls(self) -> None:
-        """Re-enable rig UI after TX completes, aborts, or errors."""
+        """Re-enable rig UI after TX completes, aborts, or errors.
+
+        Also resumes the 1 Hz rig-status poll if it was running at TX
+        start (suspended in ``_on_tx_started`` — see OP-47 comment there).
+        If the rig was disconnected mid-TX, the poll timer stays stopped;
+        the existing disconnect path (``_on_rig_disconnect``) is what
+        clears it, and re-starting here would poll a dead port.
+        """
         self._radio_panel.set_tx_active(False)
         self._settings_action.setEnabled(True)
+        # Only resume polling if the rig is still a real backend. If the
+        # user (or a disconnect handler) swapped back to ManualRig during
+        # TX, restarting the timer would poll a no-op backend and also
+        # override the disconnect intent.
+        if self._rig_poll_was_active and not isinstance(self._rig, ManualRig):
+            self._rig_poll_timer.start()
+        self._rig_poll_was_active = False
 
     def _schedule_rx_resume(self) -> None:
         """Lift the RX gate 50 ms after TX ends.

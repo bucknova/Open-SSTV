@@ -11,6 +11,82 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.2.6] — 2026-04-17
+
+### Fixed
+- **Windows TX drops the radio mid-transmission (rig-poll vs. PTT
+  race).**  On Windows, the 1 Hz rig-status poll (``get_freq`` /
+  ``get_mode`` / ``get_strength``) could interleave with the PTT
+  write on the same serial port while the radio was mid-transmit,
+  triggering a USB CODEC renegotiation that dropped both the virtual
+  COM port *and* the USB audio device.  The user-visible symptom was
+  "the radio dropped out and I got a connection error" partway into
+  every SSTV transmission.  macOS was unaffected because its
+  USB-audio stack renegotiates more gracefully on CDC-ACM control
+  traffic.
+
+  ``MainWindow._on_tx_started`` now suspends the rig-poll timer for
+  the full duration of TX and ``_unlock_rig_controls`` resumes it
+  only if the poll was running at TX start *and* the rig is still a
+  real backend (not ``ManualRig``) — so a disconnect during TX
+  doesn't get silently reinstated.  Matches the "gate CAT during TX"
+  pattern used by WSJT-X, JS8Call, and MMSSTV for the same class of
+  shared-port contention.
+
+- **Test-tone TX gain slider is now live.**  Moving the TX output
+  gain during the 5 s two-tone test signal had no audible effect
+  because ``transmit_test_tone`` pre-scaled the entire int16 buffer
+  once before playback, so later slider drags never reached the
+  soundcard.  Fixed in two layers:
+
+  - ``audio.output_stream.play_blocking`` gains an optional
+    ``gain_provider: Callable[[], float] | None`` that is re-read
+    once per ~0.1 s playback chunk inside the streaming
+    ``sd.OutputStream`` path.  Int16 overflow is clamped per chunk
+    with ``np.iinfo`` rather than wrapping to negative.
+  - ``TxWorker.transmit_test_tone`` drops the upfront scale and
+    passes ``live_gain=True`` through ``_run_tx``, so the test tone
+    behaves as a live ALC-calibration knob (slider changes audible
+    within ~100 ms).  Regular SSTV TX keeps the pre-scale path for a
+    stable envelope across the image.
+
+- **Progressive decode now paints rows as they arrive (MMSSTV-style).**
+  The previous 1 s flush cadence between ``InputStreamWorker`` and
+  the decoder collected ~6 Robot 36 scan lines per burst, giving the
+  UI a distinctly "tick-tick-tick" rhythm.  ``RxWorker`` now selects
+  its flush interval dynamically per flush:
+
+  - **Incremental path, IDLE** (hunting VIS) — 1 s.  Keeps the
+    pre-v0.2.6 VIS-hunt cadence.  Shortening this multiplied the
+    unknown-VIS false-positive rate by 10×, and on that path
+    ``Decoder._feed_idle`` trims the rolling buffer past
+    ``vis_end``, which mutilated the real VIS arriving moments
+    later.  Acoustic (speaker→mic) captures were the worst-hit
+    case.
+  - **Incremental path, DECODING** (painting lines) — 0.1 s.  VIS
+    has already locked, so the IDLE false-positive risk no longer
+    applies.  Per-line work inside ``Decoder.feed`` means total CPU
+    is independent of flush rate, so the short interval is
+    effectively free.
+  - **Batch fallback path** — 2 s, regardless of state.  The O(N²)
+    reprocessing cost on long Scottie-family receives dominates, so
+    responsiveness is traded for throughput.  Responsiveness now
+    lives on the incremental path.
+
+  Behavioural impact: first Robot 36 row appears in the gallery
+  preview ~10× sooner after the VIS lock, and the preview grows
+  smoothly one line at a time instead of in bursts.  VIS detection
+  itself is unchanged — same cadence, same thresholds as v0.2.5.
+
+### Changed
+- ``assets/icon.png`` and ``docs/icon.png`` refreshed with a
+  better-resized version of the application icon.  Linux AppImage
+  packaging already copies ``assets/icon.png`` into the bundle at
+  build time, so no workflow change was needed.  GitHub Pages site
+  (``docs/index.html``) picks up the new icon automatically.
+
+---
+
 ## [0.2.5] — 2026-04-16
 
 ### Fixed

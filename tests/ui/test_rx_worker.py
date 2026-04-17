@@ -106,6 +106,57 @@ def test_flush_noop_when_scratch_is_empty(qapp) -> None:
     worker._decoder.feed.assert_not_called()
 
 
+def test_default_flush_interval_incremental_idle_is_1s(qapp) -> None:
+    """v0.2.6: while IDLE (hunting for VIS), the incremental path keeps
+    the pre-v0.2.6 1 s cadence.  Calling ``detect_vis`` 10× more often
+    on noisy pre-transmission audio compounds the chance of a
+    noise-triggered unknown-VIS false positive, which in turn trims
+    the buffer past ``vis_end`` and can mutilate the real VIS arriving
+    moments later — breaking acoustic (speaker→mic) captures.
+    """
+    worker = RxWorker(sample_rate=48_000, incremental_decode=True)
+    # decoder starts in IDLE; the "current" threshold should be 1 s.
+    assert worker._current_flush_samples() == 48_000
+
+
+def test_flush_interval_incremental_shortens_to_100ms_when_decoding(qapp) -> None:
+    """v0.2.6: once VIS has locked and we're painting lines, the flush
+    cadence drops to 0.1 s so the UI shows rows as they complete
+    (MMSSTV-style).  VIS detection has already succeeded by this
+    point, so the IDLE false-positive risk no longer applies.
+    """
+    worker = RxWorker(sample_rate=48_000, incremental_decode=True)
+    worker._decoding = True  # simulate post-ImageStarted state
+    assert worker._current_flush_samples() == 4_800
+
+
+def test_default_flush_interval_batch_is_2s(qapp) -> None:
+    """v0.2.6: the batch path — still the opt-in fallback — flushes
+    every 2 s instead of 1 s to amortise its O(N²) reprocessing cost
+    on long Scottie-family receives. Responsiveness is now owned by
+    the incremental path, so the v0.1.25 '2 s → 1 s for paint-as-you-go'
+    revert no longer applies here.  The batch path does not dual-mode
+    between IDLE and DECODING since its cost is dominated by the
+    reprocess, not the detection step.
+    """
+    worker = RxWorker(sample_rate=48_000, incremental_decode=False)
+    assert worker._current_flush_samples() == 96_000
+    worker._decoding = True
+    assert worker._current_flush_samples() == 96_000  # unchanged
+
+
+def test_default_flush_interval_scales_with_sample_rate(qapp) -> None:
+    """The interval is a number of seconds; sample-count derives from
+    the constructor sample_rate so non-48 kHz callers still get the
+    right cadence.  44.1 kHz × 1.0 s (IDLE) = 44 100 samples;
+    44.1 kHz × 0.1 s (DECODING) = 4 410 samples.
+    """
+    worker = RxWorker(sample_rate=44_100, incremental_decode=True)
+    assert worker._current_flush_samples() == 44_100
+    worker._decoding = True
+    assert worker._current_flush_samples() == 4_410
+
+
 def test_reset_clears_scratch_and_decoder(qapp) -> None:
     worker = RxWorker(sample_rate=48_000, flush_samples=100_000)
     worker._decoder = MagicMock()

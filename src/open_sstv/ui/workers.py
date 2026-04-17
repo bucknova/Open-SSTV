@@ -51,10 +51,14 @@ RxWorker
 The RX flow is the inverse of TX: chunks stream in from
 ``InputStreamWorker.chunk_ready`` on a worker thread and the worker
 hands them to ``core.decoder.Decoder``. The worker accumulates chunks
-locally and flushes to ``Decoder.feed`` every ``_RX_FLUSH_SAMPLES_DEFAULT``
-samples (1 s at 48 kHz default). This caps the VIS-hunt overhead in IDLE
-state while keeping latency low enough that the first decoded row appears
-well within one flush cycle of the sync pulse.
+locally and flushes to ``Decoder.feed`` on a cadence that depends on
+which decode path is active *and* whether the decoder is IDLE or
+DECODING.  On the incremental path we use 1 s while hunting for VIS
+(to keep the unknown-VIS false-positive rate low on noisy acoustic
+inputs) and drop to 0.1 s once VIS has locked (so the UI paints rows
+as they complete, MMSSTV-style).  The batch fallback uses a flat 2 s
+to amortise its O(N²) reprocessing cost.  See the
+``_DECODE_FLUSH_INTERVAL_S_*`` constants below for the full rationale.
 
 In DECODING state (``incremental_decode=True``, the default since v0.1.24)
 the ``Decoder`` passes only new audio to the per-mode incremental backend,
@@ -112,23 +116,43 @@ _CW_GAP_S: float = 0.500
 DEFAULT_PTT_DELAY_S = 0.2
 
 #: How long to accumulate audio in ``RxWorker`` before flushing a
-#: batch to ``Decoder.feed``.  The batch decoder reprocesses the entire
-#: growing buffer on every flush (O(N) per flush → O(N²) total), so a
-#: longer interval trades responsiveness for lower CPU load.  Reverted
-#: from 2 s back to 1 s in v0.1.25 for a more responsive "paint-as-you-go"
-#: feel — noticeably snappier on short modes (Robot 36, PD-50) and
-#: effectively free on the incremental decoder (per-sync work, not
-#: per-flush).  The extra CPU cost vs. 2 s only matters for long
-#: Scottie-family receives on the batch path, and even there it stays
-#: well under real-time on any machine from the last decade.
-#: Tune this constant rather than hunting for the magic number in tests.
-_DECODE_FLUSH_INTERVAL_S: float = 1.0
-
-#: Derived flush threshold in samples at the default 48 kHz sample rate.
-#: ``RxWorker`` recomputes a per-instance value from the constructor's
-#: ``sample_rate`` parameter, so this default is only used when
-#: ``flush_samples`` is not passed explicitly.
-_RX_FLUSH_SAMPLES_DEFAULT: int = int(_DECODE_FLUSH_INTERVAL_S * DEFAULT_SAMPLE_RATE)
+#: batch to ``Decoder.feed``.  Three values, selected dynamically per
+#: flush based on (a) which decode path is active and (b) whether the
+#: decoder is currently in IDLE (hunting VIS) or DECODING (painting
+#: lines).
+#:
+#: **Incremental path, IDLE** — 1 s.  The 0.1 s "paint-as-you-go"
+#: cadence below would call ``detect_vis`` 10× per second on a rolling
+#: noisy pre-VIS buffer.  Each call is an independent chance for a
+#: noise-triggered *unknown-VIS false positive*, and on that path
+#: ``Decoder._feed_idle`` trims the buffer past ``vis_end`` — which can
+#: mutilate the real VIS arriving moments later.  Keeping the IDLE
+#: hunt at 1 s matches the pre-v0.2.6 behaviour and preserves acoustic
+#: (speaker→mic) VIS detection.
+#:
+#: **Incremental path, DECODING** — 0.1 s.  Per-line work inside
+#: ``Decoder.feed``, so total CPU is independent of how often we flush.
+#: Short interval paints rows as they complete, matching the MMSSTV /
+#: slowrx "watch it arrive" feel.  A 0.1 s cadence gives roughly one
+#: flush per scan line on short modes (Robot 36 ~150 ms, PD-50
+#: ~195 ms) and sub-line granularity on long modes (Pasokon P7
+#: ~820 ms).  VIS has already locked by this point, so the IDLE
+#: false-positive risk does not apply.
+#:
+#: **Batch fallback path** — 2 s, independent of IDLE/DECODING.
+#: The decoder reprocesses the *entire* growing buffer on every
+#: flush (O(N) per flush → O(N²) total), so the flush interval is
+#: the dominant CPU knob.  A 2 s interval roughly halves the total
+#: work on long Scottie-family receives compared with 1 s, at the
+#: cost of one extra second of update latency.  Users on the batch
+#: path are there as an opt-in diagnostic fallback, so we prioritise
+#: throughput over cadence; anyone who wants a live preview uses the
+#: default (incremental) path.
+#:
+#: Tune these constants rather than hunting for magic numbers in tests.
+_DECODE_FLUSH_INTERVAL_S_INCREMENTAL_IDLE: float = 1.0
+_DECODE_FLUSH_INTERVAL_S_INCREMENTAL_DECODING: float = 0.1
+_DECODE_FLUSH_INTERVAL_S_BATCH: float = 2.0
 
 #: Per-transmission RX decoder watchdog: total-elapsed multiplier.
 #: If we've been in DECODING state for ``mode.total_duration_s × this``
@@ -599,15 +623,14 @@ class TxWorker(QObject):
             rig = self._rig
 
         # Generate the test signal upfront so we can size the watchdog
-        # against the actual sample count.
+        # against the actual sample count.  We deliberately do NOT apply
+        # self._output_gain here — _run_tx(live_gain=True) re-reads the
+        # gain each playback chunk so the slider behaves as a live ALC-
+        # calibration knob during the 5 s tone, matching the user-facing
+        # promise in the README and the Settings tooltip.  Regular SSTV
+        # TX keeps the pre-scale path (stable envelope for the whole
+        # image — see transmit()).
         samples = _make_two_tone(self._sample_rate, _TEST_TONE_DURATION_S)
-
-        # Honour the user's output-gain setting just like regular TX.
-        if self._output_gain != 1.0:
-            samples = np.clip(
-                samples.astype(np.float64) * self._output_gain,
-                -32768, 32767,
-            ).astype(samples.dtype)
 
         playback_budget_s = _compute_playback_watchdog_s(
             samples.size, self._sample_rate, self._ptt_delay_s
@@ -620,7 +643,7 @@ class TxWorker(QObject):
         watchdog.start()
 
         try:
-            result = self._run_tx(samples, rig)
+            result = self._run_tx(samples, rig, live_gain=True)
         finally:
             watchdog.cancel()
 
@@ -632,9 +655,28 @@ class TxWorker(QObject):
             self.transmission_complete.emit()
 
     def _run_tx(
-        self, samples: "NDArray", rig: "Rig"
+        self,
+        samples: "NDArray",
+        rig: "Rig",
+        live_gain: bool = False,
     ) -> "bool | None":
         """Key PTT, play *samples*, unkey PTT.
+
+        Parameters
+        ----------
+        samples:
+            The fully-rendered int16 buffer to play.  Regular SSTV TX
+            pre-scales this by ``self._output_gain`` before calling so
+            the ALC sees a stable envelope for the duration of the image.
+        rig:
+            Backend to key/unkey.  ``ManualRig`` skips the hardware call.
+        live_gain:
+            If ``True``, ``self._output_gain`` is re-read per playback
+            chunk inside ``play_blocking`` and applied on-the-fly.  Used
+            by the test-tone path so moving the TX gain slider during
+            calibration is audible within ~100 ms.  Callers that enable
+            this MUST NOT pre-scale *samples* or the gain will apply
+            twice.
 
         Returns
         -------
@@ -673,6 +715,9 @@ class TxWorker(QObject):
                     device=self._output_device,
                     progress_callback=lambda played, total: self.transmission_progress.emit(played, total),
                     stop_event=self._stop_event,
+                    gain_provider=(
+                        (lambda: self._output_gain) if live_gain else None
+                    ),
                 )
                 playback_succeeded = not self._stop_event.is_set()
         except sd.PortAudioError:
@@ -793,11 +838,30 @@ class RxWorker(QObject):
         self._decoding: bool = False
         self._input_gain: float = 1.0
         self._tx_active: bool = False
-        self._flush_samples: int = (
-            flush_samples
-            if flush_samples is not None
-            else _RX_FLUSH_SAMPLES_DEFAULT
+        # Flush cadence is selected dynamically per flush via
+        # ``_current_flush_samples`` — see the block comment on the
+        # ``_DECODE_FLUSH_INTERVAL_S_*`` constants above for the full
+        # rationale.  We pre-compute the three sample counts so the
+        # hot path in ``feed_chunk`` is a single attribute read + an
+        # integer comparison.
+        #
+        # Legacy ``flush_samples`` override (explicit int) still wins
+        # for back-compat with tests that pin a tight flush size.
+        self._flush_samples_override: int | None = flush_samples
+        self._flush_samples_incremental_idle: int = int(
+            _DECODE_FLUSH_INTERVAL_S_INCREMENTAL_IDLE * sample_rate
         )
+        self._flush_samples_incremental_decoding: int = int(
+            _DECODE_FLUSH_INTERVAL_S_INCREMENTAL_DECODING * sample_rate
+        )
+        self._flush_samples_batch: int = int(
+            _DECODE_FLUSH_INTERVAL_S_BATCH * sample_rate
+        )
+        # Legacy public attribute: many existing tests read this
+        # directly to assert the configured threshold.  It now
+        # reflects the IDLE threshold of the active path, which is
+        # the one that governs the first flush after construction.
+        self._flush_samples: int = self._current_flush_samples()
         # v0.1.36: RX decoder watchdog state — see _check_rx_watchdog
         # for the full logic.  ``_decoding_start_time`` is set when an
         # ``ImageStarted`` event fires; ``_last_progress_time`` updates
@@ -973,8 +1037,36 @@ class RxWorker(QObject):
         self._scratch_samples += arr.size
         self._total_samples += arr.size
 
-        if self._scratch_samples >= self._flush_samples:
+        # Flush threshold is chosen per-call so it tracks the
+        # IDLE → DECODING transition: we want cheap frequent flushes
+        # while painting lines, but infrequent (stable) flushes while
+        # hunting for VIS on noisy pre-transmission audio.
+        if self._scratch_samples >= self._current_flush_samples():
             self._flush()
+
+    def _current_flush_samples(self) -> int:
+        """Return the flush threshold (samples) appropriate for the
+        current path and state.
+
+        * Explicit ``flush_samples`` constructor override wins.
+        * Batch path uses one constant regardless of state (its
+          O(N²) reprocessing cost is the dominant factor).
+        * Incremental path uses 1 s while IDLE to match pre-v0.2.6
+          VIS-hunt cadence (avoids multiplying the unknown-VIS
+          false-positive rate by 10× — that path trims the buffer
+          past ``vis_end`` and can mutilate real VIS arriving moments
+          later) and 0.1 s while DECODING to paint lines as they
+          complete.
+        """
+        if self._flush_samples_override is not None:
+            return self._flush_samples_override
+        if not self._incremental_decode:
+            return self._flush_samples_batch
+        return (
+            self._flush_samples_incremental_decoding
+            if self._decoding
+            else self._flush_samples_incremental_idle
+        )
 
     def request_cancel(self) -> None:
         """Interrupt any in-flight decode. Safe to call from any thread.

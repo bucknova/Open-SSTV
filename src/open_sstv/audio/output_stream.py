@@ -38,6 +38,7 @@ def play_blocking(
     device: AudioDevice | int | None = None,
     progress_callback: "Callable[[int, int], None] | None" = None,
     stop_event: "threading.Event | None" = None,
+    gain_provider: "Callable[[], float] | None" = None,
 ) -> None:
     """Play a buffer of samples and block until playback finishes.
 
@@ -59,6 +60,16 @@ def play_blocking(
         after each chunk write. Runs on the calling thread.
     stop_event:
         If provided and set, playback aborts early.
+    gain_provider:
+        Optional zero-arg callable returning the current linear gain
+        (``1.0`` = unity). When set, each ~0.1 s chunk is scaled by the
+        *current* value before being written to the device, so a user
+        moving a gain slider during playback hears the change within one
+        chunk (<100 ms). If ``None``, samples are written unmodified and
+        callers are expected to have pre-scaled the buffer.  The provider
+        is called on the playback thread, so it must be cheap and
+        non-blocking; a simple attribute read is ideal.  Used by the
+        test-tone path so ALC calibration is interactive.
 
     Raises
     ------
@@ -77,14 +88,15 @@ def play_blocking(
 
     device_index = device.index if isinstance(device, AudioDevice) else device
 
-    if progress_callback is None and stop_event is None:
-        # Fast path: no progress reporting needed
+    if progress_callback is None and stop_event is None and gain_provider is None:
+        # Fast path: no progress reporting, no stop, no live gain.
         sd.play(samples, samplerate=sample_rate, device=device_index, blocking=True)
         sd.wait()
         return
 
     # Chunked write path: ~0.1 s chunks keep stop-button latency below
-    # 100 ms and give smooth progress updates.
+    # 100 ms and give smooth progress updates. Also the granularity at
+    # which live gain is re-read — one chunk late at worst.
     chunk_size = int(sample_rate * 0.1)
     total = samples.size
 
@@ -100,6 +112,25 @@ def play_blocking(
                 break
             end = min(written + chunk_size, total)
             chunk = samples[written:end]
+            if gain_provider is not None:
+                gain = gain_provider()
+                if gain != 1.0:
+                    # Clip to the sample dtype's range so float math
+                    # doesn't wrap on int16 overflow. We mirror the
+                    # pre-scale path in workers.py for consistency.
+                    if np.issubdtype(chunk.dtype, np.integer):
+                        info = np.iinfo(chunk.dtype)
+                        chunk = np.clip(
+                            chunk.astype(np.float64) * gain,
+                            info.min,
+                            info.max,
+                        ).astype(chunk.dtype)
+                    else:
+                        chunk = np.clip(
+                            chunk.astype(np.float64) * gain,
+                            -1.0,
+                            1.0,
+                        ).astype(chunk.dtype)
             stream.write(chunk.reshape(-1, 1))
             written = end
             if progress_callback is not None:

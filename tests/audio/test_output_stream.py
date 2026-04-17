@@ -78,3 +78,103 @@ def test_stop_calls_sd_stop() -> None:
     with patch("open_sstv.audio.output_stream.sd.stop") as mock_stop:
         output_stream.stop()
     mock_stop.assert_called_once()
+
+
+# --- Live gain (test-tone ALC calibration) ---
+
+class _FakeStream:
+    """Minimal sd.OutputStream stand-in that records every chunk it was
+    handed. Supports the context-manager protocol so ``with
+    sd.OutputStream(...)`` works under patch.
+    """
+
+    def __init__(self) -> None:
+        self.writes: list[np.ndarray] = []
+
+    def __enter__(self) -> "_FakeStream":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+    def write(self, chunk: np.ndarray) -> None:
+        # Store a copy — play_blocking hands us a view into the parent
+        # buffer and will be GC'd before the assertions run.
+        self.writes.append(np.asarray(chunk).copy())
+
+
+def test_play_blocking_applies_live_gain_per_chunk() -> None:
+    """Regression: the test-tone TX gain slider used to only affect the
+    next tone because ``transmit_test_tone`` pre-scaled the whole buffer.
+    ``gain_provider`` is re-read for each ~0.1 s chunk so slider drags
+    are audible in <100 ms. This test fakes a 4-chunk playback and
+    verifies each chunk is scaled by the *then-current* provider value.
+    """
+    sr = 48000
+    # 0.4 s of full-scale DC so scaling is easy to check. Four 0.1 s
+    # chunks at 48 kHz → 4 chunks of 4800 samples.
+    samples = np.full(sr // 10 * 4, 10_000, dtype=np.int16)
+
+    # Provider returns 0.5, 1.0, 1.5, 2.0 in order.
+    gains = iter([0.5, 1.0, 1.5, 2.0])
+
+    fake_stream = _FakeStream()
+    with (
+        patch("open_sstv.audio.output_stream.sd.OutputStream", return_value=fake_stream),
+    ):
+        output_stream.play_blocking(
+            samples,
+            sr,
+            progress_callback=lambda *_: None,  # force chunked path
+            gain_provider=lambda: next(gains),
+        )
+
+    assert len(fake_stream.writes) == 4
+    # Each chunk should be scaled by the gain at its iteration.
+    # Writes reshape to (-1, 1) so compare the first column.
+    peak_by_chunk = [int(np.abs(w).max()) for w in fake_stream.writes]
+    assert peak_by_chunk == [5000, 10000, 15000, 20000]
+
+
+def test_play_blocking_gain_provider_clips_int16_overflow() -> None:
+    """With a sample near int16 max and gain > 1, scaled output must
+    clip to the dtype's range instead of wrapping negative.
+    """
+    sr = 48000
+    samples = np.full(sr // 10, 30_000, dtype=np.int16)  # one chunk
+
+    fake_stream = _FakeStream()
+    with patch("open_sstv.audio.output_stream.sd.OutputStream", return_value=fake_stream):
+        output_stream.play_blocking(
+            samples,
+            sr,
+            progress_callback=lambda *_: None,
+            gain_provider=lambda: 2.0,  # would overflow to 60_000 without clip
+        )
+
+    assert len(fake_stream.writes) == 1
+    assert fake_stream.writes[0].max() == np.iinfo(np.int16).max  # 32767
+    # And crucially, no wrap-around to negative.
+    assert fake_stream.writes[0].min() >= 0
+
+
+def test_play_blocking_gain_provider_unity_is_passthrough() -> None:
+    """When the provider returns 1.0 the chunk should be written
+    unmodified (no allocation, no clip). We assert array identity via
+    data equality rather than ``is`` because play_blocking slices the
+    parent buffer either way.
+    """
+    sr = 48000
+    samples = np.full(sr // 10, 12345, dtype=np.int16)
+
+    fake_stream = _FakeStream()
+    with patch("open_sstv.audio.output_stream.sd.OutputStream", return_value=fake_stream):
+        output_stream.play_blocking(
+            samples,
+            sr,
+            progress_callback=lambda *_: None,
+            gain_provider=lambda: 1.0,
+        )
+
+    assert len(fake_stream.writes) == 1
+    np.testing.assert_array_equal(fake_stream.writes[0].ravel(), samples)
