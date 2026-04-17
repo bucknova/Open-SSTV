@@ -11,6 +11,37 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.2.3] — 2026-04-16
+
+### Added
+- **Downloadable binaries published automatically on tag push.**
+  The ``Build & Release`` GitHub Actions workflow now attaches
+  PyInstaller-frozen portable builds to the GitHub Release created for
+  each ``v*`` tag.  End users no longer need a Python install or a
+  GitHub account to grab a working copy — they download the zip or
+  AppImage from the Releases page and run it.
+- ``docs/future_work.md`` — captures the post-v0.2.2 design
+  discussion on extending ``rx_weak_signal_mode`` into a coordinated
+  Weak-signal RX profile (narrower prefilter, relaxed sync
+  thresholds, impulse-noise blanker) plus a Settings info-box draft
+  explaining how to configure the radio's own filters for SSTV.  No
+  code change; intent captured for a future milestone.
+
+### Changed
+- **Build matrix drops macOS Intel.**  GitHub's ``macos-13`` runner
+  queue times were stalling release builds for tens of minutes while
+  the other four targets were already green.  Apple Silicon is now
+  the dominant modern Mac target; Intel-Mac users can still install
+  from PyPI with ``pipx install open-sstv`` until a Universal2 build
+  is wired up.  Builds produced per release: Windows x86_64, Linux
+  x86_64 (zip + AppImage), Linux ARM64 (zip + AppImage), and
+  macOS Apple Silicon.
+- ``assets/icon.png`` is now bundled into the Linux AppImage as the
+  application icon (previously a placeholder generated at build
+  time).
+
+---
+
 ## [0.2.2] — 2026-04-16
 
 ### Fixed

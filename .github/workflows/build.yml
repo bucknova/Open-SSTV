@@ -14,8 +14,13 @@
 #   open-sstv-linux-x86_64-appimage → Open-SSTV-x86_64.AppImage
 #   open-sstv-linux-arm64      → open-sstv-linux-arm64.zip
 #   open-sstv-linux-arm64-appimage  → Open-SSTV-aarch64.AppImage
-#   open-sstv-macos-intel      → open-sstv-macos-intel.zip
 #   open-sstv-macos-arm64      → open-sstv-macos-arm64.zip
+#
+# macOS Intel is intentionally excluded — GitHub's ``macos-13`` runner
+# pool has long queue times that stall releases, and Apple Silicon is
+# the dominant modern Mac target.  Intel users on macOS can still
+# install via ``pipx install open-sstv`` until a Universal2 build is
+# wired up.
 #
 # On tag pushes all of the above are also attached to a public GitHub Release.
 #
@@ -56,10 +61,6 @@ jobs:
             runner: ubuntu-22.04-arm
             artifact: open-sstv-linux-arm64
             appimage_arch: aarch64
-
-          - name: macOS Intel
-            runner: macos-13
-            artifact: open-sstv-macos-intel
 
           - name: macOS Apple Silicon
             runner: macos-14
