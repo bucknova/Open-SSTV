@@ -17,11 +17,15 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from PIL import ImageDraw, ImageFont
+
 from open_sstv.core.banner import (
     BANNER_HEIGHT,
     SIZE_TABLE,
+    _DEFAULT_FONT_SIZE,
     apply_tx_banner,
     banner_size_params,
+    resolve_right_side_text,
 )
 
 
@@ -290,4 +294,118 @@ def test_banner_pushes_content_down_not_overwrites() -> None:
     assert green_channel_mean < 80 and blue_channel_mean < 80, (
         f"Unexpected colour in pushed-down content: "
         f"G={green_channel_mean:.0f}, B={blue_channel_mean:.0f}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 8. v0.2.8 — right-side tier fallback for narrow modes
+# ---------------------------------------------------------------------------
+#
+# Martin M2 / M4 / Scottie S2 are 160 px wide — the full
+# "Open-SSTV v{version}" doesn't fit beside even a short callsign.  The
+# right-side text now degrades through three tiers: full → brand-only → none.
+# Callsign is never dropped.
+
+
+@pytest.fixture
+def _default_font() -> ImageFont.ImageFont | ImageFont.FreeTypeFont:
+    return ImageFont.load_default(size=_DEFAULT_FONT_SIZE)
+
+
+@pytest.fixture
+def _scratch_draw() -> ImageDraw.ImageDraw:
+    """Disposable draw context for measuring text widths.
+
+    ``resolve_right_side_text`` only calls ``draw.textbbox``; any
+    ``ImageDraw.Draw`` bound to an image of any size works as a
+    measurement surface.
+    """
+    scratch = Image.new("RGB", (800, 32))
+    return ImageDraw.Draw(scratch)
+
+
+def test_resolve_prefers_full_when_fits(_default_font, _scratch_draw) -> None:
+    """320 px wide mode with short callsign → full brand+version fits."""
+    # 320 px image, 45 px callsign column, 8 px padding on each side →
+    # ~255 px available on the right.  That's plenty for "Open-SSTV v0.2.8".
+    text = resolve_right_side_text("0.2.8", 255, _scratch_draw, _default_font)
+    assert text == "Open-SSTV v0.2.8"
+
+
+def test_resolve_drops_version_when_full_overflows(_default_font, _scratch_draw) -> None:
+    """Narrow budget that fits 'Open-SSTV' but not the version → brand-only."""
+    # Measure "Open-SSTV" and "Open-SSTV v0.2.8" to pick a budget that lies
+    # between them.  This makes the test robust against font-metric drift.
+    brand = "Open-SSTV"
+    full = f"Open-SSTV v0.2.8"
+    brand_w = _scratch_draw.textbbox((0, 0), brand, font=_default_font)[2]
+    full_w = _scratch_draw.textbbox((0, 0), full, font=_default_font)[2]
+    # Budget just above brand width but below full width.
+    budget = brand_w + (full_w - brand_w) // 2
+    text = resolve_right_side_text("0.2.8", budget, _scratch_draw, _default_font)
+    assert text == "Open-SSTV"
+
+
+def test_resolve_drops_brand_when_even_brand_overflows(_default_font, _scratch_draw) -> None:
+    """Budget below brand width → empty string (nothing renders)."""
+    brand_w = _scratch_draw.textbbox((0, 0), "Open-SSTV", font=_default_font)[2]
+    # Pick a budget well below brand width.
+    text = resolve_right_side_text("0.2.8", brand_w - 10, _scratch_draw, _default_font)
+    assert text == ""
+
+
+def test_resolve_zero_budget_returns_empty(_default_font, _scratch_draw) -> None:
+    """Zero or negative available width → empty string."""
+    assert resolve_right_side_text("0.2.8", 0, _scratch_draw, _default_font) == ""
+    assert resolve_right_side_text("0.2.8", -50, _scratch_draw, _default_font) == ""
+
+
+def test_banner_martin_m2_does_not_clip(_default_font) -> None:
+    """Martin M2 (160×256) with W0AEZ callsign: the full banner fallback
+    must leave no right-side ink clipped at the image boundary.
+
+    Regression guard: before v0.2.8, the right-side version text was
+    rendered with ``rx = width - rw - padding``; when ``rw`` exceeded the
+    remaining budget, ``rx`` could fall inside the callsign column and
+    Pillow simply clipped at the image edge.  Now we drop the version
+    (and the brand if needed) so the rendered banner is always whole.
+    """
+    img = _solid(160, 256, (50, 50, 50))
+    result = apply_tx_banner(img, "0.2.8", "W0AEZ")
+
+    arr = np.array(result)
+    # The rightmost column of the banner strip should be the background
+    # colour, not text ink — i.e. no text reaches the edge.  Allow a
+    # small tolerance because antialiasing fringe pixels may deviate a
+    # few units from the exact bg hex value.
+    bg_rgb = np.array(_hex_to_rgb("#202020"), dtype=np.int16)
+    rightmost_col = arr[:BANNER_HEIGHT, -1, :].astype(np.int16)
+    max_deviation = int(np.max(np.abs(rightmost_col - bg_rgb)))
+    assert max_deviation <= 8, (
+        f"Banner right edge has non-background ink: max deviation "
+        f"{max_deviation} from {bg_rgb.tolist()} — text may be clipped."
+    )
+
+
+def test_banner_narrow_preserves_callsign(_default_font) -> None:
+    """Martin M2: callsign must still render at the left even when the
+    right side is dropped entirely.
+
+    This is the §97.119 invariant: the operator's callsign is the one
+    field we never drop, regardless of how narrow the frame is.
+    """
+    img = _solid(160, 256, (50, 50, 50))
+    result = apply_tx_banner(img, "0.2.8", "W0AEZ")
+
+    arr = np.array(result)
+    # The callsign column should have non-background ink starting around
+    # x=8 (padding).  Scan the leftmost 60 px of the banner strip for any
+    # non-bg pixels — callsign "W0AEZ" at 18 pt is well wider than that.
+    bg_rgb = np.array(_hex_to_rgb("#202020"), dtype=np.uint8)
+    left_band = arr[:BANNER_HEIGHT, :60, :]
+    is_bg = np.all(left_band == bg_rgb, axis=2)
+    non_bg_fraction = 1.0 - is_bg.mean()
+    assert non_bg_fraction > 0.05, (
+        f"Callsign appears to be missing in narrow-mode banner: "
+        f"only {non_bg_fraction:.1%} non-bg ink in the left column"
     )

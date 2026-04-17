@@ -12,6 +12,7 @@ after the dialog is accepted.
 """
 from __future__ import annotations
 
+import datetime
 import logging
 import subprocess
 
@@ -61,6 +62,7 @@ from open_sstv import __version__ as _APP_VERSION
 from open_sstv.config.schema import AppConfig
 from open_sstv.core.banner import apply_tx_banner, banner_size_params
 from open_sstv.core.modes import Mode
+from open_sstv.templates import TokenContext, build_autosave_filename
 
 
 #: Common Hamlib radio models (model_id, display_name).
@@ -680,12 +682,29 @@ class SettingsDialog(QDialog):
         idx = self._tx_mode.findData(self._config.default_tx_mode)
         if idx >= 0:
             self._tx_mode.setCurrentIndex(idx)
+        # v0.2.8: the autosave preview uses the default TX mode as a
+        # realistic placeholder so the user sees how ``%m`` will render.
+        self._tx_mode.currentIndexChanged.connect(
+            lambda _=None: self._refresh_autosave_preview()
+        )
         form.addRow("Default TX mode:", self._tx_mode)
 
-        # Auto-save
-        self._auto_save = QCheckBox("Auto-save decoded images")
+        # Auto-save (RX)
+        self._auto_save = QCheckBox("Auto-save received images")
         self._auto_save.setChecked(self._config.auto_save)
         form.addRow(self._auto_save)
+
+        # v0.2.8: TX auto-save — independent of RX so operators can
+        # archive a log of everything they transmit without also
+        # archiving every RX decode (or vice versa).
+        self._autosave_tx = QCheckBox("Auto-save transmitted images")
+        self._autosave_tx.setToolTip(
+            "When enabled, every successful SSTV transmission (not test tone)\n"
+            "is written to the Save directory using the filename template\n"
+            "below. The saved image includes any TX banner that was stamped."
+        )
+        self._autosave_tx.setChecked(self._config.autosave_tx)
+        form.addRow(self._autosave_tx)
 
         # Save directory
         dir_row = QHBoxLayout()
@@ -696,6 +715,53 @@ class SettingsDialog(QDialog):
         browse_btn.clicked.connect(self._browse_save_dir)
         dir_row.addWidget(browse_btn)
         form.addRow("Save directory:", dir_row)
+
+        # v0.2.8: filename template.  Shared by RX + TX auto-save so the
+        # operator gets a consistent naming convention across the
+        # directory.  See ``open_sstv.templates.tokens`` for the vocabulary.
+        self._autosave_pattern = QLineEdit(self._config.autosave_filename_pattern)
+        self._autosave_pattern.setToolTip(
+            "Tokens:\n"
+            "  %d  date (YYYY-MM-DD, UTC)\n"
+            "  %t  time (HHMMSS, UTC)\n"
+            "  %ts Unix epoch timestamp\n"
+            "  %c  your callsign\n"
+            "  %m  SSTV mode (e.g. Scottie-S1)\n"
+            "  %rx_tx  literal 'RX' or 'TX'\n"
+            "  %%  literal percent sign\n"
+            "Named aliases ({date}, {time}, {callsign}, …) also work."
+        )
+        self._autosave_pattern.textChanged.connect(
+            self._refresh_autosave_preview
+        )
+        form.addRow("Filename template:", self._autosave_pattern)
+
+        # File format — drop-down so hand-edited values (or unknown
+        # formats) can't silently land users on a non-standard extension.
+        self._autosave_format = QComboBox()
+        for label, key in (("PNG (lossless)", "png"), ("JPG (smaller)", "jpg")):
+            self._autosave_format.addItem(label, key)
+        _fmt_idx = self._autosave_format.findData(
+            self._config.autosave_file_format
+        )
+        if _fmt_idx >= 0:
+            self._autosave_format.setCurrentIndex(_fmt_idx)
+        self._autosave_format.currentIndexChanged.connect(
+            self._refresh_autosave_preview
+        )
+        form.addRow("File format:", self._autosave_format)
+
+        # Live preview — shows the concrete filename the current template
+        # + format would produce right now, so the user can verify before
+        # accepting the dialog.  Pure-Python, no filesystem touch.
+        self._autosave_preview = QLabel()
+        self._autosave_preview.setStyleSheet("color: #666; font-family: monospace;")
+        self._autosave_preview.setToolTip(
+            "Example filename using the current template, format, and\n"
+            "your callsign at the current time. Updates live as you type."
+        )
+        form.addRow("Preview:", self._autosave_preview)
+        self._refresh_autosave_preview()
 
         # --- TX Banner ---
         banner_group = QGroupBox("TX Banner")
@@ -781,14 +847,19 @@ class SettingsDialog(QDialog):
     # === Private slots ===
 
     def _refresh_banner_preview_if_built(self) -> None:
-        """Refresh the banner preview only after the Images tab has been built.
+        """Refresh the banner + autosave previews only after the Images tab has been built.
 
         ``_callsign.textChanged`` fires during ``_build_radio_tab`` before
         ``_build_images_tab`` has run, so ``_banner_preview`` doesn't exist
         yet.  The guard prevents an AttributeError on dialog construction.
+        v0.2.8 also refreshes the filename preview from here so the
+        auto-save preview picks up callsign edits made on the Radio tab
+        without the user having to switch tabs.
         """
         if hasattr(self, "_banner_preview"):
             self._refresh_banner_preview()
+        if hasattr(self, "_autosave_preview"):
+            self._refresh_autosave_preview()
 
     def _test_connection(self) -> None:
         """Try to connect and ping the rigctld daemon at the current settings."""
@@ -908,6 +979,53 @@ class SettingsDialog(QDialog):
         )
         if directory:
             self._save_dir.setText(directory)
+
+    def _refresh_autosave_preview(self) -> None:
+        """Re-render the auto-save filename preview from the current inputs.
+
+        Builds a throwaway :class:`TokenContext` against the current
+        clock, callsign, and a canonical mode (the configured default
+        TX mode, or ``Scottie-S1`` if that widget hasn't been built
+        yet), then resolves the template the same way the RX/TX save
+        paths do. Uses ``save_dir=None`` equivalent logic by pointing
+        the builder at the configured save directory only if it
+        already exists — otherwise we resolve into a fixed temp path
+        so the user sees a realistic filename without us creating
+        directories from a preview render.
+
+        Safe to call before the Images tab is fully built: the guard
+        on ``hasattr`` is the same pattern as ``_refresh_banner_preview_if_built``.
+        """
+        if not hasattr(self, "_autosave_preview"):
+            return
+        pattern = self._autosave_pattern.text()
+        fmt = self._autosave_format.currentData() or "png"
+        callsign = (
+            self._callsign.text().strip().upper()
+            if hasattr(self, "_callsign")
+            else self._config.callsign
+        )
+        mode_name = (
+            self._tx_mode.currentData()
+            if hasattr(self, "_tx_mode") and self._tx_mode.currentData()
+            else "Scottie-S1"
+        )
+        ctx = TokenContext(
+            callsign=callsign,
+            mode=mode_name,
+            direction="RX",
+            now_utc=datetime.datetime.now(datetime.timezone.utc),
+        )
+        # Resolve in-memory without touching the filesystem — the
+        # preview must not ``mkdir`` the save directory, and it must
+        # not pick collision suffixes from whatever files happen to be
+        # in there.  Call the lower-level resolver directly.
+        from open_sstv.templates.tokens import resolve_tokens
+        from open_sstv.templates.filename import sanitize_filename_component
+
+        resolved = resolve_tokens(pattern, ctx)
+        stem = sanitize_filename_component(resolved)
+        self._autosave_preview.setText(f"{stem}.{fmt}")
 
     def _refresh_banner_preview(self) -> None:
         """Re-render the banner preview label from the current selections.
@@ -1149,6 +1267,9 @@ class SettingsDialog(QDialog):
             callsign=self._callsign.text().strip().upper(),
             images_save_dir=self._save_dir.text(),
             auto_save=self._auto_save.isChecked(),
+            autosave_tx=self._autosave_tx.isChecked(),
+            autosave_filename_pattern=self._autosave_pattern.text(),
+            autosave_file_format=self._autosave_format.currentData() or "png",
             tx_banner_enabled=self._banner_enabled.isChecked(),
             tx_banner_bg_color=self._banner_bg_color,
             tx_banner_text_color=self._banner_text_color,

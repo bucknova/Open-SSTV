@@ -64,3 +64,56 @@ def test_save_creates_parent_dirs(tmp_path: Path) -> None:
     assert deep.is_file()
     loaded = load_config(path=deep)
     assert loaded == AppConfig()
+
+
+# === v0.2.8: auto-save filename template ===
+
+
+def test_round_trip_autosave_filename_fields(tmp_path: Path) -> None:
+    """The three v0.2.8 auto-save fields must survive a TOML round-trip.
+
+    Catches the specific regression mode where a new AppConfig field is
+    added but not threaded through ``save_config`` / ``load_config``,
+    causing the user's saved template to silently revert to the
+    default on every relaunch.
+    """
+    cfg = AppConfig(
+        auto_save=True,
+        autosave_tx=True,
+        autosave_filename_pattern="%c_%d_%t_%m",
+        autosave_file_format="jpg",
+    )
+    p = tmp_path / "config.toml"
+    save_config(cfg, path=p)
+    loaded = load_config(path=p)
+    assert loaded.autosave_tx is True
+    assert loaded.autosave_filename_pattern == "%c_%d_%t_%m"
+    assert loaded.autosave_file_format == "jpg"
+    assert loaded == cfg
+
+
+def test_load_autosave_defaults_when_missing(tmp_path: Path) -> None:
+    """Older configs (pre-v0.2.8) lack these keys. Loading must apply
+    sensible defaults rather than crash."""
+    p = tmp_path / "config.toml"
+    p.write_text('callsign = "W0AEZ"\n')
+    loaded = load_config(path=p)
+    assert loaded.autosave_tx is False
+    assert loaded.autosave_filename_pattern == "%d_%t_%m"
+    assert loaded.autosave_file_format == "png"
+
+
+def test_autosave_file_format_normalised_on_load(tmp_path: Path) -> None:
+    """Hand-edited TOML with 'JPEG' or '.PNG' must still produce a
+    valid filename extension — ``AppConfig.__post_init__`` normalises
+    it to lowercase and maps ``jpeg`` → ``jpg``."""
+    p = tmp_path / "config.toml"
+    p.write_text('autosave_file_format = "JPEG"\n')
+    loaded = load_config(path=p)
+    assert loaded.autosave_file_format == "jpg"
+
+    p.write_text('autosave_file_format = "bmp"\n')
+    loaded = load_config(path=p)
+    # Unknown format falls back to PNG — never leaves the user with a
+    # config that produces unopenable files.
+    assert loaded.autosave_file_format == "png"

@@ -11,6 +11,101 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.2.8] — 2026-04-17
+
+### Added
+- **Auto-save filename templates.**  The Images tab in Settings now
+  exposes a *Filename template* field and a separate *File format*
+  drop-down (PNG or JPG), sharing the same template between RX and
+  TX auto-save so the operator gets one consistent naming
+  convention across the directory.  The template understands a small
+  token vocabulary — ``%d`` (date, ``YYYY-MM-DD`` UTC), ``%t`` (time,
+  ``HHMMSS`` UTC), ``%ts`` (Unix epoch), ``%c`` (callsign), ``%m``
+  (SSTV mode such as ``Scottie-S1``), ``%rx_tx`` (literal ``RX`` or
+  ``TX``), and ``%%`` (literal ``%``); named aliases ``{date}``,
+  ``{time}``, ``{callsign}``, etc. are accepted as well.  Unknown
+  tokens pass through unchanged so a pattern referencing a
+  future-version token never corrupts the current save.  A live
+  preview label under the template field shows the concrete filename
+  the current pattern would produce right now (using the active
+  callsign, the default TX mode, and the current clock), with no
+  filesystem touch — change the template, format, default mode, or
+  callsign and the preview updates instantly.  Default pattern is
+  ``%d_%t_%m`` (e.g. ``2026-04-17_213512_Scottie-S1.png``) —
+  filename-sortable, unambiguous across time zones, and safe on
+  Windows / macOS / Linux.  Separator collision is handled
+  automatically: for a listening-only operator with an empty
+  callsign, ``%d_%t_%c_%m`` collapses to
+  ``2026-04-17_213512_Scottie-S1.png`` rather than producing the
+  awkward double underscore.  Cross-platform filename sanitisation
+  strips Windows-forbidden characters (``\\ / : * ? " < > |`` plus
+  ``NUL``), collapses whitespace runs to underscore, trims edge
+  separators, caps the stem length at 200 characters, and falls back
+  to the literal ``sstv`` if sanitisation empties the name.
+  Collisions are resolved with a deterministic ``_001`` / ``_002`` /
+  ``_NNN`` suffix so a second decode in the same UTC second never
+  overwrites the first.
+- **Independent TX auto-save.**  A new *Auto-save transmitted images*
+  checkbox (Settings → Images) is decoupled from RX auto-save, so
+  operators who want to keep a log of every image they put on the air
+  for station-portfolio or contest purposes can enable it without
+  also auto-saving every RX decode — and vice versa.  The saved file
+  is the post-banner composite (whatever was actually modulated on
+  air, including any TX identification strip), captured via a new
+  ``TxWorker.tx_image_prepared`` signal that fires after banner
+  stamping but before encoding begins.  Save happens on
+  ``transmission_complete`` so a cancelled or errored TX never
+  produces a file that was never actually transmitted; the stashed
+  image is cleared on every TX kickoff, on abort, and on error.
+  Test tones never emit the signal, so they can never be
+  auto-saved.  Both auto-save toggles and the manual save path all
+  resolve the same filename template via a new shared
+  ``_autosave_image`` helper — one code path, three call sites,
+  identical behaviour.
+
+### Fixed
+- **TX banner no longer clips on narrow SSTV modes.**  The
+  identification strip stamped across the top of transmitted images
+  (opt-in, v0.1.19) assumed there was always enough room on the right
+  for ``Open-SSTV v{version}`` plus the callsign flush-right.  On
+  narrow modes — Martin M2 (160 × 256), Martin M4 (160 × 128),
+  Scottie S2 (160 × 256) — the branding ran off the edge and, in the
+  worst case, started overlapping the callsign.  A new pure helper
+  ``resolve_right_side_text`` implements a three-tier fallback that
+  measures the available width before drawing: (1) render the full
+  ``Open-SSTV v{version}`` when it fits, (2) drop the version and
+  render just ``Open-SSTV`` when the full string overflows, (3) drop
+  the brand entirely when even that doesn't fit.  The callsign is
+  inviolable — under FCC §97.119 and equivalent rules elsewhere, the
+  station ID is the whole point of the banner, so it's the last
+  thing to give up space.  On Martin M1 and everything wider the
+  rendering is bit-identical to v0.2.7; the tiering only activates
+  on modes that actually need it.  Six new tests in
+  ``tests/core/test_banner.py`` pin down each tier at the exact
+  crossover pixel width.
+
+### Internal
+- **New ``open_sstv.templates`` package** containing two pure
+  modules that the UI layer depends on: ``tokens.py`` (a testable
+  ``TokenContext`` frozen dataclass plus ``resolve_tokens`` with
+  ``%%`` escape handling via a sentinel) and ``filename.py``
+  (``sanitize_filename_component`` and ``build_autosave_filename``
+  with collision resolution).  Zero Qt dependencies — 48 new unit
+  tests exercise the resolver + builder headlessly and run in under
+  a quarter of a second.  Designed so the v0.3 template compositor
+  (docs/design/v0.3_templates.md) can share this vocabulary
+  unchanged: a token that works in an auto-save filename today will
+  work in a v0.3 template text layer tomorrow.
+- **Config schema round-trip tests for the three new fields**
+  (``autosave_tx``, ``autosave_filename_pattern``,
+  ``autosave_file_format``) in ``tests/config/test_store.py``, plus
+  a regression test that older pre-v0.2.8 TOMLs load with sane
+  defaults, and one that a hand-edited ``"JPEG"`` or ``"bmp"`` is
+  normalised on load rather than handed to the filename builder
+  unchanged.
+
+---
+
 ## [0.2.7] — 2026-04-17
 
 ### Added

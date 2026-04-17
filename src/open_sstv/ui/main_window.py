@@ -105,6 +105,7 @@ from open_sstv.ui.rx_panel import RxPanel
 from open_sstv.ui.settings_dialog import SettingsDialog
 from open_sstv.ui.tx_panel import TxPanel
 from open_sstv.core.modes import Mode
+from open_sstv.templates import TokenContext, build_autosave_filename
 from open_sstv.ui.workers import RxWorker, TxWorker
 
 if TYPE_CHECKING:
@@ -235,6 +236,13 @@ class MainWindow(QMainWindow):
         #: transmission, see ``_compute_playback_watchdog_s``).
         self._last_watchdog_duration_s: float = 0.0
         self._last_tx_was_test_tone: bool = False
+        #: v0.2.8: latest TX image captured (after banner compositing, before
+        #: encoding) so it can be auto-saved on ``transmission_complete``
+        #: when ``autosave_tx`` is enabled.  Cleared after each save so a
+        #: follow-up test tone (which never emits ``tx_image_prepared``)
+        #: cannot accidentally re-save the previous real transmission.
+        self._last_tx_image: "PILImage | None" = None
+        self._last_tx_mode: "Mode | str | None" = None
         #: OP-47: remembers whether the 1 Hz rig-poll timer was running when
         #: TX started, so ``_unlock_rig_controls`` can resume it only if the
         #: rig is still connected. The poll is *suspended* for the duration
@@ -365,6 +373,9 @@ class MainWindow(QMainWindow):
         self._tx_worker.transmission_progress.connect(self._on_tx_progress)
         self._tx_worker.transmission_complete.connect(self._on_tx_complete)
         self._tx_worker.transmission_aborted.connect(self._on_tx_aborted)
+        # v0.2.8: stash the composited TX image (banner already applied) so
+        # ``_on_tx_complete`` can auto-save it when ``autosave_tx`` is on.
+        self._tx_worker.tx_image_prepared.connect(self._on_tx_image_prepared)
         self._tx_worker.watchdog_fired.connect(self._on_watchdog_fired)
         self._tx_worker.error.connect(self._on_tx_error)
 
@@ -772,6 +783,21 @@ class MainWindow(QMainWindow):
         """
         QTimer.singleShot(50, lambda: self._request_rx_gate.emit(False))
 
+    @Slot(object, object)
+    def _on_tx_image_prepared(self, image: object, mode: object) -> None:
+        """Stash the composited TX image (post-banner) for optional auto-save.
+
+        Fired by ``TxWorker`` after the banner has been stamped but
+        before encoding begins, so the saved file matches what's
+        actually on the air.  Test-tone transmissions never emit this
+        signal — the stash is cleared on every TX kickoff and after
+        every save, so a follow-up test tone can't accidentally
+        re-save the previous real image.
+        """
+        pil_image: PILImage = image  # type: ignore[assignment]
+        self._last_tx_image = pil_image
+        self._last_tx_mode = mode  # type: ignore[assignment]
+
     @Slot()
     def _on_tx_complete(self) -> None:
         self._tx_panel.set_transmitting(False)
@@ -787,6 +813,23 @@ class MainWindow(QMainWindow):
             self._tx_panel.set_status(alc_msg)
             self.statusBar().showMessage(alc_msg, 10000)
         else:
+            # v0.2.8: auto-save the transmitted image when enabled. We
+            # save here (rather than in ``_on_tx_image_prepared``) so a
+            # cancelled or errored TX doesn't produce a file that was
+            # never actually put on the air.
+            if (
+                self._config.autosave_tx
+                and self._last_tx_image is not None
+                and self._last_tx_mode is not None
+            ):
+                self._autosave_image(
+                    self._last_tx_image,
+                    self._last_tx_mode,
+                    "TX",
+                    status_verb="TX saved",
+                )
+            self._last_tx_image = None
+            self._last_tx_mode = None
             self._tx_panel.set_status("Transmission complete.")
             self.statusBar().showMessage("Ready")
         self._unlock_rig_controls()
@@ -808,6 +851,10 @@ class MainWindow(QMainWindow):
     @Slot()
     def _on_tx_aborted(self) -> None:
         self._tx_panel.set_transmitting(False)
+        # v0.2.8: drop any stashed image — aborted transmissions must
+        # not be auto-saved on the next successful TX.
+        self._last_tx_image = None
+        self._last_tx_mode = None
         if self._last_abort_was_watchdog:
             self._last_abort_was_watchdog = False
             msg = (
@@ -829,6 +876,10 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def _on_tx_error(self, message: str) -> None:
         self._last_tx_was_test_tone = False
+        # v0.2.8: same reasoning as ``_on_tx_aborted`` — a failed TX
+        # must not leak into the next successful one's auto-save.
+        self._last_tx_image = None
+        self._last_tx_mode = None
         self._tx_panel.set_transmitting(False)
         self._tx_panel.set_status(f"Error: {message}")
         self.statusBar().showMessage(message, 5000)
@@ -904,6 +955,58 @@ class MainWindow(QMainWindow):
         self._request_rx_reset.emit()
         self._rx_panel.set_status("Cleared — waiting for VIS header.")
 
+    def _build_save_context(
+        self, mode: object, direction: str
+    ) -> TokenContext:
+        """Build a :class:`TokenContext` from the current config + runtime.
+
+        Centralised so RX auto-save, TX auto-save, and the manual save
+        path all resolve the same token vocabulary against the same
+        fixture-friendly clock.  ``mode`` may arrive as either a
+        :class:`Mode` enum or a bare ``str`` (Qt unwraps ``StrEnum``
+        through queued signals), so we normalise it here.
+        """
+        mode_name = mode.value if isinstance(mode, Mode) else str(mode)
+        return TokenContext(
+            callsign=self._config.callsign or "",
+            mode=mode_name,
+            direction=direction,  # type: ignore[arg-type]
+            now_utc=datetime.datetime.now(datetime.timezone.utc),
+        )
+
+    def _autosave_image(
+        self,
+        image: "PILImage",
+        mode: object,
+        direction: str,
+        *,
+        status_verb: str = "Auto-saved",
+    ) -> Path | None:
+        """Resolve the filename template and write ``image`` to disk.
+
+        Returns the saved path on success, ``None`` on failure (a
+        warning dialog is shown for OSError).  Shared by the RX and TX
+        auto-save call sites so both consume the same
+        ``autosave_filename_pattern`` and ``autosave_file_format``
+        config fields.
+        """
+        save_dir = Path(self._config.images_save_dir)
+        ctx = self._build_save_context(mode, direction)
+        try:
+            save_dir.mkdir(parents=True, exist_ok=True)
+            path = build_autosave_filename(
+                self._config.autosave_filename_pattern,
+                save_dir,
+                ctx,
+                file_format=self._config.autosave_file_format,
+            )
+            image.save(str(path))
+        except OSError as exc:
+            QMessageBox.warning(self, "Save failed", str(exc))
+            return None
+        self.statusBar().showMessage(f"{status_verb} {path.name}", 3000)
+        return path
+
     @Slot(object, object, int)
     def _on_rx_image_complete(
         self, image: object, mode: object, vis_code: int
@@ -912,59 +1015,53 @@ class MainWindow(QMainWindow):
         if not self._config.auto_save:
             return
         pil_image: PILImage = image  # type: ignore[assignment]
-        # Mode may arrive as a plain str (Qt unwraps StrEnum through signals)
-        mode_name = mode.value if isinstance(mode, Mode) else str(mode)
-        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        save_dir = Path(self._config.images_save_dir)
-        path = save_dir / f"sstv_{mode_name}_{stamp}.png"
-        try:
-            save_dir.mkdir(parents=True, exist_ok=True)
-            pil_image.save(str(path))
-            self.statusBar().showMessage(f"Auto-saved {path.name}", 3000)
-        except OSError as exc:
-            QMessageBox.warning(self, "Save failed", str(exc))
+        self._autosave_image(pil_image, mode, "RX")
 
     @Slot(object, object)
     def _on_rx_image_saved(self, image: object, mode: object) -> None:
         """Save a decoded image to disk.
 
         If auto-save is enabled, writes directly to the configured save
-        directory with a timestamped filename. Otherwise, opens a
-        ``QFileDialog`` so the user can choose where to save.
+        directory using the filename template. Otherwise, opens a
+        ``QFileDialog`` so the user can choose where to save — but the
+        template-resolved name is pre-populated so the user still gets
+        their configured convention as the default.
         """
         pil_image: PILImage = image  # type: ignore[assignment]
-        # Mode may arrive as a plain str (Qt unwraps StrEnum through signals)
-        mode_name = mode.value if isinstance(mode, Mode) else str(mode)
-        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        default_name = f"sstv_{mode_name}_{stamp}.png"
 
         if self._config.auto_save:
-            save_dir = Path(self._config.images_save_dir)
-            path = save_dir / default_name
+            self._autosave_image(pil_image, mode, "RX", status_verb="Saved")
+            return
+
+        # Manual save: seed the dialog with the template-resolved name so
+        # the user's filename convention is honoured by default, but they
+        # can still override it (and pick a different directory / format).
+        save_dir = Path(self._config.images_save_dir)
+        ctx = self._build_save_context(mode, "RX")
+        try:
+            save_dir.mkdir(parents=True, exist_ok=True)
+            suggested = build_autosave_filename(
+                self._config.autosave_filename_pattern,
+                save_dir,
+                ctx,
+                file_format=self._config.autosave_file_format,
+            )
+        except OSError:
+            suggested = save_dir / f"sstv.{self._config.autosave_file_format}"
+        path_str, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save decoded image",
+            str(suggested),
+            "PNG (*.png);;JPEG (*.jpg *.jpeg);;All files (*)",
+        )
+        if path_str:
             try:
-                save_dir.mkdir(parents=True, exist_ok=True)
-                pil_image.save(str(path))
-                self.statusBar().showMessage(f"Saved {path.name}", 3000)
+                pil_image.save(path_str)
+                self.statusBar().showMessage(
+                    f"Saved {Path(path_str).name}", 3000
+                )
             except OSError as exc:
                 QMessageBox.warning(self, "Save failed", str(exc))
-        else:
-            start_dir = str(
-                Path(self._config.images_save_dir) / default_name
-            )
-            path_str, _ = QFileDialog.getSaveFileName(
-                self,
-                "Save decoded image",
-                start_dir,
-                "PNG (*.png);;JPEG (*.jpg *.jpeg);;All files (*)",
-            )
-            if path_str:
-                try:
-                    pil_image.save(path_str)
-                    self.statusBar().showMessage(
-                        f"Saved {Path(path_str).name}", 3000
-                    )
-                except OSError as exc:
-                    QMessageBox.warning(self, "Save failed", str(exc))
 
     @Slot()
     def _on_save_shortcut(self) -> None:

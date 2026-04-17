@@ -123,6 +123,26 @@ class AppConfig:
     # --- Directories ---
     images_save_dir: str = field(default_factory=_default_images_dir)
     auto_save: bool = False
+    # v0.2.8: TX auto-save is independent of RX.  Some operators want to
+    # keep a log of every image they transmitted (for station-portfolio
+    # or contest purposes); others don't.  Default off so upgraders'
+    # behaviour is unchanged — RX auto-save continues to follow
+    # ``auto_save`` above.
+    autosave_tx: bool = False
+    # v0.2.8: filename template shared by RX and TX auto-save.  See
+    # ``open_sstv.templates.tokens`` for the token vocabulary.  Default
+    # ``%d_%t_%m`` resolves to e.g. ``2026-04-17_213512_Scottie-S1.png``
+    # — filename-sortable, unambiguous across time zones (UTC), and
+    # filename-safe on all three target platforms.  Existing users
+    # upgrading from ≤ v0.2.7 were on ``sstv_{mode}_{YYYYMMDD_HHMMSS}``;
+    # the new default is a light cosmetic change and still clearly
+    # identifies the file as an SSTV decode.
+    autosave_filename_pattern: str = "%d_%t_%m"
+    # v0.2.8: output format for auto-saved images.  PNG preserves every
+    # decoded pixel losslessly and is the right default for archival;
+    # JPG is offered for operators who receive high volumes and want
+    # smaller files.  Constrained by the Settings UI to "png" or "jpg".
+    autosave_file_format: str = "png"
 
     def __post_init__(self) -> None:
         # v0.1.12: slider ceiling reverted from 500% to 200%.
@@ -146,6 +166,14 @@ class AppConfig:
         # TOML files can't push WPM or tone outside what the UI allows.
         self.cw_id_wpm = max(15, min(30, self.cw_id_wpm))
         self.cw_id_tone_hz = max(400, min(1200, self.cw_id_tone_hz))
+        # v0.2.8: normalise the auto-save file format to lowercase and
+        # fall back to "png" for unknown values so a hand-edited TOML
+        # can't put us into a state where the filename builder silently
+        # produces files that no viewer can open.
+        fmt = (self.autosave_file_format or "").lower().lstrip(".")
+        if fmt not in ("png", "jpg", "jpeg"):
+            fmt = "png"
+        self.autosave_file_format = "jpg" if fmt == "jpeg" else fmt
 
 
 __all__ = ["AppConfig"]

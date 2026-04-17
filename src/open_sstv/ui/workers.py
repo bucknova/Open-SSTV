@@ -316,6 +316,12 @@ class TxWorker(QObject):
     transmission_progress = Signal(int, int)  # (samples_played, samples_total)
     transmission_complete = Signal()
     transmission_aborted = Signal()
+    #: v0.2.8: emitted once the exact image that will be transmitted is
+    #: finalised (after any TX-banner compositing, before SSTV encoding).
+    #: Carries the PIL image and the Mode so the UI can auto-save the
+    #: actual transmitted bits — including the banner, if enabled —
+    #: without reproducing the compositing logic.
+    tx_image_prepared = Signal(object, object)  # (image, mode)
     #: Emits the watchdog budget (seconds) that fired so the UI can
     #: show "exceeded N s" without hardcoding the value or having to
     #: read internal worker state.  Value is the per-transmission
@@ -524,6 +530,13 @@ class TxWorker(QObject):
                     banner_height=_bh,
                     font_size=_fs,
                 )
+
+            # v0.2.8: announce the finalised image so the UI can auto-save
+            # it.  Emitted *after* banner compositing so the saved copy is
+            # byte-identical to what the encoder actually sees.  Regular
+            # TX transmission_complete still fires at the end of playback
+            # — this signal is purely informational for the auto-save path.
+            self.tx_image_prepared.emit(image, mode)
 
             # --- Encode (CPU-bound, ~100 ms for the modes we ship) ---
             try:

@@ -90,6 +90,51 @@ def _load_font(size: int) -> ImageFont.ImageFont | ImageFont.FreeTypeFont:
     return ImageFont.load_default(size=size)
 
 
+def resolve_right_side_text(
+    version: str,
+    available_width_px: int,
+    draw: ImageDraw.ImageDraw,
+    font: ImageFont.ImageFont | ImageFont.FreeTypeFont,
+) -> str:
+    """Pick the widest right-side banner text that fits in *available_width_px*.
+
+    Tiered fallback (v0.2.8):
+
+    1. ``"Open-SSTV v{version}"`` — preferred.
+    2. ``"Open-SSTV"`` — drop version when it doesn't fit.
+    3. ``""`` — drop brand entirely when even that is too wide.
+
+    The callsign is the §97.119-critical field and is rendered
+    unconditionally by the caller; this helper only decides what (if
+    anything) to put on the right-hand side beside it.
+
+    Parameters
+    ----------
+    version:
+        Application version, e.g. ``"0.2.8"``.
+    available_width_px:
+        Horizontal pixels available for right-side text.  The caller
+        computes this as ``image_width − callsign_right_x − padding``.
+    draw:
+        Pillow drawing context used for width measurement.
+    font:
+        Font to measure against.  Must be the same font the banner
+        actually renders with, or the measurement won't match.
+
+    Returns
+    -------
+    str
+        The chosen right-side text.  Empty string means nothing fits.
+    """
+    if available_width_px <= 0:
+        return ""
+    for candidate in (f"Open-SSTV v{version}", "Open-SSTV"):
+        bbox = draw.textbbox((0, 0), candidate, font=font)
+        if bbox[2] - bbox[0] <= available_width_px:
+            return candidate
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -181,20 +226,34 @@ def apply_tx_banner(
         callsign_right_x = padding + lw
 
     # --- Right side: app version (flush-right) ---
-    version_text = f"Open-SSTV v{version}"
-    bbox_r = draw.textbbox((0, 0), version_text, font=font)
-    rw = bbox_r[2] - bbox_r[0]
-    rx = width - rw - padding
+    # v0.2.8: tiered fallback for narrow modes.  Martin M2 / M4 / Scottie S2
+    # are 160 px wide — the full "Open-SSTV v{version}" text doesn't fit
+    # beside even a short callsign.  Previous behaviour rendered whatever
+    # hit the image boundary and silently clipped the rest.
+    #
+    # Callsign is §97.119-critical and never dropped.  Right-side text
+    # degrades through three tiers until it fits — see
+    # ``resolve_right_side_text`` for the tier definition.
+    #
+    # Fit budget: one padding of slack between the callsign column and
+    # the right-side text, plus the usual right-edge padding.
+    gap_after_callsign = padding if callsign else 0
+    available_right = width - callsign_right_x - gap_after_callsign - padding
+    right_text = resolve_right_side_text(version, available_right, draw, font)
 
-    # If the version text would overlap the callsign, push it right until it
-    # clears the callsign column.  Any remaining overflow is clipped naturally
-    # by the image boundary — no callsign pixels are ever overwritten.
-    if callsign and rx < callsign_right_x + padding:
-        rx = callsign_right_x + padding
-
-    draw.text((rx, _vcenter(bbox_r)), version_text, fill=text_color, font=font)
+    if right_text:
+        right_bbox = draw.textbbox((0, 0), right_text, font=font)
+        rw = right_bbox[2] - right_bbox[0]
+        rx = width - rw - padding
+        draw.text((rx, _vcenter(right_bbox)), right_text, fill=text_color, font=font)
 
     return out
 
 
-__all__ = ["BANNER_HEIGHT", "SIZE_TABLE", "apply_tx_banner", "banner_size_params"]
+__all__ = [
+    "BANNER_HEIGHT",
+    "SIZE_TABLE",
+    "apply_tx_banner",
+    "banner_size_params",
+    "resolve_right_side_text",
+]
