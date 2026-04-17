@@ -120,6 +120,25 @@ jobs:
           Compress-Archive -Path dist\open-sstv -DestinationPath dist\${{ matrix.artifact }}.zip
           Write-Host "Archive: $([math]::Round((Get-Item dist\${{ matrix.artifact }}.zip).Length / 1MB, 1)) MB"
 
+      # ── 6a½. Re-apply ad-hoc codesign (macOS only) ─────────────────────────
+      # PyInstaller ad-hoc signs Mach-O binaries during the build, but the
+      # signatures can be invalidated by intermediate steps (UPX if present,
+      # strip, file-copy / attribute stripping in the runner's fs) and by
+      # the time the user unzips on their Mac, AMFI rejects them with
+      # ``library load disallowed by system policy``.  Re-signing every
+      # .dylib / .so / Python interpreter ad-hoc before zipping is cheap
+      # and guarantees every Mach-O in the bundle carries a fresh, valid
+      # ad-hoc signature.  The zip + download round-trip preserves these
+      # (signatures live in the Mach-O header, not xattrs).
+      - name: Re-sign bundle ad-hoc (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cd dist/open-sstv
+          find . -type f \( -name "*.dylib" -o -name "*.so" -o -name "Python" \) \
+            -exec codesign --force --sign - {} \;
+          codesign --force --sign - open-sstv
+          echo "Ad-hoc signed: $(find . -type f \( -name '*.dylib' -o -name '*.so' \) | wc -l) dylibs/so + Python + launcher"
+
       # ── 6b. Package: macOS / Linux zip ─────────────────────────────────────
       - name: Zip (Unix)
         if: runner.os != 'Windows'

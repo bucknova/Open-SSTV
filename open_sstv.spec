@@ -51,6 +51,19 @@ else:
 # scipy ships .pyd/.dll data alongside its Python modules; include them.
 datas = collect_data_files("scipy")
 
+# UPX compresses Mach-O / ELF / PE binaries to shrink bundle size.  On
+# macOS (especially Apple Silicon) this is actively harmful: UPX rewrites
+# binaries *after* PyInstaller's ad-hoc codesign pass, which invalidates
+# every affected ``.dylib`` / ``.so`` signature.  The hardened runtime
+# (AMFI) then refuses to load them with::
+#
+#   code signature in <...> not valid for use in process:
+#   library load disallowed by system policy
+#
+# UPX compression savings are also negligible on modern storage.  Disable
+# UPX on Darwin; keep it available on Linux / Windows where it's safe.
+UPX_OK = sys.platform != "darwin"
+
 a = Analysis(
     # Entry-point: the same function pyproject.toml's console_script calls.
     ["src/open_sstv/app.py"],
@@ -88,7 +101,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,                # compress binaries with UPX if available
+    upx=UPX_OK,              # disabled on macOS — UPX breaks ad-hoc codesigns
     console=False,           # no console window (GUI app)
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -103,7 +116,7 @@ coll = COLLECT(
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    upx=UPX_OK,              # disabled on macOS — UPX breaks ad-hoc codesigns
     upx_exclude=[],
     name="open-sstv",        # dist/open-sstv/  <-- the folder to zip
 )
