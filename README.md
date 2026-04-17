@@ -230,6 +230,49 @@ The DSP `core/` is a pure-Python package with no UI, audio, or socket
 dependencies -- it's unit-testable in headless CI and can be driven from a
 different front-end (TUI, web, CLI) without modification.
 
+## Install (prebuilt binary)
+
+Prebuilt binaries for Windows, macOS (Apple Silicon), and Linux (x86_64 and arm64)
+are attached to every [GitHub Release](https://github.com/bucknova/Open-SSTV/releases/latest).
+No Python install required — just download, unzip, and run.
+
+### macOS (Apple Silicon)
+
+Because the release bundle is ad-hoc signed (not yet Apple-notarized — planned),
+macOS Gatekeeper will refuse to launch it until you clear the quarantine flag
+that Safari/Chrome/Finder stamps on every downloaded file. You only need to do
+this once per download.
+
+```bash
+cd ~/Downloads
+unzip -o open-sstv-macos-arm64.zip
+xattr -cr open-sstv            # strip the quarantine flag recursively
+./open-sstv/open-sstv          # launch
+```
+
+**Symptoms if you skip `xattr -cr`:** cascading *"'python' is damaged and can't
+be opened"* popups, or a terminal error like
+`library load disallowed by system policy`. The bundle is not actually damaged —
+that's Gatekeeper refusing to verify an ad-hoc-signed binary against the
+Apple-notarization catalog. `xattr -cr` removes the quarantine attribute that
+triggers the check.
+
+Notarized builds are on the roadmap; when that lands, double-clicking the
+unzipped `open-sstv` in Finder will Just Work with no Terminal step.
+
+### Linux (x86_64 or arm64)
+
+Two formats are published per architecture:
+
+- **`.AppImage`** — single-file, self-contained. `chmod +x open-sstv-*.AppImage && ./open-sstv-*.AppImage`.
+- **`.zip`** — unpacked onedir bundle. `unzip open-sstv-linux-*.zip && ./open-sstv/open-sstv`.
+
+### Windows
+
+Download `open-sstv-windows-x86_64.zip`, unzip, and double-click `open-sstv.exe`.
+Windows SmartScreen may show a "Windows protected your PC" dialog on first launch
+because the binary is unsigned; click **More info → Run anyway**.
+
 ## Install (development)
 
 ### Linux and macOS (supported)
