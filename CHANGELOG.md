@@ -11,6 +11,83 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.2.7] — 2026-04-17
+
+### Added
+- **First-launch callsign dialog.**  New ``FirstLaunchDialog`` prompts
+  the operator for their callsign on a truly fresh install so they
+  don't have to go hunt through Settings before their first TX.  The
+  dialog explains why the callsign is needed (it's stamped on the TX
+  banner and keyed as the CW station ID per FCC §97.119 and
+  equivalent ID rules in other administrations) and auto-uppercases
+  input up to 12 characters.  *Save* persists and populates both the
+  radio panel and TX panel immediately; *Skip for now* closes the
+  dialog without writing anything.  Either choice flips a new
+  ``AppConfig.first_launch_seen`` flag to ``True`` so listening-only
+  operators who skip aren't nagged on every launch.
+
+  Migration for upgraders: ``store.load_config`` injects
+  ``first_launch_seen = True`` when the key is absent in an existing
+  TOML, so anyone upgrading from v0.2.6 or earlier is grandfathered
+  in and never sees the prompt.  A missing TOML file (truly fresh
+  install) keeps the default ``False`` and fires the dialog via
+  ``QTimer.singleShot(0, ...)`` once the main window has painted.
+
+- **Gallery preview on single-click and right-click "View".**
+  Previously the only way to see a decoded image was save-to-disk
+  and reopen in an external viewer.  Single-click on an RX gallery
+  thumbnail now loads the image into the main RX preview with the
+  correct mode label and save button re-enabled; a new *View* entry
+  is the first item in the right-click context menu, same effect.
+  Double-click still triggers the existing *activated* behaviour.
+
+  Implementation note: PySide6's ``QMenu.exec`` is C++-backed and
+  can't be monkey-patched from Python, so context-menu dispatch was
+  extracted to a testable ``_dispatch_context_action(item, label)``
+  helper.  ``QStandardItem.setData`` round-trips ``StrEnum`` values
+  as bare ``str``, so a new ``_coerce_mode`` staticmethod rehydrates
+  ``Mode`` on retrieval.
+
+### Fixed
+- **``QObject::killTimer`` cross-thread warnings on exit.**  The
+  RxWorker's wall-clock watchdog ``QTimer`` was being destroyed from
+  the GUI thread after the RX thread's event loop had already
+  drained, emitting
+
+      QObject::killTimer: Timers cannot be stopped from another thread
+
+  on every clean shutdown.  Added a ``shutdown()`` slot on
+  ``RxWorker`` that stops and ``deleteLater()``s the timer from the
+  worker's own thread, idempotent across repeat calls and safe when
+  the timer was never created.  ``MainWindow`` now emits a new
+  ``_request_rx_shutdown`` signal in ``closeEvent`` before
+  ``thread.quit()``, so the queued slot runs on the correct thread
+  before teardown and the warning is gone.
+
+### Docs
+- **v0.3 template compositor design plan** added at
+  ``docs/design/v0.3_templates.md``.  Captures the full v0.3 scope:
+  layered data model (seven layer types including RX-image slot),
+  token resolver supporting both ``%c`` and ``{callsign}`` syntaxes,
+  visual template gallery in the TX panel with role filter, dedicated
+  editor dialog, TOML persistence format with worked example,
+  aspect-ratio handling across all SSTV modes, shipped Tier 1 fonts
+  (DejaVu Sans Bold, Inter Bold, Press Start 2P — all open-licensed),
+  migration from v0.2.x template strings, and a phased delivery plan
+  across v0.3.0 / v0.3.1 / v0.3.2.  Reference material only; no v0.3
+  code ships in this release.
+
+### Internal
+- Test coverage added in three new test modules
+  (``test_first_launch_dialog.py``, ``test_image_gallery.py``,
+  expansions to ``test_rx_worker.py``), plus a
+  ``_suppress_first_launch_dialog`` fixture in
+  ``test_main_window.py`` that stamps ``first_launch_seen=True`` on
+  the loaded config so CI never blocks on the modal.  Full suite:
+  576 pass / 1 skip.
+
+---
+
 ## [0.2.6] — 2026-04-17
 
 ### Fixed
@@ -1556,7 +1633,8 @@ Two P0s, eight P1s, six P2s, two P3s.
 
 ---
 
-[Unreleased]: https://github.com/bucknova/Open-SSTV/compare/v0.1.9...HEAD
+[Unreleased]: https://github.com/bucknova/Open-SSTV/compare/v0.2.7...HEAD
+[0.2.7]: https://github.com/bucknova/Open-SSTV/compare/v0.2.6...v0.2.7
 [0.1.9]: https://github.com/bucknova/Open-SSTV/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/bucknova/Open-SSTV/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/bucknova/Open-SSTV/compare/v0.1.6...v0.1.7
