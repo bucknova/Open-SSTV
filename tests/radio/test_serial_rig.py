@@ -271,3 +271,161 @@ class TestSerialExceptionWrapping:
 
         with pytest.raises(RigConnectionError, match="Serial PTT write failed"):
             r.set_ptt(True)
+
+
+# ---------------------------------------------------------------------------
+# Y-1 through Y-3 — YaesuRig.set_ptt write-only path (FT-991 timeout fix)
+# ---------------------------------------------------------------------------
+
+
+def _make_yaesu_rig() -> "YaesuRig":
+    from open_sstv.radio.serial_rig import YaesuRig
+    import threading
+
+    r = YaesuRig.__new__(YaesuRig)
+    r._port = "/dev/null"
+    r._baud_rate = 38400
+    r._lock = threading.Lock()
+    r._ser = None
+    return r
+
+
+class TestYaesuSetPtt:
+    """set_ptt must use a write-only path — no 1-second timeout for TX1;/TX0;."""
+
+    def test_set_ptt_true_no_response_succeeds(self) -> None:
+        """TX1; sent, no response — must return immediately without raising."""
+        r = _make_yaesu_rig()
+        r._ser = MagicMock()
+        r.set_ptt(True)
+        r._ser.write.assert_called_once_with(b"TX1;")
+        r._ser.read.assert_not_called()
+
+    def test_set_ptt_false_no_response_succeeds(self) -> None:
+        """TX0; sent, no response — must return immediately without raising."""
+        r = _make_yaesu_rig()
+        r._ser = MagicMock()
+        r.set_ptt(False)
+        r._ser.write.assert_called_once_with(b"TX0;")
+        r._ser.read.assert_not_called()
+
+    def test_set_ptt_echoed_response_does_not_block(self) -> None:
+        """A radio that echoes TX1; must not block set_ptt or cause an error."""
+        r = _make_yaesu_rig()
+        mock_ser = MagicMock()
+        mock_ser.in_waiting = 4
+        mock_ser.read.return_value = b"TX1;"
+        r._ser = mock_ser
+        # write-only path: does not attempt to read, so no blocking
+        r.set_ptt(True)
+        mock_ser.write.assert_called_once_with(b"TX1;")
+        mock_ser.read.assert_not_called()
+
+
+class TestYaesuQuestionMarkError:
+    """?; from the radio must raise RigCommandError, not silently time out."""
+
+    def test_question_mark_via_read_command_raises(self) -> None:
+        from open_sstv.radio.exceptions import RigCommandError
+        from open_sstv.radio.serial_rig import YaesuRig
+
+        r = _make_yaesu_rig()
+        mock_ser = MagicMock()
+        # Simulate radio returning ?; immediately
+        mock_ser.in_waiting = 2
+        mock_ser.read.return_value = b"?;"
+        r._ser = mock_ser
+
+        with pytest.raises(RigCommandError, match="Radio rejected command"):
+            r._read_response(expected_prefix="FA")
+
+    def test_question_mark_error_carries_command_context(self) -> None:
+        from open_sstv.radio.exceptions import RigCommandError
+        from open_sstv.radio.serial_rig import YaesuRig
+
+        r = _make_yaesu_rig()
+        mock_ser = MagicMock()
+        mock_ser.in_waiting = 2
+        mock_ser.read.return_value = b"?;"
+        r._ser = mock_ser
+
+        exc = pytest.raises(RigCommandError, r._read_response, expected_prefix="ID")
+        assert exc.value.command == "ID"
+
+
+# ---------------------------------------------------------------------------
+# K-1 through K-3 — KenwoodRig.set_ptt write-only path (robustness fix)
+# ---------------------------------------------------------------------------
+
+
+def _make_kenwood_rig() -> "KenwoodRig":
+    from open_sstv.radio.serial_rig import KenwoodRig
+    import threading
+
+    r = KenwoodRig.__new__(KenwoodRig)
+    r._port = "/dev/null"
+    r._baud_rate = 9600
+    r._lock = threading.Lock()
+    r._ser = None
+    return r
+
+
+class TestKenwoodSetPtt:
+    """set_ptt must use a write-only path for cross-firmware robustness."""
+
+    def test_set_ptt_true_no_response_succeeds(self) -> None:
+        """TX1; sent, no response — must return without raising."""
+        r = _make_kenwood_rig()
+        r._ser = MagicMock()
+        r.set_ptt(True)
+        r._ser.write.assert_called_once_with(b"TX1;")
+        r._ser.read.assert_not_called()
+
+    def test_set_ptt_false_sends_rx(self) -> None:
+        """RX; is the Kenwood receive command — must be sent for set_ptt(False)."""
+        r = _make_kenwood_rig()
+        r._ser = MagicMock()
+        r.set_ptt(False)
+        r._ser.write.assert_called_once_with(b"RX;")
+        r._ser.read.assert_not_called()
+
+    def test_set_ptt_echoed_response_does_not_block(self) -> None:
+        """Kenwood radios that echo TX1; must not block set_ptt."""
+        r = _make_kenwood_rig()
+        mock_ser = MagicMock()
+        mock_ser.in_waiting = 4
+        mock_ser.read.return_value = b"TX1;"
+        r._ser = mock_ser
+        r.set_ptt(True)
+        mock_ser.write.assert_called_once_with(b"TX1;")
+        mock_ser.read.assert_not_called()
+
+
+class TestKenwoodQuestionMarkError:
+    """?; from the radio must raise RigCommandError, not silently time out."""
+
+    def test_question_mark_via_read_command_raises(self) -> None:
+        from open_sstv.radio.exceptions import RigCommandError
+        from open_sstv.radio.serial_rig import KenwoodRig
+
+        r = _make_kenwood_rig()
+        mock_ser = MagicMock()
+        mock_ser.in_waiting = 2
+        mock_ser.read.return_value = b"?;"
+        r._ser = mock_ser
+
+        with pytest.raises(RigCommandError, match="Radio rejected command"):
+            r._read_response(expected_prefix="FA")
+
+    def test_question_mark_error_carries_command_context(self) -> None:
+        from open_sstv.radio.exceptions import RigCommandError
+        from open_sstv.radio.serial_rig import KenwoodRig
+
+        r = _make_kenwood_rig()
+        mock_ser = MagicMock()
+        mock_ser.in_waiting = 2
+        mock_ser.read.return_value = b"?;"
+        r._ser = mock_ser
+
+        exc = pytest.raises(RigCommandError, r._read_response, expected_prefix="MD")
+        assert exc.value.command == "MD"

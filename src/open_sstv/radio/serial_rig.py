@@ -505,10 +505,11 @@ class KenwoodRig:
         return False
 
     def set_ptt(self, on: bool) -> None:
-        if on:
-            self._command("TX1")
-        else:
-            self._command("RX")
+        # TX1;/RX; are set commands — use write-only path for robustness.
+        # Kenwood radios generally echo set commands, but some firmware
+        # versions and Elecraft models may not; write-only avoids a
+        # potential 1-second timeout on every key.
+        self._write_command("TX1" if on else "RX")
 
     def get_strength(self) -> int:
         resp = self._command("SM0")
@@ -529,8 +530,25 @@ class KenwoodRig:
         if not resp.startswith("ID"):
             raise RigConnectionError("No valid ID response from radio")
 
+    def _write_command(self, cmd: str) -> None:
+        """Write a set command without waiting for a response.
+
+        Used for commands (``TX1;``, ``RX;``) that either send no response
+        or whose echo can safely be ignored.
+        """
+        with self._lock:
+            if self._ser is None:
+                raise RigConnectionError("Serial port not open")
+            try:
+                self._ser.reset_input_buffer()
+                self._ser.write(f"{cmd};".encode("ascii"))
+            except serial.SerialException as exc:
+                raise RigConnectionError(
+                    f"Kenwood serial I/O failed on {self._port}: {exc}"
+                ) from exc
+
     def _command(self, cmd: str) -> str:
-        """Send a Kenwood command and return the response.
+        """Send a Kenwood read command and return the response.
 
         Wraps ``serial.SerialException`` as ``RigConnectionError`` so a
         mid-session unplug is observable to callers that catch
@@ -556,7 +574,8 @@ class KenwoodRig:
         Discards unsolicited status messages (common when the operator
         turns knobs during polling) and keeps reading until a response
         whose first characters match *expected_prefix* arrives, or until
-        the 1 s deadline expires.
+        the 1 s deadline expires.  A ``?;`` response is treated as a
+        command rejection and raises ``RigCommandError`` immediately.
 
         ``serial.SerialException`` raised by ``in_waiting``/``read``
         propagates out; ``_command`` catches it and re-raises as
@@ -575,6 +594,11 @@ class KenwoodRig:
                     idx = buf.index(b";")
                     text = buf[:idx].decode("ascii", errors="replace")
                     del buf[:idx + 1]
+                    if text == "?":
+                        raise RigCommandError(
+                            "Radio rejected command (?)",
+                            command=expected_prefix,
+                        )
                     if not expected_prefix or text.startswith(expected_prefix):
                         return text
                     # Unsolicited message — discard and keep reading.
@@ -591,10 +615,16 @@ class KenwoodRig:
 class YaesuRig:
     """Direct CAT control for Yaesu radios.
 
-    Modern Yaesu radios (FT-991A, FT-891, FT-710, FTDX10, FTDX101,
-    FT-950) use a Kenwood-like text protocol with ``;``-terminated
+    Modern Yaesu radios (FT-991, FT-991A, FT-891, FT-710, FTDX10,
+    FTDX101, FT-950) use a Kenwood-like text protocol with ``;``-terminated
     commands. Older radios (FT-817/818, FT-857) use a binary protocol;
     this class targets the modern text variant.
+
+    .. note::
+        Yaesu *set* commands (e.g. ``TX1;``, ``TX0;``) execute silently —
+        the radio sends **no response**.  Read commands (e.g. ``TX;``,
+        ``FA;``) respond with the current value.  ``set_ptt`` uses a
+        write-only path to avoid a 1-second timeout on every key-up/down.
     """
 
     name: str = "Yaesu CAT"
@@ -679,10 +709,9 @@ class YaesuRig:
         return False
 
     def set_ptt(self, on: bool) -> None:
-        if on:
-            self._command("TX1")
-        else:
-            self._command("TX0")
+        # TX1; / TX0; are set commands — Yaesu sends no response.
+        # Using _write_command avoids a 1-second timeout on every key.
+        self._write_command("TX1" if on else "TX0")
 
     def get_strength(self) -> int:
         resp = self._command("SM0")
@@ -702,8 +731,26 @@ class YaesuRig:
         if not resp.startswith("ID"):
             raise RigConnectionError("No valid ID response from radio")
 
+    def _write_command(self, cmd: str) -> None:
+        """Write a set command without waiting for a response.
+
+        Yaesu set commands (``TX1;``, ``TX0;``, ``MD0n;``, …) execute
+        silently — the radio sends no response frame.  Callers must not
+        block waiting for one.
+        """
+        with self._lock:
+            if self._ser is None:
+                raise RigConnectionError("Serial port not open")
+            try:
+                self._ser.reset_input_buffer()
+                self._ser.write(f"{cmd};".encode("ascii"))
+            except serial.SerialException as exc:
+                raise RigConnectionError(
+                    f"Yaesu serial I/O failed on {self._port}: {exc}"
+                ) from exc
+
     def _command(self, cmd: str) -> str:
-        """Send a Yaesu command and return the response.
+        """Send a Yaesu read command and return the response.
 
         Wraps ``serial.SerialException`` as ``RigConnectionError`` so a
         mid-session unplug is observable to callers that catch
@@ -726,8 +773,9 @@ class YaesuRig:
 
         Discards unsolicited status messages and keeps reading until a
         response starting with *expected_prefix* arrives or the deadline
-        expires.  ``serial.SerialException`` propagates to ``_command``
-        which re-raises as ``RigConnectionError``.
+        expires.  A ``?;`` response is treated as a command rejection and
+        raises ``RigCommandError`` immediately.  ``serial.SerialException``
+        propagates to ``_command`` which re-raises as ``RigConnectionError``.
         """
         if self._ser is None:
             raise RigConnectionError("Serial port not open")
@@ -741,6 +789,11 @@ class YaesuRig:
                     idx = buf.index(b";")
                     text = buf[:idx].decode("ascii", errors="replace")
                     del buf[:idx + 1]
+                    if text == "?":
+                        raise RigCommandError(
+                            "Radio rejected command (?)",
+                            command=expected_prefix,
+                        )
                     if not expected_prefix or text.startswith(expected_prefix):
                         return text
                     # Unsolicited message — discard and keep reading.
