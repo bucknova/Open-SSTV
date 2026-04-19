@@ -11,6 +11,42 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.2.9] — 2026-04-19
+
+### Fixed
+
+- **Yaesu CAT set commands no longer time out.**  `set_ptt`, `set_freq`,
+  and `set_mode` on `YaesuRig` previously routed through `_command()`,
+  which waited up to 1 second for a response.  Yaesu *set* commands
+  (`TX1;`, `TX0;`, `FA{9d};`, `MD0{digit};`) execute silently — the radio
+  sends no response — so every PTT key, every frequency QSY, and every
+  mode change blocked for a full second before failing.  Confirmed on
+  FT-991 and FT-991A; likely affected FT-891, FT-710, FTDX10, FTDX101,
+  FT-950 as well.  All three set methods now use a write-only path
+  (`_write_command`) that returns immediately after the serial write.
+
+- **Kenwood/Elecraft CAT set commands no longer time out.**  Same root
+  cause as the Yaesu fix above: `set_ptt`, `set_freq`, and `set_mode` on
+  `KenwoodRig` used `_command()` for set operations.  Kenwood set commands
+  (`FA{11d};`, `MD{digit};`, `TX1;`, `RX;`) produce no response on any
+  tested hardware (TS-590SG, TS-2000, TS-480, K3).  All three set methods
+  now use `_write_command`.  Read commands (`FA;`, `MD;`, `TX;`, `ID;`,
+  `SM0;`) are unchanged and continue to use the response-reading path.
+
+- **`?;` error response surfaced as `RigCommandError`.**  When either a
+  Yaesu or Kenwood radio responds with `?;` (command rejected or
+  unrecognised), `_read_response` previously discarded it as an unsolicited
+  message and then timed out with a generic "command timeout" after 1 second
+  — hiding the real failure.  `?;` is now detected immediately and raises
+  `RigCommandError("Radio rejected command (?)")` with the command prefix
+  attached, so log messages and the status bar identify the actual cause.
+
+- **FT-991 (original) added to supported Yaesu models.**  The `YaesuRig`
+  docstring previously listed only the FT-991A; the original FT-991 uses
+  the same CAT protocol and is equally supported.
+
+---
+
 ## [0.2.8] — 2026-04-17
 
 ### Added
