@@ -429,3 +429,65 @@ class TestKenwoodQuestionMarkError:
 
         exc = pytest.raises(RigCommandError, r._read_response, expected_prefix="MD")
         assert exc.value.command == "MD"
+
+
+# ---------------------------------------------------------------------------
+# K-4 / K-5 — KenwoodRig set_freq and set_mode use write-only path
+# (FA{data}; and MD{digit}; are set commands — no response on any tested HW)
+# ---------------------------------------------------------------------------
+
+
+class TestKenwoodSetFreqAndMode:
+    def test_set_freq_no_response_succeeds(self) -> None:
+        """FA{11d}; is a set command; must not block waiting for a response."""
+        r = _make_kenwood_rig()
+        r._ser = MagicMock()
+        r.set_freq(14_230_000)
+        r._ser.write.assert_called_once_with(b"FA00014230000;")
+        r._ser.read.assert_not_called()
+
+    def test_set_mode_no_response_succeeds(self) -> None:
+        """MD{digit}; is a set command; must not block waiting for a response."""
+        r = _make_kenwood_rig()
+        r._ser = MagicMock()
+        r.set_mode("USB", 0)
+        r._ser.write.assert_called_once_with(b"MD2;")
+        r._ser.read.assert_not_called()
+
+    def test_set_mode_unknown_falls_back_to_usb(self) -> None:
+        """Unmapped mode name defaults to USB (digit '2')."""
+        r = _make_kenwood_rig()
+        r._ser = MagicMock()
+        r.set_mode("OLIVIA", 0)
+        r._ser.write.assert_called_once_with(b"MD2;")
+
+
+# ---------------------------------------------------------------------------
+# Y-4 / Y-5 — YaesuRig set_freq and set_mode use write-only path
+# (FA{data}; and MD0{digit}; are set commands — Yaesu sends no response)
+# ---------------------------------------------------------------------------
+
+
+class TestYaesuSetFreqAndMode:
+    def test_set_freq_no_response_succeeds(self) -> None:
+        """FA{9d}; is a set command; must not block waiting for a response."""
+        r = _make_yaesu_rig()
+        r._ser = MagicMock()
+        r.set_freq(14_230_000)
+        r._ser.write.assert_called_once_with(b"FA014230000;")
+        r._ser.read.assert_not_called()
+
+    def test_set_mode_no_response_succeeds(self) -> None:
+        """MD0{digit}; is a set command; must not block waiting for a response."""
+        r = _make_yaesu_rig()
+        r._ser = MagicMock()
+        r.set_mode("USB", 0)
+        r._ser.write.assert_called_once_with(b"MD02;")
+        r._ser.read.assert_not_called()
+
+    def test_set_mode_unknown_falls_back_to_usb(self) -> None:
+        """Unmapped mode name defaults to USB (digit '2')."""
+        r = _make_yaesu_rig()
+        r._ser = MagicMock()
+        r.set_mode("OLIVIA", 0)
+        r._ser.write.assert_called_once_with(b"MD02;")

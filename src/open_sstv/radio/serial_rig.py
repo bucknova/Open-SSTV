@@ -423,6 +423,14 @@ class KenwoodRig:
     by data, also ``;``-terminated.
 
     Works with: TS-590, TS-890, TS-2000, TS-480, K3, KX3, KX2, K4.
+
+    .. note::
+        Kenwood distinguishes *read* from *set* by the presence of data
+        after the command mnemonic.  ``FA;`` reads frequency; ``FA{11d};``
+        sets it.  Set commands produce **no response** on all tested
+        hardware (TS-590SG, TS-2000, TS-480, K3).  Set methods use
+        ``_write_command`` so they do not wait for a response that will
+        never arrive.
     """
 
     name: str = "Kenwood/Elecraft"
@@ -475,7 +483,8 @@ class KenwoodRig:
         return 0
 
     def set_freq(self, hz: int) -> None:
-        self._command(f"FA{hz:011d}")
+        # FA{11d}; is a set command — no response expected.
+        self._write_command(f"FA{hz:011d}")
 
     def get_mode(self) -> tuple[str, int]:
         resp = self._command("MD")
@@ -495,7 +504,8 @@ class KenwoodRig:
             "AM": "5", "FSK": "6", "CW-R": "7", "FSK-R": "9",
         }
         digit = mode_map.get(mode.upper(), "2")
-        self._command(f"MD{digit}")
+        # MD{digit}; is a set command — no response expected.
+        self._write_command(f"MD{digit}")
 
     def get_ptt(self) -> bool:
         resp = self._command("TX")
@@ -533,8 +543,9 @@ class KenwoodRig:
     def _write_command(self, cmd: str) -> None:
         """Write a set command without waiting for a response.
 
-        Used for commands (``TX1;``, ``RX;``) that either send no response
-        or whose echo can safely be ignored.
+        All Kenwood set commands (``FA{data}``, ``MD{digit}``, ``TX1``,
+        ``RX``, …) produce no response.  Callers must not block waiting
+        for one.
         """
         with self._lock:
             if self._ser is None:
@@ -621,10 +632,11 @@ class YaesuRig:
     this class targets the modern text variant.
 
     .. note::
-        Yaesu *set* commands (e.g. ``TX1;``, ``TX0;``) execute silently —
-        the radio sends **no response**.  Read commands (e.g. ``TX;``,
-        ``FA;``) respond with the current value.  ``set_ptt`` uses a
-        write-only path to avoid a 1-second timeout on every key-up/down.
+        Yaesu *set* commands (e.g. ``TX1;``, ``TX0;``, ``FA{9d};``,
+        ``MD0{digit};``) execute silently — the radio sends **no response**.
+        Read commands (e.g. ``TX;``, ``FA;``, ``MD0;``) respond with the
+        current value.  All set methods use ``_write_command`` to avoid a
+        1-second timeout waiting for a response that will never arrive.
     """
 
     name: str = "Yaesu CAT"
@@ -677,7 +689,8 @@ class YaesuRig:
         return 0
 
     def set_freq(self, hz: int) -> None:
-        self._command(f"FA{hz:09d}")
+        # FA{9d}; is a set command — Yaesu sends no response.
+        self._write_command(f"FA{hz:09d}")
 
     def get_mode(self) -> tuple[str, int]:
         resp = self._command("MD0")
@@ -699,7 +712,8 @@ class YaesuRig:
             "AM": "5", "CW": "3", "DATA-U": "C", "DATA-L": "8",
         }
         digit = mode_map.get(mode.upper(), "2")
-        self._command(f"MD0{digit}")
+        # MD0{digit}; is a set command — Yaesu sends no response.
+        self._write_command(f"MD0{digit}")
 
     def get_ptt(self) -> bool:
         # Read TX status
@@ -734,9 +748,9 @@ class YaesuRig:
     def _write_command(self, cmd: str) -> None:
         """Write a set command without waiting for a response.
 
-        Yaesu set commands (``TX1;``, ``TX0;``, ``MD0n;``, …) execute
-        silently — the radio sends no response frame.  Callers must not
-        block waiting for one.
+        All Yaesu set commands (``FA{data}``, ``MD0{digit}``, ``TX1``,
+        ``TX0``, …) execute silently — the radio sends no response frame.
+        Callers must not block waiting for one.
         """
         with self._lock:
             if self._ser is None:
