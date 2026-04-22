@@ -243,3 +243,53 @@ class TestIsSafeRigctldArg:
         """Dashes inside a value (e.g. device path) are fine."""
         assert is_safe_rigctld_arg("/dev/cu.usbserial-1410") is True
         assert is_safe_rigctld_arg("mid-dash-value") is True
+
+
+# ---------------------------------------------------------------------------
+# OP2-05 — _read_until_rprt byte-size cap
+# ---------------------------------------------------------------------------
+
+
+def test_read_until_rprt_raises_on_oversized_response(fake: FakeRigctld) -> None:
+    """_read_until_rprt must raise RigCommandError when the accumulated
+    response exceeds _MAX_RESPONSE_BYTES, even if no newlines are present
+    (OP2-05)."""
+    import socket
+    import threading
+
+    # Spin up a minimal TCP server that sends 128 KiB of garbage (no newlines)
+    # followed by a valid RPRT line — the guard should trip before then.
+    done = threading.Event()
+
+    def _junk_server(conn: socket.socket) -> None:
+        try:
+            conn.recv(1024)  # consume the command
+            # Send > 64 KiB of bytes with no newlines so the byte cap fires.
+            conn.sendall(b"X" * (65 * 1024))
+            conn.sendall(b"\nRPRT 0\n")
+        except OSError:
+            pass
+        finally:
+            conn.close()
+            done.set()
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+
+    def _accept() -> None:
+        conn, _ = srv.accept()
+        _junk_server(conn)
+
+    t = threading.Thread(target=_accept, daemon=True)
+    t.start()
+
+    from open_sstv.radio.rigctld import RigctldClient
+    client = RigctldClient(host="127.0.0.1", port=port, timeout_s=5.0)
+    client.open()
+    with pytest.raises(RigCommandError, match="bytes"):
+        client.get_freq()
+    client.close()
+    srv.close()

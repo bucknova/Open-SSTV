@@ -13,6 +13,7 @@ three built-in defaults (CQ, Exchange, 73) are returned.
 from __future__ import annotations
 
 import logging
+import os
 import tomllib
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -227,12 +228,17 @@ def save_templates(
             tpl_dict["overlay"].append(ov_dict)
         data["template"].append(tpl_dict)
 
+    # OP2-07: write atomically via a sibling .tmp + os.replace so a
+    # SIGKILL mid-write never leaves a truncated templates file.
+    tmp = path.with_suffix(path.suffix + ".tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("wb") as f:
+        with tmp.open("wb") as f:
             tomli_w.dump(data, f)
+        os.replace(tmp, path)
     except OSError as exc:
         _log.error("Failed to save templates to %s: %s", path, exc)
+        tmp.unlink(missing_ok=True)
         raise
 
 

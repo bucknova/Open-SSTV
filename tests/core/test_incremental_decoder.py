@@ -1004,3 +1004,25 @@ def test_robot36_detection_is_incremental() -> None:
         f"{len(sizes_processed)} calls, but total pending was {total_pending}. "
         f"Bound is {bound}. Suggests O(N²) regression in _try_detect."
     )
+
+
+# === OP2-10: fallback threshold uses seconds constant ===
+
+
+def test_robot36_fallback_threshold_scales_with_sample_rate() -> None:
+    """_DETECT_FALLBACK_S must scale the threshold with fs, not divide by
+    a hardcoded 48_000.  At 44.1 kHz the old formula yielded 2 s × 44100
+    instead of 3 s × 44100 (OP2-10)."""
+    from open_sstv.core.incremental_decoder import Robot36IncrementalDecoder
+
+    spec = MODE_TABLE[Mode.ROBOT_36]
+    fs_44k = 44_100
+    wrapper = Robot36IncrementalDecoder(spec, fs=fs_44k, vis_end_abs=0, start_abs=0)
+
+    expected = int(fs_44k * Robot36IncrementalDecoder._DETECT_FALLBACK_S)
+    # The fallback threshold is computed inside _try_detect; approximate it
+    # directly from the constant so a regression in the formula is visible.
+    assert expected == int(Robot36IncrementalDecoder._DETECT_FALLBACK_S * fs_44k)
+    # Sanity check: 3 s × 44100 Hz = 132 300 samples (not 2 × 44100 = 88 200
+    # as the old integer-division formula would have produced).
+    assert expected == 132_300

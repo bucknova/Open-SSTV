@@ -109,6 +109,8 @@ from open_sstv.templates import TokenContext, build_autosave_filename
 from open_sstv.ui.workers import RxWorker, TxWorker
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from PIL.Image import Image as PILImage
 
 
@@ -144,6 +146,32 @@ class _RigPollWorker(QObject):
             self.poll_error.emit()
             return
         self.poll_result.emit(freq, mode_name, strength)
+
+
+class _RigConnectWorker(QObject):
+    """One-shot: runs rig.open() + rig.ping() on a background thread.
+
+    Prevents the GUI from freezing for up to ~4 s on unresponsive radios
+    (OP2-02).  Create, moveToThread, connect succeeded/failed, start thread.
+    """
+
+    succeeded = Signal(object)  # emits the connected Rig instance
+    failed = Signal(str)        # emits a human-readable error message
+
+    def __init__(self, rig: "Rig") -> None:
+        super().__init__()
+        self._rig = rig
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self._rig.open()
+            self._rig.ping()
+            self.succeeded.emit(self._rig)
+        except RigError as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
 
 
 class MainWindow(QMainWindow):
@@ -627,9 +655,18 @@ class MainWindow(QMainWindow):
             try:
                 save_config(self._config)
             except OSError as exc:
-                self.statusBar().showMessage(
-                    f"Settings applied but could not be saved to disk: {exc}", 8000
-                )
+                # OP2-18: if rigctld was just adopted, surface a clear message
+                # so the user knows it's running despite the save failure.
+                if self._rigctld_proc is not None:
+                    self.statusBar().showMessage(
+                        f"Settings not saved ({exc}). "
+                        "rigctld is running — disconnect the rig to stop it.",
+                        10000,
+                    )
+                else:
+                    self.statusBar().showMessage(
+                        f"Settings applied but could not be saved to disk: {exc}", 8000
+                    )
                 return
 
             # If audio input device or sample rate changed while capture is
@@ -781,7 +818,9 @@ class MainWindow(QMainWindow):
         TX-period audio bleeds into the next RX attempt.  The gate-off
         also calls RxWorker.reset() so the counter and decoder start clean.
         """
-        QTimer.singleShot(50, lambda: self._request_rx_gate.emit(False))
+        # OP2-19: guard against post-close firing — isVisible() is False
+        # once closeEvent has run, so the callback becomes a no-op.
+        QTimer.singleShot(50, lambda: self.isVisible() and self._request_rx_gate.emit(False))
 
     @Slot(object, object)
     def _on_tx_image_prepared(self, image: object, mode: object) -> None:
@@ -1101,8 +1140,36 @@ class MainWindow(QMainWindow):
         else:
             self._connect_rigctld()
 
+    def _start_rig_connect_thread(
+        self,
+        rig: "Rig",
+        on_success: "Callable[[Rig], None]",
+        on_error: "Callable[[str], None]",
+    ) -> None:
+        """Spin up a one-shot QThread to run rig.open() + rig.ping().
+
+        Results are delivered to the GUI thread via queued signal connections.
+        ``on_success`` and ``on_error`` are plain callables (not Qt slots) and
+        will execute on the GUI thread when the signal fires.
+        """
+        worker = _RigConnectWorker(rig)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.succeeded.connect(lambda r: on_success(r))
+        worker.failed.connect(lambda e: on_error(e))
+        worker.succeeded.connect(lambda _: thread.quit())
+        worker.failed.connect(lambda _: thread.quit())
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
     def _connect_serial(self) -> None:
-        """Create a direct serial rig backend and start polling."""
+        """Create a direct serial rig backend and start polling.
+
+        OP2-02: open() + ping() run on a background thread via
+        ``_RigConnectWorker`` so the GUI never freezes for the CAT round-trip.
+        """
         port = self._config.rig_serial_port
         if not port:
             self._radio_panel.set_connection_error()
@@ -1119,8 +1186,6 @@ class MainWindow(QMainWindow):
                 ci_v_address=self._config.rig_civ_address,
                 ptt_line=self._config.rig_ptt_line,
             )
-            rig.open()
-            rig.ping()
         except RigError as exc:
             self._radio_panel.set_connection_error()
             self.statusBar().showMessage(
@@ -1129,19 +1194,40 @@ class MainWindow(QMainWindow):
             return
         except Exception as exc:  # noqa: BLE001
             self._radio_panel.set_connection_error()
-            self.statusBar().showMessage(
-                f"Serial connection failed: {exc}", 5000,
-            )
+            self.statusBar().showMessage(f"Serial connection failed: {exc}", 5000)
             return
 
-        self._rig = rig
-        self._tx_worker.set_rig(rig)
-        self._rig_poll_worker.set_rig(rig)
-        self._radio_panel.set_connected(True)
-        self._rig_poll_timer.start()
+        protocol = self._config.rig_serial_protocol
+        self._radio_panel.set_connecting()
         self.statusBar().showMessage(
-            f"Connected via {self._config.rig_serial_protocol} on {port}", 3000,
+            f"Connecting via {protocol} on {port}…"
         )
+
+        def _on_success(connected_rig: "Rig") -> None:
+            if not self.isVisible():
+                try:
+                    connected_rig.close()
+                except RigError:
+                    pass
+                return
+            self._rig = connected_rig
+            self._tx_worker.set_rig(connected_rig)
+            self._rig_poll_worker.set_rig(connected_rig)
+            self._radio_panel.set_connected(True)
+            self._rig_poll_timer.start()
+            self.statusBar().showMessage(
+                f"Connected via {protocol} on {port}", 3000,
+            )
+
+        def _on_error(message: str) -> None:
+            if not self.isVisible():
+                return
+            self._radio_panel.set_connection_error()
+            self.statusBar().showMessage(
+                f"Serial connection failed on {port} — {message}", 5000,
+            )
+
+        self._start_rig_connect_thread(rig, _on_success, _on_error)
 
     def _connect_rigctld(self) -> None:
         """Create a RigctldClient and start polling, optionally launching rigctld."""
@@ -1174,8 +1260,14 @@ class MainWindow(QMainWindow):
             if self._config.rig_baud_rate:
                 cmd += ["-s", str(self._config.rig_baud_rate)]
             try:
+                # OP2-14: start_new_session=True on POSIX isolates the child
+                # into its own process group so a GUI crash/SIGKILL doesn't
+                # orphan rigctld holding the serial port.
                 self._rigctld_proc = subprocess.Popen(
-                    cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    start_new_session=True,
                 )
             except FileNotFoundError:
                 self.statusBar().showMessage(
@@ -1196,28 +1288,43 @@ class MainWindow(QMainWindow):
 
         Called either immediately (no auto-launch) or after a 500 ms
         ``QTimer.singleShot`` delay when rigctld was just spawned.
-        Runs on the GUI thread but is fast (single TCP connect + ping).
+
+        OP2-02: client.open() + ping() are pushed to a background thread so
+        the GUI is never frozen for the TCP connect + CAT round-trip.
+        OP2-09: guard against post-close firing from the 500 ms singleShot.
         """
-        try:
-            client = RigctldClient(host=host, port=port)
-            client.open()
-            client.ping()
-        except RigError as exc:
+        if not self.isVisible():
+            return
+        client = RigctldClient(host=host, port=port)
+        self._radio_panel.set_connecting()
+        self.statusBar().showMessage(f"Connecting to rigctld at {host}:{port}…")
+
+        def _on_success(connected_rig: "Rig") -> None:
+            if not self.isVisible():
+                try:
+                    connected_rig.close()
+                except RigError:
+                    pass
+                return
+            self._rig = connected_rig
+            self._tx_worker.set_rig(connected_rig)
+            self._rig_poll_worker.set_rig(connected_rig)
+            self._radio_panel.set_connected(True)
+            self._rig_poll_timer.start()
+            self.statusBar().showMessage(
+                f"Connected to rigctld at {host}:{port}", 3000,
+            )
+
+        def _on_error(message: str) -> None:
+            if not self.isVisible():
+                return
             self._radio_panel.set_connection_error()
             self.statusBar().showMessage(
-                f"Could not connect to rigctld at {host}:{port} — {exc}",
+                f"Could not connect to rigctld at {host}:{port} — {message}",
                 5000,
             )
-            return
 
-        self._rig = client
-        self._tx_worker.set_rig(client)
-        self._rig_poll_worker.set_rig(client)
-        self._radio_panel.set_connected(True)
-        self._rig_poll_timer.start()
-        self.statusBar().showMessage(
-            f"Connected to rigctld at {host}:{port}", 3000
-        )
+        self._start_rig_connect_thread(client, _on_success, _on_error)
 
     @Slot()
     def _on_rig_disconnect(self) -> None:

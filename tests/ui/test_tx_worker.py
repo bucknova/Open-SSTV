@@ -220,6 +220,50 @@ def test_playback_failure_still_unkeys_rig(
     assert log["complete"] == []
 
 
+# === OP2-01: banner ValueError → error signal ===
+
+
+def test_banner_value_error_emits_error_signal(
+    qapp,
+    gradient_image: Image.Image,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If apply_tx_banner raises ValueError (image too small for the banner),
+    TxWorker must emit error() and must NOT emit started/complete/aborted.
+    The encode-stage watchdog must still be cancelled (OP2-01)."""
+    from open_sstv.ui.workers import TxWorker
+
+    def _bad_banner(*args, **kwargs):
+        raise ValueError("content_height <= 0")
+
+    monkeypatch.setattr(
+        "open_sstv.core.banner.apply_tx_banner", _bad_banner, raising=False
+    )
+    # Patch the lazy import path inside workers.py too.
+    import open_sstv.core.banner as banner_mod
+    monkeypatch.setattr(banner_mod, "apply_tx_banner", _bad_banner)
+
+    rig = MagicMock(spec=["set_ptt"])
+    worker = TxWorker(rig=rig, ptt_delay_s=0)
+    worker.set_tx_banner(
+        enabled=True,
+        callsign="W0AEZ",
+        bg_color=(0, 0, 0),
+        text_color=(255, 255, 255),
+        size="small",
+    )
+    log = _record_signals(worker)
+
+    worker.transmit(gradient_image, Mode.ROBOT_36)
+
+    assert log["error"], "error signal must fire on banner ValueError"
+    assert "TX banner failed" in log["error"][0]
+    assert log["started"] == []
+    assert log["complete"] == []
+    assert log["aborted"] == []
+    rig.set_ptt.assert_not_called()
+
+
 def test_unkey_failure_is_reported_but_doesnt_block_complete(
     qapp,
     gradient_image: Image.Image,

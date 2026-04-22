@@ -134,8 +134,11 @@ class RxPanel(QWidget):
         Called by ``MainWindow`` in response to ``InputStreamWorker``'s
         ``started``/``stopped`` signals so the UI reflects what the
         audio thread is actually doing, not just what we asked it for.
+        OP2-03: re-enables the button here (disabled in ``_on_start_clicked``
+        to prevent a double-click race that would request two audio streams).
         """
         self._capturing = capturing
+        self._start_btn.setEnabled(True)
         self._start_btn.setText("Stop Capture" if capturing else "Start Capture")
         if capturing:
             self._status.setText("Capturing… waiting for VIS header.")
@@ -257,6 +260,10 @@ class RxPanel(QWidget):
     @Slot()
     def _on_start_clicked(self) -> None:
         # Toggle: if we're currently capturing, request stop; otherwise start.
+        # OP2-03: disable immediately so a double-click between this emission
+        # and the audio_worker.started→set_capturing(True) callback can't
+        # queue a second start request.
+        self._start_btn.setEnabled(False)
         self.capture_requested.emit(not self._capturing)
 
     @Slot()

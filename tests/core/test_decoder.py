@@ -607,3 +607,82 @@ def test_slant_correction_shifts_positions_with_more_data() -> None:
         "slant_corrected_line_starts should update projected positions as more "
         "candidates arrive (verifying the D-3 test above is not vacuously true)"
     )
+
+
+# === OP2-15: CLI decode_wav skips slant correction for Robot 36 ===
+
+
+def test_decode_robot36_dispatch_apply_slant_correct_false_calls_walk() -> None:
+    """_decode_robot36_dispatch(apply_slant_correct=False) must use
+    walk_sync_grid rather than slant_corrected_line_starts (OP2-15).
+
+    We verify by patching both grid functions with call counters and
+    running a full Robot 36 decode to get a real candidate set.
+    """
+    from unittest.mock import patch
+
+    from open_sstv.core.slant import slant_corrected_line_starts
+    from open_sstv.core.sync import walk_sync_grid
+
+    slant_calls: list[int] = []
+    walk_calls: list[int] = []
+
+    def _counting_slant(*args, **kwargs):
+        slant_calls.append(1)
+        return slant_corrected_line_starts(*args, **kwargs)
+
+    def _counting_walk(*args, **kwargs):
+        walk_calls.append(1)
+        return walk_sync_grid(*args, **kwargs)
+
+    with (
+        patch("open_sstv.core.decoder.slant_corrected_line_starts", side_effect=_counting_slant),
+        patch("open_sstv.core.decoder.walk_sync_grid", side_effect=_counting_walk),
+    ):
+        # decode_wav passes apply_slant_correct=False for Robot 36, so
+        # running a full Robot 36 decode exercises the no-slant path.
+        from open_sstv.core.encoder import encode
+        import numpy as np
+        img = _make_gradient(320, 240)
+        samples = encode(img, Mode.ROBOT_36, sample_rate=48_000)
+        audio = samples.astype(np.float64) / 32768.0
+        result = decode_wav(audio, 48_000)
+
+    assert result is not None
+    assert result.mode == Mode.ROBOT_36
+    assert walk_calls, "walk_sync_grid must be called in the no-slant path"
+    assert not slant_calls, (
+        "slant_corrected_line_starts must NOT be called for Robot 36 (OP2-15)"
+    )
+
+
+def test_decode_wav_robot36_uses_walk_not_slant() -> None:
+    """decode_wav() must not apply global polyfit slant correction for
+    Robot 36 — it passes apply_slant_correct=False to match the GUI path
+    which deliberately skips the polyfit on noisy signals (OP2-15)."""
+    from unittest.mock import patch
+    import numpy as np
+    from open_sstv.core.encoder import encode
+
+    fs = 48_000
+    img = _make_gradient(320, 240)
+    samples = encode(img, Mode.ROBOT_36, sample_rate=fs)
+    audio = samples.astype(np.float64) / 32768.0
+
+    slant_calls: list[int] = []
+
+    from open_sstv.core.slant import slant_corrected_line_starts as _orig_slant
+
+    def _counting_slant(*args, **kwargs):
+        slant_calls.append(1)
+        return _orig_slant(*args, **kwargs)
+
+    with patch("open_sstv.core.decoder.slant_corrected_line_starts", side_effect=_counting_slant):
+        result = decode_wav(audio, fs)
+
+    assert result is not None
+    assert result.mode == Mode.ROBOT_36
+    assert slant_calls == [], (
+        "decode_wav must not call slant_corrected_line_starts for Robot 36 (OP2-15)"
+    )
+

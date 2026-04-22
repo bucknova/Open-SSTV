@@ -192,3 +192,44 @@ def test_rx_panel_loads_gallery_image_into_preview(qapp, qtbot) -> None:
     assert panel._save_btn.isEnabled() is True
     # Status line reflects the viewing state, not "Decoded …".
     assert "Viewing" in panel._status.text()
+
+
+# === OP2-04: gallery temp-file counter avoids id() collisions ===
+
+
+def test_gallery_temp_files_have_unique_names(qapp, qtbot) -> None:
+    """Each call to add_image must produce a unique temp filename,
+    regardless of whether the PIL object's id() is reused by GC (OP2-04)."""
+    gallery = ImageGalleryWidget()
+    qtbot.addWidget(gallery)
+
+    if gallery._tmpdir is None:
+        pytest.skip("temp directory not available in this environment")
+
+    from pathlib import Path
+    from open_sstv.ui.image_gallery import _IMAGE_PATH_ROLE
+
+    paths = []
+    for i in range(5):
+        img = _make_test_image(color=(i * 40, i * 40, i * 40))
+        gallery.add_image(img, Mode.ROBOT_36)
+        item = gallery.model().item(0)
+        assert item is not None
+        p = item.data(_IMAGE_PATH_ROLE)
+        if p:
+            paths.append(p)
+
+    # All collected paths must be distinct.
+    assert len(paths) == len(set(paths)), "Temp file names must be unique"
+
+
+def test_gallery_counter_increments_monotonically(qapp, qtbot) -> None:
+    """_image_counter starts at 0 and increments by 1 per add_image call."""
+    gallery = ImageGalleryWidget()
+    qtbot.addWidget(gallery)
+
+    assert gallery._image_counter == 0
+    gallery.add_image(_make_test_image(), Mode.ROBOT_36)
+    assert gallery._image_counter == 1
+    gallery.add_image(_make_test_image(), Mode.SCOTTIE_S1)
+    assert gallery._image_counter == 2

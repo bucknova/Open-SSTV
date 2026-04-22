@@ -10,6 +10,7 @@ The config file lives at ``platformdirs.user_config_dir("open_sstv") / "config.t
 from __future__ import annotations
 
 import logging
+import os
 import tomllib
 from dataclasses import asdict, fields
 from pathlib import Path
@@ -36,6 +37,10 @@ def load_config(path: Path | None = None) -> AppConfig:
     Returns a fresh ``AppConfig()`` with defaults if the file doesn't
     exist or is empty. Unknown keys are ignored; missing keys keep
     their dataclass defaults.
+
+    OP2-06: OSError (permission denied, directory instead of file) propagates
+    rather than being silently swallowed — only TOML decode errors fall back
+    to defaults, since a corrupt file is genuinely unrecoverable.
     """
     if path is None:
         path = config_path()
@@ -63,15 +68,17 @@ def load_config(path: Path | None = None) -> AppConfig:
         known = {f.name for f in fields(AppConfig)}
         filtered = {k: v for k, v in raw.items() if k in known}
         return AppConfig(**filtered)
-    except Exception:  # noqa: BLE001 — corrupt file must never crash startup
-        _log.warning("Config file %s is corrupt or unreadable — using defaults", path)
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError):
+        _log.warning("Config file %s is corrupt — using defaults", path)
         return AppConfig()
 
 
 def save_config(cfg: AppConfig, path: Path | None = None) -> None:
     """Write *cfg* to *path* (default: ``config_path()``).
 
-    Creates parent directories if needed.
+    Creates parent directories if needed.  Writes atomically via a
+    sibling ``.tmp`` file + ``os.replace`` so a SIGKILL mid-write never
+    leaves a truncated config (OP2-07).
 
     Raises
     ------
@@ -83,13 +90,16 @@ def save_config(cfg: AppConfig, path: Path | None = None) -> None:
     """
     if path is None:
         path = config_path()
+    tmp = path.with_suffix(path.suffix + ".tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         data = {k: v for k, v in asdict(cfg).items() if v is not None}
-        with path.open("wb") as f:
+        with tmp.open("wb") as f:
             tomli_w.dump(data, f)
+        os.replace(tmp, path)
     except OSError as exc:
         _log.error("Could not save config to %s: %s", path, exc)
+        tmp.unlink(missing_ok=True)
         raise
 
 

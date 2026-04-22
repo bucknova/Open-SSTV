@@ -103,6 +103,9 @@ class ImageGalleryWidget(QListView):
         # in long test sessions, and runs cleanup at the proper moment in
         # Qt's shutdown sequence.
         self._tmpdir: str | None = None
+        # OP2-04: monotonic counter for temp-file names so memory-address
+        # reuse after GC can't make two gallery entries point at the same file.
+        self._image_counter: int = 0
         try:
             self._tmpdir = tempfile.mkdtemp(prefix="open-sstv-gallery-")
             app = QApplication.instance()
@@ -142,7 +145,8 @@ class ImageGalleryWidget(QListView):
         item.setData(mode, _MODE_ROLE)
 
         if self._tmpdir is not None:
-            img_path = Path(self._tmpdir) / f"img_{id(image)}.png"
+            img_path = Path(self._tmpdir) / f"img_{self._image_counter}.png"
+            self._image_counter += 1
             try:
                 image.save(str(img_path))
                 item.setData(str(img_path), _IMAGE_PATH_ROLE)

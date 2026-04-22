@@ -517,19 +517,25 @@ class TxWorker(QObject):
         encode_watchdog.start()
         try:
             # --- Apply TX banner (if enabled) ---
-            if self._tx_banner_enabled:
-                from open_sstv import __version__
-                from open_sstv.core.banner import apply_tx_banner, banner_size_params
-                _bh, _fs = banner_size_params(self._tx_banner_size)
-                image = apply_tx_banner(
-                    image,
-                    __version__,
-                    self._tx_banner_callsign,
-                    self._tx_banner_bg_color,
-                    self._tx_banner_text_color,
-                    banner_height=_bh,
-                    font_size=_fs,
-                )
+            # OP2-01: catch ValueError (content_height <= 0) so a too-small
+            # image never silently escapes transmit() without emitting error.
+            try:
+                if self._tx_banner_enabled:
+                    from open_sstv import __version__
+                    from open_sstv.core.banner import apply_tx_banner, banner_size_params
+                    _bh, _fs = banner_size_params(self._tx_banner_size)
+                    image = apply_tx_banner(
+                        image,
+                        __version__,
+                        self._tx_banner_callsign,
+                        self._tx_banner_bg_color,
+                        self._tx_banner_text_color,
+                        banner_height=_bh,
+                        font_size=_fs,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                self.error.emit(f"TX banner failed: {exc}")
+                return
 
             # v0.2.8: announce the finalised image so the UI can auto-save
             # it.  Emitted *after* banner compositing so the saved copy is
@@ -919,6 +925,10 @@ class RxWorker(QObject):
             incremental_decode=self._incremental_decode,
         )
         self._decoder.set_cancel_event(self._cancel_event)
+        # OP2-16: discard pre-toggle audio so the new decoder doesn't see
+        # stale samples from the old decoder's time window.
+        self._scratch.clear()
+        self._scratch_samples = 0
 
     @Slot(bool)
     def set_incremental_decode(self, enabled: bool) -> None:
@@ -939,6 +949,9 @@ class RxWorker(QObject):
             incremental_decode=enabled,
         )
         self._decoder.set_cancel_event(self._cancel_event)
+        # OP2-16: discard pre-toggle audio (matches set_sample_rate pattern).
+        self._scratch.clear()
+        self._scratch_samples = 0
 
     @Slot(bool)
     def set_final_slant_correction(self, enabled: bool) -> None:

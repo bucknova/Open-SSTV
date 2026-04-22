@@ -215,6 +215,9 @@ class RigctldClient:
     #: Guards against unbounded buffer growth if the daemon sends garbage
     #: without an RPRT terminator before the socket timeout.
     _MAX_RESPONSE_LINES: int = 1000
+    #: OP2-05: hard byte cap so a daemon that streams chunks without newlines
+    #: can't grow buf unboundedly until the socket timeout fires.
+    _MAX_RESPONSE_BYTES: int = 64 * 1024
 
     def _read_until_rprt(self) -> list[str]:
         """Read from the socket until we see a complete ``RPRT N`` line."""
@@ -227,6 +230,12 @@ class RigctldClient:
                 raise BrokenPipeError("rigctld closed the connection")
             buf.extend(chunk)
             # Guard against unbounded growth from a misbehaving daemon.
+            if len(buf) > self._MAX_RESPONSE_BYTES:
+                raise RigCommandError(
+                    f"rigctld response exceeded {self._MAX_RESPONSE_BYTES} bytes "
+                    "— possible runaway daemon",
+                    command="<unknown>",
+                )
             line_count = buf.count(b"\n")
             if line_count > self._MAX_RESPONSE_LINES:
                 raise RigCommandError(

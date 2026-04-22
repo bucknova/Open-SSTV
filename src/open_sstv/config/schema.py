@@ -164,8 +164,24 @@ class AppConfig:
             )
         # v0.1.14: clamp CW fields to their valid ranges so hand-edited
         # TOML files can't push WPM or tone outside what the UI allows.
-        self.cw_id_wpm = max(15, min(30, self.cw_id_wpm))
-        self.cw_id_tone_hz = max(400, min(1200, self.cw_id_tone_hz))
+        # OP2-08: log the clamp so a user who hand-edits TOML understands
+        # why their value was silently overridden on next save.
+        clamped_wpm = max(15, min(30, self.cw_id_wpm))
+        if clamped_wpm != self.cw_id_wpm:
+            _log.info(
+                "AppConfig: cw_id_wpm %d out of range [15, 30] — clamped to %d",
+                self.cw_id_wpm,
+                clamped_wpm,
+            )
+        self.cw_id_wpm = clamped_wpm
+        clamped_tone = max(400, min(1200, self.cw_id_tone_hz))
+        if clamped_tone != self.cw_id_tone_hz:
+            _log.info(
+                "AppConfig: cw_id_tone_hz %d out of range [400, 1200] — clamped to %d",
+                self.cw_id_tone_hz,
+                clamped_tone,
+            )
+        self.cw_id_tone_hz = clamped_tone
         # v0.2.8: normalise the auto-save file format to lowercase and
         # fall back to "png" for unknown values so a hand-edited TOML
         # can't put us into a state where the filename builder silently

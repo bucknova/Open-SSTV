@@ -855,3 +855,32 @@ def test_shutdown_before_timer_created(qapp) -> None:
     worker.shutdown()  # must not raise
 
     assert worker._watchdog_timer is None
+
+
+# === OP2-16: decoder rebuild must clear scratch buffer ===
+
+
+def test_set_weak_signal_clears_scratch(qapp) -> None:
+    """set_weak_signal() must discard accumulated scratch audio so the new
+    decoder doesn't see stale pre-toggle samples (OP2-16)."""
+    worker = RxWorker(sample_rate=48_000, flush_samples=100_000)
+    worker.feed_chunk(np.ones(500, dtype=np.float32))
+    assert worker._scratch_samples == 500
+
+    worker.set_weak_signal(True)
+
+    assert worker._scratch_samples == 0
+    assert worker._scratch == []
+
+
+def test_set_incremental_decode_clears_scratch(qapp) -> None:
+    """set_incremental_decode() must discard accumulated scratch audio
+    so the new decoder doesn't see stale pre-toggle samples (OP2-16)."""
+    worker = RxWorker(sample_rate=48_000, flush_samples=100_000, incremental_decode=True)
+    worker.feed_chunk(np.ones(300, dtype=np.float32))
+    assert worker._scratch_samples == 300
+
+    worker.set_incremental_decode(False)
+
+    assert worker._scratch_samples == 0
+    assert worker._scratch == []

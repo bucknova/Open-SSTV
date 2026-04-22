@@ -1297,18 +1297,14 @@ class Robot36IncrementalDecoder:
     #: ``walk_sync_grid`` and the batch ``_decode_robot36_dispatch``.
     _DETECT_TOLERANCE: float = 0.25
 
-    #: Maximum samples buffered while waiting for ``_DETECT_SYNC_COUNT``
-    #: candidates before falling back to the per-line backend.  Bounded
-    #: at 3 seconds of audio at 48 kHz (~1.15 MB float64).  Without this
-    #: bound, a continuously-noisy signal that never produces enough
-    #: sync candidates would accumulate the entire image worth of audio
-    #: in ``_pending`` (OP-17).  3 s comfortably covers the canonical
-    #: line-pair detection window of ~900 ms with margin; past that we
-    #: take the per-line backend as a default — it produces a usable
-    #: image for both wire formats (the line-pair walker can re-anchor
-    #: from the per-line walker's missed candidates), just with weaker
-    #: chroma on a true line-pair stream.
-    _DETECT_FALLBACK_SAMPLES: int = 3 * 48_000
+    #: Maximum time buffered while waiting for ``_DETECT_SYNC_COUNT``
+    #: candidates before falling back to the per-line backend.  3 s
+    #: comfortably covers the canonical line-pair detection window of
+    #: ~900 ms with margin; past that we take the per-line backend as
+    #: a default — it produces a usable image for both wire formats.
+    #: OP2-10: stored as seconds so integer-division truncation can't
+    #: silently collapse the threshold when the constant is tuned.
+    _DETECT_FALLBACK_S: float = 3.0
 
     def __init__(
         self,
@@ -1445,9 +1441,7 @@ class Robot36IncrementalDecoder:
             # never arrive.  After the fallback budget elapses we pick
             # the per-line backend as a sane default — see
             # ``_DETECT_FALLBACK_SAMPLES`` for the rationale.
-            fallback_threshold = self._fs * (
-                self._DETECT_FALLBACK_SAMPLES // 48_000
-            )
+            fallback_threshold = int(self._fs * self._DETECT_FALLBACK_S)
             if buf.size >= fallback_threshold:
                 return _Robot36PerLineIncrementalDecoder
             return None

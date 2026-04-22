@@ -167,8 +167,11 @@ def decode_wav(
 
     # Robot 36 has two incompatible wire formats (see module docstring).
     # Detect which one this WAV uses before fitting a sync grid.
+    # OP2-15: skip global polyfit slant correction for Robot 36 to match
+    # the GUI RxWorker path which never runs decode_wav on R36 images.
+    # The polyfit can be corrupted by sync outliers on noisy signals.
     if mode == Mode.ROBOT_36:
-        image = _decode_robot36_dispatch(inst, fs, spec, vis_end)
+        image = _decode_robot36_dispatch(inst, fs, spec, vis_end, apply_slant_correct=False)
     else:
         line_samples = spec.line_time_ms / 1000.0 * fs
         candidates = find_sync_candidates(
@@ -207,6 +210,8 @@ def _decode_robot36_dispatch(
     fs: int,
     spec: ModeSpec,
     vis_end: int,
+    *,
+    apply_slant_correct: bool = True,
 ) -> Image.Image | None:
     """Auto-detect Robot 36 wire format and dispatch to the right decoder.
 
@@ -216,6 +221,11 @@ def _decode_robot36_dispatch(
     we walk a ``spec.height`` grid. If it matches 2× that period, the
     file is the canonical broadcast line-pair format and we walk a
     ``spec.height // 2`` grid of super-lines. Anything else is rejected.
+
+    *apply_slant_correct* controls whether ``slant_corrected_line_starts``
+    (global least-squares polyfit) is used to build the line grid, or
+    just ``walk_sync_grid``.  Callers that need resilience to noisy signals
+    should pass ``False``; the polyfit can be corrupted by sync outliers.
     """
     line_samples = spec.line_time_ms / 1000.0 * fs
     candidates = find_sync_candidates(
@@ -238,10 +248,10 @@ def _decode_robot36_dispatch(
         return None
     median_diff = float(np.median(diffs))
 
+    _grid_fn = slant_corrected_line_starts if apply_slant_correct else walk_sync_grid
+
     if abs(median_diff - line_samples) <= line_samples * tolerance:
-        line_starts = slant_corrected_line_starts(
-            candidates, line_samples, spec.height
-        )
+        line_starts = _grid_fn(candidates, line_samples, spec.height)
         if len(line_starts) < spec.height:
             return None
         # Truncation guard: see the matching comment in ``decode_wav``.
@@ -250,9 +260,7 @@ def _decode_robot36_dispatch(
         return _decode_robot36(inst, fs, spec, line_starts)
 
     if abs(median_diff - pair_samples) <= pair_samples * tolerance:
-        super_starts = slant_corrected_line_starts(
-            candidates, pair_samples, spec.height // 2
-        )
+        super_starts = _grid_fn(candidates, pair_samples, spec.height // 2)
         if len(super_starts) < spec.height // 2:
             return None
         if super_starts[-1] >= inst.size:

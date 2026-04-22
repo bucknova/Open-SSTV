@@ -35,6 +35,7 @@ class RadioPanel(QWidget):
         super().__init__(parent)
         self._connected = False
         self._tx_active = False
+        self._connecting = False
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(6, 2, 6, 2)
@@ -121,8 +122,21 @@ class RadioPanel(QWidget):
         """True when a rig backend is currently connected."""
         return self._connected
 
+    def set_connecting(self) -> None:
+        """Show a connecting-in-progress state and disable the button.
+
+        Call this before kicking off the background open+ping thread (OP2-02).
+        ``set_connected`` or ``set_connection_error`` will re-enable the button
+        when the attempt resolves.
+        """
+        self._connecting = True
+        self._update_connect_btn()
+        self._status_label.setText("Connecting…")
+        self._status_label.setStyleSheet("color: orange;")
+
     def set_connected(self, connected: bool) -> None:
         """Update the button label and status indicator."""
+        self._connecting = False
         self._connected = connected
         if connected:
             self._connect_btn.setText("Disconnect")
@@ -135,10 +149,13 @@ class RadioPanel(QWidget):
             self._freq_label.setText("—")
             self._mode_label.setText("—")
             self._smeter_bar.setValue(0)
+        self._update_connect_btn()
         self._update_test_tone_btn()
 
     def set_connection_error(self) -> None:
-        """Show a disconnected/error state without changing the button."""
+        """Show a disconnected/error state and re-enable the connect button."""
+        self._connecting = False
+        self._update_connect_btn()
         self._status_label.setText("Connection lost")
         self._status_label.setStyleSheet("color: red;")
 
@@ -149,8 +166,12 @@ class RadioPanel(QWidget):
         which could leave the radio stuck keyed on the wrong backend.
         """
         self._tx_active = active
-        self._connect_btn.setEnabled(not active)
+        self._update_connect_btn()
         self._update_test_tone_btn()
+
+    def _update_connect_btn(self) -> None:
+        """Enable the connect button only when not TX-active and not connecting."""
+        self._connect_btn.setEnabled(not self._tx_active and not self._connecting)
 
     def _update_test_tone_btn(self) -> None:
         """Enable the Test Tone button only when a rig is connected and idle."""

@@ -924,10 +924,13 @@ class SettingsDialog(QDialog):
             cmd += ["-s", str(baud_rate)]
 
         try:
+            # OP2-14: start_new_session=True isolates the child process so a
+            # GUI crash doesn't orphan rigctld holding the serial port.
             self._rigctld_proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
+                start_new_session=True,
             )
             self._rigctld_status.setText(f"rigctld launched (PID {self._rigctld_proc.pid})")
             self._rigctld_status.setStyleSheet("color: green;")
