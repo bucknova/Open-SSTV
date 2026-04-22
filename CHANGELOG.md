@@ -11,6 +11,113 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.2.10] — 2026-04-22
+
+### Fixed
+
+- **TX banner errors are now surfaced, not silently lost (OP2-01).**  If
+  `apply_tx_banner` raises `ValueError` (e.g. image too small for the
+  requested banner height), `TxWorker.transmit()` now emits `error()` and
+  returns immediately rather than letting the exception vanish into the
+  watchdog cancel path.  PTT is never keyed, and the status bar shows a
+  clear "TX banner failed: …" message.
+
+- **Rig open+ping no longer freezes the GUI (OP2-02).**  On unresponsive
+  radios the CAT connect attempt previously blocked the event loop for up
+  to 4 seconds.  Both `_connect_serial()` and `_finish_rigctld_connect()`
+  now push `rig.open() + rig.ping()` to a one-shot `_RigConnectWorker`
+  `QObject` on a `QThread`; the GUI remains responsive while the handshake
+  is in flight.  The Connect button shows "Connecting…" (orange) and is
+  disabled until the attempt resolves.
+
+- **RX Start double-click no longer spawns two audio streams (OP2-03).**
+  Clicking Start now disables the button immediately; it is re-enabled only
+  when `set_capturing(True)` is received from the worker thread.  A second
+  click in the interim is a no-op.
+
+- **Gallery temp-file names no longer collide after GC (OP2-04).**
+  Temp filenames were previously derived from `id(image)`, which CPython
+  reuses after the object is garbage-collected.  A monotonically
+  incrementing `_image_counter` is used instead, guaranteeing uniqueness
+  across the session.
+
+- **rigctld read loop has a hard byte cap (OP2-05).**  `_read_until_rprt`
+  now raises `RigCommandError` if the accumulated buffer exceeds 64 KiB,
+  preventing unbounded growth from a daemon that streams garbage without
+  newline terminators (the existing line-count guard does not fire in that
+  case).
+
+- **`load_config` no longer swallows permission errors (OP2-06).**  The
+  broad `except Exception` that fell back to defaults on any read failure
+  has been narrowed to `(tomllib.TOMLDecodeError, UnicodeDecodeError)`.
+  `OSError` (permission denied, directory in place of file, etc.) now
+  propagates so the operator is notified of a real filesystem problem
+  rather than silently starting with factory defaults.
+
+- **Config and template saves are now atomic (OP2-07).**  `save_config()`
+  and `save_templates()` write to a sibling `.tmp` file and use
+  `os.replace()` for the final rename.  A `SIGKILL` mid-write no longer
+  leaves a truncated or zero-length config; the previous version is
+  preserved until the new one is fully written.
+
+- **Out-of-range CW fields are now logged when clamped (OP2-08).**
+  `AppConfig.__post_init__` already clamped `cw_id_wpm` and
+  `cw_id_tone_hz` silently; it now logs an `INFO` message so operators
+  who hand-edit the TOML file understand why their value was overridden on
+  next save.
+
+- **Rig connect callbacks guard against post-close firing (OP2-09).**
+  The `_finish_rigctld_connect()` function (called via a 500 ms
+  `QTimer.singleShot` after spawning rigctld) now returns immediately if
+  the window is no longer visible, preventing a `RuntimeError` or
+  attribute access on a destroyed widget.
+
+- **Robot 36 fallback threshold respects non-48 kHz sample rates
+  (OP2-10).**  The constant `_DETECT_FALLBACK_SAMPLES = 3 * 48_000` was
+  used as a raw sample count even at 44.1 kHz, collapsing via integer
+  division to only 2 seconds of budget.  Replaced with
+  `_DETECT_FALLBACK_S = 3.0` (seconds) and the threshold is now computed
+  as `int(fs * _DETECT_FALLBACK_S)` at runtime.
+
+- **rigctld subprocess is process-group isolated (OP2-14).**  `Popen` in
+  both `MainWindow._connect_rigctld()` and `SettingsDialog` now passes
+  `start_new_session=True`.  On POSIX a GUI crash or `SIGKILL` no longer
+  propagates to the rigctld child, preventing the serial port from being
+  held open after the application exits.
+
+- **CLI `decode_wav` no longer applies polyfit slant correction to
+  Robot 36 (OP2-15).**  The global least-squares slant fit can be
+  corrupted by sync outliers on noisy signals, producing skewed images in
+  the very conditions where slant correction is most needed.  `decode_wav`
+  now passes `apply_slant_correct=False` to `_decode_robot36_dispatch`,
+  matching the GUI `RxWorker` path which has always skipped this step for
+  Robot 36.
+
+- **Decoder rebuild no longer contaminates new decoder with stale audio
+  (OP2-16).**  `RxWorker.set_weak_signal()` and `set_incremental_decode()`
+  each rebuild `self._decoder`; they now also clear `_scratch` and reset
+  `_scratch_samples` so the new decoder does not process audio buffered
+  during the old decoder's lifetime.
+
+- **Settings save error message identifies running rigctld (OP2-18).**
+  When `save_config()` raises `OSError` and rigctld is currently running
+  (e.g. the config directory is read-only), the status bar now shows a
+  message noting that rigctld is still running rather than a generic
+  "could not save to disk" text.
+
+- **`_schedule_rx_resume` QTimer cannot fire after window close (OP2-19).**
+  The 50 ms `QTimer.singleShot` lambda in `_schedule_rx_resume` now checks
+  `self.isVisible()` before emitting `_request_rx_gate`, preventing a
+  signal dispatch onto a destroyed widget when the user closes the window
+  immediately after a TX cycle.
+
+### Tests
+
+- 19 new tests across `tests/config/`, `tests/core/`, `tests/radio/`, and
+  `tests/ui/` covering every fix above.  Suite total: 668 passed, 1 skipped.
+
+---
+
 ## [0.2.9] — 2026-04-19
 
 ### Fixed
