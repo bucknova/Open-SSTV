@@ -333,6 +333,9 @@ class MainWindow(QMainWindow):
         #: Set by _on_audio_device_lost so _on_rx_stopped can re-show the
         #: disconnect message instead of clobbering it with "Capture stopped."
         self._last_rx_disconnect_msg: str = ""
+        #: Set by _on_rx_audio_error when stream-open fails so _on_rx_stopped
+        #: can re-show the error instead of overwriting with "Not listening…".
+        self._last_rx_audio_error_msg: str = ""
         #: When True, RxWorker status_update signals are silently dropped so
         #: "Listening… Xs buffered" updates can't overwrite disconnect or stopped
         #: messages.  Cleared by _on_rx_started when the stream is confirmed up.
@@ -534,7 +537,7 @@ class MainWindow(QMainWindow):
         # Audio -> UI.
         self._audio_worker.started.connect(self._on_rx_started)
         self._audio_worker.stopped.connect(self._on_rx_stopped)
-        self._audio_worker.error.connect(self._on_rx_error)
+        self._audio_worker.error.connect(self._on_rx_audio_error)
         self._audio_worker.stream_error.connect(self._on_audio_device_lost)
 
         # RX worker -> UI.
@@ -1037,26 +1040,20 @@ class MainWindow(QMainWindow):
         connection sequences the two steps deterministically.
         """
         if start:
-            # Clear any stale device-loss state from the previous session so
-            # _on_rx_started and _on_rx_stopped behave correctly for this new
-            # attempt, even if a prior session's signals are still in-flight.
+            # Clear any stale device-loss / stream-error state from the
+            # previous session so _on_rx_started and _on_rx_stopped behave
+            # correctly for this new attempt.
             self._last_rx_disconnect_msg = ""
+            self._last_rx_audio_error_msg = ""
+            # Defensive: if _on_rx_started never fired (e.g. stream-open
+            # failed last time), the suppress flag may still be True.
+            # Clear it here so the next status updates are visible.
+            self._suppress_rx_status_updates = False
             # Reset the decoder + sample counter so each new capture session
             # starts from zero rather than accumulating across stop/restart
             # cycles (bug R-1: counter climbed past 127s with no image).
             # Defer the start-capture request until reset_done arrives so
             # the two worker threads are ordered correctly (OP-05).
-            #
-            # Re-enumerate the input device by name each time so a USB
-            # replug (which may assign a new PortAudio device index) is
-            # handled transparently — the saved name still matches, even
-            # if the numeric index changed.
-            if self._config.audio_input_device:
-                fresh = find_input_device_by_name(self._config.audio_input_device)
-                if fresh is not None:
-                    self._input_device = fresh
-            device = self._input_device
-            sample_rate = self._config.sample_rate
 
             def _start_once() -> None:
                 # Disconnect ourselves before emitting so a later reset()
@@ -1065,8 +1062,15 @@ class MainWindow(QMainWindow):
                     self._rx_worker.reset_done.disconnect(_start_once)
                 except (RuntimeError, TypeError):
                     pass
+                # Re-enumerate AFTER _pa_reset (which fires before reset_done)
+                # so a USB replug gets the new PortAudio device index rather
+                # than the stale pre-reset index captured before the reset.
+                if self._config.audio_input_device:
+                    fresh = find_input_device_by_name(self._config.audio_input_device)
+                    if fresh is not None:
+                        self._input_device = fresh
                 self._request_start_capture.emit(
-                    device, sample_rate, DEFAULT_BLOCKSIZE
+                    self._input_device, self._config.sample_rate, DEFAULT_BLOCKSIZE
                 )
 
             self._rx_worker.reset_done.connect(_start_once)
@@ -1100,6 +1104,13 @@ class MainWindow(QMainWindow):
             self._last_rx_disconnect_msg = ""
             self._rx_panel.set_status(msg)
             self.statusBar().showMessage(msg)
+        elif self._last_rx_audio_error_msg:
+            # stream-open failed: keep the error visible instead of
+            # overwriting with "Not listening…"
+            msg = self._last_rx_audio_error_msg
+            self._last_rx_audio_error_msg = ""
+            self._rx_panel.set_status(msg)
+            self.statusBar().showMessage(msg, 5000)
         else:
             self._rx_panel.set_status("Not listening — click Start to begin.")
             self.statusBar().showMessage("Ready")
@@ -1250,6 +1261,22 @@ class MainWindow(QMainWindow):
         self._rx_panel.set_status(f"RX: {message}")
         self.statusBar().showMessage(message, 5000)
 
+    @Slot(str)
+    def _on_rx_audio_error(self, message: str) -> None:
+        """Audio-worker error slot that survives the _on_rx_stopped overwrite.
+
+        When stream-open fails, InputStreamWorker emits error then stopped in
+        the same event-loop cycle.  _on_rx_stopped would clobber the error
+        message with "Not listening…" before the user sees it.  We store the
+        message here so _on_rx_stopped can re-show it in its elif branch.
+        """
+        formatted = f"RX: {message}"
+        if not self._capture_running:
+            # start-time failure — preserve for _on_rx_stopped
+            self._last_rx_audio_error_msg = formatted
+        self._rx_panel.set_status(formatted)
+        self.statusBar().showMessage(message, 5000)
+
     # === Rig connect / disconnect / poll ===
 
     @Slot()
@@ -1320,14 +1347,26 @@ class MainWindow(QMainWindow):
         relay = _RigConnectRelay(on_success, on_error, thread, timeout_timer, cancel)
         self._connect_relay = relay
 
-        worker.moveToThread(thread)
+        # Connect all signals BEFORE moveToThread.  AutoConnection re-evaluates
+        # at emit time (Qt docs), so QueuedConnection is still used for
+        # cross-thread emits after the move.  Connecting first is cleaner and
+        # avoids a window where the thread is running but signals are unwired.
         thread.started.connect(worker.run)
         worker.succeeded.connect(relay.on_succeeded)
         worker.failed.connect(relay.on_failed)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(relay.deleteLater)
+        # Do NOT connect worker.deleteLater or relay.deleteLater here.
+        # worker.deleteLater called from thread.finished (worker thread) posts
+        # a DeferredDelete to the exiting thread; Qt processes it when the
+        # thread exits — before _on_connect_thread_finished clears the Python
+        # ref.  That races with CPython's refcount destructor and produces a
+        # QObjectWrapper use-after-free.  Python GC via ref-clearing in
+        # _on_connect_thread_finished is the sole owner; deleteLater is not
+        # needed.  thread.deleteLater is safe because thread lives on the GUI
+        # thread and its DeferredDelete processes on the GUI event loop.
         thread.finished.connect(thread.deleteLater)
         thread.finished.connect(self._on_connect_thread_finished)
+
+        worker.moveToThread(thread)
 
         def _on_timeout() -> None:
             if not cancel.is_set():
@@ -1346,6 +1385,17 @@ class MainWindow(QMainWindow):
     @Slot()
     def _on_connect_thread_finished(self) -> None:
         """Clear connect-thread state when the thread exits normally."""
+        thread = self._connect_thread
+        worker = self._connect_worker
+        # Explicitly break thread.started → worker.run before releasing Python
+        # refs.  This removes Qt's internal connection record (which holds a
+        # ref to worker) so Qt doesn't touch the object after Python GC frees
+        # it when we set self._connect_worker = None below.
+        if thread is not None and worker is not None:
+            try:
+                thread.started.disconnect(worker.run)
+            except (RuntimeError, TypeError):
+                pass
         self._connect_thread = None
         self._connect_cancel = None
         self._connect_worker = None
