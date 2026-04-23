@@ -330,6 +330,9 @@ class MainWindow(QMainWindow):
         self._rigctld_proc: "subprocess.Popen | None" = None
         self._capture_running: bool = False
         self._last_abort_was_watchdog: bool = False
+        #: Set by _on_audio_device_lost so _on_rx_stopped can re-show the
+        #: disconnect message instead of clobbering it with "Capture stopped."
+        self._last_rx_disconnect_msg: str = ""
         #: Watchdog budget (seconds) of the most recently fired TX watchdog,
         #: forwarded by ``TxWorker.watchdog_fired``.  Used by
         #: ``_on_tx_aborted`` to format a precise "exceeded N s" message
@@ -528,7 +531,7 @@ class MainWindow(QMainWindow):
         self._audio_worker.started.connect(self._on_rx_started)
         self._audio_worker.stopped.connect(self._on_rx_stopped)
         self._audio_worker.error.connect(self._on_rx_error)
-        self._audio_worker.stream_error.connect(self._on_rx_error)
+        self._audio_worker.stream_error.connect(self._on_audio_device_lost)
 
         # RX worker -> UI.
         self._rx_worker.image_started.connect(self._rx_panel.show_image_started)
@@ -1077,8 +1080,21 @@ class MainWindow(QMainWindow):
     def _on_rx_stopped(self) -> None:
         self._capture_running = False
         self._rx_panel.set_capturing(False)
-        self._rx_panel.set_status("Capture stopped.")
-        self.statusBar().showMessage("Ready")
+        if self._last_rx_disconnect_msg:
+            msg = self._last_rx_disconnect_msg
+            self._last_rx_disconnect_msg = ""
+            self._rx_panel.set_status(msg)
+            self.statusBar().showMessage(msg)
+        else:
+            self._rx_panel.set_status("Not listening — click Start to begin.")
+            self.statusBar().showMessage("Ready")
+
+    @Slot(str)
+    def _on_audio_device_lost(self, message: str) -> None:
+        """Device-loss path: store message so _on_rx_stopped can re-show it."""
+        self._last_rx_disconnect_msg = message
+        self._rx_panel.set_status(message)
+        self.statusBar().showMessage(message)  # sticky — no timeout
 
     @Slot()
     def _on_rx_clear(self) -> None:

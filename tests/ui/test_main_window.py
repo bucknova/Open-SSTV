@@ -750,3 +750,78 @@ class TestAudioDeviceReplug:
             "_on_capture_requested must re-enumerate the device by name so a "
             "replug with a new PortAudio index is handled correctly"
         )
+
+
+# ---------------------------------------------------------------------------
+# UI feedback for audio device disconnect (stream_error signal chain)
+# ---------------------------------------------------------------------------
+
+
+class TestAudioDeviceLostUI:
+    """Verify the device-loss message persists in the status bar and RX panel
+    and is not overwritten by the generic 'Capture stopped.' / 'Ready' text.
+    """
+
+    def test_device_lost_message_shown_in_status_bar(
+        self, window: MainWindow, qapp
+    ) -> None:
+        """_on_audio_device_lost must post a sticky status-bar message with
+        no timeout, so it survives until the user acts."""
+        msg = "Audio device disconnected — replug and click Start to recover"
+        window._on_audio_device_lost(msg)
+        assert window.statusBar().currentMessage() == msg
+
+    def test_device_lost_message_shown_in_rx_panel(
+        self, window: MainWindow, qapp
+    ) -> None:
+        """_on_audio_device_lost must also update the RX panel status label."""
+        msg = "Audio device disconnected — replug and click Start to recover"
+        window._on_audio_device_lost(msg)
+        assert window._rx_panel._status.text() == msg
+
+    def test_device_lost_message_survives_rx_stopped(
+        self, window: MainWindow, qapp
+    ) -> None:
+        """When stream_error fires before stopped, _on_rx_stopped must
+        re-show the disconnect message, not 'Capture stopped.' / 'Ready'."""
+        msg = "Audio device disconnected — replug and click Start to recover"
+        window._on_audio_device_lost(msg)
+        # Now the stopped signal fires (as it would after device-loss stop()).
+        window._on_rx_stopped()
+
+        assert window.statusBar().currentMessage() == msg
+        assert window._rx_panel._status.text() == msg
+
+    def test_device_lost_flag_cleared_after_rx_stopped(
+        self, window: MainWindow, qapp
+    ) -> None:
+        """_on_rx_stopped must clear _last_rx_disconnect_msg after consuming it
+        so subsequent normal stops don't re-show the stale disconnect message."""
+        msg = "Audio device disconnected — replug and click Start to recover"
+        window._on_audio_device_lost(msg)
+        window._on_rx_stopped()
+
+        assert window._last_rx_disconnect_msg == ""
+
+    def test_normal_stop_shows_not_listening(
+        self, window: MainWindow, qapp
+    ) -> None:
+        """A deliberate stop (no device loss) must show the 'Not listening'
+        message in the RX panel and 'Ready' in the status bar."""
+        # No prior _on_audio_device_lost call.
+        window._on_rx_stopped()
+
+        assert "Not listening" in window._rx_panel._status.text()
+        assert window.statusBar().currentMessage() == "Ready"
+
+    def test_stream_error_wired_to_device_lost_slot(
+        self, window: MainWindow, qapp
+    ) -> None:
+        """stream_error must be connected to _on_audio_device_lost, NOT
+        _on_rx_error, so the message is stored for _on_rx_stopped to use."""
+        msg = "Audio device disconnected — replug and click Start to recover"
+        # Emit stream_error directly on the worker (direct call, synchronous).
+        window._audio_worker.stream_error.emit(msg)
+        # The stored flag confirms _on_audio_device_lost ran (not _on_rx_error,
+        # which never sets this attribute).
+        assert window._last_rx_disconnect_msg == msg
