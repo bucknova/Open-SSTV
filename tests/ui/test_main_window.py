@@ -465,3 +465,173 @@ def test_start_rig_connect_thread_failure_updates_radio_panel(
         lambda: window._radio_panel._connect_btn.text() == "Connect Rig",
         timeout=1000,
     )
+
+
+# ---------------------------------------------------------------------------
+# _RigPollWorker: consecutive-error counter + auto-disconnect signal
+# ---------------------------------------------------------------------------
+
+
+class TestRigPollWorkerErrorCounter:
+    """Unit tests for _RigPollWorker's consecutive-error counter and
+    radio_disconnected signal.  Tests bypass the QThread and call poll()
+    directly on the test thread so they run synchronously and need no
+    qtbot.waitUntil.
+    """
+
+    def _make_worker(self) -> "_RigPollWorker":
+        from open_sstv.ui.main_window import _RigPollWorker  # type: ignore[attr-defined]
+        return _RigPollWorker()
+
+    def test_successful_poll_resets_counter(self, qapp) -> None:
+        """A successful poll resets consecutive_errors to 0."""
+        from open_sstv.radio.base import ManualRig
+
+        worker = self._make_worker()
+        worker._consecutive_errors = 2  # simulate prior failures
+        worker.set_rig(ManualRig())  # set_rig also resets, but...
+
+        # Force the counter back to 2 to test that poll() itself resets it
+        worker._consecutive_errors = 2
+        worker.poll()
+
+        assert worker._consecutive_errors == 0
+
+    def test_failed_poll_increments_counter(self, qapp) -> None:
+        """Each failing poll increments the counter by 1."""
+        worker = self._make_worker()
+        rig = MagicMock()
+        rig.get_freq.side_effect = RuntimeError("device gone")
+        worker.set_rig(rig)
+
+        assert worker._consecutive_errors == 0
+        worker.poll()
+        assert worker._consecutive_errors == 1
+        worker.poll()
+        assert worker._consecutive_errors == 2
+
+    def test_radio_disconnected_fires_at_threshold(self, qapp) -> None:
+        """radio_disconnected emits exactly once at _POLL_FAIL_THRESHOLD."""
+        from open_sstv.ui.main_window import _RigPollWorker  # type: ignore[attr-defined]
+
+        worker = self._make_worker()
+        rig = MagicMock()
+        rig.get_freq.side_effect = RuntimeError("unplug")
+        worker.set_rig(rig)
+
+        disconnected: list[bool] = []
+        worker.radio_disconnected.connect(lambda: disconnected.append(True))
+
+        threshold = _RigPollWorker._POLL_FAIL_THRESHOLD
+        for _ in range(threshold - 1):
+            worker.poll()
+        assert disconnected == [], "signal must not fire before threshold"
+
+        worker.poll()
+        assert disconnected == [True], "signal must fire exactly at threshold"
+
+        # Additional failures must NOT re-fire the signal
+        worker.poll()
+        worker.poll()
+        assert disconnected == [True], "signal must not fire again above threshold"
+
+    def test_poll_error_emitted_on_every_failure(self, qapp) -> None:
+        """poll_error fires on every failing poll, regardless of threshold."""
+        worker = self._make_worker()
+        rig = MagicMock()
+        rig.get_freq.side_effect = RuntimeError("gone")
+        worker.set_rig(rig)
+
+        errors: list[bool] = []
+        worker.poll_error.connect(lambda: errors.append(True))
+
+        for _ in range(5):
+            worker.poll()
+
+        assert len(errors) == 5
+
+    def test_set_rig_resets_counter(self, qapp) -> None:
+        """set_rig() resets consecutive_errors so a new rig starts fresh."""
+        from open_sstv.radio.base import ManualRig
+
+        worker = self._make_worker()
+        rig = MagicMock()
+        rig.get_freq.side_effect = RuntimeError("gone")
+        worker.set_rig(rig)
+
+        worker.poll()
+        worker.poll()
+        assert worker._consecutive_errors == 2
+
+        worker.set_rig(ManualRig())
+        assert worker._consecutive_errors == 0
+
+    def test_termios_error_triggers_disconnect(self, qapp) -> None:
+        """termios.error from get_freq increments counter and fires the signal."""
+        import termios
+        from open_sstv.ui.main_window import _RigPollWorker  # type: ignore[attr-defined]
+
+        worker = self._make_worker()
+        rig = MagicMock()
+        rig.get_freq.side_effect = termios.error(6, "Device not configured")
+        worker.set_rig(rig)
+
+        disconnected: list[bool] = []
+        worker.radio_disconnected.connect(lambda: disconnected.append(True))
+
+        threshold = _RigPollWorker._POLL_FAIL_THRESHOLD
+        for _ in range(threshold):
+            worker.poll()
+
+        assert disconnected == [True]
+
+
+class TestOnRadioDisconnected:
+    """Integration: _on_radio_disconnected reverts MainWindow to idle state."""
+
+    def test_on_radio_disconnected_stops_timer_and_sets_disconnected(
+        self, window: MainWindow, qapp
+    ) -> None:
+        """After _on_radio_disconnected fires, the poll timer stops and
+        the radio panel shows disconnected state."""
+        from open_sstv.radio.base import ManualRig
+
+        # Simulate a connected state
+        fake_rig = MagicMock()
+        fake_rig.get_freq.return_value = 14_074_000
+        fake_rig.get_mode.return_value = ("USB", 2400)
+        fake_rig.get_strength.return_value = -73
+        window._rig = fake_rig
+        window._radio_panel.set_connected(True)
+        window._rig_poll_timer.start()
+
+        assert window._rig_poll_timer.isActive()
+        assert window._radio_panel.connected
+
+        window._on_radio_disconnected()
+
+        assert not window._rig_poll_timer.isActive()
+        assert not window._radio_panel.connected
+        assert isinstance(window._rig, ManualRig)
+
+    def test_on_radio_disconnected_is_idempotent(
+        self, window: MainWindow, qapp
+    ) -> None:
+        """Calling _on_radio_disconnected when already disconnected is a no-op."""
+        from open_sstv.radio.base import ManualRig
+
+        assert isinstance(window._rig, ManualRig)  # starts disconnected
+        window._on_radio_disconnected()  # must not raise or change state
+        assert isinstance(window._rig, ManualRig)
+
+    def test_on_radio_disconnected_closes_old_rig(
+        self, window: MainWindow, qapp
+    ) -> None:
+        """The old rig's close() is called, even if it raises."""
+        dying_rig = MagicMock()
+        dying_rig.close.side_effect = Exception("termios.error: device gone")
+        window._rig = dying_rig
+
+        window._on_radio_disconnected()  # must not raise
+
+        dying_rig.close.assert_called_once()

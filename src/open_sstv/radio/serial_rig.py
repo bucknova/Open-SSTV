@@ -43,6 +43,19 @@ _log = logging.getLogger(__name__)
 
 from open_sstv.radio.exceptions import RigCommandError, RigConnectionError
 
+# termios.error is raised by reset_input_buffer() / tcflush() on a USB unplug.
+# It does NOT inherit from OSError (its MRO is termios.error → Exception) so a
+# bare `except OSError` misses it.  Include it explicitly where present.
+try:
+    import termios as _termios
+
+    _SERIAL_IO_ERRORS: tuple[type[Exception], ...] = (
+        serial.SerialException, OSError, _termios.error
+    )
+except ImportError:
+    # Windows: no termios module — serial.SerialException (itself an OSError) suffices.
+    _SERIAL_IO_ERRORS = (serial.SerialException, OSError)
+
 
 # ============================================================
 # PTT-only via serial control lines
@@ -84,7 +97,7 @@ class SerialPttRig:
                 )
                 # Ensure PTT is off on open
                 self._set_ptt_line(False)
-            except (serial.SerialException, OSError) as exc:
+            except _SERIAL_IO_ERRORS as exc:
                 self._ser = None
                 raise RigConnectionError(
                     f"Could not open {self._port}: {exc}"
@@ -96,7 +109,7 @@ class SerialPttRig:
                 try:
                     self._set_ptt_line(False)
                     self._ser.close()
-                except (serial.SerialException, OSError):
+                except _SERIAL_IO_ERRORS:
                     pass
                 self._ser = None
 
@@ -120,7 +133,7 @@ class SerialPttRig:
                 if self._ptt_line == "RTS":
                     return self._ser.rts
                 return self._ser.dtr
-            except (serial.SerialException, OSError) as exc:
+            except _SERIAL_IO_ERRORS as exc:
                 raise RigConnectionError(
                     f"Serial PTT read failed on {self._port}: {exc}"
                 ) from exc
@@ -131,7 +144,7 @@ class SerialPttRig:
                 raise RigConnectionError("Serial port not open")
             try:
                 self._set_ptt_line(on)
-            except (serial.SerialException, OSError) as exc:
+            except _SERIAL_IO_ERRORS as exc:
                 raise RigConnectionError(
                     f"Serial PTT write failed on {self._port}: {exc}"
                 ) from exc
@@ -208,7 +221,7 @@ class IcomCIVRig:
                     write_timeout=1.0,
                 )
                 self._ser.reset_input_buffer()
-            except (serial.SerialException, OSError) as exc:
+            except _SERIAL_IO_ERRORS as exc:
                 self._ser = None
                 raise RigConnectionError(
                     f"Could not open {self._port}: {exc}"
@@ -219,7 +232,7 @@ class IcomCIVRig:
             if self._ser is not None:
                 try:
                     self._ser.close()
-                except (serial.SerialException, OSError):
+                except _SERIAL_IO_ERRORS:
                     pass
                 self._ser = None
 
@@ -321,7 +334,7 @@ class IcomCIVRig:
                 self._ser.reset_input_buffer()
                 self._ser.write(frame)
                 return self._read_response()
-            except (serial.SerialException, OSError) as exc:
+            except _SERIAL_IO_ERRORS as exc:
                 raise RigConnectionError(
                     f"Icom CI-V serial I/O failed on {self._port}: {exc}"
                 ) from exc
@@ -457,7 +470,7 @@ class KenwoodRig:
                     write_timeout=1.0,
                 )
                 self._ser.reset_input_buffer()
-            except (serial.SerialException, OSError) as exc:
+            except _SERIAL_IO_ERRORS as exc:
                 self._ser = None
                 raise RigConnectionError(
                     f"Could not open {self._port}: {exc}"
@@ -468,7 +481,7 @@ class KenwoodRig:
             if self._ser is not None:
                 try:
                     self._ser.close()
-                except (serial.SerialException, OSError):
+                except _SERIAL_IO_ERRORS:
                     pass
                 self._ser = None
 
@@ -553,7 +566,7 @@ class KenwoodRig:
             try:
                 self._ser.reset_input_buffer()
                 self._ser.write(f"{cmd};".encode("ascii"))
-            except (serial.SerialException, OSError) as exc:
+            except _SERIAL_IO_ERRORS as exc:
                 raise RigConnectionError(
                     f"Kenwood serial I/O failed on {self._port}: {exc}"
                 ) from exc
@@ -572,7 +585,7 @@ class KenwoodRig:
                 self._ser.reset_input_buffer()
                 self._ser.write(f"{cmd};".encode("ascii"))
                 return self._read_response(expected_prefix=cmd[:2])
-            except (serial.SerialException, OSError) as exc:
+            except _SERIAL_IO_ERRORS as exc:
                 raise RigConnectionError(
                     f"Kenwood serial I/O failed on {self._port}: {exc}"
                 ) from exc
@@ -661,7 +674,7 @@ class YaesuRig:
                     write_timeout=1.0,
                 )
                 self._ser.reset_input_buffer()
-            except (serial.SerialException, OSError) as exc:
+            except _SERIAL_IO_ERRORS as exc:
                 self._ser = None
                 raise RigConnectionError(
                     f"Could not open {self._port}: {exc}"
@@ -672,7 +685,7 @@ class YaesuRig:
             if self._ser is not None:
                 try:
                     self._ser.close()
-                except (serial.SerialException, OSError):
+                except _SERIAL_IO_ERRORS:
                     pass
                 self._ser = None
 
@@ -756,7 +769,7 @@ class YaesuRig:
             try:
                 self._ser.reset_input_buffer()
                 self._ser.write(f"{cmd};".encode("ascii"))
-            except (serial.SerialException, OSError) as exc:
+            except _SERIAL_IO_ERRORS as exc:
                 raise RigConnectionError(
                     f"Yaesu serial I/O failed on {self._port}: {exc}"
                 ) from exc
@@ -775,7 +788,7 @@ class YaesuRig:
                 self._ser.reset_input_buffer()
                 self._ser.write(f"{cmd};".encode("ascii"))
                 return self._read_response(expected_prefix=cmd[:2])
-            except (serial.SerialException, OSError) as exc:
+            except _SERIAL_IO_ERRORS as exc:
                 raise RigConnectionError(
                     f"Yaesu serial I/O failed on {self._port}: {exc}"
                 ) from exc

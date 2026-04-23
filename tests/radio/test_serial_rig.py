@@ -618,3 +618,100 @@ class TestOSErrorWrapping:
 
         with pytest.raises(RigConnectionError, match="Serial PTT write failed"):
             r.set_ptt(True)
+
+
+# ---------------------------------------------------------------------------
+# OP-TX-02 — termios.error specifically (not a subclass of OSError)
+#
+# termios.error MRO: termios.error → Exception → BaseException → object.
+# A bare `except OSError` does NOT catch it.  The _SERIAL_IO_ERRORS tuple
+# includes termios.error explicitly so a raw USB unplug is caught even when
+# pyserial doesn't wrap it in SerialException.
+# ---------------------------------------------------------------------------
+
+
+class TestTermiosErrorWrapping:
+    """Regression: raw termios.error from tcflush/reset_input_buffer must be
+    caught and translated, not propagate as an unhandled exception.
+    """
+
+    def test_icom_command_wraps_termios_error(self) -> None:
+        """IcomCIVRig._command: termios.error → RigConnectionError."""
+        import termios
+        import threading
+        from open_sstv.radio.exceptions import RigConnectionError
+
+        r = IcomCIVRig.__new__(IcomCIVRig)
+        r._port = "/dev/null"
+        r._baud_rate = 19200
+        r._addr = 0x94
+        r._lock = threading.Lock()
+        r._ser = MagicMock()
+        r._ser.reset_input_buffer.side_effect = termios.error(6, "Device not configured")
+
+        with pytest.raises(RigConnectionError, match="Icom CI-V serial I/O failed"):
+            r._command(b"\x1c\x00\x00")
+
+    def test_kenwood_command_wraps_termios_error(self) -> None:
+        """KenwoodRig._command: termios.error → RigConnectionError."""
+        import termios
+        from open_sstv.radio.exceptions import RigConnectionError
+        from open_sstv.radio.serial_rig import KenwoodRig
+
+        r = _make_kenwood_rig()
+        r._ser = MagicMock()
+        r._ser.reset_input_buffer.side_effect = termios.error(6, "Device not configured")
+
+        with pytest.raises(RigConnectionError, match="Kenwood serial I/O failed"):
+            r._command("FA")
+
+    def test_kenwood_write_command_wraps_termios_error(self) -> None:
+        """KenwoodRig._write_command: termios.error → RigConnectionError."""
+        import termios
+        from open_sstv.radio.exceptions import RigConnectionError
+        from open_sstv.radio.serial_rig import KenwoodRig
+
+        r = _make_kenwood_rig()
+        r._ser = MagicMock()
+        r._ser.write.side_effect = termios.error(6, "Device not configured")
+
+        with pytest.raises(RigConnectionError, match="Kenwood serial I/O failed"):
+            r._write_command("TX1")
+
+    def test_yaesu_command_wraps_termios_error(self) -> None:
+        """YaesuRig._command: termios.error → RigConnectionError."""
+        import termios
+        from open_sstv.radio.exceptions import RigConnectionError
+        from open_sstv.radio.serial_rig import YaesuRig
+
+        r = _make_yaesu_rig()
+        r._ser = MagicMock()
+        r._ser.reset_input_buffer.side_effect = termios.error(6, "Device not configured")
+
+        with pytest.raises(RigConnectionError, match="Yaesu serial I/O failed"):
+            r._command("FA")
+
+    def test_yaesu_write_command_wraps_termios_error(self) -> None:
+        """YaesuRig._write_command: termios.error → RigConnectionError."""
+        import termios
+        from open_sstv.radio.exceptions import RigConnectionError
+        from open_sstv.radio.serial_rig import YaesuRig
+
+        r = _make_yaesu_rig()
+        r._ser = MagicMock()
+        r._ser.write.side_effect = termios.error(6, "Device not configured")
+
+        with pytest.raises(RigConnectionError, match="Yaesu serial I/O failed"):
+            r._write_command("TX0")
+
+    def test_termios_error_is_not_oserror_subclass(self) -> None:
+        """Documents the root cause: termios.error does NOT inherit from OSError.
+        A bare `except OSError` would miss it — _SERIAL_IO_ERRORS includes it
+        explicitly for exactly this reason.
+        """
+        import termios
+        assert not issubclass(termios.error, OSError), (
+            "If termios.error became an OSError subclass, the explicit entry in "
+            "_SERIAL_IO_ERRORS is now redundant but harmless — update this test "
+            "and the comment in serial_rig.py to reflect the new MRO."
+        )

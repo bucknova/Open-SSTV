@@ -127,14 +127,22 @@ class _RigPollWorker(QObject):
 
     poll_result = Signal(int, str, int)  # (freq_hz, mode_name, strength_db)
     poll_error = Signal()
+    #: Emitted exactly once when ``_POLL_FAIL_THRESHOLD`` consecutive polls
+    #: fail.  ``MainWindow`` stops the timer and reverts to disconnected state.
+    radio_disconnected = Signal()
+
+    #: How many consecutive poll failures trigger the auto-disconnect signal.
+    _POLL_FAIL_THRESHOLD: int = 3
 
     def __init__(self) -> None:
         super().__init__()
         self._rig: Rig = ManualRig()
+        self._consecutive_errors: int = 0
 
     def set_rig(self, rig: Rig) -> None:
         """Swap the rig reference. GIL-safe for a plain attribute store."""
         self._rig = rig
+        self._consecutive_errors = 0
 
     @Slot()
     def poll(self) -> None:
@@ -143,9 +151,13 @@ class _RigPollWorker(QObject):
             freq = self._rig.get_freq()
             mode_name, _ = self._rig.get_mode()
             strength = self._rig.get_strength()
-        except RigError:
+        except Exception:  # noqa: BLE001 — catch RigError + any raw OSError/termios.error
+            self._consecutive_errors += 1
             self.poll_error.emit()
+            if self._consecutive_errors == self._POLL_FAIL_THRESHOLD:
+                self.radio_disconnected.emit()
             return
+        self._consecutive_errors = 0
         self.poll_result.emit(freq, mode_name, strength)
 
 
@@ -543,6 +555,7 @@ class MainWindow(QMainWindow):
         self._rig_poll_timer.timeout.connect(self._rig_poll_worker.poll)
         self._rig_poll_worker.poll_result.connect(self._on_poll_result)
         self._rig_poll_worker.poll_error.connect(self._radio_panel.set_connection_error)
+        self._rig_poll_worker.radio_disconnected.connect(self._on_radio_disconnected)
 
         # --- Keyboard shortcuts ---
         save_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
@@ -1506,6 +1519,31 @@ class MainWindow(QMainWindow):
         # Stop rigctld if we launched it
         self._kill_rigctld()
         self.statusBar().showMessage("Rig disconnected.", 3000)
+
+    @Slot()
+    def _on_radio_disconnected(self) -> None:
+        """USB unplug detected: stop polling and revert to disconnected state.
+
+        Fired by ``_RigPollWorker`` after ``_POLL_FAIL_THRESHOLD`` consecutive
+        poll failures.  Mirrors ``_on_rig_disconnect`` but shows a different
+        status message so the user knows the disconnect was involuntary.
+        """
+        if isinstance(self._rig, ManualRig):
+            return  # already disconnected — guard against a queued double-fire
+        self._rig_poll_timer.stop()
+        old_rig = self._rig
+        self._rig = ManualRig()
+        self._tx_worker.set_rig(self._rig)
+        self._rig_poll_worker.set_rig(self._rig)
+        self._radio_panel.set_connected(False)
+        self._kill_rigctld()
+        try:
+            old_rig.close()
+        except Exception:  # noqa: BLE001 — dead port may raise termios.error
+            pass
+        self.statusBar().showMessage(
+            "Radio disconnected — check USB connection", 8000
+        )
 
     def _kill_rigctld(self) -> None:
         """Terminate any rigctld process we spawned.
