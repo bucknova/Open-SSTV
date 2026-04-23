@@ -170,3 +170,145 @@ def test_stop_button_calls_request_stop(
 # passing a non-``None`` config to the existing ``MainWindow`` constructor
 # in a test harness on Darwin.  Tracked for a follow-up dedicated
 # investigation — the user-impact fix ships without it.
+
+
+# ---------------------------------------------------------------------------
+# v0.2.11: connect timeout, Cancel button, close-while-connecting safety
+# ---------------------------------------------------------------------------
+
+
+def test_on_connect_cancel_resets_panel_to_disconnected(
+    window: MainWindow, qtbot
+) -> None:
+    """Calling _on_connect_cancel() must restore 'Connect Rig' text and
+    re-enable the button, regardless of whether a thread is running."""
+    window._radio_panel.set_connecting()
+    assert window._radio_panel._connect_btn.text() == "Cancel"
+
+    window._on_connect_cancel()
+
+    assert window._radio_panel._connect_btn.text() == "Connect Rig"
+    assert window._radio_panel._connect_btn.isEnabled()
+    # Status bar should mention "cancelled".
+    assert "cancel" in window.statusBar().currentMessage().lower()
+
+
+def test_rig_connect_worker_cancel_suppresses_succeeded(qapp) -> None:
+    """_RigConnectWorker must not emit succeeded when cancel is pre-set."""
+    import threading as _threading
+    from open_sstv.radio.base import ManualRig
+    from open_sstv.ui.main_window import _RigConnectWorker
+
+    cancel = _threading.Event()
+    cancel.set()  # pre-cancel before run()
+    worker = _RigConnectWorker(ManualRig(), cancel)
+
+    succeeded: list[object] = []
+    failed: list[str] = []
+    worker.succeeded.connect(lambda r: succeeded.append(r))
+    worker.failed.connect(lambda e: failed.append(e))
+
+    worker.run()  # synchronous on the test thread
+
+    assert succeeded == [], "cancelled worker must not emit succeeded"
+    assert failed == [], "cancelled worker must not emit failed"
+
+
+def test_rig_connect_worker_cancel_suppresses_failed(qapp, monkeypatch) -> None:
+    """_RigConnectWorker must not emit failed when cancel fires before open()
+    returns — covers the case where open() raises and cancel is already set."""
+    import threading as _threading
+    from unittest.mock import MagicMock
+    from open_sstv.ui.main_window import _RigConnectWorker
+
+    cancel = _threading.Event()
+    cancel.set()
+
+    bad_rig = MagicMock()
+    bad_rig.open.side_effect = Exception("port busy")
+    worker = _RigConnectWorker(bad_rig, cancel)
+
+    failed: list[str] = []
+    worker.failed.connect(lambda e: failed.append(e))
+    worker.run()
+
+    assert failed == [], "cancelled worker must not emit failed even on open() error"
+
+
+def test_abort_connect_is_noop_when_idle(window: MainWindow) -> None:
+    """_abort_connect() must not raise when no connect is in flight."""
+    assert window._connect_thread is None
+    window._abort_connect()  # must not raise
+    assert window._connect_thread is None
+
+
+def test_connect_timeout_calls_on_error(window: MainWindow, qtbot, monkeypatch) -> None:
+    """When _CONNECT_TIMEOUT_S elapses, on_error must be called with a
+    'timed out' message and the UI must return to a usable state."""
+    import threading as _threading
+
+    monkeypatch.setattr(type(window), "_CONNECT_TIMEOUT_S", 0.05)
+
+    gate = _threading.Event()
+    error_messages: list[str] = []
+
+    slow_rig = MagicMock()
+
+    def _slow_open() -> None:
+        gate.wait(5.0)  # released by on_error so the thread finishes quickly
+
+    slow_rig.open.side_effect = _slow_open
+
+    def _on_success(_r: object) -> None:
+        pass  # should not be called
+
+    def _on_error(msg: str) -> None:
+        error_messages.append(msg)
+        gate.set()  # unblock the slow open so the thread can exit
+
+    window._radio_panel.set_connecting()
+    window._start_rig_connect_thread(slow_rig, _on_success, _on_error)
+
+    qtbot.waitUntil(lambda: len(error_messages) > 0, timeout=1000)
+
+    assert "timed out" in error_messages[0].lower()
+    # Wait for the thread to finish (gate was set in _on_error)
+    qtbot.waitUntil(
+        lambda: window._connect_thread is None
+        or not window._connect_thread.isRunning(),
+        timeout=1000,
+    )
+
+
+def test_close_while_connecting_no_crash(
+    qtbot,
+    patched_audio: dict[str, MagicMock],
+    _suppress_first_launch_dialog: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Closing the window while a connect attempt is in-flight must not crash.
+
+    Regression: QThread(parent=MainWindow) is destroyed by Qt's deleteChildren
+    while the thread is still blocking in rig.open() → QThread::~QThread()
+    calls fatal().  Fixed by _abort_connect() at the top of closeEvent().
+    """
+    import threading as _threading
+
+    # Use a very short timeout so _abort_connect doesn't wait 5 s in CI.
+    gate = _threading.Event()
+
+    window = MainWindow(rig=ManualRig())
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitExposed(window)
+
+    slow_rig = MagicMock()
+    slow_rig.open.side_effect = lambda: gate.wait(3.0)
+
+    window._radio_panel.set_connecting()
+    window._start_rig_connect_thread(slow_rig, lambda _: None, lambda _: None)
+
+    # Close immediately — _abort_connect must stop the thread before Qt's
+    # deleteChildren destroys the QThread object.
+    gate.set()  # unblock rig.open so the thread can finish during abort
+    window.close()  # triggers closeEvent → _abort_connect → thread.wait()

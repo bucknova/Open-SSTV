@@ -29,6 +29,7 @@ class RadioPanel(QWidget):
 
     connect_requested = Signal()
     disconnect_requested = Signal()
+    cancel_requested = Signal()
     test_tone_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -123,14 +124,15 @@ class RadioPanel(QWidget):
         return self._connected
 
     def set_connecting(self) -> None:
-        """Show a connecting-in-progress state and disable the button.
+        """Show a connecting-in-progress state with a Cancel button.
 
-        Call this before kicking off the background open+ping thread (OP2-02).
-        ``set_connected`` or ``set_connection_error`` will re-enable the button
-        when the attempt resolves.
+        The button is relabelled "Cancel" and kept *enabled* so the user can
+        abort the attempt.  ``set_connected`` or ``set_connection_error`` will
+        restore the button when the attempt resolves.
         """
         self._connecting = True
-        self._update_connect_btn()
+        self._connect_btn.setText("Cancel")
+        self._connect_btn.setEnabled(True)  # always clickable so Cancel works
         self._status_label.setText("Connecting…")
         self._status_label.setStyleSheet("color: orange;")
 
@@ -155,6 +157,7 @@ class RadioPanel(QWidget):
     def set_connection_error(self) -> None:
         """Show a disconnected/error state and re-enable the connect button."""
         self._connecting = False
+        self._connect_btn.setText("Connect Rig")  # reset from "Cancel" if needed
         self._update_connect_btn()
         self._status_label.setText("Connection lost")
         self._status_label.setStyleSheet("color: red;")
@@ -170,8 +173,12 @@ class RadioPanel(QWidget):
         self._update_test_tone_btn()
 
     def _update_connect_btn(self) -> None:
-        """Enable the connect button only when not TX-active and not connecting."""
-        self._connect_btn.setEnabled(not self._tx_active and not self._connecting)
+        """Enable the connect/cancel button whenever TX is not active.
+
+        During connecting, the button shows "Cancel" and stays enabled — so
+        the user can always abort.  TX disables it (to prevent rig mid-swap).
+        """
+        self._connect_btn.setEnabled(not self._tx_active)
 
     def _update_test_tone_btn(self) -> None:
         """Enable the Test Tone button only when a rig is connected and idle."""
@@ -219,7 +226,9 @@ class RadioPanel(QWidget):
 
     @Slot()
     def _on_connect_clicked(self) -> None:
-        if self._connected:
+        if self._connecting:
+            self.cancel_requested.emit()
+        elif self._connected:
             self.disconnect_requested.emit()
         else:
             self.connect_requested.emit()

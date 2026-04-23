@@ -68,6 +68,7 @@ from __future__ import annotations
 
 import datetime
 import subprocess
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -152,30 +153,42 @@ class _RigConnectWorker(QObject):
     """One-shot: runs rig.open() + rig.ping() on a background thread.
 
     Prevents the GUI from freezing for up to ~4 s on unresponsive radios
-    (OP2-02).  Create, moveToThread, connect succeeded/failed, start thread.
+    (OP2-02).  Caller supplies a ``threading.Event``; when set the worker
+    silently discards any pending emit so a timeout or cancel can win the
+    race without a spurious success/error reaching the GUI.
     """
 
     succeeded = Signal(object)  # emits the connected Rig instance
     failed = Signal(str)        # emits a human-readable error message
 
-    def __init__(self, rig: "Rig") -> None:
+    def __init__(self, rig: "Rig", cancel: threading.Event) -> None:
         super().__init__()
         self._rig = rig
+        self._cancel = cancel
 
     @Slot()
     def run(self) -> None:
         try:
             self._rig.open()
+            if self._cancel.is_set():
+                return
             self._rig.ping()
+            if self._cancel.is_set():
+                return
             self.succeeded.emit(self._rig)
         except RigError as exc:
-            self.failed.emit(str(exc))
+            if not self._cancel.is_set():
+                self.failed.emit(str(exc))
         except Exception as exc:  # noqa: BLE001
-            self.failed.emit(str(exc))
+            if not self._cancel.is_set():
+                self.failed.emit(str(exc))
 
 
 class MainWindow(QMainWindow):
     """The Phase 2 main window: TX + RX side-by-side, three worker threads."""
+
+    #: How long to wait for rig.open()+ping() before giving up (seconds).
+    _CONNECT_TIMEOUT_S: float = 5.0
 
     #: Private signals used to dispatch ``start``/``stop`` calls onto
     #: the audio worker thread. We can't just call
@@ -285,11 +298,19 @@ class MainWindow(QMainWindow):
         # --- Menu bar ---
         self._build_menu_bar()
 
+        # In-flight connect-thread state — cleared by _on_connect_thread_finished
+        # and _abort_connect.  All three point at the same logical "current
+        # connect attempt"; they are always set and cleared together.
+        self._connect_cancel: threading.Event | None = None
+        self._connect_thread: QThread | None = None
+        self._connect_timeout_timer: QTimer | None = None
+
         # --- Radio panel (toolbar strip above TX/RX) ---
         self._radio_panel = RadioPanel(self)
         self._radio_panel.set_callsign(self._config.callsign)
         self._radio_panel.connect_requested.connect(self._on_rig_connect)
         self._radio_panel.disconnect_requested.connect(self._on_rig_disconnect)
+        self._radio_panel.cancel_requested.connect(self._on_connect_cancel)
 
         # Push callsign to TX panel for the image editor's text overlay
         self._tx_panel = TxPanel(
@@ -1148,21 +1169,103 @@ class MainWindow(QMainWindow):
     ) -> None:
         """Spin up a one-shot QThread to run rig.open() + rig.ping().
 
-        Results are delivered to the GUI thread via queued signal connections.
-        ``on_success`` and ``on_error`` are plain callables (not Qt slots) and
-        will execute on the GUI thread when the signal fires.
+        Results are delivered to the GUI thread via *explicit* QueuedConnection
+        so the lambdas always execute on the GUI event loop — never on the
+        worker thread.  (AutoConnection resolves to DirectConnection for plain
+        Python callables because they lack QObject thread affinity, which would
+        make the GUI mutations in on_success/on_error run on the wrong thread
+        and be silently dropped by Qt on macOS.)
+
+        A ``_CONNECT_TIMEOUT_S`` QTimer fires on_error with a "timed out"
+        message if the rig never responds.  The cancel event lets the caller
+        (cancel button, timeout, closeEvent) suppress any late emit.
         """
-        worker = _RigConnectWorker(rig)
+        cancel = threading.Event()
+        self._connect_cancel = cancel
+
+        worker = _RigConnectWorker(rig, cancel)
         thread = QThread(self)
+        thread.setObjectName("rig-connect-thread")
+        self._connect_thread = thread
+
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.succeeded.connect(lambda r: on_success(r))
-        worker.failed.connect(lambda e: on_error(e))
-        worker.succeeded.connect(lambda _: thread.quit())
-        worker.failed.connect(lambda _: thread.quit())
+
+        # Explicit QueuedConnection: guarantees these lambdas run on the GUI
+        # thread, not on the worker thread where they would mutate widgets
+        # illegally and be silently dropped.
+        qc = Qt.ConnectionType.QueuedConnection
+        worker.succeeded.connect(lambda r: on_success(r), qc)
+        worker.failed.connect(lambda e: on_error(e), qc)
+        worker.succeeded.connect(lambda _: thread.quit(), qc)
+        worker.failed.connect(lambda _: thread.quit(), qc)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._on_connect_thread_finished)
+
+        timeout_timer = QTimer(self)
+        timeout_timer.setSingleShot(True)
+        self._connect_timeout_timer = timeout_timer
+
+        def _on_timeout() -> None:
+            if not cancel.is_set():
+                cancel.set()
+                thread.quit()
+                on_error(
+                    "Connection timed out — check that your radio is "
+                    "connected and powered on."
+                )
+
+        timeout_timer.timeout.connect(_on_timeout)
+        worker.succeeded.connect(lambda _: timeout_timer.stop(), qc)
+        worker.failed.connect(lambda _: timeout_timer.stop(), qc)
+
         thread.start()
+        timeout_timer.start(int(self._CONNECT_TIMEOUT_S * 1000))
+
+    @Slot()
+    def _on_connect_thread_finished(self) -> None:
+        """Clear connect-thread state when the thread exits normally."""
+        self._connect_thread = None
+        self._connect_cancel = None
+        if self._connect_timeout_timer is not None:
+            self._connect_timeout_timer.stop()
+            self._connect_timeout_timer = None
+
+    @Slot()
+    def _on_connect_cancel(self) -> None:
+        """User clicked Cancel during a connect attempt."""
+        self._abort_connect()
+        self._radio_panel.set_connected(False)
+        self.statusBar().showMessage("Connection cancelled.", 3000)
+
+    def _abort_connect(self) -> None:
+        """Cancel any in-flight connect attempt and wait for its thread to stop.
+
+        Safe to call when no connect is in flight (all refs will be None).
+        Called from closeEvent to prevent QThread::~QThread() fatal() when
+        the window is destroyed while the worker is still blocking in open().
+        Uses objectName to find *all* lingering connect threads, handling the
+        edge case where a timeout fired and the user started a second attempt
+        before the first thread finished its blocking C call.
+        """
+        timer = self._connect_timeout_timer
+        cancel = self._connect_cancel
+        self._connect_thread = None
+        self._connect_cancel = None
+        self._connect_timeout_timer = None
+
+        if timer is not None:
+            timer.stop()
+        if cancel is not None:
+            cancel.set()
+
+        for thread in self.findChildren(QThread):
+            if thread.objectName() == "rig-connect-thread" and thread.isRunning():
+                thread.quit()
+                if not thread.wait(2000):
+                    thread.terminate()
+                    thread.wait(500)
 
     def _connect_serial(self) -> None:
         """Create a direct serial rig backend and start polling.
@@ -1382,6 +1485,11 @@ class MainWindow(QMainWindow):
     # === lifecycle ===
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 — Qt API
+        # Abort any in-flight rig connect first — the QThread is a child of
+        # this window and Qt calls fatal() if it is still running when the
+        # parent is destroyed (OP2-02 regression fix).
+        self._abort_connect()
+
         # Stop rig polling first to avoid timer fires during teardown.
         self._rig_poll_timer.stop()
 
