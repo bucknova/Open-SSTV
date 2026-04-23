@@ -673,6 +673,7 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(
             self._config,
             rig_connected=self._radio_panel.connected,
+            tx_image=self._tx_panel.current_image,
             parent=self,
         )
         # Route Test Tone from the dialog through the same path as the Radio

@@ -113,6 +113,7 @@ class SettingsDialog(QDialog):
         self,
         config: AppConfig,
         rig_connected: bool = False,
+        tx_image: object = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -120,6 +121,7 @@ class SettingsDialog(QDialog):
         self.setMinimumWidth(480)
         self._config = config
         self._rig_connected = rig_connected
+        self._tx_image = tx_image  # PIL Image from the TX panel, or None
         self._tx_active = False
 
         layout = QVBoxLayout(self)
@@ -819,14 +821,12 @@ class SettingsDialog(QDialog):
         banner_layout.addRow("Preview:", self._banner_preview)
         self._refresh_banner_preview()
 
-        # Preview on a real image — file-picker → modal dialog showing the full
-        # image with the banner stamped on top using the current colour/size
-        # selections.  Lets the operator see how the banner actually looks
-        # composited against a photo, not just the neutral-grey strip above.
+        # Preview on a real image — uses the TX panel image when one is loaded,
+        # otherwise falls back to a file-picker.
         self._banner_preview_on_image_btn = QPushButton("Preview on image…")
         self._banner_preview_on_image_btn.setToolTip(
-            "Pick an image from disk and see the banner applied to it using "
-            "the current colour and size settings."
+            "Show the banner applied to the current TX image.\n"
+            "If no image is loaded in the TX panel, a file picker opens instead."
         )
         self._banner_preview_on_image_btn.clicked.connect(
             self._preview_banner_on_image
@@ -1086,57 +1086,57 @@ class SettingsDialog(QDialog):
             self._refresh_banner_preview()
 
     def _preview_banner_on_image(self) -> None:
-        """Open a file picker and show the banner composited onto the chosen image.
+        """Show the banner composited onto the current TX image (or a file pick).
 
-        The strip-only preview above is handy for colour tuning, but it hides
-        the one question operators actually care about: *does this look okay on
-        top of an actual photo?*  This opens a modal with the current colour
-        and size selections applied to a user-chosen image so they can see the
-        whole result before committing to TX.
+        When the TX panel has an image loaded (passed in via ``tx_image``),
+        it is used directly so the operator sees exactly what will go on air.
+        If no TX image is available, falls back to a file picker so the button
+        is still useful when the dialog is opened before loading an image.
 
-        Does not require saving settings first — whatever is currently picked
-        in the dialog (enabled state ignored, colours + size live) is used.
-        Large images are scaled down to fit the available screen area.
+        Does not require saving settings first — current colour and size
+        selections are applied live.  Large images are scaled to 80 % of the
+        screen to prevent spill on laptop displays.
         """
-        # Lazy imports so opening Settings doesn't pay for them when the
-        # button is never clicked.
         from pathlib import Path as _Path
 
         from PIL import Image as _PILImage, UnidentifiedImageError
 
-        initial_dir = self._save_dir.text() or str(_Path.home())
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Preview banner on image",
-            initial_dir,
-            "Images (*.png *.jpg *.jpeg *.bmp *.webp *.tiff *.gif);;All files (*)",
-        )
-        if not path:
-            return
-
-        try:
-            source = _PILImage.open(path).convert("RGB")
-        except (OSError, UnidentifiedImageError) as exc:
-            QMessageBox.warning(
+        if self._tx_image is not None:
+            source: "_PILImage.Image" = self._tx_image.convert("RGB")  # type: ignore[union-attr]
+            title = "Banner preview — TX image"
+        else:
+            initial_dir = self._save_dir.text() or str(_Path.home())
+            path, _ = QFileDialog.getOpenFileName(
                 self,
-                "Could not open image",
-                f"Failed to load {path!r}:\n\n{exc}",
+                "Preview banner on image",
+                initial_dir,
+                "Images (*.png *.jpg *.jpeg *.bmp *.webp *.tiff *.gif);;All files (*)",
             )
-            return
+            if not path:
+                return
+            try:
+                source = _PILImage.open(path).convert("RGB")
+            except (OSError, UnidentifiedImageError) as exc:
+                QMessageBox.warning(
+                    self,
+                    "Could not open image",
+                    f"Failed to load {path!r}:\n\n{exc}",
+                )
+                return
+            title = f"Banner preview — {_Path(path).name}"
 
         size_key = self._banner_size.currentData() or "small"
         bh, fs = banner_size_params(size_key)
         stamped = apply_tx_banner(
             source,
             _APP_VERSION,
-            self._config.callsign,
+            self._callsign.text().strip().upper(),
             self._banner_bg_color,
             self._banner_text_color,
             banner_height=bh,
             font_size=fs,
         )
 
-        # PIL → QPixmap at native size.
         raw = stamped.tobytes("raw", "RGB")
         qimg = QImage(
             raw, stamped.width, stamped.height, stamped.width * 3,
@@ -1144,8 +1144,6 @@ class SettingsDialog(QDialog):
         )
         pix = QPixmap.fromImage(qimg)
 
-        # Scale down if bigger than 80 % of the current screen — PD-290 at
-        # 800×616 would otherwise spill off a laptop display.
         screen_geom = self.screen().availableGeometry()
         max_w = int(screen_geom.width() * 0.80)
         max_h = int(screen_geom.height() * 0.80)
@@ -1157,7 +1155,7 @@ class SettingsDialog(QDialog):
             )
 
         dlg = QDialog(self)
-        dlg.setWindowTitle(f"Banner preview — {_Path(path).name}")
+        dlg.setWindowTitle(title)
         lay = QVBoxLayout(dlg)
         caption = QLabel(
             f"{stamped.width}×{stamped.height} · {size_key} size "

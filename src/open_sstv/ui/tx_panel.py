@@ -217,6 +217,11 @@ class TxPanel(QWidget):
 
     # === public API used by MainWindow ===
 
+    @property
+    def current_image(self) -> "PILImage | None":
+        """The PIL image currently loaded in the TX panel, or None."""
+        return self._current_image
+
     def load_image(self, path: Path) -> None:
         """Load an image from disk into the preview.
 
