@@ -11,6 +11,47 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.2.11] — 2026-04-23
+
+### Fixed
+
+- **Connect button no longer sticks at "Connecting…" forever.**  The OP2-02
+  fix moved `rig.open()+ping()` off the GUI thread via `_RigConnectWorker`,
+  but PySide6 resolves `AutoConnection` to `DirectConnection` for plain Python
+  lambdas (they have no `QObject` thread affinity).  The `on_success`/`on_error`
+  callbacks were therefore running on the worker thread, where Qt silently drops
+  widget mutations on macOS.  All worker signal → lambda connections now use
+  explicit `Qt.ConnectionType.QueuedConnection`, guaranteeing delivery on the
+  GUI event loop.
+
+- **Rig connect now times out after 5 seconds.**  If `open()+ping()` never
+  returns (unresponsive radio, serial port that exists but has no device, or a
+  dead rigctld TCP endpoint), a `QTimer` fires after `_CONNECT_TIMEOUT_S = 5.0`
+  seconds and surfaces the message *"Connection timed out — check that your
+  radio is connected and powered on."*  Previously the app was stuck
+  indefinitely with no escape.
+
+- **Connect button becomes "Cancel" during a connect attempt.**  Clicking it
+  while the worker is in-flight emits `cancel_requested`, aborts the thread,
+  and returns the panel to *Disconnected* state.  Closing the window mid-connect
+  also triggers the same abort path.
+
+- **Closing the window mid-connect no longer crashes.**  `_RigConnectWorker`
+  runs on a `QThread` parented to `MainWindow`.  If the window was closed while
+  the thread was blocking inside `rig.open()`, Qt's `deleteChildren` would
+  destroy the still-running `QThread`, triggering `QThread::~QThread() →
+  fatal()`.  `closeEvent` now calls `_abort_connect()` first, which sets the
+  cancel event, calls `thread.quit() + thread.wait(2000)`, and falls back to
+  `thread.terminate()` if the blocking C call does not return in time.
+
+### Tests
+
+- 10 new tests: `tests/ui/test_radio_panel.py` (Cancel button surface) and
+  `tests/ui/test_main_window.py` (timeout, cancel, close-safety, worker cancel
+  suppression).  Suite total: 678 passed, 1 skipped.
+
+---
+
 ## [0.2.10] — 2026-04-22
 
 ### Fixed
