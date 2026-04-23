@@ -11,6 +11,54 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.2.13] — 2026-04-23
+
+### Fixed
+
+- **Audio device hot-unplug recovery — full PortAudio reset cycle.**  When the
+  IC-7300 (or any USB audio device) is unplugged while capture is running,
+  `InputStreamWorker` now detects the loss via PortAudio's `finished_callback`
+  and a 3 s watchdog timer.  On reconnect, `sounddevice._terminate()` then
+  `sounddevice._initialize()` flush the stale internal device-handle cache so
+  a fresh `sd.InputStream()` succeeds instead of failing with
+  `-10851 (Invalid Property Value)`.  The saved device name is re-enumerated
+  on every Start click so a replug that assigns a new PortAudio index is
+  transparent to the user.
+
+- **Start button always re-enables after a failed stream open.**  Previously,
+  if `InputStreamWorker.start()` raised (stale device index, device not yet
+  re-enumerated), only `error` was emitted and `stopped` was not, leaving the
+  Start Capture button permanently greyed.  `stopped` is now unconditionally
+  emitted in every failure path of `start()`.
+
+- **Persistent "Audio device disconnected" feedback.**  When device loss is
+  detected, the status bar and RX panel label now show
+  *"Audio device disconnected — replug and click Start to recover"* and remain
+  visible.  Two previous races wiped the message before the user could read it:
+  (a) `RxWorker.status_update` emits `"Listening… Xs buffered…"` on a periodic
+  timer; these updates are now suppressed via a `_suppress_rx_status_updates`
+  gate that is set on stop/disconnect and cleared only when the stream is
+  confirmed running.  (b) When PortAudio's `finished_callback` fires during
+  `start()`, `stream_error` arrives at the GUI before `started`; `_on_rx_started`
+  now returns early if `_last_rx_disconnect_msg` is set so it cannot overwrite
+  the disconnect message.
+
+- **RX panel status correctly reflects idle state.**  After any stop (user-
+  initiated or device loss), the RX panel label shows
+  *"Not listening — click Start to begin."* rather than staying on the last
+  decode message or "Listening…".  The periodic `RxWorker` status-update timer
+  no longer overwrites this text after the stream closes.
+
+### Tests
+
+- 28 new tests across `tests/audio/test_input_stream.py` (PA reset, watchdog
+  flag, `finished_callback` lifecycle, `_stopping` guard) and
+  `tests/ui/test_main_window.py` (device-loss message persistence, signal
+  ordering race, `status_update` suppress gate, Start-button re-enable,
+  device re-enumeration by name).  Suite total: 760 passed, 1 skipped.
+
+---
+
 ## [0.2.12] — 2026-04-23
 
 ### Fixed
