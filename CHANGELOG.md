@@ -11,6 +11,66 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.2.12] — 2026-04-23
+
+### Fixed
+
+- **Radio connect button — replaced broken lambda+QueuedConnection with
+  `_RigConnectRelay` QObject.**  PySide6 resolves `AutoConnection` to
+  `DirectConnection` for plain Python lambdas (they carry no `QObject` thread
+  affinity), so the `on_success`/`on_error` callbacks added in v0.2.11 were
+  still executing on the worker thread and being silently dropped by Qt on
+  macOS.  The fix introduces `_RigConnectRelay`, a tiny `QObject` subclass
+  whose slots have real thread affinity; all worker-result connections are now
+  routed through it so `AutoConnection` resolves to `QueuedConnection` as
+  intended.
+
+- **TX unkey crash on USB unplug — serial I/O now catches `termios.error`.**
+  `termios.error` does not inherit from `OSError` (MRO:
+  `termios.error → Exception → BaseException`), so the previous
+  `except (serial.SerialException, OSError)` guards in every rig backend
+  (`IcomCIVRig`, `KenwoodRig`, `YaesuRig`, `SerialPttRig`) silently missed it.
+  A module-level `_SERIAL_IO_ERRORS` tuple now includes `termios.error`
+  explicitly on POSIX and falls back gracefully on Windows where the `termios`
+  module is absent.  The TX worker's `finally` block is also hardened so that a
+  `termios.error` raised during unkey never propagates as an unhandled exception.
+
+- **Radio disconnect not detected after USB unplug — UI now auto-disconnects.**
+  The poll worker accumulated `termios.error` spam after the USB cable was
+  removed but never signalled the GUI, so the panel remained stuck at
+  "Connected".  A consecutive-error counter (`_POLL_FAIL_THRESHOLD = 3`) now
+  fires `radio_disconnected` exactly once when the threshold is reached.
+  `MainWindow._on_radio_disconnected` stops the poll timer, calls
+  `set_connected(False)` on the radio panel, closes the dead serial port, and
+  shows *"Radio disconnected — check USB connection"* in the status bar.
+
+### Added
+
+- **Banner preview uses the actual TX image.**  The TX banner settings pane now
+  renders its preview against whatever image is currently loaded in the TX panel
+  (falls back to a neutral grey sample when no image has been loaded yet).  This
+  lets you see exactly how the callsign strip will look on your specific image
+  before transmitting.
+
+- **Dynamic banner scaling — height proportional to image height.**  Banner
+  height was previously a fixed pixel value (Small = 24 px, Medium = 32 px,
+  Large = 40 px) that looked proportionally very different across modes with
+  different pixel heights.  The Small / Medium / Large preset now defines a
+  percentage of the image's pixel height (9 % / 12 % / 15 %) clamped to
+  per-preset min/max bounds (`[18,32]` / `[24,44]` / `[28,56]` px).  Font size
+  scales with banner height at a fixed 0.75 ratio.  The push-down resize
+  behaviour is unchanged — SSTV mode pixel geometry is preserved exactly.
+
+### Tests
+
+- 27 new tests across `tests/radio/test_serial_rig.py` (termios wrapping),
+  `tests/ui/test_main_window.py` (poll error counter, auto-disconnect),
+  and `tests/core/test_banner.py` (scaled banner params for all four reference
+  modes: Martin M1 320×256, Martin M2 160×256, Robot 36 320×240, PD-120
+  640×496).  Suite total: 732 passed, 1 skipped.
+
+---
+
 ## [0.2.11] — 2026-04-23
 
 ### Fixed
