@@ -1035,6 +1035,15 @@ class MainWindow(QMainWindow):
             # cycles (bug R-1: counter climbed past 127s with no image).
             # Defer the start-capture request until reset_done arrives so
             # the two worker threads are ordered correctly (OP-05).
+            #
+            # Re-enumerate the input device by name each time so a USB
+            # replug (which may assign a new PortAudio device index) is
+            # handled transparently — the saved name still matches, even
+            # if the numeric index changed.
+            if self._config.audio_input_device:
+                fresh = find_input_device_by_name(self._config.audio_input_device)
+                if fresh is not None:
+                    self._input_device = fresh
             device = self._input_device
             sample_rate = self._config.sample_rate
 

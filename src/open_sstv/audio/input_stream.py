@@ -146,6 +146,9 @@ class InputStreamWorker(QObject):
         # OP-11: first-chunk tracker for cold-start → steady-state
         # watchdog interval switch.  Set back to False on stop().
         self._first_chunk_seen: bool = False
+        # True while stop() is executing so _on_pa_stream_finished can
+        # distinguish a deliberate teardown from an unexpected device loss.
+        self._stopping: bool = False
 
     @property
     def is_running(self) -> bool:
@@ -180,6 +183,7 @@ class InputStreamWorker(QObject):
         )
         self._sample_rate = sample_rate
         self._dropped_chunks = 0
+        self._stopping = False
 
         # Drain any stale chunks from a previous session before the
         # callback starts pushing new ones. Queue lives on the worker
@@ -198,11 +202,16 @@ class InputStreamWorker(QObject):
                 channels=1,
                 dtype="float32",
                 callback=self._audio_callback,
+                finished_callback=self._on_pa_stream_finished,
             )
             self._stream.start()
         except Exception as exc:  # noqa: BLE001 — surface anything to UI
             self._stream = None
             self.error.emit(f"Could not open input stream: {exc}")
+            # Emit stopped so the UI can re-enable the Start button even
+            # when the stream never opened (e.g. stale device index after
+            # a USB replug).
+            self.stopped.emit()
             return
 
         # Create the poll timer lazily so its thread affinity matches
@@ -247,6 +256,10 @@ class InputStreamWorker(QObject):
         if self._stream is None:
             return
 
+        # Signal _on_pa_stream_finished that this teardown is deliberate so
+        # it doesn't misinterpret the PA finished callback as a device loss.
+        self._stopping = True
+
         if self._timer is not None:
             self._timer.stop()
             self._timer.deleteLater()
@@ -267,6 +280,7 @@ class InputStreamWorker(QObject):
             self.error.emit(f"Error closing input stream: {exc}")
         finally:
             self._stream = None
+            self._stopping = False
 
         # Emit any residual chunks so the consumer gets a clean
         # tail-flush before we report stopped. This matters for
@@ -355,8 +369,33 @@ class InputStreamWorker(QObject):
     @Slot()
     def _on_watchdog_timeout(self) -> None:
         """No audio for _DEVICE_WATCHDOG_MS ms — treat the device as lost."""
-        self.stream_error.emit("Audio input device lost")
+        self.stream_error.emit(
+            "Audio device disconnected — replug and click Start to recover"
+        )
         self.stop()
+
+    def _on_pa_stream_finished(self) -> None:
+        """PortAudio finished callback — called on PortAudio's internal thread.
+
+        Fires whenever the stream ends: on a normal ``stop()`` call *and*
+        on an unexpected device loss (USB unplug, OS audio-subsystem reset).
+        The ``_stopping`` flag distinguishes the two:
+
+        * If ``True``, ``stop()`` is already in progress — do nothing.
+        * If ``False``, the device was lost mid-session.  Emit
+          ``stream_error`` immediately (giving the user a clear message
+          before the 3 s watchdog would fire) and schedule ``stop()`` on
+          the worker thread via a queued invocation so the QTimer cleanup
+          runs on the correct thread.  The watchdog itself is cancelled by
+          ``stop()`` before it fires, so no double message is produced.
+        """
+        if self._stopping:
+            return
+        self.stream_error.emit(
+            "Audio device disconnected — replug and click Start to recover"
+        )
+        from PySide6.QtCore import QMetaObject, Qt
+        QMetaObject.invokeMethod(self, "stop", Qt.ConnectionType.QueuedConnection)
 
 
 __all__ = [

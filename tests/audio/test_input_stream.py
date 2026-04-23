@@ -57,6 +57,7 @@ class _FakeStream:
         self.stopped_count = 0
         self.closed_count = 0
         self.callback = kwargs["callback"]
+        self.finished_callback = kwargs.get("finished_callback")
         _FakeStream.last_instance = self
 
     def start(self) -> None:
@@ -73,6 +74,11 @@ class _FakeStream:
         indata = samples.reshape(-1, 1).astype(np.float32)
         flags = _FakeCallbackFlags(overflow=overflow)
         self.callback(indata, indata.shape[0], None, flags)
+
+    def finish(self) -> None:
+        """Simulate PortAudio calling the finished_callback (e.g. on device loss)."""
+        if self.finished_callback is not None:
+            self.finished_callback()
 
 
 @pytest.fixture
@@ -188,6 +194,31 @@ def test_start_stream_construction_failure_emits_error(
 
     assert log["started"] == []
     assert log["error"] and "no such device" in log["error"][0]
+    assert worker.is_running is False
+
+
+def test_start_failure_emits_stopped_to_re_enable_button(
+    qapp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When start() fails (e.g. stale device index after replug), the UI must
+    be able to re-enable the Start button.  The only signal that triggers
+    ``set_capturing(False)`` on the RxPanel is ``stopped``, so we verify it
+    is emitted even when the stream never opened."""
+
+    def boom(**_kwargs: Any) -> None:
+        raise RuntimeError("device gone after replug")
+
+    monkeypatch.setattr("open_sstv.audio.input_stream.sd.InputStream", boom)
+    worker = InputStreamWorker()
+    log = _record_signals(worker)
+
+    worker.start()
+
+    assert log["stopped"] == [True], (
+        "stopped must be emitted on start failure so the UI can re-enable"
+        " the Start button"
+    )
+    assert log["started"] == []
     assert worker.is_running is False
 
 
@@ -363,3 +394,91 @@ def test_stop_survives_stream_close_errors(
     assert worker.is_running is False
     assert log["stopped"] == [True]
     assert any("close botched" in msg for msg in log["error"])
+
+
+# === device-loss (finished_callback / hot-unplug) ===
+
+
+def test_stream_passes_finished_callback_to_portaudio(
+    qapp, fake_stream_cls: type[_FakeStream]
+) -> None:
+    """sd.InputStream must receive a finished_callback kwarg so PortAudio
+    can notify us immediately when the device is yanked."""
+    worker = InputStreamWorker()
+    worker.start()
+    stream = fake_stream_cls.last_instance
+
+    assert stream.finished_callback is not None, (
+        "InputStreamWorker must pass finished_callback= to sd.InputStream "
+        "so hot-unplug can be detected immediately"
+    )
+    worker.stop()
+
+
+def test_pa_finished_callback_noop_during_deliberate_stop(
+    qapp, fake_stream_cls: type[_FakeStream]
+) -> None:
+    """When _stopping is True, _on_pa_stream_finished must not emit
+    stream_error — the finish was deliberate and the UI is already
+    handling cleanup."""
+    worker = InputStreamWorker()
+    stream_errors: list[str] = []
+    worker.stream_error.connect(stream_errors.append)
+    worker.start()
+
+    # Manually set _stopping so _on_pa_stream_finished thinks stop() is running.
+    worker._stopping = True
+    fake_stream_cls.last_instance.finish()
+
+    assert stream_errors == [], (
+        "_on_pa_stream_finished must be a no-op when _stopping is True"
+    )
+
+    worker._stopping = False
+    worker.stop()
+
+
+def test_pa_finished_callback_emits_stream_error_on_device_loss(
+    qapp, fake_stream_cls: type[_FakeStream]
+) -> None:
+    """Simulating an unexpected PA stream finish (device yanked) must emit
+    stream_error with a clear recovery message."""
+    worker = InputStreamWorker()
+    stream_errors: list[str] = []
+    worker.stream_error.connect(stream_errors.append)
+    worker.start()
+
+    # Simulate PortAudio calling finished_callback unexpectedly.
+    fake_stream_cls.last_instance.finish()
+
+    assert len(stream_errors) == 1
+    assert "replug" in stream_errors[0].lower() or "disconnect" in stream_errors[0].lower(), (
+        "stream_error message should guide the user to recover"
+    )
+
+    # Clean up — stop() was scheduled via invokeMethod; process events.
+    from PySide6.QtWidgets import QApplication
+    QApplication.processEvents()
+
+
+def test_pa_finished_callback_schedules_stop_on_device_loss(
+    qapp, fake_stream_cls: type[_FakeStream]
+) -> None:
+    """After an unexpected PA finish, stop() must run so the stream is
+    torn down and ``stopped`` is emitted (which re-enables the Start button)."""
+    worker = InputStreamWorker()
+    log = _record_signals(worker)
+    worker.start()
+
+    fake_stream_cls.last_instance.finish()
+
+    # invokeMethod queues stop() onto the event loop — process it.
+    from PySide6.QtWidgets import QApplication
+    QApplication.processEvents()
+
+    assert worker.is_running is False, (
+        "stream must be torn down after unexpected PA finished callback"
+    )
+    assert log["stopped"] == [True], (
+        "stopped must be emitted so the UI can re-enable the Start button"
+    )

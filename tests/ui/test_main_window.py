@@ -635,3 +635,118 @@ class TestOnRadioDisconnected:
         window._on_radio_disconnected()  # must not raise
 
         dying_rig.close.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# USB replug / device re-enumeration tests
+# ---------------------------------------------------------------------------
+
+
+class TestAudioDeviceReplug:
+    """Verify that the Start Capture button is never permanently disabled
+    and that a re-plugged USB audio device is found by name even if its
+    PortAudio index changed.
+    """
+
+    def test_start_button_re_enabled_after_stream_open_fails(
+        self, window: MainWindow, qtbot, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If InputStreamWorker.start() fails (e.g. stale device index), the
+        Start Capture button must be re-enabled so the user can try again.
+
+        Regression: before the fix, start() emitted error but not stopped,
+        so RxPanel.set_capturing() was never called and the button stayed
+        greyed out permanently.
+        """
+        import sounddevice as _sd
+
+        # Make every sd.InputStream() raise so start() always fails.
+        monkeypatch.setattr(
+            "open_sstv.audio.input_stream.sd.InputStream",
+            MagicMock(side_effect=_sd.PortAudioError("no device")),
+        )
+
+        btn = window._rx_panel._start_btn
+        assert btn.isEnabled(), "button should start enabled"
+
+        # Simulate user clicking Start.
+        btn.click()
+        # Button is disabled immediately on click.
+        assert not btn.isEnabled()
+
+        # Process the queued signal chain: capture_requested →
+        # _on_capture_requested → reset_done → _request_start_capture →
+        # audio_worker.start() → stopped (from failure) → _on_rx_stopped →
+        # set_capturing(False) → button re-enabled.
+        qtbot.waitUntil(lambda: btn.isEnabled(), timeout=2000)
+        assert btn.text() == "Start Capture"
+
+    def test_capture_start_re_enumerates_input_device_by_name(
+        self, window: MainWindow, qtbot, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When the user clicks Start, MainWindow must look up the configured
+        input device by name so a replug (new PortAudio index) is handled
+        transparently — the stale cached index is not passed to start().
+        """
+        from open_sstv.audio.devices import AudioDevice
+
+        # Simulate the configured device name.
+        window._config.audio_input_device = "IC-7300 USB Audio CODEC"
+
+        # The old (stale) device object — wrong index 3.
+        stale_device = AudioDevice(
+            index=3,
+            name="IC-7300 USB Audio CODEC",
+            host_api="CoreAudio",
+            max_input_channels=2,
+            max_output_channels=0,
+            default_sample_rate=48000.0,
+        )
+        window._input_device = stale_device
+
+        # The fresh device after replug — correct new index 7.
+        fresh_device = AudioDevice(
+            index=7,
+            name="IC-7300 USB Audio CODEC",
+            host_api="CoreAudio",
+            max_input_channels=2,
+            max_output_channels=0,
+            default_sample_rate=48000.0,
+        )
+
+        # Patch find_input_device_by_name to return the fresh device.
+        monkeypatch.setattr(
+            "open_sstv.ui.main_window.find_input_device_by_name",
+            lambda _name: fresh_device,
+        )
+
+        # Capture what device index reaches audio_worker.start().
+        received_device: list[object] = []
+        original_start = window._audio_worker.start
+
+        def _capture_start(device, *args, **kwargs):
+            received_device.append(device)
+            # Don't actually open a stream — just emit started so the test
+            # doesn't hang on set_capturing() waiting for audio.
+            window._audio_worker.started.emit()
+
+        monkeypatch.setattr(window._audio_worker, "start", _capture_start)
+
+        # Also patch reset so reset_done fires synchronously.
+        original_reset = window._rx_worker.reset
+
+        def _fast_reset():
+            original_reset()
+
+        monkeypatch.setattr(window._rx_worker, "reset", _fast_reset)
+
+        window._on_capture_requested(True)
+
+        # reset_done fires on rx_worker thread; process events to let
+        # _start_once fire and call our _capture_start mock.
+        qtbot.waitUntil(lambda: len(received_device) > 0, timeout=2000)
+
+        assert received_device[0] is fresh_device, (
+            "_on_capture_requested must re-enumerate the device by name so a "
+            "replug with a new PortAudio index is handled correctly"
+        )
