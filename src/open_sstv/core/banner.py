@@ -54,10 +54,52 @@ SIZE_TABLE: dict[str, tuple[int, int]] = {
     "large":  (40, 30),
 }
 
+#: Fraction of image height used as banner height for each named preset.
+_SCALED_PERCENT: dict[str, float] = {
+    "small":  0.09,
+    "medium": 0.12,
+    "large":  0.15,
+}
+
+#: (min_px, max_px) clamp applied after percentage calculation.
+_SCALED_CLAMP: dict[str, tuple[int, int]] = {
+    "small":  (18, 32),
+    "medium": (24, 44),
+    "large":  (28, 56),
+}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def scaled_banner_params(size: str, image_height: int) -> tuple[int, int]:
+    """Return ``(banner_height, font_size)`` scaled to *image_height*.
+
+    The banner height is computed as a percentage of *image_height* and then
+    clamped to a reasonable pixel range so the strip never looks absurdly
+    thin on a tiny mode or huge on a large one.
+
+    Parameters
+    ----------
+    size:
+        One of ``"small"``, ``"medium"``, or ``"large"``.  Unknown names
+        fall back to ``"small"``.
+    image_height:
+        Full pixel height of the image that will receive the banner.
+
+    Returns
+    -------
+    tuple[int, int]
+        ``(banner_height_px, font_size_pt)``
+    """
+    key = size.lower()
+    pct = _SCALED_PERCENT.get(key, _SCALED_PERCENT["small"])
+    lo, hi = _SCALED_CLAMP.get(key, _SCALED_CLAMP["small"])
+    banner_height = max(lo, min(hi, int(image_height * pct)))
+    font_size = max(10, int(banner_height * 0.75))
+    return banner_height, font_size
 
 
 def banner_size_params(size: str) -> tuple[int, int]:
@@ -256,4 +298,5 @@ __all__ = [
     "apply_tx_banner",
     "banner_size_params",
     "resolve_right_side_text",
+    "scaled_banner_params",
 ]

@@ -60,7 +60,7 @@ from open_sstv.audio.devices import (
 )
 from open_sstv import __version__ as _APP_VERSION
 from open_sstv.config.schema import AppConfig
-from open_sstv.core.banner import apply_tx_banner, banner_size_params
+from open_sstv.core.banner import apply_tx_banner, scaled_banner_params
 from open_sstv.core.modes import Mode
 from open_sstv.templates import TokenContext, build_autosave_filename
 
@@ -1042,9 +1042,8 @@ class SettingsDialog(QDialog):
         from PIL import Image as _PILImage
 
         size_key = self._banner_size.currentData() or "small"
-        bh, fs = banner_size_params(size_key)
-
         source = _PILImage.new("RGB", (320, 240), (0x80, 0x80, 0x80))
+        bh, fs = scaled_banner_params(size_key, source.height)
         banner = apply_tx_banner(
             source,
             _APP_VERSION,
@@ -1126,7 +1125,7 @@ class SettingsDialog(QDialog):
             title = f"Banner preview — {_Path(path).name}"
 
         size_key = self._banner_size.currentData() or "small"
-        bh, fs = banner_size_params(size_key)
+        bh, fs = scaled_banner_params(size_key, source.height)
         stamped = apply_tx_banner(
             source,
             _APP_VERSION,
