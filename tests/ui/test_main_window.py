@@ -825,3 +825,83 @@ class TestAudioDeviceLostUI:
         # The stored flag confirms _on_audio_device_lost ran (not _on_rx_error,
         # which never sets this attribute).
         assert window._last_rx_disconnect_msg == msg
+
+    # --- signal ordering race: stream_error arrives before started ---
+
+    def test_late_rx_started_does_not_overwrite_disconnect_msg(
+        self, window: MainWindow, qapp
+    ) -> None:
+        """If stream_error fires before started (race on disconnect during start),
+        _on_rx_started must not overwrite the disconnect message in the UI."""
+        msg = "Audio device disconnected — replug and click Start to recover"
+        window._on_audio_device_lost(msg)
+        # Simulate the late started arriving after stream_error.
+        window._on_rx_started()
+
+        assert window._rx_panel._status.text() == msg
+        assert window.statusBar().currentMessage() == msg
+
+    def test_late_rx_started_does_not_set_capture_running(
+        self, window: MainWindow, qapp
+    ) -> None:
+        """_on_rx_started after device loss must not set _capture_running=True."""
+        window._on_audio_device_lost("disconnected")
+        window._on_rx_started()
+        assert not window._capture_running
+
+    def test_late_rx_started_leaves_button_as_start_capture(
+        self, window: MainWindow, qapp
+    ) -> None:
+        """_on_rx_started after device loss must not flip the button to 'Stop Capture'."""
+        window._on_audio_device_lost("disconnected")
+        window._on_rx_started()
+        assert window._rx_panel._start_btn.text() == "Start Capture"
+        assert window._rx_panel._start_btn.isEnabled()
+
+    # --- status_update gate ---
+
+    def test_status_update_suppressed_after_stop(
+        self, window: MainWindow, qapp
+    ) -> None:
+        """RxWorker status_update must be suppressed after _on_rx_stopped so
+        'Listening… Xs buffered' cannot overwrite 'Not listening…'."""
+        window._on_rx_stopped()  # sets suppress flag + "Not listening…"
+        # Simulate RxWorker emitting its periodic "Listening…" status.
+        window._on_rx_status_update("Listening… 12s buffered, waiting for signal.")
+        assert "Not listening" in window._rx_panel._status.text()
+
+    def test_status_update_suppressed_after_device_lost(
+        self, window: MainWindow, qapp
+    ) -> None:
+        """RxWorker status_update must be suppressed after device loss."""
+        disconnect_msg = "Audio device disconnected — replug and click Start to recover"
+        window._on_audio_device_lost(disconnect_msg)
+        window._on_rx_status_update("Listening… 12s buffered, waiting for signal.")
+        assert window._rx_panel._status.text() == disconnect_msg
+
+    def test_status_update_allowed_during_capture(
+        self, window: MainWindow, qapp
+    ) -> None:
+        """RxWorker status_update must flow through while capture is active."""
+        window._on_rx_started()  # clears suppress flag
+        window._on_rx_status_update("Listening… 5s buffered, waiting for signal.")
+        assert "Listening" in window._rx_panel._status.text()
+
+    def test_suppress_flag_cleared_on_rx_started(
+        self, window: MainWindow, qapp
+    ) -> None:
+        """_on_rx_started must clear _suppress_rx_status_updates."""
+        window._suppress_rx_status_updates = True
+        window._on_rx_started()
+        assert not window._suppress_rx_status_updates
+
+    def test_capture_requested_clears_disconnect_msg(
+        self, window: MainWindow, qtbot, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Clicking Start must clear _last_rx_disconnect_msg so the new session
+        starts clean even if a prior session's signals are still in-flight."""
+        window._last_rx_disconnect_msg = "stale disconnect message"
+        # Patch reset so we don't need a real rx_thread.
+        monkeypatch.setattr(window._rx_worker, "reset", lambda: None)
+        window._on_capture_requested(True)
+        assert window._last_rx_disconnect_msg == ""

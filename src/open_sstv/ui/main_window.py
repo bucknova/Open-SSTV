@@ -333,6 +333,10 @@ class MainWindow(QMainWindow):
         #: Set by _on_audio_device_lost so _on_rx_stopped can re-show the
         #: disconnect message instead of clobbering it with "Capture stopped."
         self._last_rx_disconnect_msg: str = ""
+        #: When True, RxWorker status_update signals are silently dropped so
+        #: "Listening… Xs buffered" updates can't overwrite disconnect or stopped
+        #: messages.  Cleared by _on_rx_started when the stream is confirmed up.
+        self._suppress_rx_status_updates: bool = True
         #: Watchdog budget (seconds) of the most recently fired TX watchdog,
         #: forwarded by ``TxWorker.watchdog_fired``.  Used by
         #: ``_on_tx_aborted`` to format a precise "exceeded N s" message
@@ -538,7 +542,7 @@ class MainWindow(QMainWindow):
         self._rx_worker.image_progress.connect(self._rx_panel.show_image_progress)
         self._rx_worker.image_complete.connect(self._rx_panel.show_image_complete)
         self._rx_worker.image_complete.connect(self._on_rx_image_complete)
-        self._rx_worker.status_update.connect(self._rx_panel.set_status)
+        self._rx_worker.status_update.connect(self._on_rx_status_update)
         self._rx_worker.error.connect(self._on_rx_error)
 
         # --- Rig poll: lightweight 1 Hz timer on GUI thread dispatches to
@@ -1033,6 +1037,10 @@ class MainWindow(QMainWindow):
         connection sequences the two steps deterministically.
         """
         if start:
+            # Clear any stale device-loss state from the previous session so
+            # _on_rx_started and _on_rx_stopped behave correctly for this new
+            # attempt, even if a prior session's signals are still in-flight.
+            self._last_rx_disconnect_msg = ""
             # Reset the decoder + sample counter so each new capture session
             # starts from zero rather than accumulating across stop/restart
             # cycles (bug R-1: counter climbed past 127s with no image).
@@ -1072,13 +1080,20 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_rx_started(self) -> None:
+        if self._last_rx_disconnect_msg:
+            # stream_error arrived at the GUI before this started signal —
+            # the stream opened and immediately closed due to device loss.
+            # Don't let this late started clobber the disconnect message.
+            return
         self._capture_running = True
+        self._suppress_rx_status_updates = False
         self._rx_panel.set_capturing(True)
         self.statusBar().showMessage("Capturing")
 
     @Slot()
     def _on_rx_stopped(self) -> None:
         self._capture_running = False
+        self._suppress_rx_status_updates = True
         self._rx_panel.set_capturing(False)
         if self._last_rx_disconnect_msg:
             msg = self._last_rx_disconnect_msg
@@ -1093,8 +1108,21 @@ class MainWindow(QMainWindow):
     def _on_audio_device_lost(self, message: str) -> None:
         """Device-loss path: store message so _on_rx_stopped can re-show it."""
         self._last_rx_disconnect_msg = message
+        self._suppress_rx_status_updates = True
         self._rx_panel.set_status(message)
         self.statusBar().showMessage(message)  # sticky — no timeout
+
+    @Slot(str)
+    def _on_rx_status_update(self, text: str) -> None:
+        """Gate for RxWorker.status_update — suppressed when capture is idle.
+
+        RxWorker emits "Listening… Xs buffered, waiting for signal." on a
+        periodic timer.  Without this gate, those updates arrive at the GUI
+        *after* _on_rx_stopped and overwrite the "Not listening" / disconnect
+        messages that _on_rx_stopped just set.
+        """
+        if not self._suppress_rx_status_updates:
+            self._rx_panel.set_status(text)
 
     @Slot()
     def _on_rx_clear(self) -> None:
