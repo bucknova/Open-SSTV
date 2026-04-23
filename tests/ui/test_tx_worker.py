@@ -755,3 +755,130 @@ class TestTwoStageWatchdogIntegration:
         worker._watchdog_fire(42.5)
 
         assert captured == [42.5]
+
+
+# ---------------------------------------------------------------------------
+# OP-TX-01 — USB unplug during TX: termios.error / OSError resilience
+#
+# Before this fix, a raw OSError from reset_input_buffer() inside
+# set_ptt(False) was not caught by `except RigError`, propagated out of
+# _run_tx, and left the GUI permanently frozen in TX state with the radio
+# stuck keyed.  Two layered fixes:
+#
+#   1. serial_rig.py: all _command/_write_command now catch (SerialException,
+#      OSError) and re-raise as RigConnectionError.
+#   2. workers.py: the finally block catches Exception (not just RigError)
+#      as a safety net; transmit/transmit_test_tone also emit
+#      transmission_aborted in the playback-error branch.
+# ---------------------------------------------------------------------------
+
+
+class TestUnkeyResilience:
+    """The rig must always be unkeyed and the GUI must always unfreeze,
+    even when set_ptt(False) raises a non-RigError exception (e.g. a raw
+    OSError that slipped past the serial_rig layer in a future code change).
+    """
+
+    def test_non_rig_error_from_unkey_still_emits_error(
+        self,
+        qapp,
+        gradient_image: "Image.Image",
+    ) -> None:
+        """A raw OSError from set_ptt(False) must be caught and emitted as
+        an error signal — it must not escape _run_tx."""
+        calls: list[bool] = []
+
+        def fake_set_ptt(on: bool) -> None:
+            calls.append(on)
+            if not on:
+                raise OSError(6, "Device not configured")
+
+        rig = MagicMock(spec=["set_ptt"])
+        rig.set_ptt.side_effect = fake_set_ptt
+        worker = TxWorker(rig=rig, ptt_delay_s=0)
+        log = _record_signals(worker)
+
+        worker.transmit(gradient_image, Mode.ROBOT_36)
+
+        assert calls == [True, False]
+        assert log["error"], "error signal must fire when unkey raises OSError"
+        assert "Device not configured" in log["error"][0]
+
+    def test_non_rig_error_from_unkey_still_emits_complete(
+        self,
+        qapp,
+        gradient_image: "Image.Image",
+    ) -> None:
+        """After a successful playback, an OSError on unkey must still result
+        in transmission_complete being emitted so the GUI unfreezes."""
+        calls: list[bool] = []
+
+        def fake_set_ptt(on: bool) -> None:
+            calls.append(on)
+            if not on:
+                raise OSError(6, "Device not configured")
+
+        rig = MagicMock(spec=["set_ptt"])
+        rig.set_ptt.side_effect = fake_set_ptt
+        worker = TxWorker(rig=rig, ptt_delay_s=0)
+        log = _record_signals(worker)
+
+        worker.transmit(gradient_image, Mode.ROBOT_36)
+
+        # Playback finished OK, so complete (not aborted) must fire.
+        assert log["complete"] == [True]
+        assert log["aborted"] == []
+
+    def test_playback_error_emits_aborted_not_complete(
+        self,
+        qapp,
+        gradient_image: "Image.Image",
+        patch_encode_and_playback: "dict[str, MagicMock]",
+    ) -> None:
+        """A PortAudioError during playback must emit error + transmission_aborted
+        so the GUI resets to idle.  Before the fix, the else branch emitted
+        nothing and the button stayed stuck in TX state."""
+        import sounddevice as sd
+
+        patch_encode_and_playback["play"].side_effect = sd.PortAudioError("device gone")
+        worker = TxWorker(rig=ManualRig(), ptt_delay_s=0)
+        log = _record_signals(worker)
+
+        worker.transmit(gradient_image, Mode.ROBOT_36)
+
+        assert log["error"] and "Audio device disconnected" in log["error"][0]
+        assert log["aborted"] == [True], "GUI must unfreeze after playback error"
+        assert log["complete"] == []
+
+    def test_generic_playback_error_emits_aborted(
+        self,
+        qapp,
+        gradient_image: "Image.Image",
+        patch_encode_and_playback: "dict[str, MagicMock]",
+    ) -> None:
+        """Any non-PortAudio playback exception must also emit transmission_aborted."""
+        patch_encode_and_playback["play"].side_effect = RuntimeError("audio device gone")
+        worker = TxWorker(rig=ManualRig(), ptt_delay_s=0)
+        log = _record_signals(worker)
+
+        worker.transmit(gradient_image, Mode.ROBOT_36)
+
+        assert log["error"] and "audio device gone" in log["error"][0]
+        assert log["aborted"] == [True], "GUI must unfreeze after playback error"
+        assert log["complete"] == []
+
+    def test_test_tone_playback_error_emits_aborted(
+        self,
+        qapp,
+        patch_encode_and_playback: "dict[str, MagicMock]",
+    ) -> None:
+        """transmit_test_tone must also emit transmission_aborted on playback error."""
+        patch_encode_and_playback["play"].side_effect = RuntimeError("no audio")
+        worker = TxWorker(rig=ManualRig(), ptt_delay_s=0)
+        log = _record_signals(worker)
+
+        worker.transmit_test_tone()
+
+        assert log["error"] and "no audio" in log["error"][0]
+        assert log["aborted"] == [True]
+        assert log["complete"] == []

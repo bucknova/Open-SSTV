@@ -84,7 +84,7 @@ class SerialPttRig:
                 )
                 # Ensure PTT is off on open
                 self._set_ptt_line(False)
-            except serial.SerialException as exc:
+            except (serial.SerialException, OSError) as exc:
                 self._ser = None
                 raise RigConnectionError(
                     f"Could not open {self._port}: {exc}"
@@ -96,7 +96,7 @@ class SerialPttRig:
                 try:
                     self._set_ptt_line(False)
                     self._ser.close()
-                except serial.SerialException:
+                except (serial.SerialException, OSError):
                     pass
                 self._ser = None
 
@@ -120,7 +120,7 @@ class SerialPttRig:
                 if self._ptt_line == "RTS":
                     return self._ser.rts
                 return self._ser.dtr
-            except serial.SerialException as exc:
+            except (serial.SerialException, OSError) as exc:
                 raise RigConnectionError(
                     f"Serial PTT read failed on {self._port}: {exc}"
                 ) from exc
@@ -131,7 +131,7 @@ class SerialPttRig:
                 raise RigConnectionError("Serial port not open")
             try:
                 self._set_ptt_line(on)
-            except serial.SerialException as exc:
+            except (serial.SerialException, OSError) as exc:
                 raise RigConnectionError(
                     f"Serial PTT write failed on {self._port}: {exc}"
                 ) from exc
@@ -208,7 +208,7 @@ class IcomCIVRig:
                     write_timeout=1.0,
                 )
                 self._ser.reset_input_buffer()
-            except serial.SerialException as exc:
+            except (serial.SerialException, OSError) as exc:
                 self._ser = None
                 raise RigConnectionError(
                     f"Could not open {self._port}: {exc}"
@@ -219,7 +219,7 @@ class IcomCIVRig:
             if self._ser is not None:
                 try:
                     self._ser.close()
-                except serial.SerialException:
+                except (serial.SerialException, OSError):
                     pass
                 self._ser = None
 
@@ -321,7 +321,7 @@ class IcomCIVRig:
                 self._ser.reset_input_buffer()
                 self._ser.write(frame)
                 return self._read_response()
-            except serial.SerialException as exc:
+            except (serial.SerialException, OSError) as exc:
                 raise RigConnectionError(
                     f"Icom CI-V serial I/O failed on {self._port}: {exc}"
                 ) from exc
@@ -457,7 +457,7 @@ class KenwoodRig:
                     write_timeout=1.0,
                 )
                 self._ser.reset_input_buffer()
-            except serial.SerialException as exc:
+            except (serial.SerialException, OSError) as exc:
                 self._ser = None
                 raise RigConnectionError(
                     f"Could not open {self._port}: {exc}"
@@ -468,7 +468,7 @@ class KenwoodRig:
             if self._ser is not None:
                 try:
                     self._ser.close()
-                except serial.SerialException:
+                except (serial.SerialException, OSError):
                     pass
                 self._ser = None
 
@@ -553,7 +553,7 @@ class KenwoodRig:
             try:
                 self._ser.reset_input_buffer()
                 self._ser.write(f"{cmd};".encode("ascii"))
-            except serial.SerialException as exc:
+            except (serial.SerialException, OSError) as exc:
                 raise RigConnectionError(
                     f"Kenwood serial I/O failed on {self._port}: {exc}"
                 ) from exc
@@ -561,11 +561,9 @@ class KenwoodRig:
     def _command(self, cmd: str) -> str:
         """Send a Kenwood read command and return the response.
 
-        Wraps ``serial.SerialException`` as ``RigConnectionError`` so a
-        mid-session unplug is observable to callers that catch
-        ``RigError`` (the poll thread, TX worker, settings test).  Without
-        this, the raw pyserial exception used to leak past every
-        ``RigError`` catch (OP-02).
+        Wraps ``serial.SerialException`` and ``OSError`` (e.g. termios.error
+        on USB unplug) as ``RigConnectionError`` so a mid-session unplug
+        is observable to callers that catch ``RigError`` (OP-02).
         """
         with self._lock:
             if self._ser is None:
@@ -574,7 +572,7 @@ class KenwoodRig:
                 self._ser.reset_input_buffer()
                 self._ser.write(f"{cmd};".encode("ascii"))
                 return self._read_response(expected_prefix=cmd[:2])
-            except serial.SerialException as exc:
+            except (serial.SerialException, OSError) as exc:
                 raise RigConnectionError(
                     f"Kenwood serial I/O failed on {self._port}: {exc}"
                 ) from exc
@@ -663,7 +661,7 @@ class YaesuRig:
                     write_timeout=1.0,
                 )
                 self._ser.reset_input_buffer()
-            except serial.SerialException as exc:
+            except (serial.SerialException, OSError) as exc:
                 self._ser = None
                 raise RigConnectionError(
                     f"Could not open {self._port}: {exc}"
@@ -674,7 +672,7 @@ class YaesuRig:
             if self._ser is not None:
                 try:
                     self._ser.close()
-                except serial.SerialException:
+                except (serial.SerialException, OSError):
                     pass
                 self._ser = None
 
@@ -758,7 +756,7 @@ class YaesuRig:
             try:
                 self._ser.reset_input_buffer()
                 self._ser.write(f"{cmd};".encode("ascii"))
-            except serial.SerialException as exc:
+            except (serial.SerialException, OSError) as exc:
                 raise RigConnectionError(
                     f"Yaesu serial I/O failed on {self._port}: {exc}"
                 ) from exc
@@ -766,9 +764,9 @@ class YaesuRig:
     def _command(self, cmd: str) -> str:
         """Send a Yaesu read command and return the response.
 
-        Wraps ``serial.SerialException`` as ``RigConnectionError`` so a
-        mid-session unplug is observable to callers that catch
-        ``RigError`` (OP-02).
+        Wraps ``serial.SerialException`` and ``OSError`` (e.g. termios.error
+        on USB unplug) as ``RigConnectionError`` so a mid-session unplug
+        is observable to callers that catch ``RigError`` (OP-02).
         """
         with self._lock:
             if self._ser is None:
@@ -777,7 +775,7 @@ class YaesuRig:
                 self._ser.reset_input_buffer()
                 self._ser.write(f"{cmd};".encode("ascii"))
                 return self._read_response(expected_prefix=cmd[:2])
-            except serial.SerialException as exc:
+            except (serial.SerialException, OSError) as exc:
                 raise RigConnectionError(
                     f"Yaesu serial I/O failed on {self._port}: {exc}"
                 ) from exc

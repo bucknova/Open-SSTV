@@ -491,3 +491,130 @@ class TestYaesuSetFreqAndMode:
         r._ser = MagicMock()
         r.set_mode("OLIVIA", 0)
         r._ser.write.assert_called_once_with(b"MD02;")
+
+
+# ---------------------------------------------------------------------------
+# OP-TX-01 — OSError (termios.error) is wrapped as RigConnectionError
+#
+# USB unplug raises termios.error (errno 6, "Device not configured") from
+# reset_input_buffer().  termios.error is a subclass of OSError.  All
+# _command() and _write_command() methods must catch it and re-raise as
+# RigConnectionError so the finally block in _run_tx can catch RigError
+# and the GUI always unfreezes.
+# ---------------------------------------------------------------------------
+
+
+class TestOSErrorWrapping:
+    """Regression: termios.error / OSError from a mid-TX USB unplug must
+    be translated to RigConnectionError in every rig backend, not leak raw.
+    """
+
+    def _icom_rig(self) -> IcomCIVRig:
+        import threading
+        r = IcomCIVRig.__new__(IcomCIVRig)
+        r._port = "/dev/null"
+        r._baud_rate = 19200
+        r._addr = 0x94
+        r._lock = threading.Lock()
+        r._ser = MagicMock()
+        return r
+
+    def _kenwood_rig(self) -> "KenwoodRig":
+        return _make_kenwood_rig()
+
+    def _yaesu_rig(self) -> "YaesuRig":
+        return _make_yaesu_rig()
+
+    def test_icom_command_wraps_oserror(self) -> None:
+        """IcomCIVRig._command: termios.error from reset_input_buffer → RigConnectionError."""
+        from open_sstv.radio.exceptions import RigConnectionError
+
+        r = self._icom_rig()
+        r._ser.reset_input_buffer.side_effect = OSError(6, "Device not configured")
+
+        with pytest.raises(RigConnectionError, match="Icom CI-V serial I/O failed"):
+            r._command(b"\x1c\x00\x00")
+
+    def test_icom_command_wraps_oserror_on_write(self) -> None:
+        """IcomCIVRig._command: OSError from write() → RigConnectionError."""
+        from open_sstv.radio.exceptions import RigConnectionError
+
+        r = self._icom_rig()
+        r._ser.write.side_effect = OSError(5, "Input/output error")
+
+        with pytest.raises(RigConnectionError, match="Icom CI-V serial I/O failed"):
+            r._command(b"\x03")
+
+    def test_kenwood_command_wraps_oserror(self) -> None:
+        """KenwoodRig._command: OSError from reset_input_buffer → RigConnectionError."""
+        from open_sstv.radio.exceptions import RigConnectionError
+        from open_sstv.radio.serial_rig import KenwoodRig
+
+        r = _make_kenwood_rig()
+        r._ser = MagicMock()
+        r._ser.reset_input_buffer.side_effect = OSError(6, "Device not configured")
+
+        with pytest.raises(RigConnectionError, match="Kenwood serial I/O failed"):
+            r._command("FA")
+
+    def test_kenwood_write_command_wraps_oserror(self) -> None:
+        """KenwoodRig._write_command: OSError → RigConnectionError."""
+        from open_sstv.radio.exceptions import RigConnectionError
+        from open_sstv.radio.serial_rig import KenwoodRig
+
+        r = _make_kenwood_rig()
+        r._ser = MagicMock()
+        r._ser.write.side_effect = OSError(6, "Device not configured")
+
+        with pytest.raises(RigConnectionError, match="Kenwood serial I/O failed"):
+            r._write_command("TX1")
+
+    def test_yaesu_command_wraps_oserror(self) -> None:
+        """YaesuRig._command: OSError from reset_input_buffer → RigConnectionError."""
+        from open_sstv.radio.exceptions import RigConnectionError
+        from open_sstv.radio.serial_rig import YaesuRig
+
+        r = _make_yaesu_rig()
+        r._ser = MagicMock()
+        r._ser.reset_input_buffer.side_effect = OSError(6, "Device not configured")
+
+        with pytest.raises(RigConnectionError, match="Yaesu serial I/O failed"):
+            r._command("FA")
+
+    def test_yaesu_write_command_wraps_oserror(self) -> None:
+        """YaesuRig._write_command: OSError → RigConnectionError."""
+        from open_sstv.radio.exceptions import RigConnectionError
+        from open_sstv.radio.serial_rig import YaesuRig
+
+        r = _make_yaesu_rig()
+        r._ser = MagicMock()
+        r._ser.write.side_effect = OSError(6, "Device not configured")
+
+        with pytest.raises(RigConnectionError, match="Yaesu serial I/O failed"):
+            r._write_command("TX0")
+
+    def test_serial_ptt_set_ptt_wraps_oserror(self) -> None:
+        """SerialPttRig.set_ptt: OSError from DTR write → RigConnectionError."""
+        import threading
+        from open_sstv.radio.exceptions import RigConnectionError
+        from open_sstv.radio.serial_rig import SerialPttRig
+
+        r = SerialPttRig.__new__(SerialPttRig)
+        r._port = "/dev/null"
+        r._baud_rate = 9600
+        r._ptt_line = "DTR"
+        r._lock = threading.Lock()
+
+        class _DisconnectedSer:
+            @property
+            def dtr(self) -> bool:
+                return False
+
+            @dtr.setter
+            def dtr(self, value: bool) -> None:
+                raise OSError(6, "Device not configured")
+
+        r._ser = _DisconnectedSer()
+
+        with pytest.raises(RigConnectionError, match="Serial PTT write failed"):
+            r.set_ptt(True)

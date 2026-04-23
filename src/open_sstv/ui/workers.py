@@ -609,6 +609,10 @@ class TxWorker(QObject):
         playback_watchdog.start()
         try:
             result = self._run_tx(samples, rig)
+        except Exception as exc:  # noqa: BLE001
+            self.error.emit(f"TX failed: {exc}")
+            self.transmission_aborted.emit()
+            return
         finally:
             playback_watchdog.cancel()
 
@@ -618,7 +622,10 @@ class TxWorker(QObject):
             self.transmission_aborted.emit()
         elif result:
             self.transmission_complete.emit()
-        # else: playback error — error signal already emitted, no complete/aborted
+        else:
+            # Playback error — error signal already emitted; still signal
+            # the GUI that TX ended so it can reset to idle.
+            self.transmission_aborted.emit()
 
     @Slot()
     def transmit_test_tone(self) -> None:
@@ -663,6 +670,10 @@ class TxWorker(QObject):
 
         try:
             result = self._run_tx(samples, rig, live_gain=True)
+        except Exception as exc:  # noqa: BLE001
+            self.error.emit(f"Test tone TX failed: {exc}")
+            self.transmission_aborted.emit()
+            return
         finally:
             watchdog.cancel()
 
@@ -672,6 +683,8 @@ class TxWorker(QObject):
             self.transmission_aborted.emit()
         elif result:
             self.transmission_complete.emit()
+        else:
+            self.transmission_aborted.emit()
 
     def _run_tx(
         self,
@@ -745,10 +758,12 @@ class TxWorker(QObject):
             self.error.emit(f"Playback failed: {exc}")
         finally:
             # ALWAYS unkey, even on error or stop, so the rig never gets
-            # left in a stuck-keyed state.
+            # left in a stuck-keyed state.  Catch Exception (not just
+            # RigError) so a raw OSError/termios.error from a USB unplug
+            # mid-TX is still reported rather than escaping _run_tx.
             try:
                 rig.set_ptt(False)
-            except RigError as exc:
+            except Exception as exc:  # noqa: BLE001
                 self.error.emit(f"Could not unkey rig: {exc}")
 
         return playback_succeeded
