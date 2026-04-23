@@ -184,6 +184,54 @@ class _RigConnectWorker(QObject):
                 self.failed.emit(str(exc))
 
 
+class _RigConnectRelay(QObject):
+    """Receives _RigConnectWorker signals on the GUI thread.
+
+    Plain Python callables (lambdas) have no QObject thread affinity, so
+    PySide6 cannot guarantee which thread delivers a QueuedConnection event
+    to them — in practice the delivery lands on the worker thread, where
+    every widget mutation in on_success/on_error is silently dropped and
+    QTimer.stop() is called from the wrong thread.
+
+    This relay is a QObject that is never moved off the GUI thread.
+    AutoConnection from the worker thread therefore automatically promotes
+    to QueuedConnection and the slots execute on the GUI event loop.
+    """
+
+    def __init__(
+        self,
+        on_success: "Callable[[Rig], None]",
+        on_error: "Callable[[str], None]",
+        thread: QThread,
+        timer: QTimer,
+        cancel: threading.Event,
+    ) -> None:
+        super().__init__()
+        self._on_success = on_success
+        self._on_error = on_error
+        self._thread = thread
+        self._timer = timer
+        self._cancel = cancel
+
+    @Slot(object)
+    def on_succeeded(self, rig: "Rig") -> None:
+        if self._cancel.is_set():
+            return
+        self._cancel.set()  # prevent late timeout from also calling on_error
+        self._timer.stop()
+        self._thread.quit()
+        self._on_success(rig)
+
+    @Slot(str)
+    def on_failed(self, message: str) -> None:
+        if self._cancel.is_set():
+            return
+        self._cancel.set()
+        self._timer.stop()
+        self._thread.quit()
+        self._on_error(message)
+
+
 class MainWindow(QMainWindow):
     """The Phase 2 main window: TX + RX side-by-side, three worker threads."""
 
@@ -299,11 +347,13 @@ class MainWindow(QMainWindow):
         self._build_menu_bar()
 
         # In-flight connect-thread state — cleared by _on_connect_thread_finished
-        # and _abort_connect.  All three point at the same logical "current
+        # and _abort_connect.  All five point at the same logical "current
         # connect attempt"; they are always set and cleared together.
         self._connect_cancel: threading.Event | None = None
         self._connect_thread: QThread | None = None
+        self._connect_worker: "_RigConnectWorker | None" = None
         self._connect_timeout_timer: QTimer | None = None
+        self._connect_relay: "_RigConnectRelay | None" = None
 
         # --- Radio panel (toolbar strip above TX/RX) ---
         self._radio_panel = RadioPanel(self)
@@ -1169,12 +1219,11 @@ class MainWindow(QMainWindow):
     ) -> None:
         """Spin up a one-shot QThread to run rig.open() + rig.ping().
 
-        Results are delivered to the GUI thread via *explicit* QueuedConnection
-        so the lambdas always execute on the GUI event loop — never on the
-        worker thread.  (AutoConnection resolves to DirectConnection for plain
-        Python callables because they lack QObject thread affinity, which would
-        make the GUI mutations in on_success/on_error run on the wrong thread
-        and be silently dropped by Qt on macOS.)
+        Results are delivered via ``_RigConnectRelay``, a QObject that lives
+        on the GUI thread.  AutoConnection from the worker thread promotes to
+        QueuedConnection automatically, so on_success/on_error always execute
+        on the GUI event loop — never on the worker thread where widget
+        mutations would be silently dropped on macOS.
 
         A ``_CONNECT_TIMEOUT_S`` QTimer fires on_error with a "timed out"
         message if the rig never responds.  The cancel event lets the caller
@@ -1187,25 +1236,31 @@ class MainWindow(QMainWindow):
         thread = QThread(self)
         thread.setObjectName("rig-connect-thread")
         self._connect_thread = thread
-
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-
-        # Explicit QueuedConnection: guarantees these lambdas run on the GUI
-        # thread, not on the worker thread where they would mutate widgets
-        # illegally and be silently dropped.
-        qc = Qt.ConnectionType.QueuedConnection
-        worker.succeeded.connect(lambda r: on_success(r), qc)
-        worker.failed.connect(lambda e: on_error(e), qc)
-        worker.succeeded.connect(lambda _: thread.quit(), qc)
-        worker.failed.connect(lambda _: thread.quit(), qc)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(self._on_connect_thread_finished)
+        # Keep a strong Python reference to the worker so CPython's reference
+        # counting doesn't destroy it (and its signal connections) between
+        # _start_rig_connect_thread returning and the thread actually starting.
+        # PySide6 signal connections only hold a *weak* reference to the
+        # receiver object; if the last strong ref drops, the C++ QObject is
+        # deleted and thread.started → worker.run becomes a dead connection.
+        self._connect_worker = worker
 
         timeout_timer = QTimer(self)
         timeout_timer.setSingleShot(True)
         self._connect_timeout_timer = timeout_timer
+
+        # Relay lives on the GUI thread (no moveToThread).  AutoConnection
+        # from the worker thread → QueuedConnection → slots run on GUI thread.
+        relay = _RigConnectRelay(on_success, on_error, thread, timeout_timer, cancel)
+        self._connect_relay = relay
+
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.succeeded.connect(relay.on_succeeded)
+        worker.failed.connect(relay.on_failed)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(relay.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._on_connect_thread_finished)
 
         def _on_timeout() -> None:
             if not cancel.is_set():
@@ -1217,8 +1272,6 @@ class MainWindow(QMainWindow):
                 )
 
         timeout_timer.timeout.connect(_on_timeout)
-        worker.succeeded.connect(lambda _: timeout_timer.stop(), qc)
-        worker.failed.connect(lambda _: timeout_timer.stop(), qc)
 
         thread.start()
         timeout_timer.start(int(self._CONNECT_TIMEOUT_S * 1000))
@@ -1228,6 +1281,8 @@ class MainWindow(QMainWindow):
         """Clear connect-thread state when the thread exits normally."""
         self._connect_thread = None
         self._connect_cancel = None
+        self._connect_worker = None
+        self._connect_relay = None
         if self._connect_timeout_timer is not None:
             self._connect_timeout_timer.stop()
             self._connect_timeout_timer = None
@@ -1254,6 +1309,7 @@ class MainWindow(QMainWindow):
         self._connect_thread = None
         self._connect_cancel = None
         self._connect_timeout_timer = None
+        self._connect_relay = None
 
         if timer is not None:
             timer.stop()
@@ -1266,6 +1322,11 @@ class MainWindow(QMainWindow):
                 if not thread.wait(2000):
                     thread.terminate()
                     thread.wait(500)
+
+        # Drop the worker reference only after all threads have stopped.
+        # Clearing it earlier would destroy the C++ QObject while the worker
+        # thread might still be executing worker.run(), which crashes.
+        self._connect_worker = None
 
     def _connect_serial(self) -> None:
         """Create a direct serial rig backend and start polling.

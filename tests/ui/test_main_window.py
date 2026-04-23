@@ -312,3 +312,156 @@ def test_close_while_connecting_no_crash(
     # deleteChildren destroys the QThread object.
     gate.set()  # unblock rig.open so the thread can finish during abort
     window.close()  # triggers closeEvent → _abort_connect → thread.wait()
+
+
+# ---------------------------------------------------------------------------
+# _RigConnectRelay unit tests (OP2-02 bugfix: lambda→QObject relay)
+# ---------------------------------------------------------------------------
+
+
+def test_relay_on_succeeded_calls_on_success(qapp) -> None:
+    """_RigConnectRelay.on_succeeded must invoke on_success with the rig."""
+    import threading as _threading
+    from unittest.mock import MagicMock
+    from open_sstv.ui.main_window import _RigConnectRelay
+
+    cancel = _threading.Event()
+    timer = MagicMock()
+    thread = MagicMock()
+    rig = MagicMock()
+    results: list[object] = []
+
+    relay = _RigConnectRelay(lambda r: results.append(r), lambda _: None, thread, timer, cancel)
+    relay.on_succeeded(rig)
+
+    assert results == [rig]
+    timer.stop.assert_called_once()
+    thread.quit.assert_called_once()
+
+
+def test_relay_on_failed_calls_on_error(qapp) -> None:
+    """_RigConnectRelay.on_failed must invoke on_error with the message."""
+    import threading as _threading
+    from unittest.mock import MagicMock
+    from open_sstv.ui.main_window import _RigConnectRelay
+
+    cancel = _threading.Event()
+    timer = MagicMock()
+    thread = MagicMock()
+    errors: list[str] = []
+
+    relay = _RigConnectRelay(lambda _: None, lambda e: errors.append(e), thread, timer, cancel)
+    relay.on_failed("port busy")
+
+    assert errors == ["port busy"]
+    timer.stop.assert_called_once()
+    thread.quit.assert_called_once()
+
+
+def test_relay_cancel_suppresses_on_succeeded(qapp) -> None:
+    """Relay must not call on_success if cancel is already set (e.g. timeout won)."""
+    import threading as _threading
+    from unittest.mock import MagicMock
+    from open_sstv.ui.main_window import _RigConnectRelay
+
+    cancel = _threading.Event()
+    cancel.set()
+    timer = MagicMock()
+    thread = MagicMock()
+    results: list[object] = []
+
+    relay = _RigConnectRelay(lambda r: results.append(r), lambda _: None, thread, timer, cancel)
+    relay.on_succeeded(MagicMock())
+
+    assert results == []
+    timer.stop.assert_not_called()
+
+
+def test_relay_cancel_suppresses_on_failed(qapp) -> None:
+    """Relay must not call on_error if cancel is already set."""
+    import threading as _threading
+    from unittest.mock import MagicMock
+    from open_sstv.ui.main_window import _RigConnectRelay
+
+    cancel = _threading.Event()
+    cancel.set()
+    timer = MagicMock()
+    thread = MagicMock()
+    errors: list[str] = []
+
+    relay = _RigConnectRelay(lambda _: None, lambda e: errors.append(e), thread, timer, cancel)
+    relay.on_failed("CI-V timeout")
+
+    assert errors == []
+    timer.stop.assert_not_called()
+
+
+def test_relay_on_succeeded_sets_cancel_to_block_timeout(qapp) -> None:
+    """on_succeeded must mark cancel so a racing timeout callback is a no-op."""
+    import threading as _threading
+    from unittest.mock import MagicMock
+    from open_sstv.ui.main_window import _RigConnectRelay
+
+    cancel = _threading.Event()
+    relay = _RigConnectRelay(
+        lambda _: None, lambda _: None, MagicMock(), MagicMock(), cancel
+    )
+    relay.on_succeeded(MagicMock())
+    assert cancel.is_set()
+
+
+def test_start_rig_connect_thread_success_updates_radio_panel(
+    window: MainWindow, qtbot
+) -> None:
+    """Full integration: a fast-responding rig must flip the panel to Connected.
+
+    This is the regression test for the OP2-02 lambda→relay fix.  Before the
+    fix, on_success ran on the worker thread where widget mutations are silently
+    dropped on macOS, so the panel stayed stuck at 'Connecting' forever.
+    """
+    fast_rig = MagicMock()
+    fast_rig.open.return_value = None
+    fast_rig.ping.return_value = None
+
+    window._radio_panel.set_connecting()
+    assert window._radio_panel._connect_btn.text() == "Cancel"
+
+    def _on_success(connected_rig: object) -> None:
+        window._radio_panel.set_connected(True)
+
+    def _on_error(msg: str) -> None:
+        pass
+
+    window._start_rig_connect_thread(fast_rig, _on_success, _on_error)
+
+    qtbot.waitUntil(
+        lambda: window._radio_panel._connect_btn.text() == "Disconnect",
+        timeout=2000,
+    )
+    assert window._radio_panel.connected
+
+
+def test_start_rig_connect_thread_failure_updates_radio_panel(
+    window: MainWindow, qtbot
+) -> None:
+    """A failing rig must call on_error and leave a usable state."""
+    from open_sstv.radio.exceptions import RigConnectionError
+
+    bad_rig = MagicMock()
+    bad_rig.open.side_effect = RigConnectionError("port not found")
+
+    errors: list[str] = []
+
+    def _on_error(msg: str) -> None:
+        errors.append(msg)
+        window._radio_panel.set_connection_error()
+
+    window._radio_panel.set_connecting()
+    window._start_rig_connect_thread(bad_rig, lambda _: None, _on_error)
+
+    qtbot.waitUntil(lambda: len(errors) > 0, timeout=2000)
+    assert "port not found" in errors[0]
+    qtbot.waitUntil(
+        lambda: window._radio_panel._connect_btn.text() == "Connect Rig",
+        timeout=1000,
+    )
