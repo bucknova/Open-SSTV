@@ -482,3 +482,152 @@ def test_pa_finished_callback_schedules_stop_on_device_loss(
     assert log["stopped"] == [True], (
         "stopped must be emitted so the UI can re-enable the Start button"
     )
+
+
+# === PortAudio terminate/initialize reset ===
+
+
+def test_pa_reset_called_by_stop_after_device_loss(
+    qapp, fake_stream_cls: type[_FakeStream], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When _device_lost is True, stop() must call sd._terminate() then
+    sd._initialize() before emitting stopped, so the next start() can
+    open a fresh stream without hitting -10851 (Invalid Property Value)."""
+    terminate_calls: list[str] = []
+    initialize_calls: list[str] = []
+    monkeypatch.setattr("open_sstv.audio.input_stream.sd._terminate",
+                        lambda: terminate_calls.append("terminate"))
+    monkeypatch.setattr("open_sstv.audio.input_stream.sd._initialize",
+                        lambda: initialize_calls.append("initialize"))
+
+    worker = InputStreamWorker()
+    worker.start()
+    worker._device_lost = True  # simulate device-loss flag set by watchdog/PA
+
+    worker.stop()
+
+    assert terminate_calls == ["terminate"], "_terminate must be called on device-loss stop"
+    assert initialize_calls == ["initialize"], "_initialize must be called on device-loss stop"
+    assert worker._device_lost is False, "flag must be cleared after reset"
+
+
+def test_pa_reset_not_called_on_normal_stop(
+    qapp, fake_stream_cls: type[_FakeStream], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A user-initiated stop (no device loss) must NOT call _terminate/_initialize
+    — resetting PortAudio unnecessarily adds latency and could disrupt other streams."""
+    terminate_calls: list[str] = []
+    monkeypatch.setattr("open_sstv.audio.input_stream.sd._terminate",
+                        lambda: terminate_calls.append("terminate"))
+    monkeypatch.setattr("open_sstv.audio.input_stream.sd._initialize",
+                        lambda: terminate_calls.append("initialize"))
+
+    worker = InputStreamWorker()
+    worker.start()
+    # _device_lost is False by default — simulate normal user stop
+    worker.stop()
+
+    assert terminate_calls == [], "PA reset must not run on a normal stop"
+
+
+def test_pa_reset_safety_net_in_start(
+    qapp, fake_stream_cls: type[_FakeStream], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If _device_lost is still True when start() is called (edge case where
+    stop() returned early before the reset), start() must perform the reset
+    before opening the new stream."""
+    terminate_calls: list[str] = []
+    initialize_calls: list[str] = []
+    monkeypatch.setattr("open_sstv.audio.input_stream.sd._terminate",
+                        lambda: terminate_calls.append("terminate"))
+    monkeypatch.setattr("open_sstv.audio.input_stream.sd._initialize",
+                        lambda: initialize_calls.append("initialize"))
+
+    worker = InputStreamWorker()
+    worker._device_lost = True  # simulate left-over flag
+
+    worker.start()
+
+    assert terminate_calls == ["terminate"], "safety-net reset must run in start() when flag is set"
+    assert initialize_calls == ["initialize"]
+    assert worker._device_lost is False, "flag must be cleared after safety-net reset"
+
+    worker.stop()
+
+
+def test_pa_reset_survives_terminate_exception(
+    qapp, fake_stream_cls: type[_FakeStream], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If sd._terminate() raises, _pa_reset must catch it and still call
+    sd._initialize() — a partial reset is better than no reset."""
+    initialize_calls: list[str] = []
+    monkeypatch.setattr("open_sstv.audio.input_stream.sd._terminate",
+                        lambda: (_ for _ in ()).throw(RuntimeError("PA internal error")))
+    monkeypatch.setattr("open_sstv.audio.input_stream.sd._initialize",
+                        lambda: initialize_calls.append("initialize"))
+
+    worker = InputStreamWorker()
+    worker._pa_reset()  # must not raise
+
+    assert initialize_calls == ["initialize"], "_initialize must still run after _terminate raises"
+
+
+def test_pa_reset_survives_initialize_exception(
+    qapp, fake_stream_cls: type[_FakeStream], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If sd._initialize() raises, _pa_reset must catch it and not propagate —
+    the caller (stop/start) must not be interrupted."""
+    terminate_calls: list[str] = []
+    monkeypatch.setattr("open_sstv.audio.input_stream.sd._terminate",
+                        lambda: terminate_calls.append("terminate"))
+    monkeypatch.setattr("open_sstv.audio.input_stream.sd._initialize",
+                        lambda: (_ for _ in ()).throw(RuntimeError("init failed")))
+
+    worker = InputStreamWorker()
+    worker._pa_reset()  # must not raise
+
+    assert terminate_calls == ["terminate"]
+
+
+def test_watchdog_sets_device_lost_flag(
+    qapp, fake_stream_cls: type[_FakeStream], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_on_watchdog_timeout must set _device_lost before calling stop() so
+    stop() knows to run the PA reset."""
+    monkeypatch.setattr("open_sstv.audio.input_stream.sd._terminate", lambda: None)
+    monkeypatch.setattr("open_sstv.audio.input_stream.sd._initialize", lambda: None)
+
+    worker = InputStreamWorker()
+    worker.start()
+
+    assert worker._device_lost is False
+    worker._on_watchdog_timeout()
+
+    # _device_lost was True when stop() ran; stop() cleared it after _pa_reset().
+    assert worker._device_lost is False, "flag cleared by stop() after reset"
+    assert worker.is_running is False
+
+
+def test_pa_finished_callback_sets_device_lost_flag(
+    qapp, fake_stream_cls: type[_FakeStream], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_on_pa_stream_finished must set _device_lost so the queued stop()
+    knows to run the PA reset."""
+    monkeypatch.setattr("open_sstv.audio.input_stream.sd._terminate", lambda: None)
+    monkeypatch.setattr("open_sstv.audio.input_stream.sd._initialize", lambda: None)
+
+    worker = InputStreamWorker()
+    worker.start()
+
+    fake_stream_cls.last_instance.finish()  # triggers _on_pa_stream_finished
+
+    # _device_lost is set synchronously in _on_pa_stream_finished.
+    assert worker._device_lost is True, "_device_lost must be set before stop() runs"
+
+    # Now drain the event loop so the queued stop() runs.
+    from PySide6.QtWidgets import QApplication
+    QApplication.processEvents()
+
+    # stop() clears the flag after _pa_reset().
+    assert worker._device_lost is False
+    assert worker.is_running is False

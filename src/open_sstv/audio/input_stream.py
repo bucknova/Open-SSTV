@@ -44,12 +44,15 @@ Public API
 """
 from __future__ import annotations
 
+import logging
 import queue
 from typing import TYPE_CHECKING
 
 import numpy as np
 import sounddevice as sd
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
+
+_log = logging.getLogger(__name__)
 
 from open_sstv.audio.devices import AudioDevice
 
@@ -149,6 +152,11 @@ class InputStreamWorker(QObject):
         # True while stop() is executing so _on_pa_stream_finished can
         # distinguish a deliberate teardown from an unexpected device loss.
         self._stopping: bool = False
+        # Set by device-loss paths so stop() and start() know to call
+        # _pa_reset() — PortAudio caches device handles internally and will
+        # return -10851 (Invalid Property Value) on the next stream-open
+        # unless Pa_Terminate()+Pa_Initialize() have been called.
+        self._device_lost: bool = False
 
     @property
     def is_running(self) -> bool:
@@ -193,6 +201,15 @@ class InputStreamWorker(QObject):
                 self._queue.get_nowait()
             except queue.Empty:
                 break
+
+        # Safety net: if the previous session ended in a device-loss event but
+        # stop() somehow didn't complete the PA reset (e.g. stop() returned
+        # early because _stream was already None), do it now before trying to
+        # open the new stream.  PortAudio caches internal device handles and
+        # will fail with -10851 unless Pa_Terminate()+Pa_Initialize() ran.
+        if self._device_lost:
+            self._pa_reset()
+            self._device_lost = False
 
         try:
             self._stream = sd.InputStream(
@@ -282,6 +299,15 @@ class InputStreamWorker(QObject):
             self._stream = None
             self._stopping = False
 
+        # Reset PortAudio if this stop was triggered by a device-loss event.
+        # PortAudio caches device handles internally; without a full
+        # Pa_Terminate()+Pa_Initialize() cycle the next sd.InputStream()
+        # open will fail with -10851 (Invalid Property Value) even after the
+        # device is replugged and a fresh device index has been obtained.
+        if self._device_lost:
+            self._pa_reset()
+            self._device_lost = False
+
         # Emit any residual chunks so the consumer gets a clean
         # tail-flush before we report stopped. This matters for
         # decode_wav-style consumers that want to finish whatever
@@ -369,6 +395,7 @@ class InputStreamWorker(QObject):
     @Slot()
     def _on_watchdog_timeout(self) -> None:
         """No audio for _DEVICE_WATCHDOG_MS ms — treat the device as lost."""
+        self._device_lost = True
         self.stream_error.emit(
             "Audio device disconnected — replug and click Start to recover"
         )
@@ -382,20 +409,49 @@ class InputStreamWorker(QObject):
         The ``_stopping`` flag distinguishes the two:
 
         * If ``True``, ``stop()`` is already in progress — do nothing.
-        * If ``False``, the device was lost mid-session.  Emit
-          ``stream_error`` immediately (giving the user a clear message
-          before the 3 s watchdog would fire) and schedule ``stop()`` on
-          the worker thread via a queued invocation so the QTimer cleanup
-          runs on the correct thread.  The watchdog itself is cancelled by
-          ``stop()`` before it fires, so no double message is produced.
+        * If ``False``, the device was lost mid-session.  Set
+          ``_device_lost`` so ``stop()`` knows to call ``_pa_reset()``,
+          emit ``stream_error`` with a clear recovery message, and
+          schedule ``stop()`` on the worker thread via a queued invocation
+          so the QTimer cleanup runs on the correct thread.  The watchdog
+          is cancelled by ``stop()`` before it fires, preventing a
+          duplicate message.
         """
         if self._stopping:
             return
+        self._device_lost = True
         self.stream_error.emit(
             "Audio device disconnected — replug and click Start to recover"
         )
         from PySide6.QtCore import QMetaObject, Qt
         QMetaObject.invokeMethod(self, "stop", Qt.ConnectionType.QueuedConnection)
+
+    def _pa_reset(self) -> None:
+        """Force a full PortAudio re-initialization to clear stale device handles.
+
+        After a USB audio device is hot-unplugged, PortAudio's internal host-API
+        cache still points at the old (now invalid) device handle.  A subsequent
+        ``sd.InputStream()`` open fails with PAErrorCode -10851 (Invalid Property
+        Value) even when ``find_input_device_by_name`` has already resolved a
+        fresh PortAudio index for the replugged device.  Calling
+        ``Pa_Terminate()`` + ``Pa_Initialize()`` forces a full re-enumeration
+        from the OS so the next stream open sees the device in its new state.
+
+        Note: this is a process-wide PortAudio operation.  Any other sounddevice
+        streams (e.g. the TX output stream) are invalidated.  In this app TX and
+        RX are never active simultaneously and both use the same USB audio device,
+        so this is safe in practice.
+        """
+        _log.info("PortAudio reset: terminating to clear stale device cache")
+        try:
+            sd._terminate()
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("PortAudio _terminate() failed: %s", exc)
+        _log.info("PortAudio reset: re-initializing")
+        try:
+            sd._initialize()
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("PortAudio _initialize() failed: %s", exc)
 
 
 __all__ = [
