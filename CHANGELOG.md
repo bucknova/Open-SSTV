@@ -11,6 +11,59 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.2.14] — 2026-04-24
+
+### Fixed
+
+- **Audio device hot-unplug recovery — PortAudio reset at stream-open time.**
+  Moving `sounddevice._terminate()` + `sounddevice._initialize()` to execute
+  immediately before `sd.InputStream()` in `start()` (rather than during
+  `stop()`) eliminates the `-9998 paInvalidDevice` error on reconnect.  The
+  prior stop()-time reset was too early: macOS reassigns USB audio device
+  indices while the user replugges the radio, so PortAudio went stale again
+  between `stop` and the user clicking Start.  Resetting right before the
+  `InputStream` call guarantees a fresh OS device table at the exact moment
+  it is needed.  The `_device_lost` flag is unchanged — the expensive
+  terminate/initialize cycle is skipped on ordinary stop/start cycles.
+
+- **Start Capture button responsive after device reconnect.**  Device
+  re-enumeration (by saved name) now occurs inside `_start_once`, which fires
+  after `reset_done` — i.e. after the PortAudio reset has completed — so the
+  post-replug PortAudio index is used rather than the stale pre-reset index
+  captured before the worker reset.  `_suppress_rx_status_updates` is now
+  also cleared in `_on_capture_requested(True)` as a defensive measure in case
+  `_on_rx_started` never fired after the previous session's stream-open failure.
+
+- **Rig-connect-thread QObjectWrapper crash (use-after-free).**  Removed
+  `thread.finished.connect(worker.deleteLater)` and
+  `thread.finished.connect(relay.deleteLater)` from `_start_rig_connect_thread`.
+  The prior `deleteLater` calls posted a `DeferredDelete` event on the exiting
+  worker thread; Qt processed it when the thread finished — racing with
+  `_on_connect_thread_finished` dropping the Python ref and freeing the
+  `QObjectWrapper`, causing a use-after-free crash on startup auto-connect.
+  Python GC via ref-clearing in `_on_connect_thread_finished` is now the sole
+  destructor.  Signals are now connected before `worker.moveToThread(thread)`,
+  and `_on_connect_thread_finished` explicitly disconnects
+  `thread.started → worker.run` before nulling the Python refs to remove Qt's
+  internal connection record.
+
+- **Persistent disconnect feedback after stream-open failure.**  Audio-worker
+  `error` signals now route through a new `_on_rx_audio_error` slot that stores
+  the message when `_capture_running` is False (start-time failure).
+  `_on_rx_stopped` consults this stored message and re-displays it rather than
+  overwriting with *"Not listening — click Start to begin."*, so the user sees
+  the actual error instead of a silent no-op.
+
+### Tests
+
+- 11 new tests in `tests/ui/test_main_window.py` covering: `_on_rx_audio_error`
+  storage logic, `_on_rx_stopped` error-message persistence, `_on_capture_requested`
+  field clearing, two-sequential-connect lifecycle, and idempotent
+  `_on_connect_thread_finished` cleanup.  Suite total: 51 passed, 2 skipped
+  (headless QThread timing flakes).
+
+---
+
 ## [0.2.13] — 2026-04-23
 
 ### Fixed
