@@ -1639,6 +1639,9 @@ class MainWindow(QMainWindow):
         self._tx_worker.set_rig(self._rig)
         self._rig_poll_worker.set_rig(self._rig)
         self._radio_panel.set_connected(False)
+        # Abort any in-flight TX immediately so audio doesn't continue
+        # playing through Mac speakers after the USB device is gone.
+        self._tx_worker.request_stop()
         self._kill_rigctld()
         try:
             old_rig.close()

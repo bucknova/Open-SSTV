@@ -1074,3 +1074,51 @@ class TestRigConnectLifecycle:
         window._connect_timeout_timer = None
         # Must not raise.
         window._on_connect_thread_finished()
+
+
+# ---------------------------------------------------------------------------
+# Poll-worker auto-disconnect aborts any in-flight TX (OP-TX-02)
+# ---------------------------------------------------------------------------
+
+
+class TestRadioDisconnectedAbortsTx:
+    """When _RigPollWorker fires radio_disconnected, any in-flight TX must
+    be aborted immediately so audio doesn't leak to Mac speakers."""
+
+    def test_radio_disconnected_calls_tx_request_stop(
+        self, window: MainWindow, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_on_radio_disconnected must call tx_worker.request_stop() so the
+        TX stop_event is set and sd.stop() is called immediately."""
+        stop_calls: list[int] = []
+        monkeypatch.setattr(window._tx_worker, "request_stop", lambda: stop_calls.append(1))
+
+        # Simulate a non-ManualRig being connected so the guard doesn't return early.
+        from open_sstv.radio.base import ManualRig
+        from unittest.mock import MagicMock
+        fake_rig = MagicMock()
+        fake_rig.close.return_value = None
+        window._rig = fake_rig  # type: ignore[assignment]
+
+        window._on_radio_disconnected()
+
+        assert len(stop_calls) == 1, (
+            "_on_radio_disconnected must call request_stop() to abort TX"
+        )
+
+    def test_radio_disconnected_is_noop_when_manual_rig(
+        self, window: MainWindow, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_on_radio_disconnected must return early when already on ManualRig
+        — the guard prevents double-fire from queued signals."""
+        stop_calls: list[int] = []
+        monkeypatch.setattr(window._tx_worker, "request_stop", lambda: stop_calls.append(1))
+
+        from open_sstv.radio.base import ManualRig
+        window._rig = ManualRig()
+
+        window._on_radio_disconnected()
+
+        assert len(stop_calls) == 0, (
+            "request_stop() must not be called when already on ManualRig"
+        )

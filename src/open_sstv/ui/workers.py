@@ -735,6 +735,12 @@ class TxWorker(QObject):
 
         # --- Play the buffer ---
         playback_succeeded = False
+
+        def _on_output_device_lost() -> None:
+            self.error.emit(
+                "Audio output device disconnected during transmission."
+            )
+
         try:
             time.sleep(self._ptt_delay_s)
             if self._stop_event.is_set():
@@ -750,6 +756,7 @@ class TxWorker(QObject):
                     gain_provider=(
                         (lambda: self._output_gain) if live_gain else None
                     ),
+                    on_device_lost=_on_output_device_lost,
                 )
                 playback_succeeded = not self._stop_event.is_set()
         except sd.PortAudioError:
