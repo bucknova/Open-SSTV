@@ -22,8 +22,8 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
 ## Goals
 
 - **Open source end-to-end**, GPL-3.0-or-later.
-- **Cross-platform**: Linux x86_64 and macOS in v1; Raspberry Pi / ARM and Windows
-  planned for v0.2.
+- **Cross-platform**: Linux x86_64, macOS, and Windows (experimental — prebuilt
+  binaries available, real-hardware validation ongoing). Raspberry Pi / ARM planned.
 - **Modern, intuitive UI** built on Qt 6 (PySide6).
 - **Lightweight** enough to run on modest hardware. Pure Python + a small set of
   well-maintained scientific dependencies.
@@ -301,8 +301,8 @@ required for direct serial or manual PTT):
 > driven a real radio from Open-SSTV on Windows. Please treat the instructions
 > below as a call for testers rather than a supported install, and
 > [file issues](https://github.com/bucknova/Open-SSTV/issues) with your
-> findings — good or bad. Full Windows support is on the
-> [v0.2 roadmap](#v02-planned).
+> findings — good or bad. Full validated Windows support is on the
+> [v0.3 roadmap](#post-beta--v03).
 
 Prerequisites: Python 3.11+ from [python.org](https://www.python.org/downloads/)
 (tick "Add Python to PATH" during install) and a working Git for Windows.
@@ -383,7 +383,7 @@ with what you tried and what happened.
 - **Waterfall display** -- live FFT spectrogram in the RX panel
   (scope: [docs/waterfall_scope.md](docs/waterfall_scope.md)).
 - **Raspberry Pi / ARM support** -- tested on Pi 4/5.
-- **Windows support** (validated on real hardware).
+- **Windows support** -- full validation on real hardware (experimental binaries ship in v0.2.x).
 - **Digital VOX** -- auto-detect incoming SSTV and start decoding without manual
   capture start.
 - **Drag-and-drop** image loading in the TX panel.
