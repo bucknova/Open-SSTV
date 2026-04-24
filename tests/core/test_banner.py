@@ -420,54 +420,54 @@ def test_banner_narrow_preserves_callsign(_default_font) -> None:
 
 
 class TestScaledBannerParams:
-    """scaled_banner_params scales banner height as a % of image height,
+    """scaled_banner_params scales banner height as a % of image width,
     clamped to per-preset min/max pixel bounds."""
 
     # ---- percentage + clamp maths ----
 
-    @pytest.mark.parametrize("size,image_height,expected_bh", [
-        # Martin M1 (320×256) and Martin M2 (160×256) share height=256
-        ("small",  256, max(_SCALED_CLAMP["small"][0],
+    @pytest.mark.parametrize("size,image_width,expected_bh", [
+        # Martin M1 (320×256) — typical wide mode
+        ("small",  320, max(_SCALED_CLAMP["small"][0],
                             min(_SCALED_CLAMP["small"][1],
-                                int(256 * _SCALED_PERCENT["small"])))),
-        ("medium", 256, max(_SCALED_CLAMP["medium"][0],
+                                int(320 * _SCALED_PERCENT["small"])))),
+        ("medium", 320, max(_SCALED_CLAMP["medium"][0],
                             min(_SCALED_CLAMP["medium"][1],
-                                int(256 * _SCALED_PERCENT["medium"])))),
-        ("large",  256, max(_SCALED_CLAMP["large"][0],
+                                int(320 * _SCALED_PERCENT["medium"])))),
+        ("large",  320, max(_SCALED_CLAMP["large"][0],
                             min(_SCALED_CLAMP["large"][1],
-                                int(256 * _SCALED_PERCENT["large"])))),
-        # Robot 36 (320×240)
-        ("small",  240, max(_SCALED_CLAMP["small"][0],
+                                int(320 * _SCALED_PERCENT["large"])))),
+        # Martin M2 / Scottie S2 (160×256) — narrow mode hits lower clamp
+        ("small",  160, max(_SCALED_CLAMP["small"][0],
                             min(_SCALED_CLAMP["small"][1],
-                                int(240 * _SCALED_PERCENT["small"])))),
-        ("medium", 240, max(_SCALED_CLAMP["medium"][0],
+                                int(160 * _SCALED_PERCENT["small"])))),
+        ("medium", 160, max(_SCALED_CLAMP["medium"][0],
                             min(_SCALED_CLAMP["medium"][1],
-                                int(240 * _SCALED_PERCENT["medium"])))),
-        ("large",  240, max(_SCALED_CLAMP["large"][0],
+                                int(160 * _SCALED_PERCENT["medium"])))),
+        ("large",  160, max(_SCALED_CLAMP["large"][0],
                             min(_SCALED_CLAMP["large"][1],
-                                int(240 * _SCALED_PERCENT["large"])))),
-        # PD-120 (640×496) — tall enough to hit the upper clamp for all sizes
-        ("small",  496, max(_SCALED_CLAMP["small"][0],
+                                int(160 * _SCALED_PERCENT["large"])))),
+        # PD-120 (640×496) — wide enough to hit the upper clamp for all sizes
+        ("small",  640, max(_SCALED_CLAMP["small"][0],
                             min(_SCALED_CLAMP["small"][1],
-                                int(496 * _SCALED_PERCENT["small"])))),
-        ("medium", 496, max(_SCALED_CLAMP["medium"][0],
+                                int(640 * _SCALED_PERCENT["small"])))),
+        ("medium", 640, max(_SCALED_CLAMP["medium"][0],
                             min(_SCALED_CLAMP["medium"][1],
-                                int(496 * _SCALED_PERCENT["medium"])))),
-        ("large",  496, max(_SCALED_CLAMP["large"][0],
+                                int(640 * _SCALED_PERCENT["medium"])))),
+        ("large",  640, max(_SCALED_CLAMP["large"][0],
                             min(_SCALED_CLAMP["large"][1],
-                                int(496 * _SCALED_PERCENT["large"])))),
+                                int(640 * _SCALED_PERCENT["large"])))),
     ])
-    def test_banner_height_correct(self, size: str, image_height: int,
+    def test_banner_height_correct(self, size: str, image_width: int,
                                    expected_bh: int) -> None:
-        bh, _ = scaled_banner_params(size, image_height)
+        bh, _ = scaled_banner_params(size, image_width)
         assert bh == expected_bh, (
-            f"scaled_banner_params({size!r}, {image_height}) → bh={bh}, "
+            f"scaled_banner_params({size!r}, {image_width}) → bh={bh}, "
             f"expected {expected_bh}"
         )
 
     def test_font_size_is_75_percent_of_banner_height(self) -> None:
         for size in ("small", "medium", "large"):
-            bh, fs = scaled_banner_params(size, 256)
+            bh, fs = scaled_banner_params(size, 320)
             expected_fs = max(10, int(bh * 0.75))
             assert fs == expected_fs, (
                 f"{size}: font_size={fs}, expected {expected_fs} "
@@ -475,8 +475,8 @@ class TestScaledBannerParams:
             )
 
     def test_unknown_size_falls_back_to_small(self) -> None:
-        result = scaled_banner_params("xl", 256)
-        expected = scaled_banner_params("small", 256)
+        result = scaled_banner_params("xl", 320)
+        expected = scaled_banner_params("small", 320)
         assert result == expected
 
     def test_clamps_to_minimum_on_tiny_image(self) -> None:
@@ -492,30 +492,30 @@ class TestScaledBannerParams:
             assert bh == hi, f"{size}: expected max clamp {hi}, got {bh}"
 
     def test_pd120_hits_upper_clamp(self) -> None:
-        """PD-120 (496 px tall) should hit the upper clamp for all presets."""
+        """PD-120 (640 px wide) should hit the upper clamp for all presets."""
         for size in ("small", "medium", "large"):
             _, hi = _SCALED_CLAMP[size]
-            raw = int(496 * _SCALED_PERCENT[size])
+            raw = int(640 * _SCALED_PERCENT[size])
             if raw >= hi:
-                bh, _ = scaled_banner_params(size, 496)
+                bh, _ = scaled_banner_params(size, 640)
                 assert bh == hi, f"{size} PD-120: expected {hi}, got {bh}"
 
-    @pytest.mark.parametrize("size,image_height", [
-        ("small",  256),  # Martin M1/M2
-        ("small",  240),  # Robot 36
-        ("medium", 256),
-        ("large",  256),
-        ("small",  496),  # PD-120
-        ("large",  496),
+    @pytest.mark.parametrize("size,image_width", [
+        ("small",  320),  # Martin M1
+        ("small",  160),  # Martin M2 / Scottie S2
+        ("medium", 320),
+        ("large",  320),
+        ("small",  640),  # PD-120
+        ("large",  640),
     ])
     def test_apply_tx_banner_accepts_scaled_params(self, size: str,
-                                                    image_height: int) -> None:
+                                                    image_width: int) -> None:
         """Smoke test: apply_tx_banner must accept scaled_banner_params output."""
-        bh, fs = scaled_banner_params(size, image_height)
-        img = _solid(320, image_height, (100, 100, 100))
+        bh, fs = scaled_banner_params(size, image_width)
+        img = _solid(image_width, 240, (100, 100, 100))
         result = apply_tx_banner(img, "0.2.12", "W0AEZ",
                                  banner_height=bh, font_size=fs)
-        assert result.size == (320, image_height), (
+        assert result.size == (image_width, 240), (
             f"Dimensions changed after apply_tx_banner with "
-            f"scaled params ({size}, h={image_height})"
+            f"scaled params ({size}, w={image_width})"
         )

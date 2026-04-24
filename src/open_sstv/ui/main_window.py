@@ -638,7 +638,9 @@ class MainWindow(QMainWindow):
             "<p>22 modes: Robot 36, Martin M1/M2/M3/M4, Scottie S1/S2/S3/S4/DX, "
             "PD-50/90/120/160/180/240/290, Wraase SC2-120/SC2-180, Pasokon P3/P5/P7.</p>"
             "<p>Created by Kevin &mdash; W0AEZ</p>"
-            '<p><a href="https://github.com/bucknova/Open-SSTV">'
+            '<p><a href="https://bucknova.github.io/Open-SSTV/">'
+            "bucknova.github.io/Open-SSTV</a> &middot; "
+            '<a href="https://github.com/bucknova/Open-SSTV">'
             "github.com/bucknova/Open-SSTV</a></p>"
             "<p>GPL-3.0-or-later</p>",
         )

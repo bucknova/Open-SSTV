@@ -490,9 +490,10 @@ def test_pa_finished_callback_schedules_stop_on_device_loss(
 def test_pa_reset_called_by_stop_after_device_loss(
     qapp, fake_stream_cls: type[_FakeStream], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When _device_lost is True, stop() must call sd._terminate() then
-    sd._initialize() before emitting stopped, so the next start() can
-    open a fresh stream without hitting -10851 (Invalid Property Value)."""
+    """When _device_lost is True, stop() must leave the flag set so the
+    subsequent start() calls _pa_reset() immediately before opening the new
+    stream.  This avoids the race where the OS reassigns USB device indices
+    between stop() and the user clicking Start again."""
     terminate_calls: list[str] = []
     initialize_calls: list[str] = []
     monkeypatch.setattr("open_sstv.audio.input_stream.sd._terminate",
@@ -506,9 +507,18 @@ def test_pa_reset_called_by_stop_after_device_loss(
 
     worker.stop()
 
-    assert terminate_calls == ["terminate"], "_terminate must be called on device-loss stop"
-    assert initialize_calls == ["initialize"], "_initialize must be called on device-loss stop"
-    assert worker._device_lost is False, "flag must be cleared after reset"
+    # stop() must NOT reset PortAudio — leave the flag so start() handles it.
+    assert terminate_calls == [], "stop() must not call _pa_reset(); start() must do it"
+    assert initialize_calls == [], "stop() must not call _pa_reset(); start() must do it"
+    assert worker._device_lost is True, "flag must remain set so start() sees it"
+
+    # start() performs the reset right before opening the new stream.
+    worker.start()
+    assert terminate_calls == ["terminate"], "_terminate must be called by start() when _device_lost"
+    assert initialize_calls == ["initialize"], "_initialize must be called by start() when _device_lost"
+    assert worker._device_lost is False, "flag must be cleared after reset in start()"
+
+    worker.stop()
 
 
 def test_pa_reset_not_called_on_normal_stop(
@@ -533,9 +543,9 @@ def test_pa_reset_not_called_on_normal_stop(
 def test_pa_reset_safety_net_in_start(
     qapp, fake_stream_cls: type[_FakeStream], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """If _device_lost is still True when start() is called (edge case where
-    stop() returned early before the reset), start() must perform the reset
-    before opening the new stream."""
+    """start() must call _pa_reset() when _device_lost is True (the primary
+    recovery path — reset happens at the last possible moment before the new
+    stream opens, after the OS has stabilised device indices)."""
     terminate_calls: list[str] = []
     initialize_calls: list[str] = []
     monkeypatch.setattr("open_sstv.audio.input_stream.sd._terminate",
@@ -592,8 +602,8 @@ def test_pa_reset_survives_initialize_exception(
 def test_watchdog_sets_device_lost_flag(
     qapp, fake_stream_cls: type[_FakeStream], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """_on_watchdog_timeout must set _device_lost before calling stop() so
-    stop() knows to run the PA reset."""
+    """_on_watchdog_timeout must set _device_lost; stop() must leave the flag
+    set so start() can call _pa_reset() at the right moment."""
     monkeypatch.setattr("open_sstv.audio.input_stream.sd._terminate", lambda: None)
     monkeypatch.setattr("open_sstv.audio.input_stream.sd._initialize", lambda: None)
 
@@ -603,8 +613,8 @@ def test_watchdog_sets_device_lost_flag(
     assert worker._device_lost is False
     worker._on_watchdog_timeout()
 
-    # _device_lost was True when stop() ran; stop() cleared it after _pa_reset().
-    assert worker._device_lost is False, "flag cleared by stop() after reset"
+    # stop() leaves _device_lost set; start() will clear it after _pa_reset().
+    assert worker._device_lost is True, "flag must remain set for start() to call _pa_reset()"
     assert worker.is_running is False
 
 
@@ -628,6 +638,6 @@ def test_pa_finished_callback_sets_device_lost_flag(
     from PySide6.QtWidgets import QApplication
     QApplication.processEvents()
 
-    # stop() clears the flag after _pa_reset().
-    assert worker._device_lost is False
+    # stop() leaves the flag set; start() will clear it after _pa_reset().
+    assert worker._device_lost is True
     assert worker.is_running is False

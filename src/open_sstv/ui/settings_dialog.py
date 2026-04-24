@@ -1043,7 +1043,7 @@ class SettingsDialog(QDialog):
 
         size_key = self._banner_size.currentData() or "small"
         source = _PILImage.new("RGB", (320, 240), (0x80, 0x80, 0x80))
-        bh, fs = scaled_banner_params(size_key, source.height)
+        bh, fs = scaled_banner_params(size_key, source.width)
         banner = apply_tx_banner(
             source,
             _APP_VERSION,
@@ -1125,7 +1125,7 @@ class SettingsDialog(QDialog):
             title = f"Banner preview — {_Path(path).name}"
 
         size_key = self._banner_size.currentData() or "small"
-        bh, fs = scaled_banner_params(size_key, source.height)
+        bh, fs = scaled_banner_params(size_key, source.width)
         stamped = apply_tx_banner(
             source,
             _APP_VERSION,

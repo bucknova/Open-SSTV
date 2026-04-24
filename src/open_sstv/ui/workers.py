@@ -523,7 +523,7 @@ class TxWorker(QObject):
                 if self._tx_banner_enabled:
                     from open_sstv import __version__
                     from open_sstv.core.banner import apply_tx_banner, scaled_banner_params
-                    _bh, _fs = scaled_banner_params(self._tx_banner_size, image.height)
+                    _bh, _fs = scaled_banner_params(self._tx_banner_size, image.width)
                     image = apply_tx_banner(
                         image,
                         __version__,
