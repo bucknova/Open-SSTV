@@ -276,6 +276,18 @@ Click **Load Image** on the Transmit panel. A file dialog opens supporting these
 
 The app will automatically resize your image to match the selected SSTV mode's native resolution when transmitting. You can also crop and resize it manually using the image editor.
 
+#### Image fit status
+
+After loading an image, a coloured status bar appears below the preview showing how your image compares to the selected mode's target dimensions:
+
+- **Green — "…matches … target — TX will encode at native resolution."**  Your image is already the exact pixel dimensions for the selected mode. No scaling of any kind will occur.
+
+- **Green — "…aspect matches; LANCZOS resize on TX, no distortion."**  Your image has the correct aspect ratio (width-to-height proportion) but a different pixel size. The app will scale it up or down using LANCZOS resampling — the highest-quality resize algorithm, which preserves sharp edges and fine detail. The result looks exactly like your original, just at a different size.
+
+- **Amber — "…aspect mismatch; image will be stretched."**  Your image's proportions don't match the selected mode. Transmitting as-is will stretch it to fit, which distorts faces and shapes. To fix this, use **Edit Image → Auto-fit Crop** to trim the image to the correct aspect ratio before transmitting.
+
+**What is LANCZOS?**  LANCZOS (also written Lanczos) is a mathematical resampling filter that produces the sharpest, most accurate results when enlarging or shrinking an image. It is the same algorithm used by professional photo editing software. You do not need to do anything to enable it — the app uses it automatically whenever a resize is needed.
+
 ### 8.2 Editing an Image
 
 Click **Edit Image** to open the image editor dialog. The editor provides the following tools.
