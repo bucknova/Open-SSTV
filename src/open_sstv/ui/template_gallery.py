@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtCore import QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -50,8 +50,10 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 
-# Thumbnail width in pixels (height auto from aspect).
-_THUMB_W: int = 140
+# Thumbnail width bounds (pixels).  Actual width is computed dynamically.
+_MAX_THUMB_W: int = 140
+_MIN_THUMB_W: int = 60
+_THUMB_W: int = _MAX_THUMB_W  # kept for backward-compat with existing tests
 
 # Role labels shown in the filter bar.
 _ROLE_LABELS: tuple[tuple[str, str | None], ...] = (
@@ -93,24 +95,24 @@ class _ThumbnailCard(QWidget):
         layout.addWidget(self._thumb_label)
 
         # Template name caption.
-        name_label = QLabel(template.name)
-        name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        name_label.setFixedWidth(_THUMB_W)
-        name_label.setWordWrap(True)
-        name_label.setStyleSheet("QLabel { font-size: 9px; }")
-        layout.addWidget(name_label)
+        self._name_label = QLabel(template.name)
+        self._name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._name_label.setFixedWidth(_THUMB_W)
+        self._name_label.setWordWrap(True)
+        self._name_label.setStyleSheet("QLabel { font-size: 9px; }")
+        layout.addWidget(self._name_label)
 
         self._set_border()
 
     # --- public ---
 
-    def set_pixmap(self, pix: QPixmap) -> None:
-        """Update the thumbnail image."""
-        scaled = pix.scaledToWidth(
-            _THUMB_W, Qt.TransformationMode.SmoothTransformation
-        )
+    def set_pixmap(self, pix: QPixmap, thumb_w: int = _THUMB_W) -> None:
+        """Update the thumbnail image, resizing labels to *thumb_w*."""
+        scaled = pix.scaledToWidth(thumb_w, Qt.TransformationMode.SmoothTransformation)
+        self._thumb_label.setFixedWidth(thumb_w)
         self._thumb_label.setFixedHeight(scaled.height())
         self._thumb_label.setPixmap(scaled)
+        self._name_label.setFixedWidth(thumb_w)
 
     def set_selected(self, selected: bool) -> None:
         self._selected = selected
@@ -165,6 +167,12 @@ class TemplateGallery(QWidget):
         self._selected_template: Template | None = None
         self._active_role: str | None = None  # None = All
         self._cards: list[_ThumbnailCard] = []
+
+        # Debounce re-renders triggered by widget resize.
+        self._resize_timer = QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.setInterval(150)
+        self._resize_timer.timeout.connect(self._rerender_all)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -310,6 +318,24 @@ class TemplateGallery(QWidget):
             )
             card.setVisible(visible)
 
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._resize_timer.start()
+
+    def _compute_thumb_w(self, frame_w: int, frame_h: int) -> int:
+        """Return the ideal thumbnail width given frame aspect ratio and available space."""
+        # Height constraint: thumbnail must fit inside the scroll area.
+        avail_h = max(60, self._scroll.height() - 32)  # 16px caption + 16px padding
+        by_aspect = int(avail_h * frame_w / frame_h) if frame_h else _MAX_THUMB_W
+
+        # Width constraint: divide available viewport width evenly among visible cards.
+        n_visible = max(1, sum(1 for c in self._cards if not c.isHidden()))
+        vp_w = self._scroll.viewport().width()
+        spacing = 8 * (n_visible + 1)
+        by_width = (vp_w - spacing) // n_visible if vp_w > spacing else _MAX_THUMB_W
+
+        return max(_MIN_THUMB_W, min(_MAX_THUMB_W, by_aspect, by_width))
+
     def _rerender_all(self) -> None:
         """Re-render thumbnails for all currently visible cards."""
         if self._app_config is None:
@@ -327,6 +353,7 @@ class TemplateGallery(QWidget):
 
         mode = self._mode or Mode("scottie_s1")
         spec = MODE_TABLE[mode]
+        thumb_w = self._compute_thumb_w(spec.width, spec.display_height)
         ctx = TXContext(
             mode_display_name=mode.value,
             frame_size=(spec.width, spec.display_height),
@@ -337,7 +364,7 @@ class TemplateGallery(QWidget):
                 card.template, self._qso_state, self._app_config, ctx
             )
             pix = pil_to_pixmap(img)
-            card.set_pixmap(pix)
+            card.set_pixmap(pix, thumb_w)
         except Exception as exc:  # noqa: BLE001
             _log.warning(
                 "Thumbnail render failed for '%s': %s", card.template.name, exc

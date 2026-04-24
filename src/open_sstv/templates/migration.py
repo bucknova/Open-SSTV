@@ -116,7 +116,7 @@ def _make_v3_from_v2(text: str, name: str, index: int) -> Template:
         role_hint = "reply" if "exchange" in name_lower or "reply" in name_lower else "closing"
 
     return Template(
-        name=f"{name} (migrated)" if name else f"Migrated {index}",
+        name=name if name else f"Template {index}",
         role=role_hint,
         description=f"Auto-migrated from v0.2 template '{name}'. Original text: {text!r}",
         layers=[
@@ -189,6 +189,7 @@ def run_migration(
                 _log.info("Migrated v0.2 template '%s' → %s", name, path.name)
             except OSError as exc:
                 _log.error("Failed to write migrated template %s: %s", path, exc)
+        install_starter_pack(tdir)
         return f"legacy_migrated:{count}"
 
     # Step 3: No legacy customisations — install the starter pack.

@@ -96,12 +96,9 @@ class QSOStateWidget(QWidget):
         self._name.textChanged.connect(self._on_field_changed)
         row1.addWidget(self._name)
 
-        row1.addWidget(QLabel("Note:"))
-        self._note = QLineEdit()
-        self._note.setPlaceholderText("Optional")
-        self._note.textChanged.connect(self._on_field_changed)
-        row1.addWidget(self._note, stretch=1)
+        self._note = QLineEdit()  # hidden until v0.4 QSO logging
 
+        row1.addStretch(1)
         self._clear_btn = QPushButton("Clear QSO")
         self._clear_btn.setMaximumWidth(90)
         self._clear_btn.clicked.connect(self.clear)

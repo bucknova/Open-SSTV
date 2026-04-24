@@ -158,7 +158,8 @@ class TestLegacyMigration:
         tdir = tmp_path / "templates"
         run_migration(templates_dir=tdir, user_config_dir=tmp_path)
         tomls = list(tdir.glob("*.toml"))
-        assert len(tomls) == 1
+        # 1 migrated + 8 starter pack files
+        assert len(tomls) == 1 + len(STARTER_TEMPLATE_FILENAMES)
 
     def test_migrated_template_loadable(self, tmp_path: Path) -> None:
         _write_v2_templates(tmp_path, [
@@ -166,9 +167,7 @@ class TestLegacyMigration:
         ])
         tdir = tmp_path / "templates"
         run_migration(templates_dir=tdir, user_config_dir=tmp_path)
-        tomls = list(tdir.glob("*.toml"))
-        assert len(tomls) == 1
-        t = load_template(tomls[0])
+        t = load_template(tdir / "custom_cq.toml")
         assert t.name
 
     def test_token_translation_mycall(self, tmp_path: Path) -> None:
@@ -177,8 +176,7 @@ class TestLegacyMigration:
         ])
         tdir = tmp_path / "templates"
         run_migration(templates_dir=tdir, user_config_dir=tmp_path)
-        tomls = list(tdir.glob("*.toml"))
-        t = load_template(tomls[0])
+        t = load_template(tdir / "cq.toml")
         # Find the TextLayer and check token was translated
         from open_sstv.templates.model import TextLayer
         text_layers = [la for la in t.layers if isinstance(la, TextLayer)]
@@ -192,8 +190,7 @@ class TestLegacyMigration:
         ])
         tdir = tmp_path / "templates"
         run_migration(templates_dir=tdir, user_config_dir=tmp_path)
-        tomls = list(tdir.glob("*.toml"))
-        t = load_template(tomls[0])
+        t = load_template(tdir / "73.toml")
         from open_sstv.templates.model import TextLayer
         text_layers = [la for la in t.layers if isinstance(la, TextLayer)]
         assert text_layers
@@ -212,8 +209,7 @@ class TestLegacyMigration:
         ])
         tdir = tmp_path / "templates"
         run_migration(templates_dir=tdir, user_config_dir=tmp_path)
-        tomls = list(tdir.glob("*.toml"))
-        t = load_template(tomls[0])
+        t = load_template(tdir / "full.toml")
         from open_sstv.templates.model import TextLayer
         text_layers = [la for la in t.layers if isinstance(la, TextLayer)]
         assert text_layers
@@ -223,15 +219,24 @@ class TestLegacyMigration:
         for new in ("%c", "%o", "%r", "%d", "%t"):
             assert new in text, f"New token {new!r} missing"
 
-    def test_migrated_template_has_name_suffix(self, tmp_path: Path) -> None:
+    def test_migrated_template_keeps_original_name(self, tmp_path: Path) -> None:
         _write_v2_templates(tmp_path, [
             {"name": "My Template", "overlays": [{"text": "W0AEZ CUSTOM"}]},
         ])
         tdir = tmp_path / "templates"
         run_migration(templates_dir=tdir, user_config_dir=tmp_path)
-        tomls = list(tdir.glob("*.toml"))
-        t = load_template(tomls[0])
-        assert "migrated" in t.name.lower()
+        t = load_template(tdir / "my_template.toml")
+        assert t.name == "My Template"
+        assert "(migrated)" not in t.name
+
+    def test_starter_pack_installed_after_legacy_migration(self, tmp_path: Path) -> None:
+        _write_v2_templates(tmp_path, [
+            {"name": "Custom CQ", "overlays": [{"text": "W0AEZ CUSTOM {mycall}"}]},
+        ])
+        tdir = tmp_path / "templates"
+        run_migration(templates_dir=tdir, user_config_dir=tmp_path)
+        for fname in STARTER_TEMPLATE_FILENAMES:
+            assert (tdir / fname).exists(), f"Starter template missing after legacy migration: {fname}"
 
     def test_mixed_default_and_custom_only_migrates_custom(self, tmp_path: Path) -> None:
         _write_v2_templates(tmp_path, [
