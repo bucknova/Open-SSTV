@@ -499,6 +499,7 @@ class MainWindow(QMainWindow):
         self._tx_worker.tx_image_prepared.connect(self._on_tx_image_prepared)
         self._tx_worker.watchdog_fired.connect(self._on_watchdog_fired)
         self._tx_worker.error.connect(self._on_tx_error)
+        self._tx_worker.rig_disconnected.connect(self._on_radio_disconnected)
 
         # --- Wire RX signals ---
         # Private start/stop dispatch signals → audio worker slots.

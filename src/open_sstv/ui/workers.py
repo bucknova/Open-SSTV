@@ -329,6 +329,10 @@ class TxWorker(QObject):
     #: fixed encode-stage budget if the encoder wedged).
     watchdog_fired = Signal(float)
     error = Signal(str)
+    #: Emitted when the rig's serial/TCP link dies during TX (USB unplug
+    #: mid-transmission).  Delivered to the GUI thread so ``_on_radio_disconnected``
+    #: can update the radio panel immediately, without waiting for TX to finish.
+    rig_disconnected = Signal()
 
     def __init__(
         self,
@@ -736,10 +740,23 @@ class TxWorker(QObject):
         # --- Play the buffer ---
         playback_succeeded = False
 
-        def _on_output_device_lost() -> None:
-            self.error.emit(
-                "Audio output device disconnected during transmission."
-            )
+        def _rig_health_check() -> None:
+            """Ping the rig serial/TCP link once. Raises on failure.
+
+            Called every ~1 s by play_blocking between chunk writes.
+            ManualRig.get_ptt() is a no-op that never raises; real backends
+            raise RigError (→ RigConnectionError) or OSError on USB unplug.
+            We emit signals before re-raising so the GUI thread updates
+            the radio panel immediately rather than waiting for TX to finish.
+            """
+            if isinstance(rig, ManualRig):
+                return
+            try:
+                rig.get_ptt()
+            except (RigError, OSError) as exc:
+                self.error.emit(f"Rig disconnected during transmission: {exc}")
+                self.rig_disconnected.emit()
+                raise
 
         try:
             time.sleep(self._ptt_delay_s)
@@ -756,7 +773,7 @@ class TxWorker(QObject):
                     gain_provider=(
                         (lambda: self._output_gain) if live_gain else None
                     ),
-                    on_device_lost=_on_output_device_lost,
+                    periodic_check=_rig_health_check,
                 )
                 playback_succeeded = not self._stop_event.is_set()
         except sd.PortAudioError:

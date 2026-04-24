@@ -39,7 +39,7 @@ def play_blocking(
     progress_callback: "Callable[[int, int], None] | None" = None,
     stop_event: "threading.Event | None" = None,
     gain_provider: "Callable[[], float] | None" = None,
-    on_device_lost: "Callable[[], None] | None" = None,
+    periodic_check: "Callable[[], None] | None" = None,
 ) -> None:
     """Play a buffer of samples and block until playback finishes.
 
@@ -71,14 +71,14 @@ def play_blocking(
         is called on the playback thread, so it must be cheap and
         non-blocking; a simple attribute read is ideal.  Used by the
         test-tone path so ALC calibration is interactive.
-    on_device_lost:
-        Optional zero-arg callable invoked when the output device
-        disappears during playback (USB unplug mid-TX).  On macOS,
-        CoreAudio may silently redirect an OutputStream to the built-in
-        speakers instead of raising ``PortAudioError``; the periodic
-        device-existence check in the write loop catches this case.
-        When called, ``stop_event`` has already been set so the loop
-        exits on the next iteration.  Runs on the calling thread.
+    periodic_check:
+        Optional zero-arg callable invoked every ~1 s (every 10 chunks)
+        during playback.  Intended for hardware health checks — e.g. a
+        serial-port ping to detect USB unplug mid-TX.  If it raises any
+        exception, playback is aborted: ``stop_event`` is set and the
+        write loop exits immediately.  The callable is responsible for
+        emitting any user-visible error signal before raising.  Runs on
+        the calling thread.
 
     Raises
     ------
@@ -101,10 +101,10 @@ def play_blocking(
         progress_callback is None
         and stop_event is None
         and gain_provider is None
-        and on_device_lost is None
+        and periodic_check is None
     ):
         # Fast path: no progress reporting, no stop, no live gain, no
-        # device-loss detection needed.
+        # health check needed.
         sd.play(samples, samplerate=sample_rate, device=device_index, blocking=True)
         sd.wait()
         return
@@ -115,24 +115,8 @@ def play_blocking(
     chunk_size = int(sample_rate * 0.1)
     total = samples.size
 
-    # Resolve device name once upfront for the periodic existence check.
-    # sd.query_devices() reads PortAudio's static device table, which
-    # CoreAudio keeps up-to-date via property callbacks even during active
-    # playback — so querying by name reliably detects USB device removal
-    # even when PortAudio silently falls back to the built-in speakers
-    # instead of raising PortAudioError.
-    _device_name: str | None = None
-    if on_device_lost is not None:
-        if isinstance(device, AudioDevice):
-            _device_name = device.name
-        elif isinstance(device, int):
-            try:
-                _device_name = str(sd.query_devices(device)["name"])  # type: ignore[index]
-            except Exception:  # noqa: BLE001
-                pass
-
-    # How often to probe the device table (every N ~0.1 s chunks ≈ 1 s).
-    _DEVICE_CHECK_INTERVAL = 10
+    # How often to run the periodic health check (every N ~0.1 s chunks ≈ 1 s).
+    _CHECK_INTERVAL = 10
     _check_counter = 0
 
     with sd.OutputStream(
@@ -146,20 +130,17 @@ def play_blocking(
             if stop_event is not None and stop_event.is_set():
                 break
 
-            # Periodic device-existence check.  On macOS, CoreAudio may
-            # silently redirect the stream to built-in speakers after the
-            # USB device is unplugged, without raising PortAudioError.
-            # A ValueError from sd.query_devices() means the device is gone.
-            if _device_name is not None:
+            # Periodic health check — e.g. a serial-port ping to detect
+            # USB unplug mid-TX.  The callable emits any user-visible error
+            # before raising; we just need to abort on any exception.
+            if periodic_check is not None:
                 _check_counter += 1
-                if _check_counter % _DEVICE_CHECK_INTERVAL == 0:
+                if _check_counter % _CHECK_INTERVAL == 0:
                     try:
-                        sd.query_devices(_device_name, "output")
-                    except ValueError:
+                        periodic_check()
+                    except Exception:  # noqa: BLE001
                         if stop_event is not None:
                             stop_event.set()
-                        if on_device_lost is not None:
-                            on_device_lost()
                         break
 
             end = min(written + chunk_size, total)

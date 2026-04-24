@@ -19,18 +19,6 @@ from open_sstv.audio import output_stream
 from open_sstv.audio.devices import AudioDevice
 
 
-def _fake_audio_device(name: str = "Fake USB Audio", index: int = 5) -> AudioDevice:
-    return AudioDevice(
-        index=index,
-        name=name,
-        host_api="CoreAudio",
-        max_input_channels=0,
-        max_output_channels=2,
-        default_sample_rate=48000.0,
-    )
-from open_sstv.audio.devices import AudioDevice
-
-
 def test_play_blocking_rejects_empty_buffer() -> None:
     with pytest.raises(ValueError, match="empty"):
         output_stream.play_blocking(np.array([], dtype=np.int16), 48000)
@@ -192,117 +180,64 @@ def test_play_blocking_gain_provider_unity_is_passthrough() -> None:
     np.testing.assert_array_equal(fake_stream.writes[0].ravel(), samples)
 
 
-# --- Output device-loss detection (TX USB unplug mid-stream) ---
+# --- Periodic health check (serial-port ping for USB unplug detection) ---
 
 
-def test_on_device_lost_called_when_query_raises() -> None:
-    """When sd.query_devices() raises ValueError mid-playback, on_device_lost
-    must be called and stop_event set so the write loop exits."""
+def test_periodic_check_aborts_on_exception() -> None:
+    """When periodic_check raises, stop_event is set and playback exits early."""
     import threading
 
     sr = 48000
-    # 11 chunks so the 10th triggers the first device check.
+    # 11 chunks so the 10th triggers the first check.
     samples = np.zeros(sr // 10 * 11, dtype=np.int16)
     stop_event = threading.Event()
-    lost_calls: list[int] = []
+    check_calls: list[int] = []
 
     fake_stream = _FakeStream()
-    _call_count = 0
 
-    def _query_devices(name_or_index, kind=None):
-        nonlocal _call_count
-        _call_count += 1
-        # Raise on the first call (which fires at chunk 10).
-        if _call_count == 1:
-            raise ValueError("no device found")
-        return {}
+    def _flaky_check() -> None:
+        check_calls.append(1)
+        raise OSError("serial port gone")
 
-    with (
-        patch("open_sstv.audio.output_stream.sd.OutputStream", return_value=fake_stream),
-        patch("open_sstv.audio.output_stream.sd.query_devices", side_effect=_query_devices),
-    ):
+    with patch("open_sstv.audio.output_stream.sd.OutputStream", return_value=fake_stream):
         output_stream.play_blocking(
             samples,
             sr,
             progress_callback=lambda *_: None,
             stop_event=stop_event,
-            on_device_lost=lambda: lost_calls.append(1),
-            device=_fake_audio_device("Fake USB Audio"),
+            periodic_check=_flaky_check,
         )
 
-    assert len(lost_calls) == 1, "on_device_lost must be called exactly once"
-    assert stop_event.is_set(), "stop_event must be set when device is lost"
-    # Playback must stop well before the end: chunks 1-10 written, then break.
-    assert len(fake_stream.writes) <= 10
+    assert len(check_calls) == 1, "check must fire exactly once before abort"
+    assert stop_event.is_set(), "stop_event must be set when check raises"
+    assert len(fake_stream.writes) <= 10, "playback must stop near the first check"
 
 
-def test_device_loss_stops_before_end() -> None:
-    """Playback must abort early (not write all chunks) when device is lost."""
+def test_periodic_check_stops_before_end() -> None:
+    """Playback must abort early (not write all chunks) when check raises."""
     import threading
 
     sr = 48000
-    # 30 chunks so loss at chunk 10 leaves 20 unwritten.
+    # 30 chunks so check at chunk 10 leaves 20 unwritten.
     samples = np.zeros(sr // 10 * 30, dtype=np.int16)
     stop_event = threading.Event()
-
     fake_stream = _FakeStream()
-    call_count = 0
 
-    def _query_devices(name_or_index, kind=None):
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            raise ValueError("gone")
-        return {}
-
-    with (
-        patch("open_sstv.audio.output_stream.sd.OutputStream", return_value=fake_stream),
-        patch("open_sstv.audio.output_stream.sd.query_devices", side_effect=_query_devices),
-    ):
+    with patch("open_sstv.audio.output_stream.sd.OutputStream", return_value=fake_stream):
         output_stream.play_blocking(
             samples,
             sr,
             progress_callback=lambda *_: None,
             stop_event=stop_event,
-            on_device_lost=lambda: None,
-            device=_fake_audio_device(),
+            periodic_check=lambda: (_ for _ in ()).throw(OSError("gone")),
         )
 
-    # Should have written at most 10 chunks (up to the first check), not 30.
     assert len(fake_stream.writes) <= 10
 
 
-def test_on_device_lost_not_called_on_clean_playback() -> None:
-    """on_device_lost must NOT fire when the device stays healthy."""
-    import threading
-
-    sr = 48000
-    samples = np.zeros(sr // 10 * 5, dtype=np.int16)  # 5 chunks, no check fires
-    stop_event = threading.Event()
-    lost_calls: list[int] = []
-
-    fake_stream = _FakeStream()
-
-    with (
-        patch("open_sstv.audio.output_stream.sd.OutputStream", return_value=fake_stream),
-        patch("open_sstv.audio.output_stream.sd.query_devices", return_value={}),
-    ):
-        output_stream.play_blocking(
-            samples,
-            sr,
-            progress_callback=lambda *_: None,
-            stop_event=stop_event,
-            on_device_lost=lambda: lost_calls.append(1),
-            device=_fake_audio_device(),
-        )
-
-    assert len(lost_calls) == 0
-    assert not stop_event.is_set()
-
-
-def test_fast_path_still_used_without_device_loss_callback() -> None:
-    """The fast sd.play/wait path is used when on_device_lost is None
-    and there is no progress/stop/gain either — unchanged from before."""
+def test_periodic_check_not_called_on_fast_path() -> None:
+    """The fast sd.play/wait path is used when periodic_check is None
+    and there is no progress/stop/gain either."""
     sr = 48000
     samples = np.zeros(sr // 10, dtype=np.int16)
 
@@ -313,3 +248,25 @@ def test_fast_path_still_used_without_device_loss_callback() -> None:
         output_stream.play_blocking(samples, sr)
 
     mock_play.assert_called_once()
+
+
+def test_periodic_check_not_called_when_none() -> None:
+    """When periodic_check=None, the check counter is never incremented
+    and playback completes all chunks normally."""
+    import threading
+
+    sr = 48000
+    samples = np.zeros(sr // 10 * 5, dtype=np.int16)
+    stop_event = threading.Event()
+    fake_stream = _FakeStream()
+
+    with patch("open_sstv.audio.output_stream.sd.OutputStream", return_value=fake_stream):
+        output_stream.play_blocking(
+            samples,
+            sr,
+            progress_callback=lambda *_: None,
+            stop_event=stop_event,
+        )
+
+    assert len(fake_stream.writes) == 5
+    assert not stop_event.is_set()
