@@ -835,6 +835,19 @@ class SettingsDialog(QDialog):
 
         form.addRow(banner_group)
 
+        # --- Updates ---
+        updates_group = QGroupBox("Updates")
+        updates_layout = QFormLayout(updates_group)
+        self._check_updates_setting = QCheckBox("Check for updates on startup")
+        self._check_updates_setting.setToolTip(
+            "On startup, Open-SSTV makes a read-only HTTPS request to\n"
+            "github.com/bucknova/Open-SSTV to check for newer releases.\n"
+            "No data is sent."
+        )
+        self._check_updates_setting.setChecked(self._config.check_for_updates)
+        updates_layout.addRow(self._check_updates_setting)
+        form.addRow(updates_group)
+
         return tab
 
     # === QDialog overrides ===
@@ -1274,6 +1287,8 @@ class SettingsDialog(QDialog):
             tx_banner_bg_color=self._banner_bg_color,
             tx_banner_text_color=self._banner_text_color,
             tx_banner_size=self._banner_size.currentData() or "small",
+            check_for_updates=self._check_updates_setting.isChecked(),
+            first_launch_seen=self._config.first_launch_seen,
         )
 
     @property

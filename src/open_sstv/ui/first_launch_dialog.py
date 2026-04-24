@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -65,6 +66,17 @@ class FirstLaunchDialog(QDialog):
         form.addRow("Callsign:", self._callsign_input)
         layout.addLayout(form)
 
+        self._check_updates = QCheckBox("Check for updates on startup")
+        self._check_updates.setChecked(True)
+        layout.addWidget(self._check_updates)
+
+        privacy_note = QLabel(
+            "Checks github.com/bucknova/Open-SSTV for new releases. No data is sent."
+        )
+        privacy_note.setWordWrap(True)
+        privacy_note.setStyleSheet("color: #888; font-size: 10px;")
+        layout.addWidget(privacy_note)
+
         # Standard Qt dialog buttons with custom labels.  Using the
         # standard box gives us correct platform-native ordering (Save
         # on the right on Windows, left on macOS) without hand-rolling
@@ -99,6 +111,10 @@ class FirstLaunchDialog(QDialog):
             self._callsign_input.setCursorPosition(cursor)
         finally:
             self._callsign_input.blockSignals(False)
+
+    def check_updates_enabled(self) -> bool:
+        """Return whether the user opted in to startup update checks."""
+        return self._check_updates.isChecked()
 
     def callsign(self) -> str:
         """Return the (trimmed, uppercased) callsign the user typed.

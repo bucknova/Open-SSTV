@@ -110,6 +110,11 @@ class AppConfig:
     # Old config key "experimental_incremental_decode" is migrated in store.py.
     incremental_decode: bool = True
 
+    # --- Update checker ---
+    # v0.2.16: when True, a background HTTPS GET to the GitHub releases API
+    # runs once at startup. No data is sent — it is a read-only request.
+    check_for_updates: bool = True
+
     # --- Identity ---
     callsign: str = ""
     # v0.2.7: one-shot flag for the welcome-callsign dialog.  False on a

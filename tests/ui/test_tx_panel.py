@@ -32,8 +32,10 @@ def gradient_path(tmp_path: Path) -> Path:
     return path
 
 
-def test_initial_state_disables_transmit(panel: TxPanel) -> None:
-    assert not panel._transmit_btn.isEnabled()
+def test_initial_state_enables_transmit_with_default_image(panel: TxPanel) -> None:
+    # The TX panel auto-loads the bundled testimage.jpg on __init__, so
+    # the transmit button is enabled from the start (v0.2.15+).
+    assert panel._transmit_btn.isEnabled()
     assert not panel._stop_btn.isEnabled()
     assert panel._load_btn.isEnabled()
 
@@ -48,7 +50,9 @@ def test_load_invalid_image_reports_error(panel: TxPanel, tmp_path: Path) -> Non
     bogus = tmp_path / "not_an_image.png"
     bogus.write_bytes(b"this is not a PNG")
     panel.load_image(bogus)
-    assert not panel._transmit_btn.isEnabled()
+    # The default test image is auto-loaded on __init__, so transmit stays
+    # enabled even when a subsequent load_image call fails (the previous
+    # valid image is still in memory).
     assert "Failed to load" in panel._status.text()
 
 
@@ -237,9 +241,10 @@ class TestTxTargetStatus:
     currently-selected mode's aspect, or will be stretched on TX.
     """
 
-    def test_no_image_no_status(self, panel: TxPanel) -> None:
-        """Before an image is loaded the status label is empty."""
-        assert panel._tx_target_status.text() == ""
+    def test_default_image_shows_status(self, panel: TxPanel) -> None:
+        """The bundled testimage.jpg auto-loads on init, so the status
+        label is non-empty from the start (v0.2.15+)."""
+        assert panel._tx_target_status.text() != ""
 
     def test_aspect_match_shows_green_status(
         self, panel: TxPanel, tmp_path: Path

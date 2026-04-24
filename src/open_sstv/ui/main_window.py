@@ -107,6 +107,7 @@ from open_sstv.ui.settings_dialog import SettingsDialog
 from open_sstv.ui.tx_panel import TxPanel
 from open_sstv.core.modes import Mode
 from open_sstv.templates import TokenContext, build_autosave_filename
+from open_sstv.ui.update_checker import UpdateCheckerWorker
 from open_sstv.ui.workers import RxWorker, TxWorker
 
 if TYPE_CHECKING:
@@ -283,6 +284,8 @@ class MainWindow(QMainWindow):
     #: receiver's event loop.  Symmetry > convenience.
     _rx_final_slant_correction_changed = Signal(bool)
     _tx_sample_rate_changed = Signal(int)
+    #: Triggers the one-shot update check on the update worker thread.
+    _request_update_check = Signal()
 
     def __init__(
         self,
@@ -568,6 +571,16 @@ class MainWindow(QMainWindow):
         self._rig_poll_worker.poll_error.connect(self._radio_panel.set_connection_error)
         self._rig_poll_worker.radio_disconnected.connect(self._on_radio_disconnected)
 
+        # --- Update checker on its own thread (one-shot HTTP GET at startup) ---
+        self._update_thread = QThread(self)
+        self._update_thread.setObjectName("sstv-app-update-checker")
+        self._update_worker = UpdateCheckerWorker()
+        self._update_worker.moveToThread(self._update_thread)
+        self._update_thread.finished.connect(self._update_worker.deleteLater)
+        self._update_thread.start()
+        self._request_update_check.connect(self._update_worker.check)
+        self._update_worker.update_available.connect(self._on_update_available)
+
         # --- Keyboard shortcuts ---
         save_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
         save_shortcut.activated.connect(self._on_save_shortcut)
@@ -601,6 +614,10 @@ class MainWindow(QMainWindow):
         # never see this dialog.
         if not self._config.first_launch_seen:
             QTimer.singleShot(0, self._show_first_launch_dialog)
+        elif self._config.check_for_updates:
+            # Fresh installs trigger the check from _show_first_launch_dialog
+            # after the user dismisses the welcome dialog.
+            QTimer.singleShot(2000, self._trigger_update_check)
 
     # === Menu bar ===
 
@@ -646,6 +663,20 @@ class MainWindow(QMainWindow):
             "<p>GPL-3.0-or-later</p>",
         )
 
+    def _trigger_update_check(self) -> None:
+        """Dispatch the one-shot update check to the worker thread."""
+        self._request_update_check.emit()
+
+    @Slot(str, str)
+    def _on_update_available(self, version: str, url: str) -> None:
+        """Show a persistent status-bar link when a newer release is found."""
+        from PySide6.QtWidgets import QLabel
+
+        lbl = QLabel(f'<a href="{url}">Open-SSTV {version} available</a>')
+        lbl.setOpenExternalLinks(True)
+        lbl.setContentsMargins(0, 0, 8, 0)
+        self.statusBar().addPermanentWidget(lbl)
+
     @Slot()
     def _show_first_launch_dialog(self) -> None:
         """Prompt the operator for their callsign on a truly fresh install.
@@ -674,6 +705,7 @@ class MainWindow(QMainWindow):
         typed = dlg.callsign() if accepted else ""
 
         self._config.first_launch_seen = True
+        self._config.check_for_updates = dlg.check_updates_enabled()
         if typed:
             self._config.callsign = typed
 
@@ -684,6 +716,9 @@ class MainWindow(QMainWindow):
                 f"Welcome settings could not be saved to disk: {exc}", 8000
             )
             return
+
+        if self._config.check_for_updates:
+            QTimer.singleShot(1000, self._trigger_update_check)
 
         if typed:
             # Push the newly-set callsign into the panels that embed
@@ -1770,9 +1805,10 @@ class MainWindow(QMainWindow):
             self._audio_thread,
             self._rx_thread,
             self._rig_poll_thread,
+            self._update_thread,
         ):
             thread.quit()
-            thread.wait(3000)
+            thread.wait(4000)
 
         try:
             self._rig.close()
