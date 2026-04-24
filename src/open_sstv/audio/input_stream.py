@@ -202,11 +202,15 @@ class InputStreamWorker(QObject):
             except queue.Empty:
                 break
 
-        # Safety net: if the previous session ended in a device-loss event but
-        # stop() somehow didn't complete the PA reset (e.g. stop() returned
-        # early because _stream was already None), do it now before trying to
-        # open the new stream.  PortAudio caches internal device handles and
-        # will fail with -10851 unless Pa_Terminate()+Pa_Initialize() ran.
+        # Reset PortAudio immediately before opening the new stream so the
+        # device list is fresh at the moment we need it.  Doing the reset in
+        # stop() is too early: macOS can reassign USB audio device indices
+        # between the stop and the next user-initiated start (e.g. while the
+        # user replugges the radio), leaving PortAudio stale again by the time
+        # start() is called.  Resetting here guarantees Pa_Initialize() has
+        # just run, so sd.InputStream() sees the current OS device table.
+        # The _device_lost flag limits the expensive terminate/initialize cycle
+        # to device-loss recovery paths — normal start/stop cycles skip it.
         if self._device_lost:
             self._pa_reset()
             self._device_lost = False
@@ -299,14 +303,10 @@ class InputStreamWorker(QObject):
             self._stream = None
             self._stopping = False
 
-        # Reset PortAudio if this stop was triggered by a device-loss event.
-        # PortAudio caches device handles internally; without a full
-        # Pa_Terminate()+Pa_Initialize() cycle the next sd.InputStream()
-        # open will fail with -10851 (Invalid Property Value) even after the
-        # device is replugged and a fresh device index has been obtained.
-        if self._device_lost:
-            self._pa_reset()
-            self._device_lost = False
+        # Leave _device_lost set so start() can see it and call _pa_reset()
+        # right before opening the next stream.  Resetting PortAudio here in
+        # stop() is too early — the OS can reassign device indices between
+        # stop and the user clicking Start again, making the reset useless.
 
         # Emit any residual chunks so the consumer gets a clean
         # tail-flush before we report stopped. This matters for
