@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "open-sstv"
-version = "0.2.14"
+version = "0.2.15"
 description = "Open-source cross-platform SSTV transceiver for amateur radio."
 readme = "README.md"
 requires-python = ">=3.11"

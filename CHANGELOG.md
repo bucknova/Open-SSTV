@@ -11,6 +11,63 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.2.15] — 2026-04-24
+
+### Fixed
+
+- **TX aborts immediately on USB unplug.**  The previous `sd.query_devices()`
+  check was unreliable — macOS silently redirects the output stream to the
+  built-in speakers without removing the device from PortAudio's device table,
+  so the query always succeeded even after the radio was unplugged.  The output
+  stream now calls `rig.get_ptt()` every ~1 s between audio write chunks
+  (`periodic_check` parameter in `play_blocking`).  The serial port dies
+  instantly on USB unplug, raising `RigConnectionError`, which sets the stop
+  event and breaks the write loop.  `ManualRig.get_ptt()` is a no-op so the
+  check is skipped when no rig is connected.
+
+- **Radio panel shows "Disconnected" immediately during TX, not after.**
+  A new `TxWorker.rig_disconnected` signal is emitted by the rig health check
+  closure before re-raising, and is wired to `_on_radio_disconnected` in
+  `MainWindow`.  The radio panel now updates within ~1 s of the USB unplug
+  event rather than waiting for the entire TX sequence to unwind.
+
+- **Unconditional PortAudio reset on every Start Capture.**  Removed the
+  `_device_lost` flag gate from `InputStreamWorker.start()` — `_pa_reset()`
+  now always runs immediately before `sd.InputStream()`.  The conditional reset
+  only covered the RX watchdog and PortAudio `finished_callback` paths;
+  TX-path disconnects (detected via serial health check) never set
+  `_device_lost` on the `InputStreamWorker`, causing `-9986 paInvalidDevice`
+  on the next Start Capture.  Always resetting eliminates the entire class of
+  "forgot to set the flag" bugs regardless of which code path detected the
+  disconnect.
+
+### Added
+
+- **Banner height scaled from image width.**  `scaled_banner_params()` now uses
+  `image_width` as the scaling base (was `image_height`).  Percentages updated
+  to 6 % / 8 % / 10 % of width for Small / Medium / Large (was 9 % / 12 % /
+  15 % of height), with clamps (18–36) / (22–48) / (28–60) px.  Narrow modes
+  like Martin M2 (160 px wide) now get proportionally thinner banners instead
+  of banners sized as if the image were as tall as it is wide.
+
+- **About dialog links GitHub Pages site.**  The Help → About Open-SSTV dialog
+  now shows both the GitHub repository link and the GitHub Pages site
+  (`bucknova.github.io/Open-SSTV`) as clickable hyperlinks.
+
+- **Default test image loads automatically in TX panel.**  A classic TV test
+  pattern (`testimage.jpg`) is bundled as a package asset under
+  `open_sstv/assets/` and loaded into the TX panel at startup.  The TX panel
+  is ready to transmit immediately on first launch without the user having to
+  click Load Image.
+
+### Docs
+
+- **Author attribution.**  "Created by Kevin (W0AEZ)" added to README.md
+  (under title), `pyproject.toml` (`authors` field), `docs/index.html` footer,
+  and User Guide version line.  About dialog already carried this attribution.
+
+---
+
 ## [0.2.14] — 2026-04-24
 
 ### Fixed

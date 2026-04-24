@@ -2,5 +2,5 @@
 """sstv-app — open-source cross-platform SSTV transceiver for amateur radio."""
 from __future__ import annotations
 
-__version__ = "0.2.14"
+__version__ = "0.2.15"
 __all__ = ["__version__"]
