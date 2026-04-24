@@ -215,6 +215,13 @@ class TxPanel(QWidget):
         self._status.setWordWrap(True)
         layout.addWidget(self._status)
 
+        # Pre-load the bundled test image so the TX panel is ready to
+        # transmit immediately on first launch without the user having
+        # to click Load Image.
+        _default = Path(__file__).parent.parent / "assets" / "testimage.jpg"
+        if _default.is_file():
+            self.load_image(_default)
+
     # === public API used by MainWindow ===
 
     @property
