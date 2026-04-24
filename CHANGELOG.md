@@ -11,6 +11,34 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.2.16] — 2026-04-24
+
+### Added
+
+- **Built-in update checker.**  On every launch (if enabled), a background
+  thread makes a single read-only HTTPS GET to the GitHub releases API
+  (`api.github.com/repos/bucknova/Open-SSTV/releases/latest`) and compares
+  the returned `tag_name` against the running version using semver tuple
+  comparison.  If a newer release exists, a clickable link appears as a
+  permanent widget in the status bar — no auto-download, no auto-install.
+  The check times out after 3 seconds; any network failure is silently
+  swallowed.  Uses stdlib `urllib.request` only — no new dependencies.
+
+- **"Check for updates on startup" preference.**  The first-launch welcome
+  dialog now includes an opt-in checkbox (default: on) with a transparency
+  note ("Checks github.com/bucknova/Open-SSTV for new releases. No data is
+  sent.").  The preference is also exposed in Settings → Images → Updates for
+  returning users.
+
+### Fixed
+
+- **Saving Settings no longer resets `first_launch_seen`.**  `result_config()`
+  in the Settings dialog now preserves `first_launch_seen` from the active
+  config, so the first-launch welcome dialog no longer reappears after the
+  user saves their settings.
+
+---
+
 ## [0.2.15] — 2026-04-24
 
 ### Fixed
