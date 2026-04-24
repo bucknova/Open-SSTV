@@ -490,33 +490,34 @@ def test_pa_finished_callback_schedules_stop_on_device_loss(
 def test_pa_reset_called_by_stop_after_device_loss(
     qapp, fake_stream_cls: type[_FakeStream], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When _device_lost is True, stop() must leave the flag set so the
-    subsequent start() calls _pa_reset() immediately before opening the new
-    stream.  This avoids the race where the OS reassigns USB device indices
-    between stop() and the user clicking Start again."""
+    """stop() must NOT reset PortAudio; start() always resets so the full
+    stop → replug → start cycle is safe regardless of which code path
+    detected the disconnect (RX watchdog, TX serial check, or PA callback)."""
     terminate_calls: list[str] = []
-    initialize_calls: list[str] = []
     monkeypatch.setattr("open_sstv.audio.input_stream.sd._terminate",
                         lambda: terminate_calls.append("terminate"))
     monkeypatch.setattr("open_sstv.audio.input_stream.sd._initialize",
-                        lambda: initialize_calls.append("initialize"))
+                        lambda: None)
 
     worker = InputStreamWorker()
     worker.start()
-    worker._device_lost = True  # simulate device-loss flag set by watchdog/PA
+    # start() always resets — snapshot count before stop/start cycle.
+    count_after_first_start = len(terminate_calls)
 
+    worker._device_lost = True  # simulate device-loss
     worker.stop()
 
-    # stop() must NOT reset PortAudio — leave the flag so start() handles it.
-    assert terminate_calls == [], "stop() must not call _pa_reset(); start() must do it"
-    assert initialize_calls == [], "stop() must not call _pa_reset(); start() must do it"
-    assert worker._device_lost is True, "flag must remain set so start() sees it"
+    # stop() must NOT add another reset.
+    assert len(terminate_calls) == count_after_first_start, \
+        "stop() must not call _pa_reset()"
+    assert worker._device_lost is True, \
+        "flag must remain set (stop() leaves it for reference)"
 
-    # start() performs the reset right before opening the new stream.
+    # start() adds one more reset regardless of _device_lost value.
     worker.start()
-    assert terminate_calls == ["terminate"], "_terminate must be called by start() when _device_lost"
-    assert initialize_calls == ["initialize"], "_initialize must be called by start() when _device_lost"
-    assert worker._device_lost is False, "flag must be cleared after reset in start()"
+    assert len(terminate_calls) == count_after_first_start + 1, \
+        "start() must call _pa_reset() on every invocation"
+    assert worker._device_lost is False
 
     worker.stop()
 
@@ -524,8 +525,8 @@ def test_pa_reset_called_by_stop_after_device_loss(
 def test_pa_reset_not_called_on_normal_stop(
     qapp, fake_stream_cls: type[_FakeStream], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A user-initiated stop (no device loss) must NOT call _terminate/_initialize
-    — resetting PortAudio unnecessarily adds latency and could disrupt other streams."""
+    """stop() must never call _pa_reset(), even on a device-loss stop.
+    The reset always happens in start() instead."""
     terminate_calls: list[str] = []
     monkeypatch.setattr("open_sstv.audio.input_stream.sd._terminate",
                         lambda: terminate_calls.append("terminate"))
@@ -534,18 +535,21 @@ def test_pa_reset_not_called_on_normal_stop(
 
     worker = InputStreamWorker()
     worker.start()
+    count_after_start = len(terminate_calls)  # start() always resets
+
     # _device_lost is False by default — simulate normal user stop
     worker.stop()
 
-    assert terminate_calls == [], "PA reset must not run on a normal stop"
+    assert len(terminate_calls) == count_after_start, \
+        "stop() must not call _pa_reset() — only start() does"
 
 
-def test_pa_reset_safety_net_in_start(
+def test_pa_reset_always_called_by_start(
     qapp, fake_stream_cls: type[_FakeStream], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """start() must call _pa_reset() when _device_lost is True (the primary
-    recovery path — reset happens at the last possible moment before the new
-    stream opens, after the OS has stabilised device indices)."""
+    """start() must always call _pa_reset() regardless of _device_lost.
+    The unconditional reset eliminates the 'forgot to set the flag' class of
+    bugs where TX-path disconnect detection skips setting RX _device_lost."""
     terminate_calls: list[str] = []
     initialize_calls: list[str] = []
     monkeypatch.setattr("open_sstv.audio.input_stream.sd._terminate",
@@ -554,13 +558,13 @@ def test_pa_reset_safety_net_in_start(
                         lambda: initialize_calls.append("initialize"))
 
     worker = InputStreamWorker()
-    worker._device_lost = True  # simulate left-over flag
+    # _device_lost is False by default — reset must still fire.
 
     worker.start()
 
-    assert terminate_calls == ["terminate"], "safety-net reset must run in start() when flag is set"
-    assert initialize_calls == ["initialize"]
-    assert worker._device_lost is False, "flag must be cleared after safety-net reset"
+    assert terminate_calls == ["terminate"], "_terminate must be called on every start()"
+    assert initialize_calls == ["initialize"], "_initialize must be called on every start()"
+    assert worker._device_lost is False
 
     worker.stop()
 

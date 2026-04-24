@@ -202,18 +202,16 @@ class InputStreamWorker(QObject):
             except queue.Empty:
                 break
 
-        # Reset PortAudio immediately before opening the new stream so the
-        # device list is fresh at the moment we need it.  Doing the reset in
-        # stop() is too early: macOS can reassign USB audio device indices
-        # between the stop and the next user-initiated start (e.g. while the
-        # user replugges the radio), leaving PortAudio stale again by the time
-        # start() is called.  Resetting here guarantees Pa_Initialize() has
-        # just run, so sd.InputStream() sees the current OS device table.
-        # The _device_lost flag limits the expensive terminate/initialize cycle
-        # to device-loss recovery paths — normal start/stop cycles skip it.
-        if self._device_lost:
-            self._pa_reset()
-            self._device_lost = False
+        # Always reset PortAudio immediately before opening the new stream so
+        # the device list is guaranteed fresh.  The conditional _device_lost
+        # gate was removed because disconnect can be detected via multiple
+        # paths (RX watchdog, TX serial health check, _on_pa_stream_finished)
+        # and any path that misses setting the flag leaves PortAudio stale,
+        # producing -9986 / -9998 errors.  _pa_reset() is fast (~50 ms) and
+        # unconditionally correct — terminate+initialize is the only reliable
+        # way to flush PortAudio's internal device cache after a USB unplug.
+        self._pa_reset()
+        self._device_lost = False
 
         try:
             self._stream = sd.InputStream(
