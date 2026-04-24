@@ -1,5 +1,7 @@
 # Open-SSTV
 
+**Created by Kevin (W0AEZ)**
+
 An open-source, cross-platform SSTV (Slow Scan Television) transceiver for amateur
 radio. Receives and decodes SSTV images live off your radio, and encodes and
 transmits images back, with optional Hamlib or direct serial PTT and frequency control.

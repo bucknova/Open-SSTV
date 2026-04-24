@@ -10,6 +10,7 @@ description = "Open-source cross-platform SSTV transceiver for amateur radio."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "GPL-3.0-or-later" }
+authors = [{name = "Kevin", email = ""}]
 keywords = ["sstv", "amateur-radio", "ham-radio", "hamlib", "rigctld", "qt"]
 classifiers = [
     "Development Status :: 4 - Beta",
