@@ -1,0 +1,58 @@
+[template]
+name = "73 Vertical"
+role = "closing"
+reference_frame = [320, 256]
+schema_version = 1
+description = "Vertical 73 variant. '73' stacked letter-over-letter on left, ToCall de Call bottom center."
+
+[[layer]]
+type = "photo"
+id = "base_photo"
+anchor = "FILL"
+fit = "cover"
+
+[[layer]]
+type = "rect"
+id = "left_strip"
+anchor = "TL"
+width_pct = 14.0
+height_pct = 100.0
+fill = [0, 0, 0, 160]
+
+[[layer]]
+type = "text"
+id = "seventy_three_stacked"
+text = "73"
+anchor = "CL"
+offset_x_pct = 1.5
+offset_y_pct = 0.0
+font_family = "DejaVu Sans Bold"
+font_size_pct = 12.0
+fill = [255, 220, 0, 255]
+stroke = { color = [0, 0, 0, 200], width_px = 2 }
+orientation = "stacked"
+slashed_zero = false
+
+[[layer]]
+type = "gradient"
+id = "bottom_fade"
+anchor = "BL"
+width_pct = 100.0
+height_pct = 35.0
+from_color = [0, 0, 0, 0]
+to_color = [0, 0, 0, 200]
+angle_deg = 0.0
+
+[[layer]]
+type = "text"
+id = "tocall_de_call"
+text = "%o de %c"
+anchor = "BC"
+offset_x_pct = 0.0
+offset_y_pct = 7.0
+font_family = "DejaVu Sans Bold"
+font_size_pct = 12.0
+fill = [255, 255, 255, 255]
+shadow = { offset_x = 2, offset_y = 2, color = [0, 0, 0, 220], blur_px = 0.0 }
+slashed_zero = true
+align = "center"

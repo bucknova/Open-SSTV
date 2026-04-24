@@ -39,7 +39,25 @@ from open_sstv.templates.model import (
     Template,
     TextLayer,
 )
+from open_sstv.templates.manager import (
+    default_templates_dir,
+    delete,
+    get_templates_by_role,
+    install_starter_pack,
+    list_templates,
+    load_by_path,
+    save,
+    starter_pack_installed,
+)
+from open_sstv.templates.migration import run_migration
 from open_sstv.templates.renderer import render_template
+from open_sstv.templates.toml_io import (
+    CURRENT_SCHEMA_VERSION,
+    SchemaVersionError,
+    TemplateLoadError,
+    load_template,
+    save_template,
+)
 from open_sstv.templates.tokens import TokenContext, resolve_text, resolve_tokens
 
 __all__ = [
@@ -67,8 +85,22 @@ __all__ = [
     "Template",
     "TextLayer",
     # v0.3 functions
+    "CURRENT_SCHEMA_VERSION",
+    "SchemaVersionError",
+    "TemplateLoadError",
+    "default_templates_dir",
+    "delete",
+    "get_templates_by_role",
+    "install_starter_pack",
     "is_font_available",
+    "list_templates",
+    "load_by_path",
+    "load_template",
     "render_template",
     "resolve_font_path",
     "resolve_text",
+    "run_migration",
+    "save",
+    "save_template",
+    "starter_pack_installed",
 ]

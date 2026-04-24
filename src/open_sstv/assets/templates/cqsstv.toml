@@ -1,0 +1,70 @@
+[template]
+name = "CQSSTV"
+role = "cq"
+reference_frame = [320, 256]
+schema_version = 1
+description = "Classic MMSSTV-style CQ call. Green banner, red CQSSTV text, blue own-call lower-right."
+
+[[layer]]
+type = "photo"
+id = "base_photo"
+anchor = "FILL"
+fit = "cover"
+
+[[layer]]
+type = "rect"
+id = "top_banner"
+anchor = "TL"
+width_pct = 100.0
+height_pct = 9.0
+fill = [0, 130, 0, 235]
+
+[[layer]]
+type = "text"
+id = "banner_call"
+text = "%c"
+anchor = "TL"
+offset_x_pct = 1.0
+offset_y_pct = 1.0
+font_family = "DejaVu Sans Bold"
+font_size_pct = 6.5
+fill = [255, 255, 255, 255]
+slashed_zero = true
+
+[[layer]]
+type = "text"
+id = "banner_mode"
+text = "%m"
+anchor = "TR"
+offset_x_pct = 1.0
+offset_y_pct = 1.0
+font_family = "DejaVu Sans Bold"
+font_size_pct = 6.5
+fill = [255, 255, 200, 255]
+slashed_zero = false
+
+[[layer]]
+type = "text"
+id = "cqsstv_text"
+text = "CQSSTV"
+anchor = "TL"
+offset_x_pct = 3.0
+offset_y_pct = 12.0
+font_family = "DejaVu Sans Bold"
+font_size_pct = 28.0
+fill = [255, 20, 20, 255]
+stroke = { color = [255, 255, 255, 255], width_px = 4 }
+slashed_zero = false
+
+[[layer]]
+type = "text"
+id = "big_call"
+text = "%c"
+anchor = "BR"
+offset_x_pct = 3.0
+offset_y_pct = 5.0
+font_family = "DejaVu Sans Bold"
+font_size_pct = 22.0
+fill = [0, 80, 255, 255]
+stroke = { color = [255, 255, 255, 255], width_px = 4 }
+slashed_zero = true

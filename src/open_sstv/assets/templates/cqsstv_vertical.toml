@@ -1,0 +1,47 @@
+[template]
+name = "CQSSTV Vertical"
+role = "cq"
+reference_frame = [320, 256]
+schema_version = 1
+description = "Vertical CQ variant. CQSSTV stacked letter-over-letter on left edge, own call bottom-right."
+
+[[layer]]
+type = "photo"
+id = "base_photo"
+anchor = "FILL"
+fit = "cover"
+
+[[layer]]
+type = "rect"
+id = "left_strip"
+anchor = "TL"
+width_pct = 14.0
+height_pct = 100.0
+fill = [0, 0, 0, 160]
+
+[[layer]]
+type = "text"
+id = "cqsstv_stacked"
+text = "CQSSTV"
+anchor = "CL"
+offset_x_pct = 1.5
+offset_y_pct = 0.0
+font_family = "DejaVu Sans Bold"
+font_size_pct = 9.0
+fill = [255, 50, 50, 255]
+stroke = { color = [255, 255, 255, 255], width_px = 2 }
+orientation = "stacked"
+slashed_zero = false
+
+[[layer]]
+type = "text"
+id = "big_call"
+text = "%c"
+anchor = "BR"
+offset_x_pct = 2.0
+offset_y_pct = 4.0
+font_family = "DejaVu Sans Bold"
+font_size_pct = 16.0
+fill = [0, 100, 255, 255]
+stroke = { color = [255, 255, 255, 255], width_px = 3 }
+slashed_zero = true

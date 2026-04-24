@@ -1,0 +1,51 @@
+[template]
+name = "73"
+role = "closing"
+reference_frame = [320, 256]
+schema_version = 1
+description = "Bold closing template. Red 73 center, own call top-right, ToCall de Call bottom with shadow."
+
+[[layer]]
+type = "photo"
+id = "base_photo"
+anchor = "FILL"
+fit = "cover"
+
+[[layer]]
+type = "text"
+id = "call_tr"
+text = "%c"
+anchor = "TR"
+offset_x_pct = 2.0
+offset_y_pct = 2.0
+font_family = "DejaVu Sans Bold"
+font_size_pct = 7.0
+fill = [255, 255, 255, 255]
+slashed_zero = true
+
+[[layer]]
+type = "text"
+id = "big_73"
+text = "73"
+anchor = "C"
+offset_x_pct = 0.0
+offset_y_pct = -8.0
+font_family = "DejaVu Sans Bold"
+font_size_pct = 38.0
+fill = [255, 30, 30, 255]
+stroke = { color = [255, 255, 255, 255], width_px = 5 }
+slashed_zero = false
+
+[[layer]]
+type = "text"
+id = "tocall_de_call"
+text = "%o de %c"
+anchor = "BC"
+offset_x_pct = 0.0
+offset_y_pct = 7.0
+font_family = "DejaVu Sans Bold"
+font_size_pct = 13.0
+fill = [255, 255, 255, 255]
+shadow = { offset_x = 3, offset_y = 3, color = [0, 0, 0, 200], blur_px = 2.0 }
+slashed_zero = true
+align = "center"

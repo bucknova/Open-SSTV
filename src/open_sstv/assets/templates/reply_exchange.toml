@@ -1,0 +1,79 @@
+[template]
+name = "Reply / Exchange"
+role = "reply"
+reference_frame = [320, 256]
+schema_version = 1
+description = "Full exchange template: green banner with ToCall+RST, RX slot bottom-left, own call bottom-right."
+
+[[layer]]
+type = "photo"
+id = "base_photo"
+anchor = "FILL"
+fit = "cover"
+
+[[layer]]
+type = "rect"
+id = "top_banner"
+anchor = "TL"
+width_pct = 100.0
+height_pct = 9.0
+fill = [0, 130, 0, 235]
+
+[[layer]]
+type = "text"
+id = "banner_tocall"
+text = "%o"
+anchor = "TL"
+offset_x_pct = 1.0
+offset_y_pct = 1.0
+font_family = "DejaVu Sans Bold"
+font_size_pct = 6.5
+fill = [255, 80, 80, 255]
+slashed_zero = true
+
+[[layer]]
+type = "text"
+id = "banner_slash"
+text = " / "
+anchor = "TC"
+offset_x_pct = -8.0
+offset_y_pct = 1.0
+font_family = "DejaVu Sans Bold"
+font_size_pct = 6.5
+fill = [255, 255, 255, 255]
+slashed_zero = false
+
+[[layer]]
+type = "text"
+id = "banner_rst"
+text = "%r"
+anchor = "TC"
+offset_x_pct = 3.0
+offset_y_pct = 1.0
+font_family = "DejaVu Sans Bold"
+font_size_pct = 6.5
+fill = [255, 240, 0, 255]
+slashed_zero = false
+
+[[layer]]
+type = "rx_image"
+id = "rx_slot"
+anchor = "BL"
+offset_x_pct = 2.0
+offset_y_pct = 10.0
+width_pct = 34.0
+height_pct = 30.0
+fit = "contain"
+
+[[layer]]
+type = "text"
+id = "own_call"
+text = "%c"
+anchor = "BR"
+offset_x_pct = 2.5
+offset_y_pct = 4.0
+font_family = "DejaVu Sans Bold"
+font_size_pct = 14.0
+fill = [0, 100, 255, 255]
+stroke = { color = [255, 255, 255, 255], width_px = 3 }
+slashed_zero = true

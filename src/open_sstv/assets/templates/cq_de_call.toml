@@ -1,0 +1,47 @@
+[template]
+name = "CQ de Call"
+role = "cq"
+reference_frame = [320, 256]
+schema_version = 1
+description = "Minimal CQ template. Own callsign top-right, large CQ de CALL bottom with cyan ghost shadow."
+
+[[layer]]
+type = "photo"
+id = "base_photo"
+anchor = "FILL"
+fit = "cover"
+
+[[layer]]
+type = "gradient"
+id = "bottom_fade"
+anchor = "BL"
+width_pct = 100.0
+height_pct = 45.0
+from_color = [0, 0, 0, 0]
+to_color = [0, 0, 0, 210]
+angle_deg = 0.0
+
+[[layer]]
+type = "text"
+id = "call_tr"
+text = "%c"
+anchor = "TR"
+offset_x_pct = 2.0
+offset_y_pct = 2.0
+font_family = "DejaVu Sans Bold"
+font_size_pct = 7.0
+fill = [255, 255, 255, 255]
+slashed_zero = true
+
+[[layer]]
+type = "text"
+id = "cq_de_text"
+text = "CQ de %c"
+anchor = "BC"
+offset_x_pct = 0.0
+offset_y_pct = 8.0
+font_family = "DejaVu Sans Bold"
+font_size_pct = 17.0
+fill = [255, 255, 255, 255]
+shadow = { offset_x = 0, offset_y = 0, color = [0, 200, 255, 180], blur_px = 6.0 }
+slashed_zero = true
