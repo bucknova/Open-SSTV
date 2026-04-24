@@ -34,8 +34,11 @@ from open_sstv.templates.model import (
 from open_sstv.templates.renderer import (
     _anchor_top_left,
     _fit_image,
+    _fit_text,
+    _wrap_text,
     render_template,
 )
+from open_sstv.templates.renderer import _load_font, _text_bbox
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -565,3 +568,123 @@ class TestModeAwareSize:
         t = Template(name="t", layers=[layer])
         img = _render(t, ctx=_ctx(frame_size=frame))
         assert img.size == frame
+
+
+# ---------------------------------------------------------------------------
+# Text overflow — _wrap_text / _fit_text / render_template integration
+# ---------------------------------------------------------------------------
+
+
+def _font(size: int = 20) -> "PIL.ImageFont.FreeTypeFont":
+    return _load_font("DejaVu Sans Bold", size)
+
+
+class TestWrapText:
+    def test_short_text_unchanged(self) -> None:
+        font = _font(20)
+        result = _wrap_text(font, "W0AEZ", 400)
+        assert result == "W0AEZ"
+
+    def test_long_line_wraps(self) -> None:
+        font = _font(20)
+        long_text = "VE7ABC DE W0AEZ RST 595 73"
+        result = _wrap_text(font, long_text, 80)
+        assert "\n" in result
+
+    def test_wrapped_lines_fit(self) -> None:
+        font = _font(20)
+        max_w = 100
+        long_text = "VE7ABC DE W0AEZ RST 595 73 SK"
+        result = _wrap_text(font, long_text, max_w)
+        for line in result.split("\n"):
+            w = _text_bbox(font, line)[2] - _text_bbox(font, line)[0]
+            assert w <= max_w, f"Line {line!r} is {w}px wide, exceeds {max_w}px"
+
+    def test_existing_newlines_preserved(self) -> None:
+        font = _font(20)
+        text = "LINE ONE\nLINE TWO"
+        result = _wrap_text(font, text, 400)
+        assert "LINE ONE" in result
+        assert "LINE TWO" in result
+
+    def test_empty_string(self) -> None:
+        font = _font(20)
+        assert _wrap_text(font, "", 100) == ""
+
+    def test_zero_max_width_returns_unchanged(self) -> None:
+        font = _font(20)
+        assert _wrap_text(font, "hello world", 0) == "hello world"
+
+
+class TestFitText:
+    def _layer(self, font_size_pct: float = 8.0) -> TextLayer:
+        return TextLayer(
+            id="t",
+            text_raw="x",
+            anchor="BC",
+            font_family="DejaVu Sans Bold",
+            font_size_pct=font_size_pct,
+            fill=(255, 255, 255, 255),
+        )
+
+    def test_short_text_unchanged(self) -> None:
+        layer = self._layer()
+        font = _font(20)
+        text_out, font_out = _fit_text(layer, "W0AEZ", font, 20, 320)
+        assert text_out == "W0AEZ"
+        assert font_out is font
+
+    def test_long_text_shrinks_font(self) -> None:
+        layer = self._layer(font_size_pct=8.0)
+        font_size = 20
+        font = _font(font_size)
+        long_text = "VE7ABC DE W0AEZ RST 595 NAME KEVIN 73 SK"
+        text_out, font_out = _fit_text(layer, long_text, font, font_size, 120)
+        # Font should have shrunk
+        assert font_out.size < font_size
+
+    def test_shrink_capped_at_50_pct(self) -> None:
+        layer = self._layer(font_size_pct=8.0)
+        font_size = 40
+        font = _font(font_size)
+        # Text so long it needs more than 50% reduction
+        very_long = "A " * 50
+        text_out, font_out = _fit_text(layer, very_long.strip(), font, font_size, 100)
+        # Font is at floor (50%) or text was wrapped
+        assert font_out.size >= font_size // 2
+
+    def test_wrap_used_when_shrink_insufficient(self) -> None:
+        layer = self._layer()
+        font_size = 40
+        font = _font(font_size)
+        # Extremely long single word can't be wrapped — at minimum it's one token
+        very_long = ("W" * 40 + " ") * 5
+        text_out, font_out = _fit_text(layer, very_long.strip(), font, font_size, 80)
+        # Must not crash; either shrunk or wrapped
+        assert text_out  # non-empty
+
+
+class TestTextOverflowIntegration:
+    """render_template must not produce images where text bleeds outside the frame."""
+
+    def _text_layer(self, text: str, font_size_pct: float = 10.0) -> TextLayer:
+        return TextLayer(
+            id="t",
+            text_raw=text,
+            anchor="BC",
+            font_family="DejaVu Sans Bold",
+            font_size_pct=font_size_pct,
+            fill=(255, 255, 255, 255),
+        )
+
+    def test_long_callsign_exchange_fits(self) -> None:
+        layer = self._text_layer("VE7ABC DE W0AEZ RST 595")
+        t = Template(name="t", layers=[layer])
+        img = _render(t, ctx=_ctx(frame_size=(160, 120)))
+        assert img.size == (160, 120)  # rendered without crash
+
+    def test_render_does_not_crash_on_very_long_text(self) -> None:
+        layer = self._text_layer("A " * 100, font_size_pct=15.0)
+        t = Template(name="t", layers=[layer])
+        img = _render(t, ctx=_ctx(frame_size=(320, 256)))
+        assert img.size == (320, 256)

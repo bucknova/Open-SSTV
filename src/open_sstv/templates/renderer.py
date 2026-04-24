@@ -527,6 +527,71 @@ def _rasterize_pattern(
     return _apply_opacity(cell, layer.opacity)
 
 
+def _wrap_text(
+    font: PIL.ImageFont.FreeTypeFont, text: str, max_w: int
+) -> str:
+    """Break *text* at word boundaries so every line fits within *max_w* px."""
+    if max_w <= 0:
+        return text
+    out_lines: list[str] = []
+    for para in text.split("\n"):
+        words = para.split()
+        if not words:
+            out_lines.append("")
+            continue
+        cur: list[str] = []
+        for word in words:
+            candidate = " ".join(cur + [word])
+            w = _text_bbox(font, candidate)[2] - _text_bbox(font, candidate)[0]
+            if w > max_w and cur:
+                out_lines.append(" ".join(cur))
+                cur = [word]
+            else:
+                cur.append(word)
+        out_lines.append(" ".join(cur))
+    return "\n".join(out_lines)
+
+
+def _fit_text(
+    layer: TextLayer,
+    text: str,
+    font: PIL.ImageFont.FreeTypeFont,
+    font_size_px: int,
+    canvas_w: int,
+) -> tuple[str, PIL.ImageFont.FreeTypeFont]:
+    """Return (text, font) adjusted so the text fits within *canvas_w*.
+
+    Strategy (in order):
+    1. If the text already fits, return unchanged.
+    2. Shrink the font proportionally down to 50 % of the original size.
+    3. If it still doesn't fit at the floor size, word-wrap.
+    """
+    stroke_w = layer.stroke.width_px if layer.stroke else 0
+    avail_w = max(1, canvas_w - stroke_w * 2)
+    min_size = max(1, font_size_px // 2)
+
+    def _max_line_w(f: PIL.ImageFont.FreeTypeFont, t: str) -> int:
+        return max(
+            (_text_bbox(f, ln)[2] - _text_bbox(f, ln)[0]) for ln in t.split("\n")
+        )
+
+    mlw = _max_line_w(font, text)
+    if mlw <= avail_w:
+        return text, font
+
+    # Proportional shrink — one font load.
+    shrunk_size = max(min_size, int(font_size_px * avail_w / mlw))
+    if shrunk_size < font_size_px:
+        font = _load_font(layer.font_family, shrunk_size)
+        mlw = _max_line_w(font, text)
+
+    # Word-wrap fallback if still overflowing.
+    if mlw > avail_w:
+        text = _wrap_text(font, text, avail_w)
+
+    return text, font
+
+
 def _rasterize_text(
     layer: TextLayer,
     resolved_text: str,
@@ -539,6 +604,7 @@ def _rasterize_text(
     if layer.orientation == "stacked":
         text_img, x, y = _render_stacked_text(layer, resolved_text, canvas_w, canvas_h, font)
     else:
+        resolved_text, font = _fit_text(layer, resolved_text, font, font_size_px, canvas_w)
         text_img, x, y = _render_horizontal_text(layer, resolved_text, canvas_w, canvas_h, font)
 
     cell = PIL.Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
@@ -650,4 +716,4 @@ def render_template(
     return canvas.convert("RGB")
 
 
-__all__ = ["render_template"]
+__all__ = ["render_template", "_fit_text", "_wrap_text"]
