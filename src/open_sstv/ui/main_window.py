@@ -106,7 +106,7 @@ from open_sstv.ui.rx_panel import RxPanel
 from open_sstv.ui.settings_dialog import SettingsDialog
 from open_sstv.ui.tx_panel import TxPanel
 from open_sstv.core.modes import Mode
-from open_sstv.templates import TokenContext, build_autosave_filename
+from open_sstv.templates import TokenContext, build_autosave_filename, run_migration
 from open_sstv.ui.update_checker import UpdateCheckerWorker
 from open_sstv.ui.workers import RxWorker, TxWorker
 
@@ -387,10 +387,22 @@ class MainWindow(QMainWindow):
         self._radio_panel.disconnect_requested.connect(self._on_rig_disconnect)
         self._radio_panel.cancel_requested.connect(self._on_connect_cancel)
 
-        # Push callsign to TX panel for the image editor's text overlay
+        # Run v0.2 → v0.3 template migration once at startup.  Safe to call
+        # every launch — it returns immediately if templates are already
+        # present (already_populated).  Runs before TxPanel so the gallery
+        # has templates to load on first launch.
+        try:
+            run_migration()
+        except Exception as exc:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).warning("Template migration failed: %s", exc)
+
+        # Push callsign and full config to TX panel so the gallery can render
+        # token-resolved thumbnails on startup.
         self._tx_panel = TxPanel(
             templates=load_templates(),
             default_mode=self._config.default_tx_mode,
+            app_config=self._config,
             parent=self,
         )
         self._tx_panel.set_callsign(self._config.callsign)
@@ -487,6 +499,14 @@ class MainWindow(QMainWindow):
         # panel → flag-setter on GUI thread, then dispatch via queued signal
         self._tx_panel.transmit_requested.connect(self._on_transmit_requested)
         self._tx_panel.stop_requested.connect(self._on_stop_requested)
+        # v0.3: when a template is composited, suppress TxWorker's legacy
+        # banner so the template's own text layers aren't double-stamped.
+        # Direct method call is GIL-safe for a plain bool write; no queued
+        # signal needed because set_v3_template_active has no Qt event-loop
+        # dependency and the worker hasn't started TX yet when this fires.
+        self._tx_panel.template_composited.connect(
+            self._tx_worker.set_v3_template_active
+        )
         self._radio_panel.test_tone_requested.connect(self._on_test_tone_requested)
         # Private dispatch signals → worker slots (QueuedConnection across thread)
         self._request_transmit.connect(self._tx_worker.transmit)
@@ -826,6 +846,9 @@ class MainWindow(QMainWindow):
         self._radio_panel.set_callsign(self._config.callsign)
         self._tx_panel.set_callsign(self._config.callsign)
         self._tx_panel.set_default_mode(self._config.default_tx_mode)
+        # v0.3: push full config so template gallery can re-render thumbnails
+        # with updated callsign / grid / op-name token values.
+        self._tx_panel.set_app_config(self._config)
         new_output = find_output_device_by_name(self._config.audio_output_device)
         self._tx_worker.set_output_device(new_output)
         self._tx_worker.set_output_gain(self._config.audio_output_gain)

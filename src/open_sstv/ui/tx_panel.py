@@ -1,26 +1,24 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Transmit panel widget.
 
-Pure presentation: an image preview, a "Load Image..." button, a mode
-picker, Transmit/Stop buttons, and a status label. Owns no threads, no
-audio, and no rig — it just emits two signals (``transmit_requested`` and
-``stop_requested``) and exposes a few UI-state setters that ``MainWindow``
-calls in response to ``TxWorker`` signals.
-
-Drag-and-drop loading is on the Phase 3 polish list; for Phase 1 the
-Load button (which opens a ``QFileDialog``) is enough to demonstrate
-end-to-end TX.
+Pure presentation: image preview, v0.3 template gallery, QSO state,
+mode picker, and Transmit/Stop buttons.  Owns no threads, no audio,
+and no rig — it just emits signals that ``MainWindow`` forwards to
+``TxWorker``.
 
 Signals
 -------
 transmit_requested(PIL.Image.Image, Mode):
-    User clicked Transmit with a loaded image. The MainWindow forwards
-    this directly to ``TxWorker.transmit`` (Qt's auto-connect handles
-    the cross-thread queuing).
+    User clicked Transmit.  If a v0.3 template is selected, the emitted
+    image is the fully composited result (template + photo + QSO state).
+    If no template is selected, the emitted image is the loaded photo
+    unchanged — TxWorker's banner system applies in that case.
 stop_requested():
-    User clicked Stop. MainWindow calls ``TxWorker.request_stop``
-    (which is a plain method, not a slot, because the worker thread is
-    blocked in ``play_blocking``).
+    User clicked Stop.
+template_composited(bool):
+    Emitted when the selected-template state changes.  True = a v0.3
+    template has been composited into the TX image, so TxWorker should
+    skip its own banner stamp.  False = fall back to existing banner.
 """
 from __future__ import annotations
 
@@ -52,15 +50,28 @@ from open_sstv.config.templates import (
 )
 from open_sstv.core.encoder import DEFAULT_SAMPLE_RATE
 from open_sstv.core.modes import MODE_TABLE, Mode
+
+def _make_tx_context(mode: Mode, photo: "PILImage | None") -> TXContext:
+    """Build a TXContext for the given mode and photo."""
+    spec = MODE_TABLE[mode]
+    return TXContext(
+        mode_display_name=mode.value,
+        frame_size=(spec.width, spec.display_height),
+        photo_image=photo,
+    )
+from open_sstv.templates.model import QSOState, TXContext, Template
+from open_sstv.templates.renderer import render_template
 from open_sstv.ui.draw_text import draw_text_overlay
 from open_sstv.ui.image_editor import ImageEditorDialog
-from open_sstv.ui.qso_template_bar import QSOTemplateBar
+from open_sstv.ui.qso_state_widget import QSOStateWidget
 from open_sstv.ui.quick_fill_dialog import QuickFillDialog
-from open_sstv.ui.template_editor_dialog import TemplateEditorDialog
+from open_sstv.ui.template_gallery import TemplateGallery
 from open_sstv.ui.utils import pil_to_pixmap as _pil_to_pixmap
 
 if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
+
+    from open_sstv.config.schema import AppConfig
 
 
 _IMAGE_FILE_FILTER = (
@@ -73,32 +84,30 @@ class TxPanel(QWidget):
 
     transmit_requested = Signal(object, object)  # (PIL.Image.Image, Mode)
     stop_requested = Signal()
+    #: True when the emitted TX image already has a v0.3 template composited
+    #: in so TxWorker can skip its own banner stamp.
+    template_composited = Signal(bool)
 
     def __init__(
         self,
         templates: list[QSOTemplate] | None = None,
         default_mode: str | None = None,
+        app_config: "AppConfig | None" = None,
+        templates_dir: Path | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
 
         self._current_image: "PILImage | None" = None
-        # The "clean" image before any template text was burned on.
-        # Clicking a template always draws on this, so re-applying
-        # auto-clears the previous template's text.
         self._base_image: "PILImage | None" = None
         self._current_path: Path | None = None
         self._callsign: str = ""
-        self._templates: list[QSOTemplate] = templates or load_templates()
-        # Sample rate used for converting samples_played → seconds in the
-        # progress label.  Defaulted to the encoder default; ``MainWindow``
-        # calls ``set_sample_rate()`` whenever the user changes the rate
-        # in Settings (OP-06).  Without this the progress label was hard-
-        # coded to 48 kHz and showed the wrong elapsed seconds at 44.1 kHz.
+        self._app_config: "AppConfig | None" = app_config
+        self._templates_dir: Path | None = templates_dir
+        self._selected_template: Template | None = None
+        # v0.2 compat: kept so set_templates() callers don't break.
+        self._v2_templates: list[QSOTemplate] = templates or load_templates()
         self._sample_rate: int = DEFAULT_SAMPLE_RATE
-        # Full-resolution source pixmap kept so ``resizeEvent`` can
-        # rescale from the original instead of from the already-scaled
-        # label pixmap (which would progressively blur on upscale).
         self._preview_source: QPixmap | None = None
 
         layout = QVBoxLayout(self)
@@ -107,21 +116,13 @@ class TxPanel(QWidget):
         self._preview = QLabel("No image loaded")
         self._preview.setMinimumSize(320, 240)
         self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        # A subtle border so the empty preview area is visible.
+        self._preview.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
         self._preview.setStyleSheet("QLabel { border: 1px solid palette(mid); }")
         layout.addWidget(self._preview, stretch=1)
 
-        # v0.1.37: TX target status label — shows current image dims vs
-        # selected mode's target dims, colored green for aspect-match
-        # and amber for mismatch.  User-reported: "The TX window does
-        # not reflect the mode the user selected.  User selects Martin
-        # M1 and crops image.  User moves to Martin M2.  The TX window
-        # still shows the images for Martin M1."  The preview pixmap
-        # stays as-loaded (changing it on mode change would stretch/
-        # squash user content behind their back), but this label and
-        # the dashed outline drawn by ``_paint_target_outline`` make
-        # the mismatch visible at a glance.
+        # TX target status label (aspect match / mismatch).
         self._tx_target_status = QLabel("")
         self._tx_target_status.setWordWrap(True)
         self._tx_target_status.setStyleSheet(
@@ -129,12 +130,19 @@ class TxPanel(QWidget):
         )
         layout.addWidget(self._tx_target_status)
 
-        # --- QSO template bar ---
-        self._template_bar = QSOTemplateBar(self._templates, self)
-        self._template_bar.template_activated.connect(self._on_template_activated)
-        self._template_bar.clear_text_requested.connect(self._on_clear_text)
-        self._template_bar.edit_templates_requested.connect(self._on_edit_templates)
-        layout.addWidget(self._template_bar)
+        # --- v0.3 Template Gallery ---
+        self._gallery = TemplateGallery(
+            app_config=app_config,
+            templates_dir=templates_dir,
+            parent=self,
+        )
+        self._gallery.template_selected.connect(self._on_v3_template_selected)
+        layout.addWidget(self._gallery)
+
+        # --- QSO State widget ---
+        self._qso_widget = QSOStateWidget(self)
+        self._qso_widget.state_changed.connect(self._on_qso_state_changed)
+        layout.addWidget(self._qso_widget)
 
         # --- Mode picker ---
         mode_row = QHBoxLayout()
@@ -145,12 +153,13 @@ class TxPanel(QWidget):
         )
         for mode in Mode:
             spec = MODE_TABLE[mode]
-            label = f"{mode.value}  ({spec.width}\u00d7{spec.display_height}, {spec.total_duration_s:.0f}s)"
+            label = (
+                f"{mode.value}  "
+                f"({spec.width}\u00d7{spec.display_height}, "
+                f"{spec.total_duration_s:.0f}s)"
+            )
             self._mode_combo.addItem(label, mode)
         if default_mode:
-            # Find the combo entry whose Mode.value matches the config string.
-            # Qt may unwrap the stored StrEnum back to a plain str via QVariant,
-            # so guard against both a Mode object and a raw string.
             for i in range(self._mode_combo.count()):
                 item = self._mode_combo.itemData(i)
                 if item is not None:
@@ -158,9 +167,6 @@ class TxPanel(QWidget):
                     if item_value == default_mode:
                         self._mode_combo.setCurrentIndex(i)
                         break
-        # v0.1.37: refresh the outline + status label when the user
-        # changes modes so they can see the target dimensions and
-        # aspect match/mismatch before clicking Transmit.
         self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         mode_row.addWidget(self._mode_combo, stretch=1)
         layout.addLayout(mode_row)
@@ -215,30 +221,41 @@ class TxPanel(QWidget):
         self._status.setWordWrap(True)
         layout.addWidget(self._status)
 
-        # Pre-load the bundled test image so the TX panel is ready to
-        # transmit immediately on first launch without the user having
-        # to click Load Image.
+        # Load bundled test image so the panel is transmit-ready on startup.
         _default = Path(__file__).parent.parent / "assets" / "testimage.jpg"
         if _default.is_file():
             self.load_image(_default)
 
-    # === public API used by MainWindow ===
+        # Load templates into gallery (may be empty on fresh install before
+        # migration runs; gallery silently shows "No templates installed").
+        self._gallery.reload_templates()
+
+    # === Public API ===
 
     @property
     def current_image(self) -> "PILImage | None":
-        """The PIL image currently loaded in the TX panel, or None."""
         return self._current_image
 
-    def load_image(self, path: Path) -> None:
-        """Load an image from disk into the preview.
+    def set_app_config(self, cfg: "AppConfig") -> None:
+        """Push updated config to gallery for token resolution."""
+        self._app_config = cfg
+        self._gallery.set_app_config(cfg)
+        # Also update the callsign shortcut used elsewhere.
+        self._callsign = cfg.callsign
 
-        Public so the main window can also wire it to a ``--image`` CLI
-        flag later. Failures are reported via the status label rather
-        than raised — TX panel is "GUI in, GUI out".
-        """
+    def reload_templates(self) -> None:
+        """Ask the gallery to reload from disk (called after migration)."""
+        self._gallery.reload_templates()
+
+    def get_qso_state(self) -> QSOState:
+        """Return the current QSO state from the QSO widget."""
+        return self._qso_widget.get_state()
+
+    def load_image(self, path: Path) -> None:
+        """Load an image from disk into the preview."""
         try:
             img = Image.open(path)
-            img.load()  # force decode now so a corrupt file fails here, not on TX
+            img.load()
         except (OSError, ValueError) as exc:
             self._status.setText(f"Failed to load: {exc}")
             return
@@ -256,14 +273,155 @@ class TxPanel(QWidget):
         self._edit_btn.setEnabled(True)
         self._status.setText(f"Loaded: {path.name}  ({img.width}×{img.height})")
 
-    def resizeEvent(self, event) -> None:  # noqa: N802 — Qt API
-        """Rescale the preview when the panel resizes.
+        # Tell the gallery to re-render thumbs with the new photo.
+        self._gallery.set_photo(img)
+        # Refresh the live preview composite.
+        self._refresh_composite_preview()
 
-        Always scales from ``_preview_source`` (the original file
-        pixmap) so repeated resizes don't accumulate blur from
-        re-scaling an already-scaled copy.
-        """
+    def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
+        self._update_preview_pixmap()
+
+    def set_transmitting(self, transmitting: bool) -> None:
+        has_image = self._current_image is not None
+        self._transmit_btn.setEnabled(not transmitting and has_image)
+        self._stop_btn.setEnabled(transmitting)
+        self._load_btn.setEnabled(not transmitting)
+        self._edit_btn.setEnabled(not transmitting and has_image)
+        self._mode_combo.setEnabled(not transmitting)
+        if transmitting:
+            self._progress_bar.setValue(0)
+            self._progress_bar.setVisible(True)
+        else:
+            self._progress_bar.setVisible(False)
+
+    @Slot(int, int)
+    def show_tx_progress(self, samples_played: int, samples_total: int) -> None:
+        if samples_total > 0:
+            pct = int(samples_played * 100 / samples_total)
+            elapsed_s = int(samples_played / self._sample_rate)
+            total_s = int(samples_total / self._sample_rate)
+            self._progress_bar.setValue(pct)
+            self._progress_bar.setFormat(f"{pct}% — {elapsed_s}s / {total_s}s")
+
+    def set_sample_rate(self, sample_rate: int) -> None:
+        if sample_rate > 0:
+            self._sample_rate = sample_rate
+
+    def set_status(self, text: str) -> None:
+        self._status.setText(text)
+
+    def set_callsign(self, callsign: str) -> None:
+        self._callsign = callsign
+
+    def set_default_mode(self, mode_value: str) -> None:
+        for i in range(self._mode_combo.count()):
+            item = self._mode_combo.itemData(i)
+            if item is not None:
+                item_val = item if isinstance(item, str) else item.value
+                if item_val == mode_value:
+                    self._mode_combo.setCurrentIndex(i)
+                    break
+
+    def selected_mode(self) -> Mode:
+        data = self._mode_combo.currentData()
+        return data if isinstance(data, Mode) else Mode(data)
+
+    def set_templates(self, templates: list[QSOTemplate]) -> None:
+        """v0.2 compat shim — no-op in v0.3."""
+        self._v2_templates = templates
+
+    # === Private slots ===
+
+    @Slot(int)
+    def _on_mode_changed(self, _index: int) -> None:
+        self._gallery.set_mode(self.selected_mode())
+        self._update_preview_pixmap()
+
+    @Slot(object)
+    def _on_v3_template_selected(self, template: "Template | None") -> None:
+        self._selected_template = template
+        self.template_composited.emit(template is not None)
+        self._refresh_composite_preview()
+
+    @Slot(object)
+    def _on_qso_state_changed(self, qso_state: QSOState) -> None:
+        self._gallery.set_qso_state(qso_state)
+        self._refresh_composite_preview()
+
+    @Slot()
+    def _on_load_clicked(self) -> None:
+        path_str, _ = QFileDialog.getOpenFileName(
+            self, "Load Image", "", _IMAGE_FILE_FILTER
+        )
+        if path_str:
+            self.load_image(Path(path_str))
+
+    @Slot()
+    def _on_edit_clicked(self) -> None:
+        if self._current_image is None:
+            return
+        dlg = ImageEditorDialog(
+            self._current_image,
+            self.selected_mode(),
+            callsign=self._callsign,
+            parent=self,
+        )
+        if dlg.exec() == ImageEditorDialog.DialogCode.Accepted:
+            result = dlg.result_image()
+            if result is not None:
+                self._current_image = result
+                base = dlg.result_base_image()
+                self._base_image = base if base is not None else result.copy()
+                self._preview_source = _pil_to_pixmap(result)
+                self._update_preview_pixmap()
+                self._preview.setText("")
+                self._status.setText(f"Edited: {result.width}x{result.height}")
+                self._gallery.set_photo(self._base_image)
+                self._refresh_composite_preview()
+
+    @Slot()
+    def _on_transmit_clicked(self) -> None:
+        if self._current_image is None:
+            return
+        mode = self.selected_mode()
+        if self._selected_template is not None and self._base_image is not None:
+            # v0.3: render template composite and emit that.
+            composed = self._compose_template()
+            if composed is not None:
+                self.transmit_requested.emit(composed, mode)
+                return
+        # Fallback: emit the current image (TxWorker banner will apply if enabled).
+        self.transmit_requested.emit(self._current_image, mode)
+
+    # === Preview helpers ===
+
+    def _compose_template(self) -> "PILImage | None":
+        """Render the selected template over the base photo. Returns None on error."""
+        if self._selected_template is None or self._base_image is None:
+            return None
+        if self._app_config is None:
+            return None
+        mode = self.selected_mode()
+        qso = self._qso_widget.get_state()
+        ctx = _make_tx_context(mode, self._base_image)
+        try:
+            return render_template(self._selected_template, qso, self._app_config, ctx)
+        except Exception as exc:  # noqa: BLE001
+            self._status.setText(f"Template render failed: {exc}")
+            return None
+
+    def _refresh_composite_preview(self) -> None:
+        """Update the main preview with the current template composite."""
+        if self._selected_template is None or self._base_image is None:
+            # No template selected — show the raw loaded image.
+            if self._preview_source is None and self._base_image is not None:
+                self._preview_source = _pil_to_pixmap(self._base_image)
+            self._update_preview_pixmap()
+            return
+        composed = self._compose_template()
+        if composed is not None:
+            self._preview_source = _pil_to_pixmap(composed)
         self._update_preview_pixmap()
 
     def _update_preview_pixmap(self) -> None:
@@ -274,35 +432,19 @@ class TxPanel(QWidget):
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
-        # v0.1.37: paint a dashed outline showing the selected mode's
-        # aspect-ratio box on top of the scaled preview.  Gives the
-        # user an at-a-glance indicator of how the TX target matches
-        # (or mismatches) the loaded image; complements the text
-        # status label below.
         annotated = self._paint_target_outline(scaled)
         self._preview.setPixmap(annotated)
         self._update_tx_target_status()
 
     def _paint_target_outline(self, pixmap: QPixmap) -> QPixmap:
-        """Return ``pixmap`` with a dashed rectangle painted to show
-        the target mode's aspect-ratio box, centered on the preview.
-
-        When the source image's aspect matches the target, the box
-        covers the full preview (drawn in a neutral colour).  When
-        aspects differ, the box is a smaller centered rectangle
-        (drawn in amber) so the user can see that the LANCZOS resize
-        to target will distort detail outside the box.
-        """
         if self._current_image is None:
             return pixmap
-
         try:
             mode = self.selected_mode()
             spec = MODE_TABLE[mode]
         except (ValueError, KeyError):
             return pixmap
 
-        # Current image + target dimensions and aspects
         iw, ih = self._current_image.width, self._current_image.height
         tw, th = spec.width, spec.display_height
         if iw <= 0 or ih <= 0 or tw <= 0 or th <= 0:
@@ -310,18 +452,11 @@ class TxPanel(QWidget):
 
         src_aspect = iw / ih
         tgt_aspect = tw / th
-        # Tolerance: treat aspects within 1% as "matching".
         aspect_match = abs(src_aspect - tgt_aspect) / tgt_aspect < 0.01
 
-        # Compute the target box's size in displayed-pixmap coords.
-        # The displayed pixmap has the same aspect as the source image
-        # (KeepAspectRatio scale).  Fit the target aspect inside it,
-        # centered.
         pw = pixmap.width()
         ph = pixmap.height()
         if tgt_aspect > src_aspect:
-            # Target is wider than source → target box is full width,
-            # shorter height.
             box_w = pw
             box_h = int(round(pw / tgt_aspect))
         else:
@@ -330,18 +465,14 @@ class TxPanel(QWidget):
         box_x = (pw - box_w) // 2
         box_y = (ph - box_h) // 2
 
-        # Draw.  Use a writable copy so we don't mutate the scaled
-        # original (which may be reused by a later resize).
         out = QPixmap(pixmap)
         painter = QPainter(out)
         try:
-            if aspect_match:
-                # Subtle neutral outline — "you're good, this will TX
-                # without distortion."
-                pen_color = QColor(180, 220, 180, 180)  # soft green
-            else:
-                # Amber — aspect mismatch, LANCZOS will stretch.
-                pen_color = QColor(255, 170, 60, 220)
+            pen_color = (
+                QColor(180, 220, 180, 180)
+                if aspect_match
+                else QColor(255, 170, 60, 220)
+            )
             pen = QPen(pen_color)
             pen.setStyle(Qt.PenStyle.DashLine)
             pen.setWidth(2)
@@ -352,11 +483,6 @@ class TxPanel(QWidget):
         return out
 
     def _update_tx_target_status(self) -> None:
-        """Refresh the small status label beneath the preview.
-        Shows current image dims vs selected mode's target dims with
-        a match/mismatch verdict.  Colour-coded: green for aspect
-        match, amber for mismatch.
-        """
         if self._current_image is None:
             self._tx_target_status.setText("")
             self._tx_target_status.setStyleSheet(
@@ -382,190 +508,61 @@ class TxPanel(QWidget):
                 f"Image {iw}×{ih} matches {mode.value} target — "
                 "TX will encode at native resolution."
             )
-            bg = "#e6f4ea"  # very light green
-            fg = "#1b5e20"
+            bg, fg = "#e6f4ea", "#1b5e20"
         elif aspect_match:
             text = (
                 f"Image {iw}×{ih} · {mode.value} target {tw}×{th} — "
                 "aspect matches; LANCZOS resize on TX, no distortion."
             )
-            bg = "#e6f4ea"
-            fg = "#1b5e20"
+            bg, fg = "#e6f4ea", "#1b5e20"
         else:
             text = (
                 f"Image {iw}×{ih} · {mode.value} target {tw}×{th} — "
                 "aspect mismatch; image will be stretched.  Consider "
                 "re-editing for the new mode."
             )
-            bg = "#fff4e5"  # light amber
-            fg = "#b26a00"
+            bg, fg = "#fff4e5", "#b26a00"
         self._tx_target_status.setText(text)
         self._tx_target_status.setStyleSheet(
             f"QLabel {{ padding: 4px 8px; border-radius: 3px; "
             f"background: {bg}; color: {fg}; }}"
         )
 
-    @Slot(int)
-    def _on_mode_changed(self, _index: int) -> None:
-        """Mode combo changed: refresh the preview outline + status
-        so the user sees the new target dims right away."""
-        self._update_preview_pixmap()
 
-    def set_transmitting(self, transmitting: bool) -> None:
-        """Toggle button state for the in-flight TX cycle."""
-        has_image = self._current_image is not None
-        self._transmit_btn.setEnabled(not transmitting and has_image)
-        self._stop_btn.setEnabled(transmitting)
-        self._load_btn.setEnabled(not transmitting)
-        self._edit_btn.setEnabled(not transmitting and has_image)
-        self._mode_combo.setEnabled(not transmitting)
-        if transmitting:
-            self._progress_bar.setValue(0)
-            self._progress_bar.setVisible(True)
-        else:
-            self._progress_bar.setVisible(False)
-
-    @Slot(int, int)
-    def show_tx_progress(self, samples_played: int, samples_total: int) -> None:
-        """Update the progress bar during transmission.
-
-        Uses the panel's configured sample rate (set via ``set_sample_rate``)
-        rather than the hardcoded 48 kHz that the original implementation
-        assumed.  At 44.1 kHz a 114 s Martin M1 transmission used to display
-        "124 s / 124 s" at completion (OP-06).
-        """
-        if samples_total > 0:
-            pct = int(samples_played * 100 / samples_total)
-            elapsed_s = int(samples_played / self._sample_rate)
-            total_s = int(samples_total / self._sample_rate)
-            self._progress_bar.setValue(pct)
-            self._progress_bar.setFormat(
-                f"{pct}% — {elapsed_s}s / {total_s}s"
-            )
-
-    def set_sample_rate(self, sample_rate: int) -> None:
-        """Update the rate used to convert samples → seconds in the
-        progress label.  Called from ``MainWindow._apply_config`` so the
-        label tracks Settings changes (OP-06)."""
-        if sample_rate > 0:
-            self._sample_rate = sample_rate
-
-    def set_status(self, text: str) -> None:
-        self._status.setText(text)
-
-    def set_callsign(self, callsign: str) -> None:
-        """Update the callsign pre-populated in the image editor."""
-        self._callsign = callsign
-
-    def set_default_mode(self, mode_value: str) -> None:
-        """Select the combo entry matching ``mode_value`` (a Mode.value string).
-
-        Called from MainWindow when settings are saved so the mode picker
-        reflects any change the user made in the Settings dialog.
-        Does nothing if the value doesn't match any known mode.
-        """
-        for i in range(self._mode_combo.count()):
-            item = self._mode_combo.itemData(i)
-            if item is not None:
-                item_val = item if isinstance(item, str) else item.value
-                if item_val == mode_value:
-                    self._mode_combo.setCurrentIndex(i)
-                    break
-
-    def selected_mode(self) -> Mode:
-        # Qt's QVariant unwraps a StrEnum back to a plain ``str`` when it
-        # comes out of ``currentData()``, so we have to re-wrap.
-        data = self._mode_combo.currentData()
-        return data if isinstance(data, Mode) else Mode(data)
-
-    # === private slots ===
-
-    @Slot()
-    def _on_load_clicked(self) -> None:
-        path_str, _ = QFileDialog.getOpenFileName(
-            self, "Load Image", "", _IMAGE_FILE_FILTER
-        )
-        if path_str:
-            self.load_image(Path(path_str))
-
-    @Slot()
-    def _on_edit_clicked(self) -> None:
-        if self._current_image is None:
-            return
-        dlg = ImageEditorDialog(
-            self._current_image,
-            self.selected_mode(),
-            callsign=self._callsign,
-            parent=self,
-        )
-        if dlg.exec() == ImageEditorDialog.DialogCode.Accepted:
-            result = dlg.result_image()
-            if result is not None:
-                self._current_image = result
-                # Use the text-free base so "Clear Text" removes ALL
-                # overlays (template-applied AND manually-added in the
-                # editor).  Falls back to a copy of the full result if
-                # the editor didn't provide a separate base (shouldn't
-                # happen, but defensive).
-                base = dlg.result_base_image()
-                self._base_image = base if base is not None else result.copy()
-                self._preview_source = _pil_to_pixmap(result)
-                self._update_preview_pixmap()
-                self._preview.setText("")
-                self._status.setText(
-                    f"Edited: {result.width}x{result.height}"
-                )
-
-    @Slot()
-    def _on_transmit_clicked(self) -> None:
-        if self._current_image is None:
-            return
-        self.transmit_requested.emit(self._current_image, self.selected_mode())
-
-    # === template slots ===
+    # -----------------------------------------------------------------------
+    # v0.2 compat private methods
+    # These are no longer wired to any UI element (QSOTemplateBar was
+    # replaced by the v0.3 gallery) but remain as private helpers so that
+    # existing tests and external callers that poke the internal API don't
+    # immediately break.  Will be removed in v0.4.
+    # -----------------------------------------------------------------------
 
     @Slot(object)
-    def _on_template_activated(self, tpl: QSOTemplate) -> None:
-        """Handle a template button click from the bar."""
+    def _on_template_activated(self, tpl: "QSOTemplate") -> None:
+        """Apply a v0.2 QSOTemplate overlay onto the base image."""
         if self._current_image is None:
             self._status.setText("Load an image first before applying a template.")
             return
 
-        needed = needs_user_input(tpl)
-        if needed:
+        if needs_user_input(tpl):
             dlg = QuickFillDialog(tpl, mycall=self._callsign, parent=self)
             if dlg.exec() != QuickFillDialog.DialogCode.Accepted:
                 return
             overlays = dlg.resolved_overlays()
         else:
-            # No user input needed — resolve automatically.  x/y MUST
-            # be forwarded so Custom-position overlays render at the
-            # user's saved coordinates.  Previously omitted, which
-            # caused Custom templates to fall through the ``x is None``
-            # branch in ``draw_text_overlay`` and render at top-left
-            # via ``position_to_xy("Custom", ...)`` returning the
-            # default (margin, margin).  Fixed in v0.1.36.
             overlays = []
             for ov in tpl.overlays:
                 overlays.append({
-                    "text": resolve_placeholders(
-                        ov.text, mycall=self._callsign,
-                    ),
+                    "text": resolve_placeholders(ov.text, mycall=self._callsign),
                     "position": ov.position,
                     "size": ov.size,
                     "color": ov.color,
                     "x": ov.x,
                     "y": ov.y,
                 })
-
         self._apply_overlays(overlays)
 
     def _apply_overlays(self, overlays: list[dict]) -> None:
-        """Draw resolved text overlays onto the base (clean) TX image.
-
-        Always starts from ``_base_image`` so re-applying a template
-        auto-clears the previous one's text.
-        """
         if self._base_image is None:
             return
         img = self._base_image.copy()
@@ -589,7 +586,6 @@ class TxPanel(QWidget):
 
     @Slot()
     def _on_clear_text(self) -> None:
-        """Restore the base (clean) image, removing all template text."""
         if self._base_image is None:
             return
         self._current_image = self._base_image.copy()
@@ -597,25 +593,6 @@ class TxPanel(QWidget):
         self._update_preview_pixmap()
         self._preview.setText("")
         self._status.setText("Template text cleared.")
-
-    @Slot()
-    def _on_edit_templates(self) -> None:
-        """Open the template editor dialog."""
-        dlg = TemplateEditorDialog(
-            self._templates, mycall=self._callsign, parent=self
-        )
-        if dlg.exec() == TemplateEditorDialog.DialogCode.Accepted:
-            self._templates = dlg.result_templates()
-            try:
-                save_templates(self._templates)
-            except OSError as exc:
-                QMessageBox.warning(self, "Could not save templates", str(exc))
-            self._template_bar.set_templates(self._templates)
-
-    def set_templates(self, templates: list[QSOTemplate]) -> None:
-        """Replace the current template list and refresh the bar."""
-        self._templates = templates
-        self._template_bar.set_templates(templates)
 
 
 __all__ = ["TxPanel"]
