@@ -165,4 +165,245 @@ def resolve_tokens(pattern: str, ctx: TokenContext) -> str:
     return pattern.replace(SENTINEL, "%")
 
 
-__all__ = ["TokenContext", "resolve_tokens"]
+# ---------------------------------------------------------------------------
+# v0.3 image-template token resolver
+# ---------------------------------------------------------------------------
+# The v0.2 API above (TokenContext / resolve_tokens) remains unchanged for
+# filename templates.  The functions below form the v0.3 resolver used by
+# the image-template compositor.  They share the same two-pass regex logic
+# but draw from the richer QSOState / AppConfig / TXContext context objects
+# instead of the lean filename-only TokenContext.
+# ---------------------------------------------------------------------------
+
+# Tokens whose *resolved value* is a callsign and should receive the
+# slashed-zero transform when TextLayer.slashed_zero is True.
+_CALLSIGN_PERCENT_KEYS: frozenset[str] = frozenset(["c", "o"])
+_CALLSIGN_NAMED_KEYS: frozenset[str] = frozenset(["callsign", "tocall"])
+
+# Ham-band lookup: Hz lower bound → band label.
+# Covers HF + 6 m + 2 m + 70 cm — all bands where SSTV is common.
+_BAND_EDGES: tuple[tuple[float, str], ...] = (
+    (1_800_000, "160m"),
+    (3_500_000, "80m"),
+    (5_330_500, "60m"),
+    (7_000_000, "40m"),
+    (10_100_000, "30m"),
+    (14_000_000, "20m"),
+    (18_068_000, "17m"),
+    (21_000_000, "15m"),
+    (24_890_000, "12m"),
+    (28_000_000, "10m"),
+    (50_000_000, "6m"),
+    (144_000_000, "2m"),
+    (420_000_000, "70cm"),
+    (902_000_000, "33cm"),
+    (1_240_000_000, "23cm"),
+)
+
+
+def _hz_to_band(freq_hz: float) -> str:
+    """Return the amateur-radio band label for a frequency, or '' if unknown."""
+    band = ""
+    for lower, label in _BAND_EDGES:
+        if freq_hz >= lower:
+            band = label
+    return band
+
+
+def _apply_slashed_zero(value: str) -> str:
+    """Replace ASCII '0' with 'Ø' (U+00D8) — the ham-radio convention."""
+    return value.replace("0", "\u00d8")
+
+
+def _v3_percent_table(
+    qso_state: "QSOState",
+    app_config: "AppConfig",
+    tx_context: "TXContext",
+    *,
+    now_utc: "datetime.datetime",
+    date_format: str,
+    time_format: str,
+    slashed_zero: bool,
+) -> dict[str, str]:
+    """Build the %x → resolved-string lookup for the v0.3 resolver."""
+    callsign = app_config.callsign.upper()
+    tocall = qso_state.tocall.upper()
+    freq_str = (
+        f"{tx_context.frequency_hz / 1_000_000:.4f} MHz"
+        if tx_context.frequency_hz is not None
+        else ""
+    )
+    band_str = (
+        _hz_to_band(tx_context.frequency_hz)
+        if tx_context.frequency_hz is not None
+        else ""
+    )
+    table: dict[str, str] = {
+        "c": _apply_slashed_zero(callsign) if slashed_zero else callsign,
+        "g": app_config.grid if hasattr(app_config, "grid") else "",
+        "n": app_config.op_name if hasattr(app_config, "op_name") else "",
+        "o": _apply_slashed_zero(tocall) if slashed_zero else tocall,
+        "r": qso_state.rst,
+        "m": tx_context.mode_display_name,
+        "d": now_utc.strftime(date_format),
+        "t": now_utc.strftime(time_format),
+        "f": freq_str,
+        "b": band_str,
+        "q": str(qso_state.serial),
+        "v": _open_sstv_version(),
+    }
+    # Multi-char percent tokens
+    table["name_o"] = qso_state.tocall_name
+    table["note"] = qso_state.note
+    return table
+
+
+def _v3_named_table(
+    qso_state: "QSOState",
+    app_config: "AppConfig",
+    tx_context: "TXContext",
+    *,
+    now_utc: "datetime.datetime",
+    date_format: str,
+    time_format: str,
+    slashed_zero: bool,
+) -> dict[str, str]:
+    """Build the {name} → resolved-string lookup for the v0.3 resolver."""
+    callsign = app_config.callsign.upper()
+    tocall = qso_state.tocall.upper()
+    freq_str = (
+        f"{tx_context.frequency_hz / 1_000_000:.4f} MHz"
+        if tx_context.frequency_hz is not None
+        else ""
+    )
+    band_str = (
+        _hz_to_band(tx_context.frequency_hz)
+        if tx_context.frequency_hz is not None
+        else ""
+    )
+    return {
+        "callsign": _apply_slashed_zero(callsign) if slashed_zero else callsign,
+        "grid": app_config.grid if hasattr(app_config, "grid") else "",
+        "name": app_config.op_name if hasattr(app_config, "op_name") else "",
+        "tocall": _apply_slashed_zero(tocall) if slashed_zero else tocall,
+        "rst": qso_state.rst,
+        "tocallname": qso_state.tocall_name,
+        "note": qso_state.note,
+        "mode": tx_context.mode_display_name,
+        "date": now_utc.strftime(date_format),
+        "time": now_utc.strftime(time_format),
+        "freq": freq_str,
+        "band": band_str,
+        "qso_serial": str(qso_state.serial),
+        "version": _open_sstv_version(),
+    }
+
+
+# v0.3 uses a superset regex: matches %c, %name_o, %note, %rx_tx, %ts, etc.
+_V3_PERCENT_TOKEN_RE = re.compile(r"%(name_o|note|rx_tx|ts|[a-z])")
+_V3_NAMED_TOKEN_RE = re.compile(r"\{([a-z_]+)\}")
+
+
+def _open_sstv_version() -> str:
+    try:
+        import open_sstv
+        return open_sstv.__version__
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def resolve_text(
+    text: str,
+    qso_state: "QSOState",
+    app_config: "AppConfig",
+    tx_context: "TXContext",
+    *,
+    slashed_zero: bool = True,
+    date_format: str = "%Y-%m-%d",
+    time_format: str = "%H:%M",
+    now_utc: "datetime.datetime | None" = None,
+) -> str:
+    """Resolve v0.3 image-template tokens in *text*.
+
+    Supports both ``%c`` (MMSSTV-style) and ``{callsign}`` (named) forms.
+    Unknown tokens pass through unchanged for forward-compatibility.
+
+    Parameters
+    ----------
+    text:
+        Raw template text, e.g. ``"CQ de %c"`` or ``"de {callsign}"``
+    qso_state:
+        Per-QSO dynamic fields (ToCall, RST, Name, etc.)
+    app_config:
+        User configuration (own callsign, grid, name, …)
+    tx_context:
+        TX-time context (mode name, frame size, rig frequency)
+    slashed_zero:
+        When True, ASCII ``0`` in *callsign-valued tokens only* is
+        replaced with ``Ø`` (U+00D8).  Does not affect RST, grid, etc.
+    date_format:
+        strftime pattern for ``%d`` / ``{date}`` tokens.
+    time_format:
+        strftime pattern for ``%t`` / ``{time}`` tokens.
+    now_utc:
+        UTC timestamp for date/time tokens.  Defaults to the current
+        wall-clock time; pass an explicit value to make tests deterministic.
+
+    Returns
+    -------
+    str
+        Fully resolved text.
+    """
+    if now_utc is None:
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+
+    SENTINEL = "\x00LITERAL_PERCENT\x00"
+    text = text.replace("%%", SENTINEL)
+
+    pct_table = _v3_percent_table(
+        qso_state,
+        app_config,
+        tx_context,
+        now_utc=now_utc,
+        date_format=date_format,
+        time_format=time_format,
+        slashed_zero=slashed_zero,
+    )
+
+    def _pct_sub(match: re.Match[str]) -> str:
+        return pct_table.get(match.group(1), match.group(0))
+
+    text = _V3_PERCENT_TOKEN_RE.sub(_pct_sub, text)
+
+    named_table = _v3_named_table(
+        qso_state,
+        app_config,
+        tx_context,
+        now_utc=now_utc,
+        date_format=date_format,
+        time_format=time_format,
+        slashed_zero=slashed_zero,
+    )
+
+    def _named_sub(match: re.Match[str]) -> str:
+        return named_table.get(match.group(1), match.group(0))
+
+    text = _V3_NAMED_TOKEN_RE.sub(_named_sub, text)
+
+    return text.replace(SENTINEL, "%")
+
+
+__all__ = [
+    "TokenContext",
+    "resolve_text",
+    "resolve_tokens",
+]
+
+# Deferred imports to avoid circular dependencies at module load time.
+# QSOState, AppConfig, TXContext are only needed in function signatures
+# resolved at call time (TYPE_CHECKING or runtime annotations).
+from typing import TYPE_CHECKING  # noqa: E402
+
+if TYPE_CHECKING:
+    from open_sstv.config.schema import AppConfig
+    from open_sstv.templates.model import QSOState, TXContext
