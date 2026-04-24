@@ -151,8 +151,8 @@ class _ThumbnailCard(QWidget):
         self._selected = False
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(3, 3, 3, 6)  # extra bottom margin for descenders
-        layout.setSpacing(2)
+        layout.setContentsMargins(3, 3, 3, 8)  # extra bottom margin for descenders
+        layout.setSpacing(4)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         # Thumbnail image.
@@ -170,14 +170,13 @@ class _ThumbnailCard(QWidget):
         layout.addWidget(self._thumb_label)
 
         # Template name caption.
-        # setMinimumHeight(28) ensures descenders (g, y, p, q) are never clipped.
         self._name_label = QLabel(template.name)
         self._name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._name_label.setFixedWidth(_THUMB_W)
-        self._name_label.setMinimumHeight(28)
+        self._name_label.setMinimumHeight(32)
         self._name_label.setWordWrap(True)
         self._name_label.setStyleSheet(
-            "QLabel { font-size: 9px; padding-bottom: 2px; }"
+            "QLabel { font-size: 9px; padding: 2px 0px 6px 0px; }"
         )
         layout.addWidget(self._name_label)
 
