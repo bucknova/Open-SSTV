@@ -25,7 +25,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QPoint, QRect, QSize, QTimer, Qt, Signal, Slot
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QFont, QFontMetrics, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
@@ -58,6 +58,14 @@ _log = logging.getLogger(__name__)
 _MAX_THUMB_W: int = 140
 _MIN_THUMB_W: int = 60
 _THUMB_W: int = _MAX_THUMB_W  # kept for backward-compat with existing tests
+
+# Caption font pixel size.  Set on the QLabel via QFont (not stylesheet)
+# so QFontMetrics reflects the rendered glyphs and we can size the label
+# height deterministically.
+_CAPTION_PX: int = 10
+# Maximum wrapped lines for the caption.  Long names truncate visually
+# (Qt elides at the wrap boundary); the card height stays uniform.
+_CAPTION_LINES: int = 2
 
 # Role labels shown in the filter bar.
 _ROLE_LABELS: tuple[tuple[str, str | None], ...] = (
@@ -151,7 +159,7 @@ class _ThumbnailCard(QWidget):
         self._selected = False
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(3, 3, 3, 8)  # extra bottom margin for descenders
+        layout.setContentsMargins(3, 3, 3, 3)
         layout.setSpacing(4)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
@@ -169,15 +177,23 @@ class _ThumbnailCard(QWidget):
         )
         layout.addWidget(self._thumb_label)
 
-        # Template name caption.
+        # Caption label.  Size deterministically via QFontMetrics +
+        # setFixedHeight: _FlowLayout lays out cards using sizeHint(), and
+        # a word-wrapped QLabel's sizeHint excludes both setMinimumHeight
+        # and stylesheet vertical padding — which is why the previous
+        # font-size/padding/min-height tweaks left descenders clipped.
+        caption_font = QFont()
+        caption_font.setPixelSize(_CAPTION_PX)
         self._name_label = QLabel(template.name)
+        self._name_label.setFont(caption_font)
         self._name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._name_label.setFixedWidth(_THUMB_W)
-        self._name_label.setMinimumHeight(32)
         self._name_label.setWordWrap(True)
-        self._name_label.setStyleSheet(
-            "QLabel { font-size: 9px; padding: 2px 0px 6px 0px; }"
-        )
+        fm = QFontMetrics(caption_font)
+        # fm.height() already covers ascent + descent + leading.  We add a
+        # 4 px tail so descenders (g, p, y, q) on the last wrapped line are
+        # never cropped by sub-pixel rounding or platform-specific metrics.
+        self._name_label.setFixedHeight(fm.height() * _CAPTION_LINES + 4)
         layout.addWidget(self._name_label)
 
         self._set_border()
