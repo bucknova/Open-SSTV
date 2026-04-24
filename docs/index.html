@@ -1015,9 +1015,9 @@
       if (!match) return;
       const version = match[1];
       const label = match[0].toLowerCase();
-      let stage = 'Release';
+      let stage = 'Beta';
       if (label.includes('pre-beta') || label.includes('alpha')) stage = 'Pre-Beta';
-      else if (label.includes('beta')) stage = 'Beta';
+      else if (label.includes('release') || label.includes('stable')) stage = 'Release';
       const badge = document.getElementById('version-badge');
       if (badge) badge.textContent = `${stage} · v${version}`;
     } catch (_) {}
