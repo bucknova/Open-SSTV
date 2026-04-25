@@ -159,6 +159,45 @@ def delete(path: Path) -> None:
     path.unlink()
 
 
+def duplicate_template(path: Path) -> Path:
+    """Create a copy of the template at *path*, returning the new file path.
+
+    The copy's ``name`` field gets ``" (copy)"`` appended (or ``" (copy 2)"``,
+    ``" (copy 3)"``, … if a sibling with that name already exists), and the
+    written filename is derived from the new name through the same slug
+    rules as :func:`save` so the gallery loads it on the next refresh.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the source template does not exist.
+    TemplateLoadError / SchemaVersionError
+        If the source template cannot be loaded.
+    OSError
+        On permission or I/O errors writing the copy.
+    """
+    src = load_template(path)
+    tdir = path.parent
+
+    existing = {p.stem for p in tdir.glob("*.toml")}
+
+    base_name = src.name + " (copy)"
+    new_name = base_name
+    n = 2
+    while True:
+        slug = "".join(
+            c for c in new_name.replace(" ", "_").replace("/", "_").lower()
+            if c.isalnum() or c in "_-"
+        ) or "template"
+        if slug not in existing and not (tdir / f"{slug}.toml").exists():
+            break
+        new_name = f"{src.name} (copy {n})"
+        n += 1
+
+    src.name = new_name
+    return save(src, tdir, filename=f"{slug}.toml")
+
+
 # ---------------------------------------------------------------------------
 # Starter pack
 # ---------------------------------------------------------------------------
@@ -218,6 +257,7 @@ __all__ = [
     "STARTER_TEMPLATE_FILENAMES",
     "default_templates_dir",
     "delete",
+    "duplicate_template",
     "get_templates_by_role",
     "install_starter_pack",
     "list_templates",
