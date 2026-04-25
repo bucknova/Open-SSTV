@@ -1,6 +1,6 @@
 # Open-SSTV User Guide
 
-**Version 0.2.16 (Beta)** | Created by Kevin (W0AEZ) | GPL-3.0-or-later
+**Version 0.3 (Beta)** | Created by Kevin (W0AEZ) | GPL-3.0-or-later
 
 ---
 
@@ -28,7 +28,7 @@
    - [Loading an Image](#81-loading-an-image)
    - [Editing an Image](#82-editing-an-image)
    - [Choosing an SSTV Mode](#83-choosing-an-sstv-mode)
-   - [Using QSO Templates](#84-using-qso-templates)
+   - [Template Gallery & QSO State](#84-template-gallery--qso-state)
    - [Sending the Transmission](#85-sending-the-transmission)
 9. [SSTV Modes Reference](#9-sstv-modes-reference)
 10. [Radio and Rig Control](#10-radio-and-rig-control)
@@ -47,11 +47,16 @@
     - [Radio Tab](#122-radio-tab)
     - [Images Tab](#123-images-tab)
     - [CW Station ID](#124-cw-station-id)
-13. [QSO Templates In Depth](#13-qso-templates-in-depth)
+13. [Templates In Depth (v0.3)](#13-templates-in-depth-v03)
     - [How Templates Work](#131-how-templates-work)
-    - [Built-In Templates](#132-built-in-templates)
-    - [Creating Custom Templates](#133-creating-custom-templates)
-    - [Placeholder Reference](#134-placeholder-reference)
+    - [The Template Gallery](#132-the-template-gallery)
+    - [The Template Editor](#133-the-template-editor)
+    - [Layer Types](#134-layer-types)
+    - [Token Reference](#135-token-reference)
+    - [QSO State Widget](#136-qso-state-widget)
+    - [Fonts](#137-fonts)
+    - [Text Features: Stacking, Auto-Shrink, Stroke, Shadow](#138-text-features-stacking-auto-shrink-stroke-shadow)
+    - [TOML Files & Sharing Templates](#139-toml-files--sharing-templates)
 14. [Image Editor Reference](#14-image-editor-reference)
 15. [Command-Line Interface](#15-command-line-interface)
     - [open-sstv-encode](#151-open-sstv-encode)
@@ -321,15 +326,19 @@ Robot 36 is the fastest mode and is the default choice for calling CQ. The longe
 
 You can set a default TX mode in **File > Settings > Images** so that it is pre-selected each time you launch the app.
 
-### 8.4 Using QSO Templates
+### 8.4 Template Gallery & QSO State
 
-QSO templates let you overlay standardized text (callsigns, signal reports, greetings) onto your image with a single click, speeding up on-air operation. The template bar sits between the image preview and the mode dropdown.
+v0.3 replaces the old text-overlay button bar with a full **template compositor**: each template is a stack of layered elements (photo, text, banners, gradients) authored once and re-rendered at TX time with your live QSO data. The TX panel exposes two new widgets for this:
 
-Click a template button (for example, "CQ") and a text overlay is applied to your image instantly. If the template contains placeholders that need your input — such as `{theircall}` for the other station's callsign — a small dialog pops up asking you to fill in the values.
+**Template Gallery** — A scrollable grid of thumbnails showing every template you have, each rendered live with your current TX photo and QSO state so the previews look exactly like what will go out on the air. Filter chips above the grid (**All / CQ / Reply / 73 / Custom**) narrow the list by role. Click a thumbnail to select it for transmission; the selected card is highlighted. Use the **+ New…** button to author a new template, or right-click any thumbnail for **Edit / Duplicate / Rename / Delete**. Double-clicking a thumbnail opens it in the editor.
 
-Click **Clear Text** to remove template overlays and restore the original image. Click the **gear icon** to open the template editor for creating and modifying templates (see the Templates In Depth section below).
+**QSO State** — Three small fields next to the gallery: **ToCall**, **RST**, and **Name**. These feed the live tokens (`%o` / `{tocall}`, `%r` / `{rst}`, `%name_o` / `{tocallname}`) inside every template, so you type the callsign once and every layer that references it updates in every preview at the same time. RST defaults to `595`. The fields persist for the current QSO and clear when you start a new one.
 
-![QSO templates](docs/screenshots/qso-templates.png)
+When you click **Transmit**, the selected template is composited at the chosen mode's native resolution (your photo plus all layers, with tokens resolved against the current QSO state and rig frequency) and encoded directly — no separate "burn-in" step is needed.
+
+For full editor coverage, layer types, and the token cheat sheet, see [Section 13: Templates In Depth](#13-templates-in-depth-v03).
+
+![Template Gallery](docs/screenshots/qso-templates.png)
 
 ### 8.5 Sending the Transmission
 
@@ -619,45 +628,187 @@ Open-SSTV can automatically append a Morse code station identification to every 
 
 ---
 
-## 13. QSO Templates In Depth
+## 13. Templates In Depth (v0.3)
 
 ### 13.1 How Templates Work
 
-QSO templates are named presets that overlay text onto your transmit image with one click. Each template has a name (shown as a button label) and one or more text overlays. Each overlay specifies the text content (which may include placeholders like `{mycall}`), a position on the image, a font size, and a color.
+A v0.3 template is a **stack of layers** — a base photo, banners, gradients, and text overlays — composited together at TX time. All positions and sizes are stored as percentages of the frame, so a single template renders cleanly at any SSTV mode's resolution (Robot 36's 320×240, PD-120's 640×496, PD-290's 800×616, and everything in between).
 
-When you click a template button, the app resolves any placeholders, prompts you for any values it needs (like the other station's callsign), and then burns the text onto the image. The original un-overlaid image is preserved internally, so clicking "Clear Text" removes the overlays and restores the clean image.
+Text layers can contain **tokens** like `%c` or `{tocall}` that are filled in from your callsign, your QSO State, the rig frequency, and the clock when you press Transmit. The same template you use for "CQ CQ CQ DE W0AEZ" today will say "DE N7XYZ" tomorrow if you change your callsign in Settings — the template doesn't know or care.
 
-### 13.2 Built-In Templates
+Templates are stored as plain-text TOML files in your config directory (see [13.9](#139-toml-files--sharing-templates)), so you can hand-edit, version-control, or share them with other operators.
 
-Open-SSTV ships with three templates designed for a standard SSTV QSO:
+### 13.2 The Template Gallery
 
-**CQ** — Places "CQ CQ CQ DE {mycall} {mycall} K" at the bottom center of the image in white, 24pt text. Your callsign is filled in automatically from your settings. This is used to call for any station.
+The gallery sits on the TX panel, above the QSO state widget. It shows a thumbnail grid of every template Open-SSTV can find, each rendered live with your current TX photo and QSO state.
 
-**Exchange** — Two overlays: "{theircall} DE {mycall}" at the top center (24pt white) and "UR {rst} {date}" at the bottom center (20pt cream/off-white). When you click this button, a dialog asks you to enter the other station's callsign and a signal report (defaulting to "59"). The date is filled in automatically as the current UTC date.
+**Filter** — The chips at the top (**All / CQ / Reply / 73 / Custom**) filter the grid by role. The role is set per-template in the editor and helps keep big libraries organised.
 
-**73** — Places "{theircall} 73 DE {mycall} SK" at the bottom center (24pt white). You are prompted for the other station's callsign. "73" means "best regards" and "SK" means "end of contact."
+**Select** — Single-click a thumbnail to mark it as the active template for the next transmission. The selected card is highlighted with a coloured border.
 
-### 13.3 Creating Custom Templates
+**+ New…** — Opens a blank template in the editor.
 
-Click the **gear icon** on the template bar (or open the template editor from within the settings) to create and edit templates.
+**Right-click a thumbnail** — Context menu with:
+- **Edit** — open in the editor (same as double-click).
+- **Duplicate** — create a copy with `(copy)` appended to the name. Use this as your starting point for tweaks; it never mutates the source.
+- **Rename** — change the displayed name (the on-disk filename updates as well).
+- **Delete** — remove the template file. There is no undo, so make sure you have the TOML elsewhere if you want to keep a backup.
 
-The template editor has a list of templates on the left and editing controls on the right. Click **Add** to create a new template, give it a name, then add one or more text overlays. For each overlay, set the text, position (7 anchor points from Top Left to Bottom Right), size (8 to 72 pixels), and color. A live preview at the bottom of the dialog shows how the overlays will look on a dark background.
+**Double-click** a thumbnail to open it in the editor.
 
-You can use placeholders in overlay text. The app substitutes them at render time. For example, an overlay with `{mycall} on {date}` would render as `W1ABC on 2026-04-13`.
+On first launch, Open-SSTV installs a **starter pack** of templates (CQSSTV, CQ DE Call, Reply Exchange, Reply Simple, 73, plus vertical-orientation variants) into your user templates directory. They behave just like any user template — feel free to edit, rename, or delete them.
 
-Click OK to save your templates. They are persisted to a TOML file and available in future sessions.
+### 13.3 The Template Editor
 
-### 13.4 Placeholder Reference
+Open the editor by double-clicking a thumbnail, right-clicking → **Edit**, or clicking **+ New…**. The dialog has three panels:
 
-| Placeholder | Replaced With | Notes |
-|-------------|---------------|-------|
-| `{mycall}` | Your callsign from settings | Automatic — no prompt |
-| `{theircall}` | The other station's callsign | You are prompted to enter this |
-| `{rst}` | Signal report | You are prompted; defaults to "59" |
-| `{date}` | Current UTC date (YYYY-MM-DD) | Automatic |
-| `{time}` | Current UTC time (HH:MZ) | Automatic |
+**Left — Layer list.** Every layer in the template, top to bottom (top-most layer renders on top). Each row has a **visibility checkbox** for quick previewing without deleting. Buttons below the list:
+- **+ Photo / + Text / + Rect / + Gradient** — add a new layer of that type.
+- **↑ / ↓** — reorder the selected layer.
+- **Delete** — remove the selected layer.
 
-The quick-fill dialog remembers the last callsign you entered during a session, so you don't have to retype it for subsequent exchanges in the same QSO.
+**Center — Live preview.** Renders the template at the selected mode's aspect ratio with your current TX photo and a sample QSO state (`W0XYZ`, RST `595`, name `Alex`) so tokens show plausible text instead of empty placeholders. The preview re-renders 300 ms after the last property change, so dragging spin-boxes feels smooth instead of laggy.
+
+**Right — Property inspector.** A scrollable form whose fields swap based on the selected layer's type. All layers share these properties:
+- **Anchor** — which corner/edge of the layer's bounding box is pinned to the canvas: Top-Left, Top-Center, Top-Right, Center-Left, Center, Center-Right, Bottom-Left, Bottom-Center, Bottom-Right, or **Fill (cover canvas)** which stretches the layer to the full frame.
+- **Offset X / Offset Y (%)** — distance inwards from the anchor edge, in percent of frame width/height.
+- **Width / Height (%)** — bounding box size. Optional for text (auto-sized from glyphs); required for rect/gradient.
+- **Opacity** — 0.0 – 1.0.
+- **Rotation (°)** — currently most useful for text and rect layers.
+
+Type-specific properties are described in [13.4](#134-layer-types).
+
+**Save** writes the template to disk and emits a refresh signal so the gallery picks it up immediately. **Save As…** prompts for a new filename — handy after Duplicate when you want to fork without overwriting. **Cancel** discards changes; the editor works on a deep copy of the template, so until you click Save the on-disk file is untouched.
+
+The editor is **non-modal** — you can leave it open while operating, change your TX photo or QSO state in the main window, and watch the preview update accordingly.
+
+### 13.4 Layer Types
+
+**Photo** — The user-selected TX photo, composited as the base of the image. Set **Fit** to:
+- **cover** — fills the canvas, cropping any overflow (default; what most callsign cards want).
+- **contain** — fits the whole photo with letterboxing.
+- **stretch** — distorts to fill exactly. Use sparingly.
+
+**Text** — A line of text with full token support. Properties:
+- **Text** — the raw template string (e.g. `CQ CQ CQ DE %c`, or `de {callsign}`). `\n` inserts a line break.
+- **Font family** — see [13.7](#137-fonts).
+- **Font size (%)** — height of one line as a percentage of frame height. Typical banner text is 5–8 %; large hero callsigns are 18–28 %.
+- **Fill colour** — RGBA via the swatch button.
+- **Stroke** — optional outline around glyphs (colour + width in pixels). Essential for white text over busy photos.
+- **Shadow** — optional drop shadow (offset, colour, blur). Stack with stroke for maximum legibility.
+- **Align** — left / center / right (only matters for multi-line text).
+- **Slashed zero** — when on (default), ASCII `0` in callsign-valued tokens (`%c`, `%o`, `{callsign}`, `{tocall}`) is replaced with `Ø`, so W0AEZ renders as WØAEZ. Doesn't affect RST, dates, or other numeric fields.
+- **Orientation** — `horizontal` (normal) or `stacked` (letter-over-letter, vertical). See [13.8](#138-text-features-stacking-auto-shrink-stroke-shadow).
+- **Date / Time format** — strftime patterns for the `%d` / `%t` / `{date}` / `{time}` tokens in this layer (defaults `%Y-%m-%d` and `%H:%M`).
+
+**Rect** — A solid or semi-transparent rectangle. Used for banner strips behind text (e.g. a 9-%-tall green bar across the top of a CQSSTV card). Only property beyond the shared geometry is **Fill** (RGBA).
+
+**Gradient** — A two-stop linear gradient. Properties:
+- **From colour / To colour** (RGBA — make one transparent for fade-to-clear effects).
+- **Angle (°)** — `0` = left-to-right, `90` = top-to-bottom, `180` = right-to-left, `270` = bottom-to-top.
+
+A common pattern: a Gradient layer pinned to **Fill** with `from = (0,0,0,180)` and `to = (0,0,0,0)` at 270° darkens the bottom of a photo so white text reads cleanly without fully obscuring the image.
+
+### 13.5 Token Reference
+
+Tokens are placeholders in text layers that resolve to live values at TX time. Two equivalent forms are accepted everywhere; pick whichever reads better. The single-letter `%` form matches MMSSTV muscle memory; the `{name}` form is more readable.
+
+| `%` form | `{name}` form | Resolves to |
+|---|---|---|
+| `%c` | `{callsign}` | Your callsign (from Settings, uppercased; slashed-zero applied if enabled) |
+| `%o` | `{tocall}` | Other station's callsign (from QSO State) |
+| `%r` | `{rst}` | Signal report (from QSO State) |
+| `%name_o` | `{tocallname}` | Other op's name (from QSO State) |
+| `%note` | `{note}` | Free-form QSO note (from QSO State) |
+| `%n` | `{name}` | Your name (from Settings) |
+| `%g` | `{grid}` | Your grid square (from Settings) |
+| `%m` | `{mode}` | Current SSTV mode display name (e.g. "Scottie S1") |
+| `%d` | `{date}` | UTC date (default `%Y-%m-%d`; per-layer override available) |
+| `%t` | `{time}` | UTC time (default `%H:%M`; per-layer override available) |
+| `%f` | `{freq}` | Rig frequency, e.g. `14.2300 MHz` (blank if no rig connected) |
+| `%b` | `{band}` | Ham band, e.g. `20m`, `40m`, `2m` (blank if no rig connected) |
+| `%q` | `{qso_serial}` | QSO serial number |
+| `%v` | `{version}` | Open-SSTV version |
+| `%%` | — | Literal `%` |
+
+Unknown tokens **pass through unchanged** rather than erroring, so a template authored in a future version that introduces new tokens still loads cleanly in older builds — you'll just see the literal `%x` until you upgrade.
+
+A copy of this cheat sheet is built into the template editor — click the **Tokens** help button to view it without leaving the dialog.
+
+### 13.6 QSO State Widget
+
+The QSO State widget lives on the TX panel between the gallery and the mode/transmit row. It feeds the dynamic tokens:
+
+- **ToCall** — the callsign of the station you're working. Feeds `%o` / `{tocall}`. Uppercased automatically.
+- **RST** — signal report. Feeds `%r` / `{rst}`. The dropdown is editable, with common values (`595`, `599`, `559`, `333`, etc.) pre-populated; defaults to `595`.
+- **Name** — the other op's name (optional). Feeds `%name_o` / `{tocallname}`.
+
+Any change in these fields triggers a re-render of the gallery thumbnails and the editor preview, so what you see is exactly what will go on the air. The widget detects when ToCall changes to a different callsign and treats that as a new QSO (clearing some session-scoped state under the hood; the Name and RST you typed remain as starting values for the next contact).
+
+### 13.7 Fonts
+
+Open-SSTV ships with **three fonts**:
+
+- **DejaVu Sans Bold** — the default. Clean, very readable at small sizes, excellent Unicode coverage including the slashed `Ø`. Use for banner callsigns, info lines, signal reports.
+- **Inter Bold** — modern, slightly narrower than DejaVu. Looks good in big hero text.
+- **Press Start 2P** — pixelated retro arcade style. Great for novelty cards and "QRP / 5 W" stickers; not recommended for long lines because every glyph is the same width.
+
+A template's **Font family** field accepts the display name (`"DejaVu Sans Bold"`, `"Inter Bold"`, `"Press Start 2P"`) and is matched fuzzily — case and spacing differences are ignored, so `dejavusansbold` works the same as `DejaVu Sans Bold`.
+
+You can add more fonts: drop `.ttf` or `.otf` files into `{user_config_dir}/open_sstv/fonts/` (the same parent directory that holds `templates/`) and they appear in the editor's font dropdown on the next launch. The display name is the filename stem with hyphens/underscores converted to spaces.
+
+If a template references a font that isn't installed, the renderer falls back to DejaVu Sans Bold and logs a warning — your template still renders, just in the fallback face.
+
+### 13.8 Text Features: Stacking, Auto-Shrink, Stroke, Shadow
+
+**Stacked vertical text** — Set a text layer's **Orientation** to `Stacked` and each character renders one above the next, no rotation. Pair with a **Center-Right** or **Center-Left** anchor and a tall, thin bounding box for classic vertical-callsign banners running down the side of a photo. Each character keeps its full glyph width, so descenders on letters like `g` or `y` are not clipped.
+
+**Auto-shrink for overflow** — If a horizontal text layer's resolved string is too wide for its bounding box (or the configured font size), the renderer auto-shrinks the font down until it fits, rather than spilling off the canvas. It also wraps at word boundaries before shrinking, so `CQ CQ CQ DE W0AEZ` will go to two lines before it gets aggressively shrunk. This makes templates resilient to long contest exchanges and unusually long callsigns without manual fiddling.
+
+**Stroke** — An outlined ring around every glyph at the configured pixel width and colour. White text with a black 4-pixel stroke is unbeatable for legibility over photographs.
+
+**Shadow** — A blurred drop shadow at a configurable offset and colour. Stack with stroke for maximum punch on busy backgrounds; use shadow alone for a softer look.
+
+### 13.9 TOML Files & Sharing Templates
+
+Templates live in:
+
+- **macOS** — `~/Library/Application Support/open_sstv/templates/`
+- **Linux** — `~/.config/open_sstv/templates/`
+- **Windows** — `%APPDATA%\open_sstv\templates\`
+
+Each template is a single `.toml` file with one `[template]` table (name, role, reference frame, description) and a sequence of `[[layer]]` tables. They're plain text and easy to read, edit, version-control, or post on a forum. Sharing a template is just sharing the `.toml` file — drop it into another operator's templates directory and it appears in their gallery on next launch.
+
+A minimal example:
+
+```toml
+[template]
+name = "CQ DE"
+role = "cq"
+reference_frame = [320, 256]
+schema_version = 1
+description = "Simple CQ card."
+
+[[layer]]
+type = "photo"
+id = "base_photo"
+anchor = "FILL"
+fit = "cover"
+
+[[layer]]
+type = "text"
+id = "cq_text"
+text = "CQ CQ CQ DE %c"
+anchor = "BC"
+offset_y_pct = 5.0
+font_family = "DejaVu Sans Bold"
+font_size_pct = 7.0
+fill = [255, 255, 255, 255]
+stroke = { color = [0, 0, 0, 255], width_px = 3 }
+slashed_zero = true
+```
+
+The `schema_version` field is `1` for all v0.3 templates. Future major template-format changes will bump it; older builds will refuse to load a higher schema version rather than misinterpreting it.
 
 ---
 
