@@ -18,6 +18,16 @@ Signals
 template_selected(object):
     Emitted when the user clicks a thumbnail.  Carries the selected
     ``Template`` instance, or ``None`` when the selection is cleared.
+new_template_requested():
+    Emitted when the user clicks "+ New…" in the header.
+edit_template_requested(object, object):
+    User asked to edit a template.  Carries ``(Template, Path)``.
+duplicate_template_requested(object):
+    User asked to duplicate a template.  Carries the source ``Path``.
+rename_template_requested(object, object):
+    User asked to rename a template.  Carries ``(Template, Path)``.
+delete_template_requested(object, object):
+    User asked to delete a template.  Carries ``(Template, Path)``.
 """
 from __future__ import annotations
 
@@ -25,13 +35,14 @@ import logging
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QPoint, QRect, QSize, QTimer, Qt, Signal, Slot
-from PySide6.QtGui import QFont, QFontMetrics, QPixmap
+from PySide6.QtGui import QAction, QFont, QFontMetrics, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLayout,
+    QMenu,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -152,11 +163,21 @@ class _ThumbnailCard(QWidget):
     """One card in the gallery: thumbnail image + name label."""
 
     clicked = Signal(object)  # Template
+    double_clicked = Signal(object, object)  # (Template, Path)
+    context_menu_requested = Signal(object, object, object)  # (Template, Path, QPoint)
 
-    def __init__(self, template: Template, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        template: Template,
+        path: "Path | None" = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self._template = template
+        self._path = path
         self._selected = False
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._on_context_menu)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(3, 3, 3, 3)
@@ -216,6 +237,10 @@ class _ThumbnailCard(QWidget):
     def template(self) -> Template:
         return self._template
 
+    @property
+    def path(self) -> "Path | None":
+        return self._path
+
     # --- private ---
 
     def _set_border(self) -> None:
@@ -228,6 +253,19 @@ class _ThumbnailCard(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit(self._template)
         super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.double_clicked.emit(self._template, self._path)
+        super().mouseDoubleClickEvent(event)
+
+    @Slot(QPoint)
+    def _on_context_menu(self, pos: QPoint) -> None:
+        # Forward in global coords so the gallery can show the menu rooted
+        # at the click position regardless of which child widget triggered.
+        self.context_menu_requested.emit(
+            self._template, self._path, self.mapToGlobal(pos),
+        )
 
 
 class TemplateGallery(QWidget):
@@ -247,6 +285,11 @@ class TemplateGallery(QWidget):
     """
 
     template_selected = Signal(object)  # Template | None
+    new_template_requested = Signal()
+    edit_template_requested = Signal(object, object)  # (Template, Path)
+    duplicate_template_requested = Signal(object)  # Path
+    rename_template_requested = Signal(object, object)  # (Template, Path)
+    delete_template_requested = Signal(object, object)  # (Template, Path)
 
     def __init__(
         self,
@@ -292,6 +335,12 @@ class TemplateGallery(QWidget):
             filter_row.addWidget(btn)
         self._role_group.buttonClicked.connect(self._on_role_filter_changed)
         filter_row.addStretch(1)
+
+        # "+ New…" launches the template editor with a blank Template.
+        self._new_btn = QPushButton("+ New…")
+        self._new_btn.setToolTip("Create a new template")
+        self._new_btn.clicked.connect(self._on_new_clicked)
+        filter_row.addWidget(self._new_btn)
         outer.addLayout(filter_row)
 
         # --- Scroll area with wrapping card grid ---
@@ -341,12 +390,12 @@ class TemplateGallery(QWidget):
     def reload_templates(self) -> None:
         """Reload the templates directory and rebuild the grid."""
         entries = list_templates(self._templates_dir)
-        templates: list[Template] = []
+        items: list[tuple[Template, "Path"]] = []
         for _name, _role, path in entries:
             t = load_by_path(path)
             if t is not None:
-                templates.append(t)
-        self._rebuild_strip(templates)
+                items.append((t, path))
+        self._rebuild_strip(items)
 
     def selected_template(self) -> Template | None:
         return self._selected_template
@@ -372,10 +421,76 @@ class TemplateGallery(QWidget):
             card.set_selected(card.template is template)
         self.template_selected.emit(template)
 
+    @Slot(object, object)
+    def _on_card_double_clicked(
+        self, template: Template, path: "Path | None"
+    ) -> None:
+        if path is not None:
+            self.edit_template_requested.emit(template, path)
+
+    @Slot(object, object, QPoint)
+    def _on_card_context_menu(
+        self, template: Template, path: "Path | None", global_pos: QPoint
+    ) -> None:
+        if path is None:
+            return
+        # Make sure the right-clicked card is also visually selected so the
+        # menu actions match what the user sees highlighted.
+        self._on_card_clicked(template)
+
+        menu = QMenu(self)
+        edit_act = QAction("Edit…", menu)
+        edit_act.triggered.connect(self._dispatch_context_action)
+        edit_act.setData(("edit", template, path))
+        menu.addAction(edit_act)
+
+        dup_act = QAction("Duplicate", menu)
+        dup_act.triggered.connect(self._dispatch_context_action)
+        dup_act.setData(("duplicate", template, path))
+        menu.addAction(dup_act)
+
+        rename_act = QAction("Rename…", menu)
+        rename_act.triggered.connect(self._dispatch_context_action)
+        rename_act.setData(("rename", template, path))
+        menu.addAction(rename_act)
+
+        menu.addSeparator()
+
+        del_act = QAction("Delete…", menu)
+        del_act.triggered.connect(self._dispatch_context_action)
+        del_act.setData(("delete", template, path))
+        menu.addAction(del_act)
+
+        menu.exec(global_pos)
+
+    @Slot()
+    def _dispatch_context_action(self) -> None:
+        action = self.sender()
+        if not isinstance(action, QAction):
+            return
+        data = action.data()
+        if not isinstance(data, tuple) or len(data) != 3:
+            return
+        kind, template, path = data
+        if kind == "edit":
+            self.edit_template_requested.emit(template, path)
+        elif kind == "duplicate":
+            self.duplicate_template_requested.emit(path)
+        elif kind == "rename":
+            self.rename_template_requested.emit(template, path)
+        elif kind == "delete":
+            self.delete_template_requested.emit(template, path)
+
+    @Slot()
+    def _on_new_clicked(self) -> None:
+        self.new_template_requested.emit()
+
     # === Private ===
 
-    def _rebuild_strip(self, templates: list[Template]) -> None:
-        """Replace all cards with new ones for *templates*."""
+    def _rebuild_strip(
+        self, templates: list[tuple[Template, "Path"]]
+    ) -> None:
+        """Replace all cards with new ones for *templates* (Template, Path pairs)."""
         for card in self._cards:
             self._strip_layout.removeWidget(card)
             card.deleteLater()
@@ -386,9 +501,11 @@ class TemplateGallery(QWidget):
         )
         self._selected_template = None
 
-        for t in templates:
-            card = _ThumbnailCard(t, self._strip_widget)
+        for t, p in templates:
+            card = _ThumbnailCard(t, p, self._strip_widget)
             card.clicked.connect(self._on_card_clicked)
+            card.double_clicked.connect(self._on_card_double_clicked)
+            card.context_menu_requested.connect(self._on_card_context_menu)
             self._strip_layout.addWidget(card)
             self._cards.append(card)
             if t.name == prev_name:
