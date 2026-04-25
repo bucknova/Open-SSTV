@@ -463,6 +463,33 @@ class TestTextLayer:
         img = _render(t)
         assert img.size == _FRAME
 
+    def test_bottom_anchored_text_not_clipped(self) -> None:
+        """Regression: BC-anchored text at offset_y_pct=0 must not be clipped.
+
+        PIL's draw.text places the ascender line at y, so ink extends down to
+        y + (ascent + descent). Sizing the text image to the ink bbox height
+        (bb[3] - bb[1]) used to push the bb[1] offset below the image bottom,
+        clipping descenders/lower glyph parts of bottom-anchored text.
+        """
+        layer = TextLayer(
+            id="t", anchor="BC",
+            text_raw="de W0AEZ",
+            font_family="DejaVu Sans Bold",
+            font_size_pct=13.0,
+            fill=(255, 255, 255, 255),
+            slashed_zero=False,
+        )
+        t = Template(name="t", layers=[layer])
+        img = _render(t)
+        W, H = _FRAME
+        # No white pixels in any of the bottom 2 rows — ink must sit fully
+        # inside the canvas, with descender room reserved.
+        for y in range(H - 2, H):
+            row = [img.getpixel((x, y)) for x in range(W)]
+            white = sum(1 for r, g, b in row if r > 200 and g > 200 and b > 200)
+            assert white == 0, f"Row {y} has {white} white pixels — text was clipped"
+
+
 
 # ---------------------------------------------------------------------------
 # Anchor positions — visual placement

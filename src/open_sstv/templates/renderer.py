@@ -275,11 +275,20 @@ def _render_horizontal_text(
     # Measure bounding box (single or multi-line)
     lines = resolved.split("\n")
     line_bboxes = [_text_bbox(font, ln) for ln in lines]
-    line_heights = [bb[3] - bb[1] for bb in line_bboxes]
     line_widths = [bb[2] - bb[0] for bb in line_bboxes]
 
-    line_h_px = max(line_heights) if line_heights else 1
-    spacing = int(line_h_px * layer.line_height_mult)
+    # Use the font's full vertical metric (ascent + descent) for line height,
+    # not the ink bbox height. PIL's draw.text() places the ascender line at y,
+    # so ink can extend down to y + (ascent + descent) for glyphs with descenders.
+    # Sizing the image to the ink-only height (bb[3]-bb[1]) drops the bb[1]
+    # offset below the image bottom and clips the lower part of glyphs.
+    ascent, descent = font.getmetrics()
+    font_h_px = ascent + descent
+    # Guard against rare fonts whose ink bbox exceeds the reported metrics.
+    last_line_extent = max((bb[3] for bb in line_bboxes), default=font_h_px)
+    line_h_px = max(font_h_px, last_line_extent)
+
+    spacing = int(font_h_px * layer.line_height_mult)
     total_h = spacing * (len(lines) - 1) + line_h_px + stroke_w * 2
     total_w = max(line_widths) if line_widths else 1
 
@@ -362,8 +371,16 @@ def _render_stacked_text(
 
     char_bboxes = [_text_bbox(font, c) for c in chars]
     char_w = max(bb[2] - bb[0] for bb in char_bboxes)
-    char_h = max(bb[3] - bb[1] for bb in char_bboxes)
-    spacing = int(char_h * layer.line_height_mult)
+
+    # See note in _render_horizontal_text: PIL anchors text at the ascender,
+    # so the per-line vertical box must reserve the full font metric range
+    # (ascent + descent) to avoid clipping the bottom of each glyph.
+    ascent, descent = font.getmetrics()
+    font_h_px = ascent + descent
+    max_ink_bottom = max((bb[3] for bb in char_bboxes), default=font_h_px)
+    char_h = max(font_h_px, max_ink_bottom)
+
+    spacing = int(font_h_px * layer.line_height_mult)
     total_h = spacing * (len(chars) - 1) + char_h + stroke_w * 2
     total_w = char_w + stroke_w * 2
 
