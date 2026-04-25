@@ -160,7 +160,12 @@ def _apply_color_to_button(
 def _pick_color(
     initial: tuple[int, int, int, int], parent: QWidget, title: str
 ) -> tuple[int, int, int, int] | None:
-    """Open a color dialog seeded with *initial*; return new RGBA or None."""
+    """Open a color dialog seeded with *initial*; return new RGBA or None.
+
+    The native color dialog can cause a non-modal parent to drop behind the
+    main window on some platforms (observed on macOS). After the dialog
+    closes we re-raise and re-activate the parent so focus returns there.
+    """
     qcol = QColor(initial[0], initial[1], initial[2], initial[3])
     out = QColorDialog.getColor(
         qcol,
@@ -168,6 +173,9 @@ def _pick_color(
         title,
         QColorDialog.ColorDialogOption.ShowAlphaChannel,
     )
+    if parent is not None:
+        parent.raise_()
+        parent.activateWindow()
     if not out.isValid():
         return None
     return (out.red(), out.green(), out.blue(), out.alpha())
@@ -224,7 +232,11 @@ class TemplateEditor(QDialog):
         # Non-modal so the user can keep the main window visible.
         self.setModal(False)
         self.setWindowTitle("Template Editor")
-        self.setMinimumSize(900, 620)
+        # The inspector needs ~360 px to show its widest form rows without
+        # horizontal scroll; combined with the layer list and a usable
+        # preview the dialog needs ~1200 px.
+        self.setMinimumSize(1200, 720)
+        self.resize(1280, 780)
 
         self._template: Template = copy.deepcopy(template)
         self._path: Path | None = path
@@ -281,11 +293,15 @@ class TemplateEditor(QDialog):
         splitter.setChildrenCollapsible(False)
         splitter.addWidget(self._build_layer_panel())
         splitter.addWidget(self._build_preview_panel())
-        splitter.addWidget(self._build_inspector_panel())
+        inspector = self._build_inspector_panel()
+        # Inspector needs enough width for QFormLayout + a vertical scrollbar
+        # so colour-pickers, stroke rows, etc. don't push into horizontal scroll.
+        inspector.setMinimumWidth(360)
+        splitter.addWidget(inspector)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 3)
         splitter.setStretchFactor(2, 2)
-        splitter.setSizes([200, 460, 280])
+        splitter.setSizes([220, 560, 400])
         outer.addWidget(splitter, stretch=1)
 
         outer.addWidget(self._build_bottom_bar())
