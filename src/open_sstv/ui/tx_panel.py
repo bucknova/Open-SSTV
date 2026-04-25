@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMessageBox,
     QProgressBar,
@@ -59,12 +60,14 @@ def _make_tx_context(mode: Mode, photo: "PILImage | None") -> TXContext:
         frame_size=(spec.width, spec.display_height),
         photo_image=photo,
     )
+from open_sstv.templates import manager as template_manager
 from open_sstv.templates.model import QSOState, TXContext, Template
 from open_sstv.templates.renderer import render_template
 from open_sstv.ui.draw_text import draw_text_overlay
 from open_sstv.ui.image_editor import ImageEditorDialog
 from open_sstv.ui.qso_state_widget import QSOStateWidget
 from open_sstv.ui.quick_fill_dialog import QuickFillDialog
+from open_sstv.ui.template_editor import TemplateEditor
 from open_sstv.ui.template_gallery import TemplateGallery
 from open_sstv.ui.utils import pil_to_pixmap as _pil_to_pixmap
 
@@ -137,7 +140,22 @@ class TxPanel(QWidget):
             parent=self,
         )
         self._gallery.template_selected.connect(self._on_v3_template_selected)
+        self._gallery.new_template_requested.connect(self._on_new_template_requested)
+        self._gallery.edit_template_requested.connect(self._on_edit_template_requested)
+        self._gallery.duplicate_template_requested.connect(
+            self._on_duplicate_template_requested
+        )
+        self._gallery.rename_template_requested.connect(
+            self._on_rename_template_requested
+        )
+        self._gallery.delete_template_requested.connect(
+            self._on_delete_template_requested
+        )
         layout.addWidget(self._gallery)
+
+        # Open editors registered here so reload doesn't garbage-collect them
+        # while the user is still typing.
+        self._open_editors: list[TemplateEditor] = []
 
         # --- QSO State widget ---
         self._qso_widget = QSOStateWidget(self)
@@ -348,6 +366,126 @@ class TxPanel(QWidget):
     def _on_qso_state_changed(self, qso_state: QSOState) -> None:
         self._gallery.set_qso_state(qso_state)
         self._refresh_composite_preview()
+
+    # --- Gallery CRUD signals ---
+
+    @Slot()
+    def _on_new_template_requested(self) -> None:
+        new_tpl = Template(name="New Template", role="custom", layers=[])
+        self._open_editor(new_tpl, path=None)
+
+    @Slot(object, object)
+    def _on_edit_template_requested(self, template: Template, path: Path) -> None:
+        self._open_editor(template, path=path)
+
+    @Slot(object)
+    def _on_duplicate_template_requested(self, path: Path) -> None:
+        try:
+            new_path = template_manager.duplicate_template(path)
+        except OSError as exc:
+            QMessageBox.critical(
+                self, "Duplicate failed", f"Could not duplicate template:\n{exc}"
+            )
+            return
+        self._gallery.reload_templates()
+        self._status.setText(f"Duplicated: {new_path.name}")
+
+    @Slot(object, object)
+    def _on_rename_template_requested(self, template: Template, path: Path) -> None:
+        new_name, ok = QInputDialog.getText(
+            self,
+            "Rename template",
+            "New name:",
+            text=template.name,
+        )
+        if not ok or not new_name.strip() or new_name == template.name:
+            return
+        # Mutate the loaded template, save to a new filename slug, and remove
+        # the old file once the write succeeds.  Atomic-ish — if save fails
+        # we leave the original untouched.
+        old_path = path
+        template.name = new_name
+        try:
+            new_path = template_manager.save(template, old_path.parent)
+        except OSError as exc:
+            QMessageBox.critical(
+                self, "Rename failed", f"Could not save renamed template:\n{exc}"
+            )
+            return
+        if new_path != old_path:
+            try:
+                template_manager.delete(old_path)
+            except OSError as exc:
+                # Non-fatal: the new file is good; just inform the user.
+                self._status.setText(
+                    f"Renamed but couldn't remove old file {old_path.name}: {exc}"
+                )
+        self._gallery.reload_templates()
+
+    @Slot(object, object)
+    def _on_delete_template_requested(self, template: Template, path: Path) -> None:
+        confirm = QMessageBox.question(
+            self,
+            "Delete template",
+            f"Delete template '{template.name}'?\n\nThis cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            template_manager.delete(path)
+        except OSError as exc:
+            QMessageBox.critical(
+                self, "Delete failed", f"Could not delete template:\n{exc}"
+            )
+            return
+        # If the deleted template is currently selected, drop the selection
+        # so the main TX preview falls back to the bare photo.
+        if (
+            self._selected_template is not None
+            and self._selected_template.name == template.name
+        ):
+            self._selected_template = None
+            self.template_composited.emit(False)
+            self._refresh_composite_preview()
+        self._gallery.reload_templates()
+        self._status.setText(f"Deleted: {path.name}")
+
+    def _open_editor(self, template: Template, path: Path | None) -> None:
+        """Spawn a non-modal editor and wire it to refresh the gallery on save."""
+        if self._app_config is None:
+            QMessageBox.warning(
+                self,
+                "Cannot edit yet",
+                "Application config isn't ready — try again in a moment.",
+            )
+            return
+        editor = TemplateEditor(
+            template,
+            path=path,
+            app_config=self._app_config,
+            templates_dir=self._templates_dir,
+            current_photo=self._base_image,
+            current_mode=self.selected_mode(),
+            parent=self,
+        )
+        editor.template_saved.connect(self._on_template_saved_in_editor)
+        editor.finished.connect(self._on_editor_finished)
+        self._open_editors.append(editor)
+        editor.show()
+        editor.raise_()
+
+    @Slot(object)
+    def _on_template_saved_in_editor(self, _path: Path) -> None:
+        self._gallery.reload_templates()
+
+    @Slot(int)
+    def _on_editor_finished(self, _result: int) -> None:
+        sender = self.sender()
+        if isinstance(sender, TemplateEditor) and sender in self._open_editors:
+            self._open_editors.remove(sender)
+            sender.deleteLater()
 
     @Slot()
     def _on_load_clicked(self) -> None:
