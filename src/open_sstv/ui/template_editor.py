@@ -105,6 +105,10 @@ _ROLE_LABELS: tuple[tuple[str, str], ...] = (
 
 _FIT_LABELS: tuple[str, ...] = ("contain", "cover", "stretch")
 _ALIGN_LABELS: tuple[str, ...] = ("left", "center", "right")
+_ORIENTATION_LABELS: tuple[tuple[str, str], ...] = (
+    ("Horizontal", "horizontal"),
+    ("Stacked", "stacked"),
+)
 
 _TOKEN_CHEAT_SHEET: str = (
     "Common tokens (resolved at TX time):\n"
@@ -777,6 +781,16 @@ class TemplateEditor(QDialog):
         self._field_align = align_combo
         form.addRow("Align:", align_combo)
 
+        orientation_combo = QComboBox()
+        for label, value in _ORIENTATION_LABELS:
+            orientation_combo.addItem(label, value)
+        idx = orientation_combo.findData(layer.orientation)
+        if idx >= 0:
+            orientation_combo.setCurrentIndex(idx)
+        orientation_combo.currentIndexChanged.connect(self._on_orientation_changed)
+        self._field_orientation = orientation_combo
+        form.addRow("Orientation:", orientation_combo)
+
         # --- Fill colour ---
         fill_btn = _make_color_button(layer.fill)
         fill_btn.clicked.connect(self._on_pick_text_fill)
@@ -1001,6 +1015,16 @@ class TemplateEditor(QDialog):
         layer = self._selected_layer()
         if isinstance(layer, TextLayer) and not self._loading_form:
             layer.align = value  # type: ignore[assignment]
+            self._schedule_preview()
+
+    @Slot(int)
+    def _on_orientation_changed(self, _idx: int) -> None:
+        layer = self._selected_layer()
+        if not isinstance(layer, TextLayer) or self._loading_form:
+            return
+        value = self._field_orientation.currentData()
+        if value:
+            layer.orientation = value  # type: ignore[assignment]
             self._schedule_preview()
 
     @Slot()
