@@ -26,6 +26,11 @@ image_saved(PIL.Image.Image, Mode):
     the context menu). Wired by ``MainWindow`` to a ``QFileDialog``.
     Single-click on a thumbnail instead loads it into the main preview
     via ``_show_gallery_image`` — no save dialog, no disk round-trip.
+rx_image_selected(PIL.Image.Image):
+    User single-clicked a gallery thumbnail (or invoked *View* from the
+    context menu). Wired by ``MainWindow`` to ``TxPanel.set_rx_image``
+    so reply/exchange templates can render that image in the
+    ``{rx_image}`` slot.
 """
 from __future__ import annotations
 
@@ -55,6 +60,7 @@ class RxPanel(QWidget):
     capture_requested = Signal(bool)
     clear_requested = Signal()
     image_saved = Signal(object, object)  # (PIL.Image, Mode)
+    rx_image_selected = Signal(object)  # PIL.Image — for template {rx_image} slot
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -254,6 +260,10 @@ class RxPanel(QWidget):
         self._status.setText(
             f"Viewing {mode_enum.value} ({image.width}×{image.height})"
         )
+        # Selecting a thumbnail also pins it as the active "RX image" for
+        # reply/exchange templates so {rx_image} resolves to what the user
+        # is looking at, not the most recent decode.
+        self.rx_image_selected.emit(image)
 
     # === private slots ===
 

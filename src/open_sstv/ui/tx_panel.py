@@ -52,13 +52,18 @@ from open_sstv.config.templates import (
 from open_sstv.core.encoder import DEFAULT_SAMPLE_RATE
 from open_sstv.core.modes import MODE_TABLE, Mode
 
-def _make_tx_context(mode: Mode, photo: "PILImage | None") -> TXContext:
-    """Build a TXContext for the given mode and photo."""
+def _make_tx_context(
+    mode: Mode,
+    photo: "PILImage | None",
+    rx_image: "PILImage | None" = None,
+) -> TXContext:
+    """Build a TXContext for the given mode, photo, and selected RX image."""
     spec = MODE_TABLE[mode]
     return TXContext(
         mode_display_name=mode.value,
         frame_size=(spec.width, spec.display_height),
         photo_image=photo,
+        rx_image=rx_image,
     )
 from open_sstv.templates import manager as template_manager
 from open_sstv.templates.model import QSOState, TXContext, Template
@@ -104,6 +109,7 @@ class TxPanel(QWidget):
         self._current_image: "PILImage | None" = None
         self._base_image: "PILImage | None" = None
         self._current_path: Path | None = None
+        self._rx_image: "PILImage | None" = None
         self._callsign: str = ""
         self._app_config: "AppConfig | None" = app_config
         self._templates_dir: Path | None = templates_dir
@@ -349,6 +355,13 @@ class TxPanel(QWidget):
         """v0.2 compat shim — no-op in v0.3."""
         self._v2_templates = templates
 
+    @Slot(object)
+    def set_rx_image(self, img: "PILImage | None") -> None:
+        """Store the user-selected RX image and re-render template previews."""
+        self._rx_image = img
+        self._gallery.set_rx_image(img)
+        self._refresh_composite_preview()
+
     # === Private slots ===
 
     @Slot(int)
@@ -542,7 +555,7 @@ class TxPanel(QWidget):
             return None
         mode = self.selected_mode()
         qso = self._qso_widget.get_state()
-        ctx = _make_tx_context(mode, self._base_image)
+        ctx = _make_tx_context(mode, self._base_image, self._rx_image)
         try:
             return render_template(self._selected_template, qso, self._app_config, ctx)
         except Exception as exc:  # noqa: BLE001
