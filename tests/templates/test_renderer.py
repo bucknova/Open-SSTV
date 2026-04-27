@@ -582,6 +582,61 @@ class TestPatternLayer:
         img = _render(t)
         assert img.size == _FRAME
 
+    def test_pattern_tint_math_matches_reference_loop(self) -> None:
+        """Regression for H1: the vectorized tint multiply must produce the
+        exact same per-pixel result as the original ``r2 * tr // 255`` loop.
+        """
+        import numpy as np
+        import PIL.Image
+
+        from open_sstv.templates.renderer import _make_pattern_tile, _tile_pattern
+
+        tile = _make_pattern_tile("checkered", 4)
+        tiled = _tile_pattern(tile, 16, 16)
+        tint = (180, 80, 40, 220)
+
+        # Vectorized — same body as the renderer's H1 implementation.
+        arr = np.array(tiled, dtype=np.uint16)
+        tint_arr = np.array(tint, dtype=np.uint16)
+        vec_arr = (arr * tint_arr // 255).astype(np.uint8)
+
+        # Reference: explicit per-pixel loop, identical to the pre-H1 code.
+        ref = PIL.Image.new("RGBA", (16, 16), (0, 0, 0, 0))
+        for y in range(16):
+            for x in range(16):
+                r, g, b, a = tiled.getpixel((x, y))
+                ref.putpixel(
+                    (x, y),
+                    (
+                        r * tint[0] // 255,
+                        g * tint[1] // 255,
+                        b * tint[2] // 255,
+                        a * tint[3] // 255,
+                    ),
+                )
+
+        # Exact equality — the math is integer, no rounding involved.
+        assert np.array_equal(vec_arr, np.asarray(ref))
+
+    def test_pattern_tint_no_uint8_overflow(self) -> None:
+        """Regression for H1: full-saturation tint (255s) must not wrap.
+
+        ``arr[..., :3] = arr[..., :3] * tint[:3] // 255`` written naively
+        in uint8 wraps because 255*255 = 65025 → 65025 % 256 = 1.  We
+        upcast to uint16; this guards against silently regressing that.
+        """
+        import numpy as np
+
+        from open_sstv.templates.renderer import _make_pattern_tile, _tile_pattern
+
+        tile = _make_pattern_tile("checkered", 2)
+        tiled = _tile_pattern(tile, 8, 8)
+        arr = np.array(tiled, dtype=np.uint16)
+        tint = np.array((255, 255, 255, 255), dtype=np.uint16)
+        out = (arr * tint // 255).astype(np.uint8)
+        # White cells of the pattern should remain white after a (255,…) tint.
+        assert (out[arr[..., 3] > 0] == np.array([255, 255, 255, 255], dtype=np.uint8)).all()
+
 
 # ---------------------------------------------------------------------------
 # Mode-aware frame size

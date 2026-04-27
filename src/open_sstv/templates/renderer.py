@@ -525,22 +525,14 @@ def _rasterize_pattern(
 
     tiled = _tile_pattern(tile, bbox_w, bbox_h)
 
-    # Apply tint: multiply pattern alpha by tint RGBA
-    tint = layer.tint
-    tinted = PIL.Image.new("RGBA", (bbox_w, bbox_h), (0, 0, 0, 0))
-    tr, tg, tb, ta = tint
-    for px_x in range(bbox_w):
-        for px_y in range(bbox_h):
-            r2, g2, b2, a2 = tiled.getpixel((px_x, px_y))
-            tinted.putpixel(
-                (px_x, px_y),
-                (
-                    r2 * tr // 255,
-                    g2 * tg // 255,
-                    b2 * tb // 255,
-                    a2 * ta // 255,
-                ),
-            )
+    # Apply tint: multiply each channel by the matching tint channel.
+    # Cast to uint16 first so the 255×255 = 65025 product doesn't wrap
+    # the uint8 buffer underneath the PIL image.
+    import numpy as np
+    arr = np.array(tiled, dtype=np.uint16)
+    tint = np.array(layer.tint, dtype=np.uint16)
+    arr = arr * tint // 255
+    tinted = PIL.Image.fromarray(arr.astype(np.uint8))
 
     cell = PIL.Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
     cell.paste(tinted, (x, y), tinted)
