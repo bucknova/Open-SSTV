@@ -550,6 +550,7 @@ class MainWindow(QMainWindow):
         self._rx_panel.capture_requested.connect(self._on_capture_requested)
         self._rx_panel.clear_requested.connect(self._on_rx_clear)
         self._rx_panel.image_saved.connect(self._on_rx_image_saved)
+        self._rx_panel.rx_image_selected.connect(self._tx_panel.set_rx_image)
 
         # Audio worker -> RX worker (chunks flow across the thread
         # boundary via queued connection; Qt handles the marshalling).

@@ -302,6 +302,7 @@ class TemplateGallery(QWidget):
         self._app_config = app_config
         self._templates_dir = templates_dir
         self._photo: "PILImage | None" = None
+        self._rx_image: "PILImage | None" = None
         self._qso_state: QSOState = QSOState()
         self._mode: "Mode | None" = None
         self._selected_template: Template | None = None
@@ -375,6 +376,11 @@ class TemplateGallery(QWidget):
     def set_photo(self, photo: "PILImage | None") -> None:
         """Update the base photo; re-renders all visible thumbnails."""
         self._photo = photo
+        self._rerender_all()
+
+    def set_rx_image(self, rx_image: "PILImage | None") -> None:
+        """Update the user-selected RX image; re-renders all thumbnails."""
+        self._rx_image = rx_image
         self._rerender_all()
 
     def set_qso_state(self, qso_state: QSOState) -> None:
@@ -559,6 +565,7 @@ class TemplateGallery(QWidget):
             mode_display_name=mode.value,
             frame_size=(spec.width, spec.display_height),
             photo_image=self._photo,
+            rx_image=self._rx_image,
         )
         try:
             img = render_template(
