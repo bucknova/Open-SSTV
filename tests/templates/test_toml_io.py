@@ -152,6 +152,64 @@ class TestStationImageLayerRoundTrip:
         assert isinstance(out, StationImageLayer)
         assert out.path == "qsl_card.png"
 
+    def test_subdir_path_survives(self, tmp_path: Path) -> None:
+        layer = StationImageLayer(id="si1", anchor="TL", path="cards/qsl.png")
+        rt = _save_load(Template(name="t", layers=[layer]), tmp_path)
+        assert rt.layers[0].path == "cards/qsl.png"
+
+
+class TestStationImagePathTraversalRejected:
+    """Regression for C1: malicious StationImageLayer paths must be rejected
+    at TOML load time so they never reach ``PIL.Image.open``.
+    """
+
+    def _toml_with_path(self, path: str) -> bytes:
+        # TOML literal strings (single quotes) don't interpret backslashes,
+        # so we can pass Windows-style paths through unmodified.
+        return (
+            b'[template]\nname = "Test"\nschema_version = 1\n\n'
+            b'[[layer]]\ntype = "station_image"\nid = "si"\nanchor = "TL"\n'
+            b"path = '" + path.encode("utf-8") + b"'\n"
+        )
+
+    def test_absolute_unix_path_rejected(self, tmp_path: Path) -> None:
+        p = tmp_path / "evil.toml"
+        p.write_bytes(self._toml_with_path("/etc/passwd"))
+        with pytest.raises(TemplateLoadError, match="absolute"):
+            load_template(p)
+
+    def test_absolute_windows_path_rejected(self, tmp_path: Path) -> None:
+        p = tmp_path / "evil.toml"
+        p.write_bytes(self._toml_with_path("C:/Windows/System32/config/SAM"))
+        with pytest.raises(TemplateLoadError, match="absolute"):
+            load_template(p)
+
+    def test_dotdot_segment_rejected(self, tmp_path: Path) -> None:
+        p = tmp_path / "evil.toml"
+        p.write_bytes(self._toml_with_path("../../../etc/passwd"))
+        with pytest.raises(TemplateLoadError, match=r"\.\."):
+            load_template(p)
+
+    def test_nested_dotdot_rejected(self, tmp_path: Path) -> None:
+        p = tmp_path / "evil.toml"
+        p.write_bytes(self._toml_with_path("subdir/../../../secret"))
+        with pytest.raises(TemplateLoadError, match=r"\.\."):
+            load_template(p)
+
+    def test_backslash_dotdot_rejected(self, tmp_path: Path) -> None:
+        # Windows-style separators should not bypass the .. check.
+        p = tmp_path / "evil.toml"
+        p.write_bytes(self._toml_with_path("..\\..\\etc\\passwd"))
+        with pytest.raises(TemplateLoadError, match=r"\.\."):
+            load_template(p)
+
+    def test_safe_relative_path_ok(self, tmp_path: Path) -> None:
+        p = tmp_path / "ok.toml"
+        p.write_bytes(self._toml_with_path("cards/my_qsl.png"))
+        t = load_template(p)
+        assert len(t.layers) == 1
+        assert t.layers[0].path == "cards/my_qsl.png"
+
 
 # ---------------------------------------------------------------------------
 # Round-trip: TextLayer

@@ -34,6 +34,7 @@ See ``model.py`` docstring for the full anchor semantics.  Summary:
 from __future__ import annotations
 
 import datetime
+import logging
 import math
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -42,6 +43,8 @@ import PIL.Image
 import PIL.ImageDraw
 import PIL.ImageFilter
 import PIL.ImageFont
+
+_log = logging.getLogger(__name__)
 
 from open_sstv.templates.fonts import resolve_font_path
 from open_sstv.templates.model import (
@@ -643,6 +646,32 @@ def _apply_opacity(img: PIL.Image.Image, opacity: float) -> PIL.Image.Image:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_station_image_path(rel_path: str, assets_dir: Path) -> Path | None:
+    """Resolve *rel_path* against *assets_dir* and confirm containment.
+
+    Returns the resolved ``Path`` if the result is inside ``assets_dir``,
+    otherwise ``None`` (the layer renders blank).  This is a defense-in-depth
+    check — the TOML loader already rejects absolute paths and ``..`` parts,
+    but a symlink inside the assets dir could still escape, so we re-verify
+    after symlink resolution here.
+    """
+    if not rel_path:
+        return None
+    try:
+        base = assets_dir.resolve()
+        resolved = (assets_dir / rel_path).resolve()
+    except OSError as exc:
+        _log.warning("Could not resolve station image path %r: %s", rel_path, exc)
+        return None
+    if not resolved.is_relative_to(base):
+        _log.warning(
+            "Refusing to load station image outside assets dir: %r resolved to %s",
+            rel_path, resolved,
+        )
+        return None
+    return resolved
+
+
 def render_template(
     template: Template,
     qso_state: QSOState,
@@ -650,6 +679,7 @@ def render_template(
     tx_context: TXContext,
     *,
     now_utc: datetime.datetime | None = None,
+    assets_dir: Path | None = None,
 ) -> PIL.Image.Image:
     """Render *template* to a PIL RGB image at the mode's frame size.
 
@@ -665,6 +695,10 @@ def render_template(
         TX-time context: frame size, mode name, rig frequency, photo/rx images.
     now_utc:
         Clock override for date/time tokens; defaults to ``datetime.now(utc)``.
+    assets_dir:
+        Directory used to resolve ``StationImageLayer.path`` values.  Defaults
+        to ``default_station_assets_dir()`` (``user_config_dir/assets``).
+        Resolved paths that escape this directory are refused.
 
     Returns
     -------
@@ -674,11 +708,15 @@ def render_template(
     if now_utc is None:
         now_utc = datetime.datetime.now(datetime.timezone.utc)
 
+    if assets_dir is None:
+        from open_sstv.templates.manager import default_station_assets_dir
+        assets_dir = default_station_assets_dir()
+
     W, H = tx_context.frame_size
     canvas = PIL.Image.new("RGBA", (W, H), (0, 0, 0, 255))
 
     # Load station image once if any StationImageLayer references it
-    _station_img_cache: dict[str, PIL.Image.Image] = {}
+    _station_img_cache: dict[str, PIL.Image.Image | None] = {}
 
     for layer in template.layers:
         if not layer.visible:
@@ -693,15 +731,17 @@ def render_template(
             cell = _rasterize_image_layer(layer, W, H, tx_context.rx_image)
 
         elif isinstance(layer, StationImageLayer):
-            if layer.path:
-                if layer.path not in _station_img_cache:
+            if layer.path and layer.path not in _station_img_cache:
+                resolved = _resolve_station_image_path(layer.path, assets_dir)
+                if resolved is None:
+                    _station_img_cache[layer.path] = None
+                else:
                     try:
-                        _station_img_cache[layer.path] = PIL.Image.open(layer.path)
-                    except OSError:
-                        _station_img_cache[layer.path] = None  # type: ignore[assignment]
-                station_img = _station_img_cache.get(layer.path)
-            else:
-                station_img = None
+                        _station_img_cache[layer.path] = PIL.Image.open(resolved)
+                    except (OSError, PIL.Image.DecompressionBombError) as exc:
+                        _log.warning("Could not open station image %s: %s", resolved, exc)
+                        _station_img_cache[layer.path] = None
+            station_img = _station_img_cache.get(layer.path) if layer.path else None
             cell = _rasterize_image_layer(layer, W, H, station_img)
 
         elif isinstance(layer, TextLayer):

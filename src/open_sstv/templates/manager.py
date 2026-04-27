@@ -60,6 +60,15 @@ def default_templates_dir() -> Path:
     return Path(platformdirs.user_config_dir(_APP_NAME)) / "templates"
 
 
+def default_station_assets_dir() -> Path:
+    """Return the user-config station assets directory (may not exist yet).
+
+    StationImageLayer.path values are resolved relative to this directory,
+    and the renderer rejects any resolved path that escapes it.
+    """
+    return Path(platformdirs.user_config_dir(_APP_NAME)) / "assets"
+
+
 def _bundled_templates_dir() -> Path:
     """Return the path to the shipped assets/templates directory."""
     anchor = importlib.resources.files("open_sstv") / "assets" / "templates"

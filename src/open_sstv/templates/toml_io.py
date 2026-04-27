@@ -40,7 +40,7 @@ from __future__ import annotations
 import logging
 import os
 import tomllib
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import tomli_w
 
@@ -117,6 +117,30 @@ def _base_kwargs(d: dict) -> dict:
     return kw
 
 
+def _validate_station_image_path(path: str) -> None:
+    """Raise ``TemplateLoadError`` if *path* would escape the assets dir.
+
+    StationImageLayer.path is documented as relative to
+    ``{user_config_dir}/open_sstv/assets/``.  A malicious template could
+    otherwise smuggle in absolute paths (``/etc/passwd``) or ``..`` segments
+    to make the renderer open arbitrary files.  We reject both at load time
+    so a hostile TOML never reaches ``PIL.Image.open`` — the renderer also
+    re-checks ``is_relative_to(assets_dir)`` as a defense-in-depth layer.
+    """
+    if not path:
+        return
+    p = PurePosixPath(path.replace("\\", "/"))
+    if p.is_absolute() or PureWindowsPath(path).is_absolute():
+        raise TemplateLoadError(
+            f"StationImageLayer.path must be relative to the assets directory, "
+            f"got absolute path {path!r}"
+        )
+    if any(part == ".." for part in p.parts):
+        raise TemplateLoadError(
+            f"StationImageLayer.path must not contain '..' components, got {path!r}"
+        )
+
+
 def _layer_from_dict(d: dict) -> Layer | None:
     """Deserialise one ``[[layer]]`` table into the appropriate Layer subclass.
 
@@ -130,6 +154,11 @@ def _layer_from_dict(d: dict) -> Layer | None:
         _log.warning("Layer missing required field %s — skipping", exc)
         return None
 
+    # Security checks happen before the catch-all below so attacks fail loudly
+    # rather than getting silently downgraded to a "skip with warning".
+    if layer_type == "station_image":
+        _validate_station_image_path(d.get("path", ""))
+
     try:
         if layer_type == "photo":
             return PhotoLayer(**base, fit=d.get("fit", "cover"))
@@ -138,9 +167,10 @@ def _layer_from_dict(d: dict) -> Layer | None:
             return RxImageLayer(**base, fit=d.get("fit", "cover"))
 
         if layer_type == "station_image":
+            raw_path = d.get("path", "")
             return StationImageLayer(
                 **base,
-                path=d.get("path", ""),
+                path=raw_path,
                 fit=d.get("fit", "contain"),
             )
 
