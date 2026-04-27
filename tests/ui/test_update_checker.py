@@ -114,6 +114,78 @@ def test_network_failure_is_silent(qtbot) -> None:
     assert completed == [True]  # check_complete still fires
 
 
+def test_url_error_is_silent(qtbot) -> None:
+    """Regression for H2: URLError (DNS failure, refused, etc.) is caught."""
+    from urllib.error import URLError
+
+    worker = UpdateCheckerWorker()
+    completed: list[bool] = []
+    worker.check_complete.connect(lambda: completed.append(True))
+
+    with patch("open_sstv.ui.update_checker.urllib.request.urlopen",
+               side_effect=URLError("name resolution failed")):
+        worker.check()
+
+    assert completed == [True]
+
+
+def test_timeout_is_silent(qtbot) -> None:
+    """Regression for H2: TimeoutError from urlopen is caught."""
+    worker = UpdateCheckerWorker()
+    completed: list[bool] = []
+    worker.check_complete.connect(lambda: completed.append(True))
+
+    with patch("open_sstv.ui.update_checker.urllib.request.urlopen",
+               side_effect=TimeoutError("read timed out")):
+        worker.check()
+
+    assert completed == [True]
+
+
+def test_json_decode_error_is_silent(qtbot) -> None:
+    """Regression for H2: malformed response body (non-JSON) is caught."""
+    from unittest.mock import MagicMock
+
+    bad = MagicMock()
+    bad.__enter__ = lambda s: s
+    bad.__exit__ = MagicMock(return_value=False)
+    bad.read = MagicMock(return_value=b"<html>503 Service Unavailable</html>")
+
+    worker = UpdateCheckerWorker()
+    completed: list[bool] = []
+    worker.check_complete.connect(lambda: completed.append(True))
+
+    with patch("open_sstv.ui.update_checker.urllib.request.urlopen", return_value=bad):
+        worker.check()
+
+    assert completed == [True]
+
+
+def test_unrelated_exception_propagates(qtbot) -> None:
+    """Regression for H2: a real bug (TypeError, AttributeError) must NOT
+    be hidden by the network-error catch.  This is the whole reason we
+    narrowed from ``except Exception``.
+    """
+    worker = UpdateCheckerWorker()
+    with patch("open_sstv.ui.update_checker.urllib.request.urlopen",
+               side_effect=TypeError("argument of wrong type")):
+        with pytest.raises(TypeError):
+            worker.check()
+
+
+def test_caught_exception_logged_at_debug(qtbot, caplog) -> None:
+    """Regression for H2: silenced exceptions still leave a debug breadcrumb."""
+    import logging
+
+    worker = UpdateCheckerWorker()
+    with caplog.at_level(logging.DEBUG, logger="open_sstv.ui.update_checker"):
+        with patch("open_sstv.ui.update_checker.urllib.request.urlopen",
+                   side_effect=OSError("connection refused")):
+            worker.check()
+
+    assert any("update check failed" in r.getMessage() for r in caplog.records)
+
+
 # === FirstLaunchDialog.check_updates_enabled ===
 
 
