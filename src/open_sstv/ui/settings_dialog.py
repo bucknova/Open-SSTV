@@ -1128,7 +1128,7 @@ class SettingsDialog(QDialog):
                 return
             try:
                 source = _PILImage.open(path).convert("RGB")
-            except (OSError, UnidentifiedImageError) as exc:
+            except (OSError, UnidentifiedImageError, _PILImage.DecompressionBombError) as exc:
                 QMessageBox.warning(
                     self,
                     "Could not open image",

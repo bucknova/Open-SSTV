@@ -280,7 +280,7 @@ class TxPanel(QWidget):
         try:
             img = Image.open(path)
             img.load()
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, Image.DecompressionBombError) as exc:
             self._status.setText(f"Failed to load: {exc}")
             return
 

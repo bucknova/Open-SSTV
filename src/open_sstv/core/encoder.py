@@ -284,7 +284,14 @@ def encode(
         msg = f"Unsupported SSTV mode: {mode!r}. Known modes: {sorted(MODE_TABLE)}"
         raise ValueError(msg)
 
-    pil_image = image if isinstance(image, Image.Image) else Image.open(image)
+    if isinstance(image, Image.Image):
+        pil_image = image
+    else:
+        try:
+            pil_image = Image.open(image)
+        except Image.DecompressionBombError as exc:
+            msg = f"Refusing to encode oversized image {image!r}: {exc}"
+            raise ValueError(msg) from exc
     sstv_cls = _PYSSTV_CLASSES[mode]
     # Use the PySSTV class's own WIDTH/HEIGHT for image preparation rather than
     # spec.width/spec.height: PD modes store height = actual_height // 2 in the
