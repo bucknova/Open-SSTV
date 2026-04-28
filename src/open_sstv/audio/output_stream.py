@@ -24,7 +24,7 @@ Public API:
 from __future__ import annotations
 
 import threading
-from typing import TYPE_CHECKING, Callable
+from typing import Callable
 
 import numpy as np
 import sounddevice as sd

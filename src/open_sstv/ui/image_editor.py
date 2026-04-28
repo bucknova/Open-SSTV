@@ -20,13 +20,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from PIL import Image, ImageDraw
-from PySide6.QtCore import QRectF, Qt, Signal, Slot
+from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import (
     QBrush,
     QColor,
-    QFont,
     QPen,
-    QPixmap,
 )
 from PySide6.QtWidgets import (
     QColorDialog,
@@ -42,7 +40,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
-    QListWidgetItem,
     QPushButton,
     QSizePolicy,
     QSpinBox,

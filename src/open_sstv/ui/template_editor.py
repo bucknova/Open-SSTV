@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QSize, QTimer, Qt, Signal, Slot
-from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox,
     QColorDialog,

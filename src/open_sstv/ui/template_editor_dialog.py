@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from PIL import Image, ImageDraw
 from PySide6.QtCore import Qt, Slot
-from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QColorDialog,
     QComboBox,
@@ -20,7 +19,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
-    QListWidgetItem,
     QPushButton,
     QSizePolicy,
     QSpinBox,
@@ -32,7 +30,6 @@ from open_sstv.config.templates import (
     QSOTemplate,
     QSOTemplateOverlay,
     resolve_placeholders,
-    save_templates,
 )
 from open_sstv.ui.draw_text import POSITIONS, draw_text_overlay, position_to_xy
 

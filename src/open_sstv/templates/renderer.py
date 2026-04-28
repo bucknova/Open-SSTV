@@ -49,7 +49,6 @@ _log = logging.getLogger(__name__)
 from open_sstv.templates.fonts import resolve_font_path
 from open_sstv.templates.model import (
     GradientLayer,
-    Layer,
     LayerBase,
     PatternLayer,
     PhotoLayer,

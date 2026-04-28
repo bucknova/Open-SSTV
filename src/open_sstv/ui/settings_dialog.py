@@ -62,7 +62,7 @@ from open_sstv import __version__ as _APP_VERSION
 from open_sstv.config.schema import AppConfig
 from open_sstv.core.banner import apply_tx_banner, scaled_banner_params
 from open_sstv.core.modes import Mode
-from open_sstv.templates import TokenContext, build_autosave_filename
+from open_sstv.templates import TokenContext
 
 
 #: Common Hamlib radio models (model_id, display_name).

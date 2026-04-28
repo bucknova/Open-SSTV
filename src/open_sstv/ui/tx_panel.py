@@ -47,7 +47,6 @@ from open_sstv.config.templates import (
     load_templates,
     needs_user_input,
     resolve_placeholders,
-    save_templates,
 )
 from open_sstv.core.encoder import DEFAULT_SAMPLE_RATE
 from open_sstv.core.modes import MODE_TABLE, Mode
