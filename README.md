@@ -202,16 +202,16 @@ Robot 12, Robot 24, Robot 72. Planned for a future release.
 
 ![Open-SSTV main window](docs/screenshots/main-window.png)
 
-*Main window — image loaded, QSO template buttons, mode selector, RX panel*
+*Main window — TX panel with the v0.3 template gallery filtered by role, QSO state widget, mode selector, and the live RX panel waiting for a signal*
 
 | | |
 |---|---|
+| ![Template editor](docs/screenshots/template-editor.png) | ![Image editor](docs/screenshots/image-editor.png) |
+| *Template editor — three-panel form (Layers / Live preview / Properties) with sample QSO state for token previews* | *Image editor — crop, rotate, flip, and text overlays before encode* |
 | ![Audio settings](docs/screenshots/settings-audio.png) | ![Radio settings](docs/screenshots/settings-radio.png) |
-| *Audio tab — device, gain sliders, weak-signal mode* | *Radio tab — Direct Serial / Icom CI-V, PTT, CW Station ID* |
-| ![Images settings](docs/screenshots/settings-images.png) | ![QSO templates](docs/screenshots/qso-templates.png) |
-| *Images tab — TX banner with live preview* | *QSO Templates — CQ DE W0AEZ overlay editor* |
-| ![Image editor](docs/screenshots/image-editor.png) | ![Main window idle](docs/screenshots/main-window-empty.png) |
-| *Image editor — crop, rotate, flip, text overlays* | *Main window — idle state at launch* |
+| *Audio tab — device, gain sliders, weak-signal mode, incremental decode* | *Radio tab — Direct Serial / Icom CI-V, PTT delay, CW Station ID* |
+| ![Images settings](docs/screenshots/settings-images.png) | ![About dialog](docs/screenshots/about-dialog.png) |
+| *Images tab — auto-save, TX banner with live preview, update-check opt-in* | *About dialog — v0.3.0, 22 modes, GPL-3.0-or-later* |
 
 ## Architecture
 
