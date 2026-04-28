@@ -365,6 +365,27 @@ class TestTextLayerRoundTrip:
         rt = _save_load(t, tmp_path)
         assert rt.layers[0].font_size_pct == pytest.approx(22.5)
 
+    def test_color_mode_default_solid_not_serialized(self, tmp_path: Path) -> None:
+        """Backward-compat: default 'solid' must NOT appear in TOML, so
+        existing templates roundtrip without acquiring a new key."""
+        p = tmp_path / "t.toml"
+        save_template(Template(name="t", layers=[self._layer()]), p)
+        with p.open("rb") as f:
+            raw = tomllib.load(f)
+        assert "color_mode" not in raw["layer"][0]
+
+    def test_color_mode_rainbow_survives(self, tmp_path: Path) -> None:
+        t = Template(name="t", layers=[self._layer(color_mode="rainbow")])
+        rt = _save_load(t, tmp_path)
+        assert rt.layers[0].color_mode == "rainbow"
+
+    def test_color_mode_missing_loads_as_solid(self, tmp_path: Path) -> None:
+        """Forward-compat with pre-rainbow templates: a TOML file without
+        ``color_mode`` must load with the default 'solid' value."""
+        t = Template(name="t", layers=[self._layer()])
+        rt = _save_load(t, tmp_path)
+        assert rt.layers[0].color_mode == "solid"
+
 
 # ---------------------------------------------------------------------------
 # Round-trip: RectLayer

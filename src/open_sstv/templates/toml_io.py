@@ -243,6 +243,7 @@ def _layer_from_dict(d: dict) -> Layer | None:
                 date_format=d.get("date_format", "%Y-%m-%d"),
                 time_format=d.get("time_format", "%H:%M"),
                 orientation=d.get("orientation", "horizontal"),
+                color_mode=d.get("color_mode", "solid"),
             )
 
         if layer_type == "rect":
@@ -344,6 +345,8 @@ def _layer_to_dict(layer: Layer) -> dict:
             d["time_format"] = layer.time_format
         if layer.orientation != "horizontal":
             d["orientation"] = layer.orientation
+        if layer.color_mode != "solid":
+            d["color_mode"] = layer.color_mode
 
     elif isinstance(layer, RectLayer):
         d["fill"] = list(layer.fill)

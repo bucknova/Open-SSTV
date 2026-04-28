@@ -819,11 +819,23 @@ class TemplateEditor(QDialog):
         self._field_orientation = orientation_combo
         form.addRow("Orientation:", orientation_combo)
 
-        # --- Fill colour ---
+        # --- Color mode ---
+        color_mode_combo = QComboBox()
+        for label, value in (("Solid", "solid"), ("Rainbow", "rainbow")):
+            color_mode_combo.addItem(label, value)
+        idx = color_mode_combo.findData(layer.color_mode)
+        if idx >= 0:
+            color_mode_combo.setCurrentIndex(idx)
+        color_mode_combo.currentIndexChanged.connect(self._on_color_mode_changed)
+        self._field_color_mode = color_mode_combo
+        form.addRow("Color mode:", color_mode_combo)
+
+        # --- Fill colour --- (hidden when color_mode=rainbow)
         fill_btn = _make_color_button(layer.fill)
         fill_btn.clicked.connect(self._on_pick_text_fill)
         self._field_fill_btn = fill_btn
-        form.addRow("Fill:", fill_btn)
+        if layer.color_mode != "rainbow":
+            form.addRow("Fill:", fill_btn)
 
         # --- Stroke ---
         stroke_row = QHBoxLayout()
@@ -1054,6 +1066,20 @@ class TemplateEditor(QDialog):
         if value:
             layer.orientation = value  # type: ignore[assignment]
             self._schedule_preview()
+
+    @Slot(int)
+    def _on_color_mode_changed(self, _idx: int) -> None:
+        layer = self._selected_layer()
+        if not isinstance(layer, TextLayer) or self._loading_form:
+            return
+        value = self._field_color_mode.currentData()
+        if not value or value == layer.color_mode:
+            return
+        layer.color_mode = value  # type: ignore[assignment]
+        # Rebuild the inspector so the Fill row appears/disappears to
+        # match the new mode.
+        self._populate_inspector(layer)
+        self._schedule_preview()
 
     @Slot()
     def _on_pick_text_fill(self) -> None:

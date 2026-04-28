@@ -653,6 +653,138 @@ class TestTextLayer:
             assert white == 0, f"Row {y} has {white} white pixels — text was clipped"
 
 
+class TestRainbowText:
+    """``color_mode='rainbow'`` paints each glyph along an HSV hue sweep
+    instead of using ``layer.fill`` as a single color.  The properties
+    tested here are:
+
+    * The render does not crash.
+    * Multiple distinct hues are present on the canvas (it's not a
+      single colour pretending to be rainbow).
+    * Solid-mode renders are unchanged (no regression).
+    * Alpha from ``layer.fill[3]`` is honoured.
+    * Stacked orientation also gets the per-glyph hue sweep.
+    """
+
+    def _layer(self, **kw) -> TextLayer:
+        defaults = dict(
+            id="t", anchor="C",
+            text_raw="RAINBOW",
+            font_family="DejaVu Sans Bold",
+            font_size_pct=20.0,
+            fill=(255, 255, 255, 255),
+            color_mode="rainbow",
+            slashed_zero=False,
+        )
+        defaults.update(kw)
+        return TextLayer(**defaults)
+
+    @staticmethod
+    def _hue_buckets(pixels: list[tuple[int, int, int]]) -> set[str]:
+        """Bin lit (non-near-black) pixels into rough hue families.
+
+        We don't validate exact pixel colours — anti-aliasing on glyph
+        edges produces in-between shades.  The contract is just that
+        the rendered text spans a non-trivial slice of the colour wheel.
+        """
+        seen: set[str] = set()
+        for r, g, b in pixels:
+            if r < 60 and g < 60 and b < 60:
+                continue  # background / very dim AA
+            if r > 180 and g < 100 and b < 100:
+                seen.add("red")
+            elif r > 180 and g > 180 and b < 100:
+                seen.add("yellow")
+            elif r < 100 and g > 180 and b < 100:
+                seen.add("green")
+            elif r < 100 and g > 180 and b > 180:
+                seen.add("cyan")
+            elif r < 100 and g < 100 and b > 180:
+                seen.add("blue")
+            elif r > 180 and g < 100 and b > 180:
+                seen.add("magenta")
+        return seen
+
+    def test_rainbow_renders_without_crash(self) -> None:
+        t = Template(name="t", layers=[self._layer()])
+        img = _render(t)
+        assert img.size == _FRAME
+
+    def test_rainbow_produces_multiple_hues(self) -> None:
+        """A 7-character rainbow line (hue ∈ [0, 6/7)) must show at
+        least three of the six primary/secondary hues."""
+        t = Template(name="t", layers=[self._layer()])
+        img = _render(t)
+        pixels = list(img.getdata())
+        buckets = self._hue_buckets(pixels)
+        assert len(buckets) >= 3, (
+            f"Rainbow render only showed buckets {buckets!r} — expected ≥3"
+        )
+
+    def test_solid_mode_produces_only_fill_colour(self) -> None:
+        """Sanity: with color_mode='solid' and a red fill, no green/blue
+        hues should appear on the canvas — confirms the rainbow path is
+        gated correctly."""
+        layer = self._layer(color_mode="solid", fill=(255, 0, 0, 255))
+        t = Template(name="t", layers=[layer])
+        img = _render(t)
+        pixels = list(img.getdata())
+        buckets = self._hue_buckets(pixels)
+        assert buckets <= {"red"}, (
+            f"Solid red render produced unexpected hues: {buckets!r}"
+        )
+
+    def test_rainbow_zero_alpha_is_invisible(self) -> None:
+        """Alpha from ``layer.fill[3]`` must propagate to the rainbow
+        glyphs.  With alpha=0 the render must be identical to a no-text
+        render (transparent over black background)."""
+        layer = self._layer(fill=(255, 255, 255, 0))
+        t_with = Template(name="t", layers=[layer])
+        t_empty = Template(name="empty", layers=[])
+        img_with = _render(t_with)
+        img_empty = _render(t_empty)
+        assert list(img_with.getdata()) == list(img_empty.getdata())
+
+    def test_rainbow_stacked_orientation(self) -> None:
+        """Stacked text steps hue across the character index instead of
+        x-position; render must still produce multiple hues."""
+        layer = self._layer(orientation="stacked", text_raw="RGBCYM", anchor="TL")
+        t = Template(name="t", layers=[layer])
+        img = _render(t)
+        pixels = list(img.getdata())
+        buckets = self._hue_buckets(pixels)
+        assert len(buckets) >= 3, (
+            f"Stacked rainbow only showed buckets {buckets!r} — expected ≥3"
+        )
+
+    def test_rainbow_with_stroke_renders(self) -> None:
+        """Stroke is applied per-glyph in rainbow mode; verify the
+        stroke colour appears on canvas alongside the rainbow ink."""
+        layer = self._layer(
+            text_raw="ABC",
+            stroke=StrokeSpec(color=(255, 255, 255, 255), width_px=2),
+        )
+        t = Template(name="t", layers=[layer])
+        img = _render(t)
+        pixels = list(img.getdata())
+        # White stroke pixels (R, G, B all > 220) must exist.
+        white = sum(1 for r, g, b in pixels if r > 220 and g > 220 and b > 220)
+        assert white > 0, "Rainbow + stroke produced no white stroke pixels"
+
+    def test_rainbow_default_is_solid(self) -> None:
+        """A TextLayer constructed with no color_mode argument must
+        default to 'solid' — backward compat with pre-rainbow code paths."""
+        layer = TextLayer(
+            id="t", anchor="C",
+            text_raw="X",
+            font_family="DejaVu Sans Bold",
+            font_size_pct=10.0,
+            fill=(255, 0, 0, 255),
+            slashed_zero=False,
+        )
+        assert layer.color_mode == "solid"
+
+
 
 # ---------------------------------------------------------------------------
 # Anchor positions — visual placement

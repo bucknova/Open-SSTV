@@ -33,6 +33,7 @@ See ``model.py`` docstring for the full anchor semantics.  Summary:
 """
 from __future__ import annotations
 
+import colorsys
 import datetime
 import logging
 import math
@@ -273,6 +274,75 @@ def _text_bbox(
     return (0, 0, w, h)
 
 
+def _build_rainbow_gradient(
+    width: int, height: int, alpha: int, *, vertical: bool = False
+) -> PIL.Image.Image:
+    """Return an RGBA image of a smooth HSV rainbow gradient.
+
+    Hue sweeps 0 → 360° at full saturation/value along the long axis
+    (horizontal by default; vertical if *vertical* is True).  Every
+    pixel carries *alpha* in its alpha channel so transparent rainbow
+    text remains possible.
+
+    The strip is built one pixel wide along the gradient axis and then
+    NEAREST-resized to the requested rectangle, which keeps the colour
+    bands sharp on the orthogonal axis.
+    """
+    w = max(1, width)
+    h = max(1, height)
+    if vertical:
+        strip = PIL.Image.new("RGBA", (1, h))
+        for i in range(h):
+            r, g, b = colorsys.hsv_to_rgb(i / h, 1.0, 1.0)
+            strip.putpixel(
+                (0, i),
+                (
+                    int(r * 255 + 0.5),
+                    int(g * 255 + 0.5),
+                    int(b * 255 + 0.5),
+                    alpha,
+                ),
+            )
+    else:
+        strip = PIL.Image.new("RGBA", (w, 1))
+        for i in range(w):
+            r, g, b = colorsys.hsv_to_rgb(i / w, 1.0, 1.0)
+            strip.putpixel(
+                (i, 0),
+                (
+                    int(r * 255 + 0.5),
+                    int(g * 255 + 0.5),
+                    int(b * 255 + 0.5),
+                    alpha,
+                ),
+            )
+    return strip.resize((w, h), PIL.Image.Resampling.NEAREST)
+
+
+def _composite_rainbow_through_mask(
+    img: PIL.Image.Image,
+    mask: PIL.Image.Image,
+    alpha: int,
+    *,
+    vertical: bool = False,
+) -> None:
+    """Overlay an HSV rainbow gradient onto *img* through an L-mode *mask*.
+
+    The gradient is sized to the mask's inked bounding box so the colour
+    sweep spans exactly the glyph extent, then pasted with the cropped
+    mask as alpha.  No-op when the mask has no inked pixels (e.g. a
+    space character with no ink).
+    """
+    bbox = mask.getbbox()
+    if bbox is None:
+        return
+    gx0, gy0, gx1, gy1 = bbox
+    gradient = _build_rainbow_gradient(
+        gx1 - gx0, gy1 - gy0, alpha, vertical=vertical
+    )
+    img.paste(gradient, (gx0, gy0), mask.crop(bbox))
+
+
 def _render_horizontal_text(
     layer: TextLayer,
     resolved: str,
@@ -348,14 +418,32 @@ def _render_horizontal_text(
 
         # Main text with optional stroke
         stroke_fill = layer.stroke.color if layer.stroke else None
-        draw.text(
-            (x, y),
-            line,
-            font=font,
-            fill=layer.fill,
-            stroke_width=stroke_w,
-            stroke_fill=stroke_fill,
-        )
+        if layer.color_mode == "rainbow":
+            # Two-pass rainbow: paint the full silhouette in stroke colour
+            # first (so the outer ring keeps its uniform colour), then
+            # overlay the gradient through a glyph-only mask.
+            if stroke_w > 0 and stroke_fill is not None:
+                draw.text(
+                    (x, y),
+                    line,
+                    font=font,
+                    fill=stroke_fill,
+                    stroke_width=stroke_w,
+                    stroke_fill=stroke_fill,
+                )
+            mask = PIL.Image.new("L", img.size, 0)
+            PIL.ImageDraw.Draw(mask).text((x, y), line, font=font, fill=255)
+            _composite_rainbow_through_mask(img, mask, layer.fill[3])
+            draw = PIL.ImageDraw.Draw(img)
+        else:
+            draw.text(
+                (x, y),
+                line,
+                font=font,
+                fill=layer.fill,
+                stroke_width=stroke_w,
+                stroke_fill=stroke_fill,
+            )
 
     # Anchor text image onto canvas
     bbox_w, bbox_h = _layer_bbox(layer, canvas_w, canvas_h)
@@ -402,18 +490,38 @@ def _render_stacked_text(
     img = PIL.Image.new("RGBA", (max(1, total_w), max(1, total_h)), (0, 0, 0, 0))
     draw = PIL.ImageDraw.Draw(img)
 
-    for i, ch in enumerate(chars):
-        y = stroke_w + i * spacing
-        x = stroke_w
-        stroke_fill = layer.stroke.color if layer.stroke else None
-        draw.text(
-            (x, y),
-            ch,
-            font=font,
-            fill=layer.fill,
-            stroke_width=stroke_w,
-            stroke_fill=stroke_fill,
-        )
+    stroke_fill = layer.stroke.color if layer.stroke else None
+    if layer.color_mode == "rainbow":
+        # Two-pass rainbow with a vertical gradient: stroke pass first
+        # (uniform colour), then composite the rainbow through a single
+        # mask covering every stacked glyph.
+        if stroke_w > 0 and stroke_fill is not None:
+            for i, ch in enumerate(chars):
+                draw.text(
+                    (stroke_w, stroke_w + i * spacing),
+                    ch,
+                    font=font,
+                    fill=stroke_fill,
+                    stroke_width=stroke_w,
+                    stroke_fill=stroke_fill,
+                )
+        mask = PIL.Image.new("L", img.size, 0)
+        mask_draw = PIL.ImageDraw.Draw(mask)
+        for i, ch in enumerate(chars):
+            mask_draw.text(
+                (stroke_w, stroke_w + i * spacing), ch, font=font, fill=255
+            )
+        _composite_rainbow_through_mask(img, mask, layer.fill[3], vertical=True)
+    else:
+        for i, ch in enumerate(chars):
+            draw.text(
+                (stroke_w, stroke_w + i * spacing),
+                ch,
+                font=font,
+                fill=layer.fill,
+                stroke_width=stroke_w,
+                stroke_fill=stroke_fill,
+            )
 
     cx, cy = _anchor_top_left(
         layer.anchor,

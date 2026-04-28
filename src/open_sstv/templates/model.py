@@ -145,6 +145,9 @@ class TextLayer(LayerBase):
     date_format: str = "%Y-%m-%d"
     time_format: str = "%H:%M"
     orientation: Literal["horizontal", "stacked"] = "horizontal"
+    # ``rainbow`` paints each glyph along an HSV hue sweep across the line
+    # width; ``fill`` is then used only for its alpha channel.
+    color_mode: Literal["solid", "rainbow"] = "solid"
 
 
 @dataclass
