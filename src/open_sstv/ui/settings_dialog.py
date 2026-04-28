@@ -23,8 +23,8 @@ _log = logging.getLogger(__name__)
 from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtWidgets import (
-    QColorDialog,
     QCheckBox,
+    QColorDialog,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -44,6 +44,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from open_sstv import __version__ as _APP_VERSION
+from open_sstv.audio.devices import (
+    AudioDevice,
+    list_input_devices,
+    list_output_devices,
+)
+from open_sstv.config.schema import AppConfig
+from open_sstv.core.banner import apply_tx_banner, scaled_banner_params
+from open_sstv.core.modes import Mode
 from open_sstv.radio.base import RigConnectionMode
 from open_sstv.radio.exceptions import RigError
 from open_sstv.radio.rigctld import RigctldClient, is_safe_rigctld_arg
@@ -52,18 +61,7 @@ from open_sstv.radio.serial_rig import (
     SERIAL_RIG_PROTOCOLS,
     create_serial_rig,
 )
-
-from open_sstv.audio.devices import (
-    AudioDevice,
-    list_input_devices,
-    list_output_devices,
-)
-from open_sstv import __version__ as _APP_VERSION
-from open_sstv.config.schema import AppConfig
-from open_sstv.core.banner import apply_tx_banner, scaled_banner_params
-from open_sstv.core.modes import Mode
-from open_sstv.templates import TokenContext, build_autosave_filename
-
+from open_sstv.templates import TokenContext
 
 #: Common Hamlib radio models (model_id, display_name).
 _COMMON_RIG_MODELS: list[tuple[int, str]] = [
@@ -1030,14 +1028,14 @@ class SettingsDialog(QDialog):
             callsign=callsign,
             mode=mode_name,
             direction="RX",
-            now_utc=datetime.datetime.now(datetime.timezone.utc),
+            now_utc=datetime.datetime.now(datetime.UTC),
         )
         # Resolve in-memory without touching the filesystem — the
         # preview must not ``mkdir`` the save directory, and it must
         # not pick collision suffixes from whatever files happen to be
         # in there.  Call the lower-level resolver directly.
-        from open_sstv.templates.tokens import resolve_tokens
         from open_sstv.templates.filename import sanitize_filename_component
+        from open_sstv.templates.tokens import resolve_tokens
 
         resolved = resolve_tokens(pattern, ctx)
         stem = sanitize_filename_component(resolved)
@@ -1111,10 +1109,11 @@ class SettingsDialog(QDialog):
         """
         from pathlib import Path as _Path
 
-        from PIL import Image as _PILImage, UnidentifiedImageError
+        from PIL import Image as _PILImage
+        from PIL import UnidentifiedImageError
 
         if self._tx_image is not None:
-            source: "_PILImage.Image" = self._tx_image.convert("RGB")  # type: ignore[union-attr]
+            source: _PILImage.Image = self._tx_image.convert("RGB")  # type: ignore[union-attr]
             title = "Banner preview — TX image"
         else:
             initial_dir = self._save_dir.text() or str(_Path.home())
@@ -1128,7 +1127,7 @@ class SettingsDialog(QDialog):
                 return
             try:
                 source = _PILImage.open(path).convert("RGB")
-            except (OSError, UnidentifiedImageError) as exc:
+            except (OSError, UnidentifiedImageError, _PILImage.DecompressionBombError) as exc:
                 QMessageBox.warning(
                     self,
                     "Could not open image",

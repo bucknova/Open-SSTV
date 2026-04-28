@@ -50,7 +50,7 @@ _MORSE_TABLE: dict[str, str] = {
 
 def _make_tone(
     n_samples: int, freq_hz: float, amplitude: float, sample_rate: int
-) -> "NDArray[np.int16]":
+) -> NDArray[np.int16]:
     """Return *n_samples* of a windowed sine at *freq_hz*.
 
     A 5 ms linear attack and decay prevent key-click transients.  The
@@ -75,7 +75,7 @@ def make_cw(
     tone_hz: int = 800,
     sample_rate: int = 48_000,
     peak_dbfs: float = -1.0,
-) -> "NDArray[np.int16]":
+) -> NDArray[np.int16]:
     """Generate Morse code PCM samples for *text*.
 
     Parameters

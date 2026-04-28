@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
-def to_mono_float32(samples: "NDArray") -> "NDArray[np.float32]":
+def to_mono_float32(samples: NDArray) -> NDArray[np.float32]:
     """Convert any audio array to mono ``float32`` in ``[-1.0, 1.0]``.
 
     Multi-channel input (shape ``(N, channels)``) is mixed down to mono by
@@ -72,8 +72,8 @@ def to_mono_float32(samples: "NDArray") -> "NDArray[np.float32]":
 
 
 def resample_to(
-    samples: "NDArray", src_rate: int, dst_rate: int
-) -> "NDArray":
+    samples: NDArray, src_rate: int, dst_rate: int
+) -> NDArray:
     """Resample a 1-D buffer from ``src_rate`` to ``dst_rate``.
 
     Uses ``scipy.signal.resample_poly`` after reducing the rate ratio with
@@ -94,7 +94,7 @@ def resample_to(
 
 def bandpass_sos(
     low_hz: float, high_hz: float, fs: float, order: int = 4
-) -> "NDArray":
+) -> NDArray:
     """Butterworth bandpass as second-order sections.
 
     The decoder uses this to isolate the SSTV passband (~1100–2400 Hz)

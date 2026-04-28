@@ -34,6 +34,7 @@ See ``model.py`` docstring for the full anchor semantics.  Summary:
 from __future__ import annotations
 
 import datetime
+import logging
 import math
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -43,10 +44,11 @@ import PIL.ImageDraw
 import PIL.ImageFilter
 import PIL.ImageFont
 
+_log = logging.getLogger(__name__)
+
 from open_sstv.templates.fonts import resolve_font_path
 from open_sstv.templates.model import (
     GradientLayer,
-    Layer,
     LayerBase,
     PatternLayer,
     PhotoLayer,
@@ -54,9 +56,9 @@ from open_sstv.templates.model import (
     RectLayer,
     RxImageLayer,
     StationImageLayer,
-    TXContext,
     Template,
     TextLayer,
+    TXContext,
 )
 from open_sstv.templates.tokens import resolve_text
 
@@ -275,11 +277,20 @@ def _render_horizontal_text(
     # Measure bounding box (single or multi-line)
     lines = resolved.split("\n")
     line_bboxes = [_text_bbox(font, ln) for ln in lines]
-    line_heights = [bb[3] - bb[1] for bb in line_bboxes]
     line_widths = [bb[2] - bb[0] for bb in line_bboxes]
 
-    line_h_px = max(line_heights) if line_heights else 1
-    spacing = int(line_h_px * layer.line_height_mult)
+    # Use the font's full vertical metric (ascent + descent) for line height,
+    # not the ink bbox height. PIL's draw.text() places the ascender line at y,
+    # so ink can extend down to y + (ascent + descent) for glyphs with descenders.
+    # Sizing the image to the ink-only height (bb[3]-bb[1]) drops the bb[1]
+    # offset below the image bottom and clips the lower part of glyphs.
+    ascent, descent = font.getmetrics()
+    font_h_px = ascent + descent
+    # Guard against rare fonts whose ink bbox exceeds the reported metrics.
+    last_line_extent = max((bb[3] for bb in line_bboxes), default=font_h_px)
+    line_h_px = max(font_h_px, last_line_extent)
+
+    spacing = int(font_h_px * layer.line_height_mult)
     total_h = spacing * (len(lines) - 1) + line_h_px + stroke_w * 2
     total_w = max(line_widths) if line_widths else 1
 
@@ -299,7 +310,10 @@ def _render_horizontal_text(
     text_x0 = pad_left + stroke_w
     text_y0 = pad_top + stroke_w
 
-    for i, (line, lw) in enumerate(zip(lines, line_widths)):
+    # strict=True: ``line_widths`` is derived 1:1 from ``lines`` via
+    # ``_text_bbox`` so the lengths cannot legitimately diverge — a future
+    # bug that changes that should fail loudly here.
+    for i, (line, lw) in enumerate(zip(lines, line_widths, strict=True)):
         y = text_y0 + i * spacing
         if layer.align == "left":
             x = text_x0
@@ -362,8 +376,16 @@ def _render_stacked_text(
 
     char_bboxes = [_text_bbox(font, c) for c in chars]
     char_w = max(bb[2] - bb[0] for bb in char_bboxes)
-    char_h = max(bb[3] - bb[1] for bb in char_bboxes)
-    spacing = int(char_h * layer.line_height_mult)
+
+    # See note in _render_horizontal_text: PIL anchors text at the ascender,
+    # so the per-line vertical box must reserve the full font metric range
+    # (ascent + descent) to avoid clipping the bottom of each glyph.
+    ascent, descent = font.getmetrics()
+    font_h_px = ascent + descent
+    max_ink_bottom = max((bb[3] for bb in char_bboxes), default=font_h_px)
+    char_h = max(font_h_px, max_ink_bottom)
+
+    spacing = int(font_h_px * layer.line_height_mult)
     total_h = spacing * (len(chars) - 1) + char_h + stroke_w * 2
     total_w = char_w + stroke_w * 2
 
@@ -426,7 +448,7 @@ def _rasterize_photo(
 
 
 def _rasterize_image_layer(
-    layer: "RxImageLayer | StationImageLayer",
+    layer: RxImageLayer | StationImageLayer,
     canvas_w: int,
     canvas_h: int,
     img: PIL.Image.Image | None,
@@ -448,6 +470,79 @@ def _rasterize_image_layer(
             bbox_w, bbox_h, canvas_w, canvas_h,
         )
     cell.paste(fitted, (x, y), fitted)
+    return _apply_opacity(cell, layer.opacity)
+
+
+def _rasterize_rx_image(
+    layer: RxImageLayer,
+    canvas_w: int,
+    canvas_h: int,
+    img: PIL.Image.Image | None,
+) -> PIL.Image.Image:
+    """Render an RxImageLayer slot.
+
+    Two visual contracts:
+
+    * **Image present** — paste the fitted image with no border or fill.
+      The slot looks identical to a PhotoLayer holding the same picture.
+    * **Image absent** — show a white-bordered placeholder box with an
+      "RX" label.  Lets template authors see the slot's position and
+      size in the editor preview before any RX image has been received.
+
+    StationImage and Photo layers continue to use ``_rasterize_image_layer`` —
+    keeping the placeholder behaviour confined to RxImage avoids surprise
+    borders on station-image overlays that intentionally render blank when
+    their asset file is missing.
+    """
+    if layer.anchor == "FILL":
+        bbox_w, bbox_h = canvas_w, canvas_h
+        x, y = 0, 0
+    else:
+        bbox_w, bbox_h = _layer_bbox(layer, canvas_w, canvas_h)
+        x, y = _anchor_top_left(
+            layer.anchor, layer.offset_x_pct, layer.offset_y_pct,
+            bbox_w, bbox_h, canvas_w, canvas_h,
+        )
+
+    cell = PIL.Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+
+    if img is not None:
+        # Spec: when an RX image is present, render it cleanly — no border,
+        # no fill.  The user sees a real picture, not a framed placeholder.
+        fitted = _fit_image(img, bbox_w, bbox_h, layer.fit)
+        cell.paste(fitted, (x, y), fitted)
+        return _apply_opacity(cell, layer.opacity)
+
+    # Spec: empty slot is a visible white-ish box so the editor preview
+    # shows where the RX image will land.  Semi-transparent fill so any
+    # photo layer composited below still reads through; "RX" label makes
+    # the intent unambiguous.
+    placeholder = PIL.Image.new("RGBA", (bbox_w, bbox_h), (255, 255, 255, 80))
+    cell.paste(placeholder, (x, y), placeholder)
+
+    draw = PIL.ImageDraw.Draw(cell)
+    draw.rectangle(
+        [x, y, x + bbox_w - 1, y + bbox_h - 1],
+        outline=(255, 255, 255, 220), width=2,
+    )
+
+    label = "RX"
+    label_size_px = max(8, int(min(bbox_w, bbox_h) * 0.30))
+    try:
+        label_font = _load_font("DejaVu Sans Bold", label_size_px)
+        lb = _text_bbox(label_font, label)
+        lw = lb[2] - lb[0]
+        lh = lb[3] - lb[1]
+        # Subtract the bbox origin so the *ink* centres in the cell, not the
+        # bbox top-left (which sits above the ascender for many fonts).
+        lx = x + (bbox_w - lw) // 2 - lb[0]
+        ly = y + (bbox_h - lh) // 2 - lb[1]
+        draw.text((lx, ly), label, font=label_font, fill=(120, 120, 120, 220))
+    except OSError:
+        # Font resolution failed (CI without DejaVu, etc.) — silently skip
+        # the label; the bordered box alone is still a clear placeholder.
+        pass
+
     return _apply_opacity(cell, layer.opacity)
 
 
@@ -505,22 +600,14 @@ def _rasterize_pattern(
 
     tiled = _tile_pattern(tile, bbox_w, bbox_h)
 
-    # Apply tint: multiply pattern alpha by tint RGBA
-    tint = layer.tint
-    tinted = PIL.Image.new("RGBA", (bbox_w, bbox_h), (0, 0, 0, 0))
-    tr, tg, tb, ta = tint
-    for px_x in range(bbox_w):
-        for px_y in range(bbox_h):
-            r2, g2, b2, a2 = tiled.getpixel((px_x, px_y))
-            tinted.putpixel(
-                (px_x, px_y),
-                (
-                    r2 * tr // 255,
-                    g2 * tg // 255,
-                    b2 * tb // 255,
-                    a2 * ta // 255,
-                ),
-            )
+    # Apply tint: multiply each channel by the matching tint channel.
+    # Cast to uint16 first so the 255×255 = 65025 product doesn't wrap
+    # the uint8 buffer underneath the PIL image.
+    import numpy as np
+    arr = np.array(tiled, dtype=np.uint16)
+    tint = np.array(layer.tint, dtype=np.uint16)
+    arr = arr * tint // 255
+    tinted = PIL.Image.fromarray(arr.astype(np.uint8))
 
     cell = PIL.Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
     cell.paste(tinted, (x, y), tinted)
@@ -542,7 +629,8 @@ def _wrap_text(
         cur: list[str] = []
         for word in words:
             candidate = " ".join(cur + [word])
-            w = _text_bbox(font, candidate)[2] - _text_bbox(font, candidate)[0]
+            bbox = _text_bbox(font, candidate)
+            w = bbox[2] - bbox[0]
             if w > max_w and cur:
                 out_lines.append(" ".join(cur))
                 cur = [word]
@@ -626,13 +714,40 @@ def _apply_opacity(img: PIL.Image.Image, opacity: float) -> PIL.Image.Image:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_station_image_path(rel_path: str, assets_dir: Path) -> Path | None:
+    """Resolve *rel_path* against *assets_dir* and confirm containment.
+
+    Returns the resolved ``Path`` if the result is inside ``assets_dir``,
+    otherwise ``None`` (the layer renders blank).  This is a defense-in-depth
+    check — the TOML loader already rejects absolute paths and ``..`` parts,
+    but a symlink inside the assets dir could still escape, so we re-verify
+    after symlink resolution here.
+    """
+    if not rel_path:
+        return None
+    try:
+        base = assets_dir.resolve()
+        resolved = (assets_dir / rel_path).resolve()
+    except OSError as exc:
+        _log.warning("Could not resolve station image path %r: %s", rel_path, exc)
+        return None
+    if not resolved.is_relative_to(base):
+        _log.warning(
+            "Refusing to load station image outside assets dir: %r resolved to %s",
+            rel_path, resolved,
+        )
+        return None
+    return resolved
+
+
 def render_template(
     template: Template,
     qso_state: QSOState,
-    app_config: "AppConfig",
+    app_config: AppConfig,
     tx_context: TXContext,
     *,
     now_utc: datetime.datetime | None = None,
+    assets_dir: Path | None = None,
 ) -> PIL.Image.Image:
     """Render *template* to a PIL RGB image at the mode's frame size.
 
@@ -648,6 +763,10 @@ def render_template(
         TX-time context: frame size, mode name, rig frequency, photo/rx images.
     now_utc:
         Clock override for date/time tokens; defaults to ``datetime.now(utc)``.
+    assets_dir:
+        Directory used to resolve ``StationImageLayer.path`` values.  Defaults
+        to ``default_station_assets_dir()`` (``user_config_dir/assets``).
+        Resolved paths that escape this directory are refused.
 
     Returns
     -------
@@ -655,13 +774,17 @@ def render_template(
         RGB image at ``tx_context.frame_size``.
     """
     if now_utc is None:
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        now_utc = datetime.datetime.now(datetime.UTC)
+
+    if assets_dir is None:
+        from open_sstv.templates.manager import default_station_assets_dir
+        assets_dir = default_station_assets_dir()
 
     W, H = tx_context.frame_size
     canvas = PIL.Image.new("RGBA", (W, H), (0, 0, 0, 255))
 
     # Load station image once if any StationImageLayer references it
-    _station_img_cache: dict[str, PIL.Image.Image] = {}
+    _station_img_cache: dict[str, PIL.Image.Image | None] = {}
 
     for layer in template.layers:
         if not layer.visible:
@@ -673,18 +796,20 @@ def render_template(
             cell = _rasterize_photo(layer, W, H, tx_context.photo_image)
 
         elif isinstance(layer, RxImageLayer):
-            cell = _rasterize_image_layer(layer, W, H, tx_context.rx_image)
+            cell = _rasterize_rx_image(layer, W, H, tx_context.rx_image)
 
         elif isinstance(layer, StationImageLayer):
-            if layer.path:
-                if layer.path not in _station_img_cache:
+            if layer.path and layer.path not in _station_img_cache:
+                resolved = _resolve_station_image_path(layer.path, assets_dir)
+                if resolved is None:
+                    _station_img_cache[layer.path] = None
+                else:
                     try:
-                        _station_img_cache[layer.path] = PIL.Image.open(layer.path)
-                    except OSError:
-                        _station_img_cache[layer.path] = None  # type: ignore[assignment]
-                station_img = _station_img_cache.get(layer.path)
-            else:
-                station_img = None
+                        _station_img_cache[layer.path] = PIL.Image.open(resolved)
+                    except (OSError, PIL.Image.DecompressionBombError) as exc:
+                        _log.warning("Could not open station image %s: %s", resolved, exc)
+                        _station_img_cache[layer.path] = None
+            station_img = _station_img_cache.get(layer.path) if layer.path else None
             cell = _rasterize_image_layer(layer, W, H, station_img)
 
         elif isinstance(layer, TextLayer):
@@ -700,6 +825,16 @@ def render_template(
             )
             if resolved:
                 cell = _rasterize_text(layer, resolved, W, H)
+            else:
+                # An empty resolved string (e.g. ``%r`` before any RST is
+                # entered) used to skip rasterization entirely.  That's
+                # invisible until the *next* layer below paints into the
+                # would-have-been text bbox, which then "moves" because the
+                # layer above isn't reserving its cell.  A transparent
+                # full-canvas cell keeps the layer present in the composite
+                # pipeline so layout decisions and debug overlays remain
+                # stable across token-resolution edge cases.
+                cell = PIL.Image.new("RGBA", (W, H), (0, 0, 0, 0))
 
         elif isinstance(layer, RectLayer):
             cell = _rasterize_rect(layer, W, H)

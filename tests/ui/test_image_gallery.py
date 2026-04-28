@@ -233,3 +233,77 @@ def test_gallery_counter_increments_monotonically(qapp, qtbot) -> None:
     assert gallery._image_counter == 1
     gallery.add_image(_make_test_image(), Mode.SCOTTIE_S1)
     assert gallery._image_counter == 2
+
+
+def test_eviction_drops_in_memory_pil_reference(qapp, qtbot) -> None:
+    """M5: when the gallery exceeds capacity in the in-memory fallback path,
+    the evicted item's PIL handle must be released, not just orphaned in
+    the QStandardItem's user data.
+
+    The disk-backed path drops references implicitly (the PIL object is
+    written and never re-stored on the item).  The in-memory fallback used
+    to keep PIL images alive forever via ``_PIL_IMAGE_ROLE`` even after
+    ``removeRow``, because Qt's PyObject ownership across the C++ boundary
+    isn't guaranteed to release the QVariant promptly.  The fix nulls the
+    role explicitly before removeRow, and we verify the dropped row's
+    underlying image is collectable.
+    """
+    import gc
+    import weakref
+
+    from open_sstv.ui.image_gallery import _MAX_IMAGES, _PIL_IMAGE_ROLE
+
+    gallery = ImageGalleryWidget()
+    qtbot.addWidget(gallery)
+
+    # Force the in-memory fallback path so this test exercises the PIL
+    # reference cleanup we actually care about.  Disk-backed mode is
+    # already ref-clean.
+    gallery._tmpdir = None
+
+    first_image = _make_test_image(color=(11, 22, 33))
+    first_ref = weakref.ref(first_image)
+    gallery.add_image(first_image, Mode.ROBOT_36)
+    # Drop the local strong ref so only the gallery holds the image.
+    del first_image
+
+    # Push enough additional images that the first one is evicted.
+    for i in range(_MAX_IMAGES + 1):
+        gallery.add_image(_make_test_image(color=(i, i, i)), Mode.ROBOT_36)
+
+    # Verify the gallery actually evicted (it bounded growth).
+    assert gallery.count() == _MAX_IMAGES
+
+    # Force a collection cycle and confirm the evicted PIL image is gone.
+    gc.collect()
+    assert first_ref() is None, (
+        "Evicted PIL image was still alive — the in-memory fallback "
+        "leaked references past _MAX_IMAGES"
+    )
+
+    # Defensive: any item in the model that does still carry a PIL handle
+    # is a *current* gallery entry, not a leftover from eviction.
+    for row in range(gallery.count()):
+        item = gallery.model().item(row)
+        # Either the item has a path (disk path is None here so this is
+        # always None) or a PIL image — both are acceptable for live items.
+        _ = item.data(_PIL_IMAGE_ROLE)
+
+
+def test_clear_drops_in_memory_pil_references(qapp, qtbot) -> None:
+    """M5: ``clear()`` releases PIL handles too, not just temp files."""
+    import gc
+    import weakref
+
+    gallery = ImageGalleryWidget()
+    qtbot.addWidget(gallery)
+    gallery._tmpdir = None  # in-memory fallback
+
+    img = _make_test_image()
+    ref = weakref.ref(img)
+    gallery.add_image(img, Mode.ROBOT_36)
+    del img
+
+    gallery.clear()
+    gc.collect()
+    assert ref() is None

@@ -611,6 +611,29 @@ class TestEmergencyUnkey:
         # Must not raise.
         worker.emergency_unkey()
 
+    def test_emits_error_occurred_on_failure(self, qapp) -> None:
+        """M4: a failure in the shutdown unkey path is observable through
+        the new centralized ``error_occurred`` signal.
+
+        Status-bar delivery is best-effort during shutdown (the GUI may be
+        dismantling its event loop), but the signal still fires so a queued
+        connection that resolves in time — or a test sitting on the queue —
+        can record the failure.  Regression guard: the previous bare ``pass``
+        path swallowed even the exception identity.
+        """
+        rig = MagicMock(spec=["set_ptt"])
+        boom = RuntimeError("kaboom")
+        rig.set_ptt.side_effect = boom
+        worker = TxWorker(rig=rig, ptt_delay_s=0)
+        captured: list[tuple[str, object]] = []
+        worker.error_occurred.connect(
+            lambda name, exc: captured.append((name, exc))
+        )
+
+        worker.emergency_unkey()
+
+        assert captured == [("emergency_unkey", boom)]
+
     def test_holds_rig_lock(self, qapp) -> None:
         """The lock is acquired so a concurrent set_rig() can't swap
         the backend out from under us mid-unkey.  We verify by

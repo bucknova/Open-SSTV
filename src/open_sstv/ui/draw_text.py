@@ -23,7 +23,6 @@ from __future__ import annotations
 
 from PIL import ImageDraw, ImageFont
 
-
 #: Position names accepted by :func:`draw_text_overlay`.
 POSITIONS = (
     "Top Left",

@@ -121,3 +121,49 @@ def test_encode_accepts_grayscale_image() -> None:
     gray = Image.new("L", (50, 50), 128)
     samples = encode(gray, Mode.ROBOT_36)
     assert samples.size > 0
+
+
+def test_robot36_chroma_pairing_uses_strict_zip(monkeypatch: pytest.MonkeyPatch) -> None:
+    """L2: the Robot-36 even/odd chroma pairings must call ``zip`` with
+    ``strict=True`` so a future bug that diverges row lengths fails loudly
+    instead of silently dropping pixels off the shorter row.
+
+    The encoder builds both lists from the same ``range(self.WIDTH)``, so
+    a real-image test can never trigger the mismatch — the guard is purely
+    a future-bug catcher.  We verify the contract by spying on the module-
+    level ``zip`` name (Python looks up names through module globals before
+    falling back to builtins, so a name shadow on the encoder module is
+    seen by the comprehensions inside ``gen_image_tuples``).
+    """
+    from open_sstv.core import encoder as encoder_module
+
+    captured_kwargs: list[dict] = []
+    real_zip = zip
+
+    def spy_zip(*args, **kwargs):
+        captured_kwargs.append(kwargs)
+        return real_zip(*args, **kwargs)
+
+    monkeypatch.setattr(encoder_module, "zip", spy_zip, raising=False)
+    encode(Image.new("RGB", (320, 240), (128, 128, 128)), Mode.ROBOT_36)
+
+    strict_calls = [k for k in captured_kwargs if k.get("strict") is True]
+    # Per-line: one Cr pairing + one Cb pairing × 120 line-pairs = 240.
+    # Allow some slack in case PySSTV calls zip elsewhere; the lower bound
+    # of 2 is the meaningful invariant (at least the two Robot-36 pairings).
+    assert len(strict_calls) >= 2, (
+        f"Expected at least two zip(..., strict=True) calls in the "
+        f"Robot-36 chroma path, saw kwargs: {captured_kwargs!r}"
+    )
+
+
+def test_zip_strict_raises_value_error_on_mismatched_lengths() -> None:
+    """L2: documents the strictness contract the encoder relies on.
+
+    ``zip(a, b, strict=True)`` raises ``ValueError`` when ``a`` and ``b``
+    have unequal lengths, which is exactly the failure mode we want for
+    a divergent even/odd row pair in Robot-36 encoding — silent
+    truncation would corrupt an entire transmission.
+    """
+    with pytest.raises(ValueError):
+        list(zip([1, 2, 3], [1, 2], strict=True))

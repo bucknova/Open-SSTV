@@ -37,7 +37,6 @@ from open_sstv.templates.manager import (
 )
 from open_sstv.templates.model import (
     RectLayer,
-    ShadowSpec,
     StrokeSpec,
     Template,
     TextLayer,

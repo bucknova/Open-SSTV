@@ -20,6 +20,17 @@ from open_sstv.templates.filename import (
     sanitize_filename_component,
 )
 from open_sstv.templates.fonts import is_font_available, resolve_font_path
+from open_sstv.templates.manager import (
+    default_templates_dir,
+    delete,
+    get_templates_by_role,
+    install_starter_pack,
+    list_templates,
+    load_by_path,
+    save,
+    starter_pack_installed,
+)
+from open_sstv.templates.migration import run_migration
 from open_sstv.templates.model import (
     ANCHORS,
     RGBA,
@@ -35,22 +46,12 @@ from open_sstv.templates.model import (
     ShadowSpec,
     StationImageLayer,
     StrokeSpec,
-    TXContext,
     Template,
     TextLayer,
+    TXContext,
 )
-from open_sstv.templates.manager import (
-    default_templates_dir,
-    delete,
-    get_templates_by_role,
-    install_starter_pack,
-    list_templates,
-    load_by_path,
-    save,
-    starter_pack_installed,
-)
-from open_sstv.templates.migration import run_migration
 from open_sstv.templates.renderer import render_template
+from open_sstv.templates.tokens import TokenContext, resolve_text, resolve_tokens
 from open_sstv.templates.toml_io import (
     CURRENT_SCHEMA_VERSION,
     SchemaVersionError,
@@ -58,7 +59,6 @@ from open_sstv.templates.toml_io import (
     load_template,
     save_template,
 )
-from open_sstv.templates.tokens import TokenContext, resolve_text, resolve_tokens
 
 __all__ = [
     # v0.2 compat

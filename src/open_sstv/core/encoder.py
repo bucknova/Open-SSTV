@@ -32,14 +32,14 @@ from typing import TYPE_CHECKING
 import numpy as np
 from PIL import Image
 from pysstv.color import (
-    MartinM1,
-    MartinM2,
     PD90,
     PD120,
     PD160,
     PD180,
     PD240,
     PD290,
+    MartinM1,
+    MartinM2,
     PasokonP3,
     PasokonP5,
     PasokonP7,
@@ -51,11 +51,11 @@ from pysstv.color import (
     WraaseSC2180,
 )
 from pysstv.sstv import (
-    SSTV,
     FREQ_BLACK,
     FREQ_SYNC,
     FREQ_VIS_START,
     FREQ_WHITE,
+    SSTV,
     byte_to_freq,
 )
 
@@ -134,7 +134,12 @@ class Robot36LinePair(Robot36):
             yield FREQ_VIS_START, self.PORCH
 
             # ---- Cr channel (44 ms, averaged from both rows) ----
-            for ep, op in zip(even_pixels, odd_pixels):
+            # strict=True: even and odd rows are both built from the same
+            # ``range(self.WIDTH)``, so any future change that diverges
+            # them (a slicing bug, an early-break optimisation, a half-row
+            # tail) raises ValueError instead of silently shortening the
+            # chroma row to the shorter list and producing a torn image.
+            for ep, op in zip(even_pixels, odd_pixels, strict=True):
                 cr = (ep[2] + op[2]) / 2
                 yield byte_to_freq(cr), c_pixel_ms
 
@@ -157,7 +162,8 @@ class Robot36LinePair(Robot36):
             yield FREQ_VIS_START, self.PORCH
 
             # ---- Cb channel (44 ms, averaged from both rows) ----
-            for ep, op in zip(even_pixels, odd_pixels):
+            # strict=True for the same reason as the Cr pairing above.
+            for ep, op in zip(even_pixels, odd_pixels, strict=True):
                 cb = (ep[1] + op[1]) / 2
                 yield byte_to_freq(cb), c_pixel_ms
 
@@ -255,7 +261,7 @@ _BITS_PER_SAMPLE = 16
 
 
 def encode(
-    image: Image.Image | str | "PathLike[str]",
+    image: Image.Image | str | PathLike[str],
     mode: Mode,
     sample_rate: int = DEFAULT_SAMPLE_RATE,
 ) -> np.ndarray:
@@ -284,7 +290,14 @@ def encode(
         msg = f"Unsupported SSTV mode: {mode!r}. Known modes: {sorted(MODE_TABLE)}"
         raise ValueError(msg)
 
-    pil_image = image if isinstance(image, Image.Image) else Image.open(image)
+    if isinstance(image, Image.Image):
+        pil_image = image
+    else:
+        try:
+            pil_image = Image.open(image)
+        except Image.DecompressionBombError as exc:
+            msg = f"Refusing to encode oversized image {image!r}: {exc}"
+            raise ValueError(msg) from exc
     sstv_cls = _PYSSTV_CLASSES[mode]
     # Use the PySSTV class's own WIDTH/HEIGHT for image preparation rather than
     # spec.width/spec.height: PD modes store height = actual_height // 2 in the

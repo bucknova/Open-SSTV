@@ -67,10 +67,13 @@ threads, and finally close the rig.
 from __future__ import annotations
 
 import datetime
+import logging
 import subprocess
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+_log = logging.getLogger(__name__)
 
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence, QShortcut
@@ -83,12 +86,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from open_sstv import __version__
 from open_sstv.audio.devices import (
     AudioDevice,
     find_input_device_by_name,
     find_output_device_by_name,
 )
-from open_sstv import __version__
 from open_sstv.audio.input_stream import (
     DEFAULT_BLOCKSIZE,
     InputStreamWorker,
@@ -96,17 +99,17 @@ from open_sstv.audio.input_stream import (
 from open_sstv.config.schema import AppConfig
 from open_sstv.config.store import load_config, save_config
 from open_sstv.config.templates import load_templates
+from open_sstv.core.modes import Mode
 from open_sstv.radio.base import ManualRig, Rig, RigConnectionMode
 from open_sstv.radio.exceptions import RigError
 from open_sstv.radio.rigctld import RigctldClient, is_safe_rigctld_arg
 from open_sstv.radio.serial_rig import create_serial_rig
+from open_sstv.templates import TokenContext, build_autosave_filename, run_migration
 from open_sstv.ui.first_launch_dialog import FirstLaunchDialog
 from open_sstv.ui.radio_panel import RadioPanel
 from open_sstv.ui.rx_panel import RxPanel
 from open_sstv.ui.settings_dialog import SettingsDialog
 from open_sstv.ui.tx_panel import TxPanel
-from open_sstv.core.modes import Mode
-from open_sstv.templates import TokenContext, build_autosave_filename, run_migration
 from open_sstv.ui.update_checker import UpdateCheckerWorker
 from open_sstv.ui.workers import RxWorker, TxWorker
 
@@ -174,7 +177,7 @@ class _RigConnectWorker(QObject):
     succeeded = Signal(object)  # emits the connected Rig instance
     failed = Signal(str)        # emits a human-readable error message
 
-    def __init__(self, rig: "Rig", cancel: threading.Event) -> None:
+    def __init__(self, rig: Rig, cancel: threading.Event) -> None:
         super().__init__()
         self._rig = rig
         self._cancel = cancel
@@ -213,8 +216,8 @@ class _RigConnectRelay(QObject):
 
     def __init__(
         self,
-        on_success: "Callable[[Rig], None]",
-        on_error: "Callable[[str], None]",
+        on_success: Callable[[Rig], None],
+        on_error: Callable[[str], None],
         thread: QThread,
         timer: QTimer,
         cancel: threading.Event,
@@ -227,7 +230,7 @@ class _RigConnectRelay(QObject):
         self._cancel = cancel
 
     @Slot(object)
-    def on_succeeded(self, rig: "Rig") -> None:
+    def on_succeeded(self, rig: Rig) -> None:
         if self._cancel.is_set():
             return
         self._cancel.set()  # prevent late timeout from also calling on_error
@@ -330,7 +333,7 @@ class MainWindow(QMainWindow):
                     f"input '{self._config.audio_input_device}'"
                 )
         self._input_device = input_device
-        self._rigctld_proc: "subprocess.Popen | None" = None
+        self._rigctld_proc: subprocess.Popen | None = None
         self._capture_running: bool = False
         self._last_abort_was_watchdog: bool = False
         #: Set by _on_audio_device_lost so _on_rx_stopped can re-show the
@@ -355,8 +358,8 @@ class MainWindow(QMainWindow):
         #: when ``autosave_tx`` is enabled.  Cleared after each save so a
         #: follow-up test tone (which never emits ``tx_image_prepared``)
         #: cannot accidentally re-save the previous real transmission.
-        self._last_tx_image: "PILImage | None" = None
-        self._last_tx_mode: "Mode | str | None" = None
+        self._last_tx_image: PILImage | None = None
+        self._last_tx_mode: Mode | str | None = None
         #: OP-47: remembers whether the 1 Hz rig-poll timer was running when
         #: TX started, so ``_unlock_rig_controls`` can resume it only if the
         #: rig is still connected. The poll is *suspended* for the duration
@@ -376,9 +379,9 @@ class MainWindow(QMainWindow):
         # connect attempt"; they are always set and cleared together.
         self._connect_cancel: threading.Event | None = None
         self._connect_thread: QThread | None = None
-        self._connect_worker: "_RigConnectWorker | None" = None
+        self._connect_worker: _RigConnectWorker | None = None
         self._connect_timeout_timer: QTimer | None = None
-        self._connect_relay: "_RigConnectRelay | None" = None
+        self._connect_relay: _RigConnectRelay | None = None
 
         # --- Radio panel (toolbar strip above TX/RX) ---
         self._radio_panel = RadioPanel(self)
@@ -522,6 +525,7 @@ class MainWindow(QMainWindow):
         self._tx_worker.tx_image_prepared.connect(self._on_tx_image_prepared)
         self._tx_worker.watchdog_fired.connect(self._on_watchdog_fired)
         self._tx_worker.error.connect(self._on_tx_error)
+        self._tx_worker.error_occurred.connect(self._handle_worker_error)
         self._tx_worker.rig_disconnected.connect(self._on_radio_disconnected)
 
         # --- Wire RX signals ---
@@ -550,6 +554,7 @@ class MainWindow(QMainWindow):
         self._rx_panel.capture_requested.connect(self._on_capture_requested)
         self._rx_panel.clear_requested.connect(self._on_rx_clear)
         self._rx_panel.image_saved.connect(self._on_rx_image_saved)
+        self._rx_panel.rx_image_selected.connect(self._tx_panel.set_rx_image)
 
         # Audio worker -> RX worker (chunks flow across the thread
         # boundary via queued connection; Qt handles the marshalling).
@@ -571,6 +576,7 @@ class MainWindow(QMainWindow):
         self._rx_worker.image_complete.connect(self._on_rx_image_complete)
         self._rx_worker.status_update.connect(self._on_rx_status_update)
         self._rx_worker.error.connect(self._on_rx_error)
+        self._rx_worker.error_occurred.connect(self._handle_worker_error)
 
         # --- Rig poll: lightweight 1 Hz timer on GUI thread dispatches to
         #     _RigPollWorker on its own thread so blocking serial/socket calls
@@ -889,7 +895,7 @@ class MainWindow(QMainWindow):
     # === TX slots ===
 
     @Slot(object, object)
-    def _on_transmit_requested(self, image: "PILImage", mode: "Mode") -> None:
+    def _on_transmit_requested(self, image: PILImage, mode: Mode) -> None:
         """Set the test-tone flag and dispatch via queued signal to TX thread."""
         self._last_tx_was_test_tone = False
         self._request_transmit.emit(image, mode)
@@ -1220,12 +1226,12 @@ class MainWindow(QMainWindow):
             callsign=self._config.callsign or "",
             mode=mode_name,
             direction=direction,  # type: ignore[arg-type]
-            now_utc=datetime.datetime.now(datetime.timezone.utc),
+            now_utc=datetime.datetime.now(datetime.UTC),
         )
 
     def _autosave_image(
         self,
-        image: "PILImage",
+        image: PILImage,
         mode: object,
         direction: str,
         *,
@@ -1322,6 +1328,28 @@ class MainWindow(QMainWindow):
         self._rx_panel.set_status(f"RX: {message}")
         self.statusBar().showMessage(message, 5000)
 
+    @Slot(str, object)
+    def _handle_worker_error(self, slot_name: str, exc: object) -> None:
+        """Centralized worker-error sink (M4 audit follow-up).
+
+        TxWorker / RxWorker emit ``error_occurred(slot_name, exc)`` for
+        failures that previously got logged-and-swallowed.  Surfacing them
+        through one slot means we get:
+
+        * a single place to log the full traceback (via ``exc_info=True``)
+        * a consistent status-bar message format
+        * an obvious target for tests to assert against
+
+        ``slot_name`` identifies the worker entry point that raised so the
+        log is grep-able; ``exc`` is the live exception object so the log
+        captures the type and message and traceback without the worker
+        having to stringify them.
+        """
+        _log.error(
+            "Worker error in %s: %s", slot_name, exc, exc_info=exc if isinstance(exc, BaseException) else None,
+        )
+        self.statusBar().showMessage(f"{slot_name}: {exc}", 5000)
+
     @Slot(str)
     def _on_rx_audio_error(self, message: str) -> None:
         """Audio-worker error slot that survives the _on_rx_stopped overwrite.
@@ -1368,9 +1396,9 @@ class MainWindow(QMainWindow):
 
     def _start_rig_connect_thread(
         self,
-        rig: "Rig",
-        on_success: "Callable[[Rig], None]",
-        on_error: "Callable[[str], None]",
+        rig: Rig,
+        on_success: Callable[[Rig], None],
+        on_error: Callable[[str], None],
     ) -> None:
         """Spin up a one-shot QThread to run rig.open() + rig.ping().
 
@@ -1545,7 +1573,7 @@ class MainWindow(QMainWindow):
             f"Connecting via {protocol} on {port}…"
         )
 
-        def _on_success(connected_rig: "Rig") -> None:
+        def _on_success(connected_rig: Rig) -> None:
             if not self.isVisible():
                 try:
                     connected_rig.close()
@@ -1641,7 +1669,7 @@ class MainWindow(QMainWindow):
         self._radio_panel.set_connecting()
         self.statusBar().showMessage(f"Connecting to rigctld at {host}:{port}…")
 
-        def _on_success(connected_rig: "Rig") -> None:
+        def _on_success(connected_rig: Rig) -> None:
             if not self.isVisible():
                 try:
                     connected_rig.close()

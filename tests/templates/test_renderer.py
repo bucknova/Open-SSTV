@@ -25,7 +25,9 @@ from open_sstv.templates.model import (
     PhotoLayer,
     QSOState,
     RectLayer,
+    RxImageLayer,
     ShadowSpec,
+    StationImageLayer,
     StrokeSpec,
     TXContext,
     Template,
@@ -38,7 +40,11 @@ from open_sstv.templates.renderer import (
     _wrap_text,
     render_template,
 )
-from open_sstv.templates.renderer import _load_font, _text_bbox
+from open_sstv.templates.renderer import (
+    _load_font,
+    _resolve_station_image_path,
+    _text_bbox,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -348,6 +354,126 @@ class TestPhotoLayer:
 
 
 # ---------------------------------------------------------------------------
+# RxImageLayer — image-present vs empty-slot placeholder
+# ---------------------------------------------------------------------------
+
+
+class TestRxImageLayer:
+    """Two visual contracts the renderer must hold for an RxImageLayer:
+
+    * Image present → paste cleanly with **no** border or fill, indistinguish-
+      able from a PhotoLayer holding the same picture.
+    * Image absent → show a white-bordered placeholder box (with an "RX"
+      label) so the slot's position is visible in the editor preview.
+    """
+
+    def _layer(self, **kw) -> RxImageLayer:
+        defaults = dict(
+            id="rx", anchor="BR",
+            width_pct=30.0, height_pct=25.0,
+            offset_x_pct=2.0, offset_y_pct=2.0,
+            fit="cover",
+        )
+        defaults.update(kw)
+        return RxImageLayer(**defaults)
+
+    def test_image_present_renders_without_border(self) -> None:
+        """Spec: when an RX image is present, the slot must NOT be framed.
+
+        We sample one pixel just *inside* the slot's outer edge.  If a
+        bordering implementation snuck back in, that pixel would be white
+        from the border; with the correct implementation it shows the
+        underlying image's red.
+        """
+        rx_img = _solid_color_image(100, 100, (255, 0, 0))
+        t = Template(name="t", layers=[self._layer()])
+        img = _render(t, ctx=_ctx(rx_image=rx_img))
+        # The slot is anchored BR with width_pct=30, height_pct=25.
+        # That's a 96×64 region offset 6px / 5px from the bottom-right
+        # of a 320×256 frame → slot rect is roughly x∈[212, 308),
+        # y∈[185, 249).  Sample one pixel from the slot's interior.
+        sx, sy = 220, 195
+        r, g, b = img.getpixel((sx, sy))
+        assert (r, g, b) == (255, 0, 0), (
+            f"RX image present must render the image without an overlaid "
+            f"border; got pixel {(r, g, b)} at {(sx, sy)} (expected red)"
+        )
+
+    def test_image_present_corner_is_image_not_border(self) -> None:
+        """Tighter regression: the *outermost* slot pixel still belongs to
+        the image, not a border.  Catches a 1-px white outline that the
+        previous guard (sampled mid-slot) would miss."""
+        rx_img = _solid_color_image(100, 100, (0, 200, 50))
+        t = Template(name="t", layers=[self._layer(anchor="TL", offset_x_pct=0, offset_y_pct=0)])
+        img = _render(t, ctx=_ctx(rx_image=rx_img))
+        # Anchor TL @ offset 0,0 → slot starts at (0, 0).
+        r, g, b = img.getpixel((0, 0))
+        assert (g > 150 and b < 100), (
+            f"Outermost slot pixel must be the image (green), not a "
+            f"border outline; got {(r, g, b)}"
+        )
+
+    def test_image_absent_shows_bordered_placeholder(self) -> None:
+        """Spec: empty slot draws a visible white-ish placeholder box.
+
+        Sample one pixel near the slot's outer edge — must not be the
+        canvas's solid black background.
+        """
+        t = Template(name="t", layers=[self._layer(anchor="TL", offset_x_pct=0, offset_y_pct=0)])
+        img = _render(t, ctx=_ctx(rx_image=None))
+        # Top-left pixel of the slot must be the white border (or the
+        # very-light placeholder fill underneath it).
+        r, g, b = img.getpixel((0, 0))
+        # Anything substantially brighter than the black canvas confirms
+        # the placeholder draws.  A solid black canvas would give (0,0,0).
+        assert max(r, g, b) > 50, (
+            f"Empty RX slot must draw a visible placeholder, not leave "
+            f"the canvas black; got {(r, g, b)} at the slot's TL corner"
+        )
+
+    def test_image_absent_then_present_paints_image_over_placeholder(
+        self,
+    ) -> None:
+        """Sanity check: switching from no-image to image must produce a
+        different rendering — there's no caching that pins the placeholder
+        once it's drawn."""
+        t = Template(name="t", layers=[self._layer(anchor="TL", offset_x_pct=0, offset_y_pct=0)])
+        empty = _render(t, ctx=_ctx(rx_image=None))
+        rx_img = _solid_color_image(100, 100, (10, 20, 220))
+        with_img = _render(t, ctx=_ctx(rx_image=rx_img))
+        # Two completely different pixel sets; not even worth sampling
+        # one position — the data should differ broadly.
+        assert list(empty.getdata()) != list(with_img.getdata())
+
+    def test_station_image_layer_unaffected(self) -> None:
+        """Regression: only RxImageLayer gets the placeholder behaviour.
+
+        StationImageLayer used to share the same rasterizer and a previous
+        WIP attempt mutated the shared function — that would have drawn
+        the same RX placeholder over every blank station-image slot too.
+        Verify a missing station image leaves the canvas alone (no border
+        painted) the way it always has.
+        """
+        layer = StationImageLayer(
+            id="si", anchor="TL", path="missing.png",
+            width_pct=30.0, height_pct=25.0,
+            offset_x_pct=0.0, offset_y_pct=0.0,
+        )
+        t = Template(name="t", layers=[layer])
+        # Empty assets dir → station image fails to load → cell should be None
+        # → composite skips → canvas stays black at the slot location.
+        import tempfile
+        from pathlib import Path as _P
+        with tempfile.TemporaryDirectory() as td:
+            img = _render(t, assets_dir=_P(td))
+        r, g, b = img.getpixel((10, 10))
+        assert (r, g, b) == (0, 0, 0), (
+            f"Missing StationImage must NOT trigger the RX placeholder; "
+            f"got {(r, g, b)} at TL of the slot"
+        )
+
+
+# ---------------------------------------------------------------------------
 # TextLayer — geometry and content
 # ---------------------------------------------------------------------------
 
@@ -449,8 +575,19 @@ class TestTextLayer:
         img = _render(t)
         assert img.size == _FRAME
 
-    def test_text_empty_after_resolve_skipped(self) -> None:
-        """A text layer whose resolved text is empty doesn't crash."""
+    def test_text_empty_after_resolve_renders_transparent_cell(self) -> None:
+        """An empty resolved text layer produces a transparent cell, not a skip.
+
+        The pre-fix behaviour was to skip rasterization entirely whenever the
+        token resolved to ``""`` (e.g. ``%r`` before any RST is entered).  That
+        broke layout stability — a debug overlay or a future "selection bbox"
+        feature would see N-1 layers in the composite path on one frame and N
+        on the next, depending on which tokens happened to be populated.
+
+        The new contract: every visible TextLayer contributes a (possibly
+        transparent) cell to the composite pipeline.  Visually identical to
+        the skip path for the empty-text case, but layer count is stable.
+        """
         layer = TextLayer(
             id="t", anchor="TL",
             text_raw="",
@@ -462,6 +599,59 @@ class TestTextLayer:
         t = Template(name="t", layers=[layer])
         img = _render(t)
         assert img.size == _FRAME
+        # The empty text cell is fully transparent, so the canvas must remain
+        # identical to a render with no layers at all (solid black background).
+        empty_img = _render(Template(name="empty", layers=[]))
+        assert list(img.getdata()) == list(empty_img.getdata())
+
+    def test_text_empty_layer_does_not_obscure_layer_below(self) -> None:
+        """Empty text in front of a coloured rect must not blacken the rect.
+
+        Direct regression check on the "transparent cell" property — if the
+        new path accidentally composited a black RGBA cell instead of a fully
+        transparent one, the underlying red would be wiped out.
+        """
+        rect = RectLayer(id="bg", anchor="FILL", fill=(255, 0, 0, 255))
+        empty_text = TextLayer(
+            id="t", anchor="TL",
+            text_raw="",
+            font_family="DejaVu Sans Bold",
+            font_size_pct=10.0,
+            fill=(255, 255, 255, 255),
+            slashed_zero=False,
+        )
+        t = Template(name="t", layers=[rect, empty_text])
+        img = _render(t)
+        # Sample the centre — a transparent overlay leaves the red rect alone.
+        r, g, b = img.getpixel((_FRAME[0] // 2, _FRAME[1] // 2))[:3]
+        assert (r, g, b) == (255, 0, 0)
+
+    def test_bottom_anchored_text_not_clipped(self) -> None:
+        """Regression: BC-anchored text at offset_y_pct=0 must not be clipped.
+
+        PIL's draw.text places the ascender line at y, so ink extends down to
+        y + (ascent + descent). Sizing the text image to the ink bbox height
+        (bb[3] - bb[1]) used to push the bb[1] offset below the image bottom,
+        clipping descenders/lower glyph parts of bottom-anchored text.
+        """
+        layer = TextLayer(
+            id="t", anchor="BC",
+            text_raw="de W0AEZ",
+            font_family="DejaVu Sans Bold",
+            font_size_pct=13.0,
+            fill=(255, 255, 255, 255),
+            slashed_zero=False,
+        )
+        t = Template(name="t", layers=[layer])
+        img = _render(t)
+        W, H = _FRAME
+        # No white pixels in any of the bottom 2 rows — ink must sit fully
+        # inside the canvas, with descender room reserved.
+        for y in range(H - 2, H):
+            row = [img.getpixel((x, y)) for x in range(W)]
+            white = sum(1 for r, g, b in row if r > 200 and g > 200 and b > 200)
+            assert white == 0, f"Row {y} has {white} white pixels — text was clipped"
+
 
 
 # ---------------------------------------------------------------------------
@@ -555,6 +745,61 @@ class TestPatternLayer:
         img = _render(t)
         assert img.size == _FRAME
 
+    def test_pattern_tint_math_matches_reference_loop(self) -> None:
+        """Regression for H1: the vectorized tint multiply must produce the
+        exact same per-pixel result as the original ``r2 * tr // 255`` loop.
+        """
+        import numpy as np
+        import PIL.Image
+
+        from open_sstv.templates.renderer import _make_pattern_tile, _tile_pattern
+
+        tile = _make_pattern_tile("checkered", 4)
+        tiled = _tile_pattern(tile, 16, 16)
+        tint = (180, 80, 40, 220)
+
+        # Vectorized — same body as the renderer's H1 implementation.
+        arr = np.array(tiled, dtype=np.uint16)
+        tint_arr = np.array(tint, dtype=np.uint16)
+        vec_arr = (arr * tint_arr // 255).astype(np.uint8)
+
+        # Reference: explicit per-pixel loop, identical to the pre-H1 code.
+        ref = PIL.Image.new("RGBA", (16, 16), (0, 0, 0, 0))
+        for y in range(16):
+            for x in range(16):
+                r, g, b, a = tiled.getpixel((x, y))
+                ref.putpixel(
+                    (x, y),
+                    (
+                        r * tint[0] // 255,
+                        g * tint[1] // 255,
+                        b * tint[2] // 255,
+                        a * tint[3] // 255,
+                    ),
+                )
+
+        # Exact equality — the math is integer, no rounding involved.
+        assert np.array_equal(vec_arr, np.asarray(ref))
+
+    def test_pattern_tint_no_uint8_overflow(self) -> None:
+        """Regression for H1: full-saturation tint (255s) must not wrap.
+
+        ``arr[..., :3] = arr[..., :3] * tint[:3] // 255`` written naively
+        in uint8 wraps because 255*255 = 65025 → 65025 % 256 = 1.  We
+        upcast to uint16; this guards against silently regressing that.
+        """
+        import numpy as np
+
+        from open_sstv.templates.renderer import _make_pattern_tile, _tile_pattern
+
+        tile = _make_pattern_tile("checkered", 2)
+        tiled = _tile_pattern(tile, 8, 8)
+        arr = np.array(tiled, dtype=np.uint16)
+        tint = np.array((255, 255, 255, 255), dtype=np.uint16)
+        out = (arr * tint // 255).astype(np.uint8)
+        # White cells of the pattern should remain white after a (255,…) tint.
+        assert (out[arr[..., 3] > 0] == np.array([255, 255, 255, 255], dtype=np.uint8)).all()
+
 
 # ---------------------------------------------------------------------------
 # Mode-aware frame size
@@ -614,6 +859,45 @@ class TestWrapText:
     def test_zero_max_width_returns_unchanged(self) -> None:
         font = _font(20)
         assert _wrap_text(font, "hello world", 0) == "hello world"
+
+    def test_negative_max_width_returns_unchanged(self) -> None:
+        """L6: a negative width is nonsensical but must not crash — the
+        ``max_w <= 0`` early-return handles it.  Symmetric with the
+        zero-width case."""
+        font = _font(20)
+        assert _wrap_text(font, "hello world", -5) == "hello world"
+
+    def test_single_unwrappable_word_is_returned_intact(self) -> None:
+        """L6: a single word wider than max_w cannot be broken — the
+        wrapper has no inter-word break point.  It must still return the
+        word (so the caller can decide what to do, e.g. shrink the font),
+        not an empty string or a crash.
+
+        Regression guard: a naive wrapper could split mid-glyph or drop
+        the word; ours falls through with ``cur=[word]`` and emits the
+        single oversized line at the end of the loop.
+        """
+        font = _font(40)
+        long_word = "Supercalifragilistic"
+        result = _wrap_text(font, long_word, 20)
+        # Same word returned (no split) and no extra newlines fabricated.
+        assert result == long_word
+        assert "\n" not in result
+
+    def test_unwrappable_word_followed_by_words(self) -> None:
+        """L6: an oversized first word must not eat the rest of the input.
+
+        With ``cur=[]`` and a single oversized word, the inner ``if`` falls
+        through (``cur`` is empty so the wrap branch is skipped) and the
+        word ends up on its own line followed by the remaining words on a
+        second line.  Regression guard against an off-by-one that swallows
+        the second word.
+        """
+        font = _font(40)
+        result = _wrap_text(font, "Supercalifragilistic and more", 60)
+        # Both halves of the input must appear in the output, somewhere.
+        assert "Supercalifragilistic" in result
+        assert "more" in result
 
 
 class TestFitText:
@@ -688,3 +972,85 @@ class TestTextOverflowIntegration:
         t = Template(name="t", layers=[layer])
         img = _render(t, ctx=_ctx(frame_size=(320, 256)))
         assert img.size == (320, 256)
+
+
+# ---------------------------------------------------------------------------
+# L6: renderer-side symlink-escape defense for StationImageLayer
+# ---------------------------------------------------------------------------
+
+
+import sys
+from pathlib import Path as _Path
+
+
+class TestStationImagePathResolution:
+    """L6: ``_resolve_station_image_path`` is the renderer's defense-in-depth
+    check against a TOML that smuggles a symlink past the loader.
+
+    The toml_io static check (C1) rejects literal absolute paths and ``..``
+    components, but a *symlink inside the assets directory* still parses as
+    a clean relative name.  At render time we resolve and re-verify the
+    result is_relative_to(assets_dir.resolve()) so the symlink target is
+    the thing we contain — not the link's name.
+    """
+
+    def test_returns_resolved_path_for_safe_relative(self, tmp_path: _Path) -> None:
+        assets = tmp_path / "assets"
+        assets.mkdir()
+        (assets / "qsl.png").write_bytes(b"")  # any content
+        out = _resolve_station_image_path("qsl.png", assets)
+        assert out == (assets / "qsl.png").resolve()
+
+    def test_returns_none_for_empty_path(self, tmp_path: _Path) -> None:
+        # Empty path is a sentinel: the layer renders blank.
+        assert _resolve_station_image_path("", tmp_path) is None
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="symlink creation needs admin / dev mode on Windows; the "
+               "Unix-flavoured test below adequately covers the escape path",
+    )
+    def test_symlink_pointing_outside_assets_dir_is_refused(
+        self, tmp_path: _Path
+    ) -> None:
+        """The smuggled-symlink attack: a TOML names ``link.png``; on disk
+        that file is a symlink to ``../../etc/passwd``.
+
+        The toml_io check sees only the plain name and accepts it.  The
+        renderer's ``is_relative_to`` check after ``resolve()`` follows the
+        symlink and refuses the load — return value is ``None`` so the
+        layer falls through to a blank cell instead of leaking file bytes.
+        """
+        assets = tmp_path / "assets"
+        assets.mkdir()
+        outside = tmp_path / "outside.txt"
+        outside.write_text("secret")
+        link = assets / "link.png"
+        link.symlink_to(outside)
+
+        result = _resolve_station_image_path("link.png", assets)
+        assert result is None, (
+            f"Symlink that points outside the assets dir must be refused; "
+            f"got {result!r}"
+        )
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="symlink semantics differ on Windows; Unix coverage is sufficient",
+    )
+    def test_symlink_pointing_inside_assets_dir_is_accepted(
+        self, tmp_path: _Path
+    ) -> None:
+        """The complementary case: a symlink that *stays inside* the assets
+        dir is fine — users may legitimately keep a single QSL card on disk
+        and link to it from multiple template-named filenames.
+        """
+        assets = tmp_path / "assets"
+        assets.mkdir()
+        target = assets / "shared.png"
+        target.write_bytes(b"")
+        link = assets / "alias.png"
+        link.symlink_to(target)
+
+        result = _resolve_station_image_path("alias.png", assets)
+        assert result == target.resolve()

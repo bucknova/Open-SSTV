@@ -150,6 +150,43 @@ def test_stop_button_calls_request_stop(
     patched_audio["stop"].assert_called()
 
 
+def test_handle_worker_error_routes_to_status_bar(
+    qtbot, window: MainWindow,
+) -> None:
+    """M4: TxWorker.error_occurred → MainWindow._handle_worker_error → status bar.
+
+    The worker emits with the slot name and the live exception object; the
+    handler stringifies them into a 5-second status-bar message.  Direct
+    invocation of the slot keeps the test off the cross-thread queue so the
+    assertion doesn't have to ``waitUntil`` a queued delivery — the wiring
+    test (next case) covers the queued-connection path.
+    """
+    boom = RuntimeError("kaboom")
+    window._handle_worker_error("test_slot", boom)
+    msg = window.statusBar().currentMessage()
+    assert "test_slot" in msg
+    assert "kaboom" in msg
+
+
+def test_worker_error_signal_is_wired_to_handler(
+    qtbot, window: MainWindow,
+) -> None:
+    """M4: TxWorker.error_occurred is connected to _handle_worker_error.
+
+    Emit from the worker (still on the GUI thread because the test holds it
+    constructed-but-pre-moveToThread for the connect call) and let the queued
+    delivery flush through the event loop — the handler should run and the
+    status-bar message should reflect the emitted slot name.
+    """
+    boom = RuntimeError("queued boom")
+    window._tx_worker.error_occurred.emit("queued_slot", boom)
+    qtbot.waitUntil(
+        lambda: "queued_slot" in window.statusBar().currentMessage(),
+        timeout=1000,
+    )
+    assert "queued boom" in window.statusBar().currentMessage()
+
+
 # ---------------------------------------------------------------------------
 # v0.1.33 note: startup applies persisted config
 # ---------------------------------------------------------------------------

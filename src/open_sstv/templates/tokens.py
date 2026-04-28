@@ -76,7 +76,7 @@ class TokenContext:
     mode: str = ""
     direction: Literal["RX", "TX"] = "RX"
     now_utc: datetime.datetime = datetime.datetime(
-        2000, 1, 1, tzinfo=datetime.timezone.utc
+        2000, 1, 1, tzinfo=datetime.UTC
     )
     date_format: str = "%Y-%m-%d"
     time_format: str = "%H%M%S"
@@ -216,11 +216,11 @@ def _apply_slashed_zero(value: str) -> str:
 
 
 def _v3_percent_table(
-    qso_state: "QSOState",
-    app_config: "AppConfig",
-    tx_context: "TXContext",
+    qso_state: QSOState,
+    app_config: AppConfig,
+    tx_context: TXContext,
     *,
-    now_utc: "datetime.datetime",
+    now_utc: datetime.datetime,
     date_format: str,
     time_format: str,
     slashed_zero: bool,
@@ -259,11 +259,11 @@ def _v3_percent_table(
 
 
 def _v3_named_table(
-    qso_state: "QSOState",
-    app_config: "AppConfig",
-    tx_context: "TXContext",
+    qso_state: QSOState,
+    app_config: AppConfig,
+    tx_context: TXContext,
     *,
-    now_utc: "datetime.datetime",
+    now_utc: datetime.datetime,
     date_format: str,
     time_format: str,
     slashed_zero: bool,
@@ -314,14 +314,14 @@ def _open_sstv_version() -> str:
 
 def resolve_text(
     text: str,
-    qso_state: "QSOState",
-    app_config: "AppConfig",
-    tx_context: "TXContext",
+    qso_state: QSOState,
+    app_config: AppConfig,
+    tx_context: TXContext,
     *,
     slashed_zero: bool = True,
     date_format: str = "%Y-%m-%d",
     time_format: str = "%H:%M",
-    now_utc: "datetime.datetime | None" = None,
+    now_utc: datetime.datetime | None = None,
 ) -> str:
     """Resolve v0.3 image-template tokens in *text*.
 
@@ -355,7 +355,7 @@ def resolve_text(
         Fully resolved text.
     """
     if now_utc is None:
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        now_utc = datetime.datetime.now(datetime.UTC)
 
     SENTINEL = "\x00LITERAL_PERCENT\x00"
     text = text.replace("%%", SENTINEL)

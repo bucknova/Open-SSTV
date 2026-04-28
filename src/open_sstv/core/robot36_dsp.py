@@ -71,7 +71,7 @@ HZ_PER_BYTE: float = (SSTV_WHITE_HZ - SSTV_BLACK_HZ) / 255.0
 
 
 def sample_pixel(
-    inst: "NDArray",
+    inst: NDArray,
     center_sample: float,
     track_len: int,
 ) -> int:
@@ -103,12 +103,12 @@ def sample_pixel(
 
 
 def sample_scan(
-    inst: "NDArray",
+    inst: NDArray,
     start: float,
     span_samples: float,
     width: int,
     track_len: int,
-) -> "NDArray[np.uint8]":
+) -> NDArray[np.uint8]:
     """Sample ``width`` pixels across a scan span, slowrx-style.
 
     ``start`` is the float sample index where the scan begins;
@@ -127,10 +127,10 @@ def sample_scan(
 
 
 def ycbcr_to_rgb(
-    y: "NDArray[np.uint8]",
-    cb: "NDArray[np.uint8]",
-    cr: "NDArray[np.uint8]",
-) -> "NDArray[np.uint8]":
+    y: NDArray[np.uint8],
+    cb: NDArray[np.uint8],
+    cr: NDArray[np.uint8],
+) -> NDArray[np.uint8]:
     """Integer YCbCr → RGB conversion from slowrx (``video.c``).
 
     .. code-block:: c

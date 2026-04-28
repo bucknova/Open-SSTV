@@ -81,6 +81,69 @@ class TestTemplateMetadata:
         rt = _save_load(t, tmp_path)
         assert rt.reference_frame == (640, 496)
 
+    def test_reference_frame_floats_are_rounded_with_warning(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        """L3: ``reference_frame = [320.7, 256.3]`` should round (not
+        truncate) and surface a warning so the author notices the field
+        is integer-only.
+
+        Pre-fix the loader did ``int(320.7) → 320`` and ``int(256.3) → 256``
+        silently — the rounding *direction* matters for percentage-based
+        layer placement on the rendered canvas.
+        """
+        p = tmp_path / "f.toml"
+        p.write_text(
+            '[template]\nname = "t"\nreference_frame = [320.7, 256.3]\n'
+        )
+        with caplog.at_level("WARNING", logger="open_sstv.templates.toml_io"):
+            rt = load_template(p)
+        # 320.7 → 321 (round-half-to-even still rounds UP from .7), 256.3 → 256.
+        assert rt.reference_frame == (321, 256)
+        assert any(
+            "reference_frame" in rec.message and "rounding" in rec.message
+            for rec in caplog.records
+        )
+
+    def test_reference_frame_ints_do_not_warn(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        """The complementary path: clean integer input is silent."""
+        p = tmp_path / "i.toml"
+        p.write_text(
+            '[template]\nname = "t"\nreference_frame = [320, 256]\n'
+        )
+        with caplog.at_level("WARNING", logger="open_sstv.templates.toml_io"):
+            rt = load_template(p)
+        assert rt.reference_frame == (320, 256)
+        assert not any(
+            "reference_frame" in rec.message for rec in caplog.records
+        )
+
+    def test_reference_frame_rejects_non_numeric(self, tmp_path: Path) -> None:
+        p = tmp_path / "s.toml"
+        p.write_text(
+            '[template]\nname = "t"\nreference_frame = ["320", "256"]\n'
+        )
+        with pytest.raises(TemplateLoadError, match="reference_frame"):
+            load_template(p)
+
+    def test_reference_frame_rejects_wrong_arity(self, tmp_path: Path) -> None:
+        p = tmp_path / "a.toml"
+        p.write_text(
+            '[template]\nname = "t"\nreference_frame = [320]\n'
+        )
+        with pytest.raises(TemplateLoadError, match="reference_frame"):
+            load_template(p)
+
+    def test_reference_frame_rejects_non_positive(self, tmp_path: Path) -> None:
+        p = tmp_path / "z.toml"
+        p.write_text(
+            '[template]\nname = "t"\nreference_frame = [0, 256]\n'
+        )
+        with pytest.raises(TemplateLoadError, match="positive"):
+            load_template(p)
+
     def test_schema_version_survives(self, tmp_path: Path) -> None:
         t = Template(name="t", schema_version=1)
         rt = _save_load(t, tmp_path)
@@ -151,6 +214,64 @@ class TestStationImageLayerRoundTrip:
         out = rt.layers[0]
         assert isinstance(out, StationImageLayer)
         assert out.path == "qsl_card.png"
+
+    def test_subdir_path_survives(self, tmp_path: Path) -> None:
+        layer = StationImageLayer(id="si1", anchor="TL", path="cards/qsl.png")
+        rt = _save_load(Template(name="t", layers=[layer]), tmp_path)
+        assert rt.layers[0].path == "cards/qsl.png"
+
+
+class TestStationImagePathTraversalRejected:
+    """Regression for C1: malicious StationImageLayer paths must be rejected
+    at TOML load time so they never reach ``PIL.Image.open``.
+    """
+
+    def _toml_with_path(self, path: str) -> bytes:
+        # TOML literal strings (single quotes) don't interpret backslashes,
+        # so we can pass Windows-style paths through unmodified.
+        return (
+            b'[template]\nname = "Test"\nschema_version = 1\n\n'
+            b'[[layer]]\ntype = "station_image"\nid = "si"\nanchor = "TL"\n'
+            b"path = '" + path.encode("utf-8") + b"'\n"
+        )
+
+    def test_absolute_unix_path_rejected(self, tmp_path: Path) -> None:
+        p = tmp_path / "evil.toml"
+        p.write_bytes(self._toml_with_path("/etc/passwd"))
+        with pytest.raises(TemplateLoadError, match="absolute"):
+            load_template(p)
+
+    def test_absolute_windows_path_rejected(self, tmp_path: Path) -> None:
+        p = tmp_path / "evil.toml"
+        p.write_bytes(self._toml_with_path("C:/Windows/System32/config/SAM"))
+        with pytest.raises(TemplateLoadError, match="absolute"):
+            load_template(p)
+
+    def test_dotdot_segment_rejected(self, tmp_path: Path) -> None:
+        p = tmp_path / "evil.toml"
+        p.write_bytes(self._toml_with_path("../../../etc/passwd"))
+        with pytest.raises(TemplateLoadError, match=r"\.\."):
+            load_template(p)
+
+    def test_nested_dotdot_rejected(self, tmp_path: Path) -> None:
+        p = tmp_path / "evil.toml"
+        p.write_bytes(self._toml_with_path("subdir/../../../secret"))
+        with pytest.raises(TemplateLoadError, match=r"\.\."):
+            load_template(p)
+
+    def test_backslash_dotdot_rejected(self, tmp_path: Path) -> None:
+        # Windows-style separators should not bypass the .. check.
+        p = tmp_path / "evil.toml"
+        p.write_bytes(self._toml_with_path("..\\..\\etc\\passwd"))
+        with pytest.raises(TemplateLoadError, match=r"\.\."):
+            load_template(p)
+
+    def test_safe_relative_path_ok(self, tmp_path: Path) -> None:
+        p = tmp_path / "ok.toml"
+        p.write_bytes(self._toml_with_path("cards/my_qsl.png"))
+        t = load_template(p)
+        assert len(t.layers) == 1
+        assert t.layers[0].path == "cards/my_qsl.png"
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +480,43 @@ class TestLayerBaseFields:
         with p.open("rb") as f:
             raw = tomllib.load(f)
         assert raw["layer"][0]["anchor"] == "BR"
+
+
+# ---------------------------------------------------------------------------
+# RGBA short-list warning
+# ---------------------------------------------------------------------------
+
+
+def test_rgba_three_element_list_warns(tmp_path: Path, caplog) -> None:
+    """A ``fill = [R, G, B]`` (no alpha) should load as opaque *and* warn.
+
+    Backwards-compatible: alpha still defaults to 255 so old templates keep
+    rendering, but the warning surfaces the omission so authors who forgot
+    the channel notice before shipping a template.
+    """
+    p = tmp_path / "short_rgba.toml"
+    p.write_text(
+        '[template]\nname = "t"\n\n'
+        '[[layer]]\ntype = "rect"\nid = "r"\nanchor = "FILL"\n'
+        "fill = [255, 128, 0]\n"
+    )
+    with caplog.at_level("WARNING", logger="open_sstv.templates.toml_io"):
+        tpl = load_template(p)
+    assert tpl.layers[0].fill == (255, 128, 0, 255)
+    assert any("only 3 elements" in rec.message for rec in caplog.records)
+
+
+def test_rgba_four_element_list_does_not_warn(tmp_path: Path, caplog) -> None:
+    """The complementary path: a complete RGBA list is silent."""
+    p = tmp_path / "full_rgba.toml"
+    p.write_text(
+        '[template]\nname = "t"\n\n'
+        '[[layer]]\ntype = "rect"\nid = "r"\nanchor = "FILL"\n'
+        "fill = [255, 128, 0, 200]\n"
+    )
+    with caplog.at_level("WARNING", logger="open_sstv.templates.toml_io"):
+        load_template(p)
+    assert not any("elements" in rec.message for rec in caplog.records)
 
 
 # ---------------------------------------------------------------------------

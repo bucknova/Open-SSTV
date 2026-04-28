@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from PIL import Image, ImageDraw
 from PySide6.QtCore import Qt, Slot
-from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QColorDialog,
     QComboBox,
@@ -20,7 +19,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
-    QListWidgetItem,
     QPushButton,
     QSizePolicy,
     QSpinBox,
@@ -32,10 +30,8 @@ from open_sstv.config.templates import (
     QSOTemplate,
     QSOTemplateOverlay,
     resolve_placeholders,
-    save_templates,
 )
 from open_sstv.ui.draw_text import POSITIONS, draw_text_overlay, position_to_xy
-
 
 #: Preview canvas size used by the template editor.  X/Y spin boxes are
 #: scoped to this coordinate space so the values the user sees match
@@ -370,7 +366,8 @@ class TemplateEditorDialog(QDialog):
         expected to have ``_updating_fields`` True so the spin-box
         writes don't re-trigger ``_on_xy_changed``.
         """
-        from PIL import Image as _PILImage, ImageDraw, ImageFont
+        from PIL import Image as _PILImage
+        from PIL import ImageDraw, ImageFont
 
         if position == "Custom":
             return

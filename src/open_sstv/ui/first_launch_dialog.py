@@ -16,7 +16,6 @@ their callsign later in Settings without being nagged every launch.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,

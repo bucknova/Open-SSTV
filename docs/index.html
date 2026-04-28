@@ -676,7 +676,7 @@
 <!-- ── Hero ── -->
 <div class="hero">
   <div>
-    <div class="hero-badge" id="version-badge">Beta · v0.2.16</div>
+    <div class="hero-badge" id="version-badge">Beta · v0.3.0</div>
     <h1>Open-Source<br /><span>SSTV Transceiver</span><br />for Amateur Radio</h1>
     <p>Transmit and receive Slow Scan Television images live from your rig — no external software required. 22 modes, modern Qt 6 GUI, cross-platform.</p>
     <div class="hero-actions">
@@ -742,7 +742,14 @@
         <div class="feature-icon">🖼</div>
         <span class="feature-tag">Editor</span>
         <h3>Built-In Image Editor</h3>
-        <p>Aspect-ratio locked crop, rotate, flip, and text overlays that auto-shrink to fit. QSO templates with one-click callsign/exchange fill-in.</p>
+        <p>Aspect-ratio locked crop, rotate, flip, and text overlays that auto-shrink to fit — all driven by the v0.3 layered template compositor.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon">🗂</div>
+        <span class="feature-tag">v0.3 · Templates</span>
+        <h3>Layered Template Compositor</h3>
+        <p>Live template gallery filtered by role (CQ / Reply / 73 / Custom). Three-panel form editor with seven layer types — photo, text, rect, gradient, pattern, station image, and an <code>rx_image</code> slot that pins one click of a received thumbnail straight into the next reply. MMSSTV-style <code>%c</code> and named <code>{callsign}</code> tokens, slashed-zero callsigns, stacked vertical text, three shipped fonts, and shareable TOML files.</p>
       </div>
 
       <div class="feature-card">
@@ -862,10 +869,10 @@
     <div class="roadmap-grid">
 
       <div class="roadmap-card">
-        <div class="roadmap-icon">🗂</div>
+        <div class="roadmap-icon">🖱</div>
         <div>
-          <h3>Expanded Template Library</h3>
-          <p>A full set of premade QSO templates inspired by MMSSTV and other popular SSTV clients — ready-to-use layouts for signal reports, contest exchanges, and general ragchewing.</p>
+          <h3>Drag-and-Drop Template Canvas</h3>
+          <p>v0.3 ships a form-based template editor; v0.3.1 adds direct manipulation — drag layers, resize with handles, and snap to grid right on the live preview.</p>
         </div>
       </div>
 
@@ -878,18 +885,18 @@
       </div>
 
       <div class="roadmap-card">
-        <div class="roadmap-icon">🔤</div>
+        <div class="roadmap-icon">📓</div>
         <div>
-          <h3>Expanded Font Support</h3>
-          <p>More typeface options for text overlays — from clean sans-serifs to classic amateur radio styles — so your callsign and captions look exactly how you want them.</p>
+          <h3>QSO Logging & ADIF Export</h3>
+          <p>Persist every contact with timestamp, mode, frequency, RST, and the TX/RX images themselves. Export to ADIF for upload to LoTW, eQSL, and your favourite logging app.</p>
         </div>
       </div>
 
       <div class="roadmap-card">
-        <div class="roadmap-icon">📐</div>
+        <div class="roadmap-icon">🌐</div>
         <div>
-          <h3>Advanced Text Layout</h3>
-          <p>Richer overlay positioning — multi-column layouts, text alignment controls, background fill options, and more — giving you full control over how information is arranged on your TX image.</p>
+          <h3>Template Sharing Hub</h3>
+          <p>Browse and download community-contributed templates from inside the app — TOML files are already shareable today, this just makes discovery one click.</p>
         </div>
       </div>
 

@@ -176,3 +176,74 @@ def test_save_config_no_tmp_on_ioerror(tmp_path: Path, monkeypatch: pytest.Monke
 
     tmp = p.with_suffix(p.suffix + ".tmp")
     assert not tmp.exists(), ".tmp must be cleaned up after a failed os.replace"
+
+
+# === M6: concurrent save_config is serialized via threading.Lock ===
+
+
+def test_save_config_concurrent_calls_are_serialized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two threads calling save_config in parallel must not interleave
+    inside the critical section.
+
+    Without the lock, two threads could both write to ``config.toml.tmp``
+    and ``os.replace`` it, leaving one writer's bytes inside the other's
+    half-finished file or producing a stray ``.tmp`` sibling.  With the
+    lock, the two calls serialize: at most one thread is inside the
+    write block at any instant, and the on-disk file matches one of the
+    two configs exactly (not a hybrid).
+    """
+    import threading
+    import time
+    import open_sstv.config.store as store_module
+
+    p = tmp_path / "config.toml"
+    cfg_a = AppConfig(callsign="W0AAA")
+    cfg_b = AppConfig(callsign="K1BBB")
+
+    # Track inside-critical-section concurrency by wrapping tomli_w.dump
+    # with a "I'm in" / "I'm out" pair guarded by a tiny sleep so the
+    # window is wide enough that two unsynchronised threads would
+    # observably overlap.
+    inside_count = 0
+    max_concurrent = 0
+    overlap_lock = threading.Lock()
+
+    real_dump = store_module.tomli_w.dump
+
+    def _instrumented_dump(data, f):
+        nonlocal inside_count, max_concurrent
+        with overlap_lock:
+            inside_count += 1
+            max_concurrent = max(max_concurrent, inside_count)
+        try:
+            time.sleep(0.05)  # widen the race window
+            real_dump(data, f)
+        finally:
+            with overlap_lock:
+                inside_count -= 1
+
+    monkeypatch.setattr(store_module.tomli_w, "dump", _instrumented_dump)
+
+    threads = [
+        threading.Thread(target=save_config, args=(cfg_a,), kwargs={"path": p}),
+        threading.Thread(target=save_config, args=(cfg_b,), kwargs={"path": p}),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert max_concurrent == 1, (
+        f"save_config critical sections overlapped (peak concurrency = "
+        f"{max_concurrent}); the threading.Lock is not protecting the writer."
+    )
+
+    # Whichever thread won the race, the resulting file must be a clean
+    # one of the two configs — never a torn hybrid.
+    loaded = load_config(path=p)
+    assert loaded.callsign in {"W0AAA", "K1BBB"}
+
+    # And no orphan .tmp sibling left behind.
+    assert not p.with_suffix(p.suffix + ".tmp").exists()

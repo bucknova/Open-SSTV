@@ -266,7 +266,7 @@ _TEST_TONE_FREQ_LO: float = 700.0
 _TEST_TONE_FREQ_HI: float = 1900.0
 
 
-def _make_two_tone(sample_rate: int, duration_s: float) -> "NDArray[np.int16]":
+def _make_two_tone(sample_rate: int, duration_s: float) -> NDArray[np.int16]:
     """Generate a two-tone test signal (700 Hz + 1900 Hz) as int16 PCM.
 
     The two equal-amplitude sine waves are summed and the result is scaled
@@ -316,6 +316,12 @@ class TxWorker(QObject):
     transmission_progress = Signal(int, int)  # (samples_played, samples_total)
     transmission_complete = Signal()
     transmission_aborted = Signal()
+    #: Centralized exception channel.  Carries the originating slot name
+    #: and the live ``Exception`` object so MainWindow can log a full
+    #: traceback while still showing a short status-bar message.  Use this
+    #: instead of swallowing failures with a bare ``pass`` — the UI handler
+    #: is responsible for deciding whether to surface to the user.
+    error_occurred = Signal(str, object)  # (slot_name, exception)
     #: v0.2.8: emitted once the exact image that will be transmitted is
     #: finalised (after any TX-banner compositing, before SSTV encoding).
     #: Carries the PIL image and the Mode so the UI can auto-save the
@@ -485,15 +491,19 @@ class TxWorker(QObject):
         Called from closeEvent if the TX thread doesn't join within the
         timeout.  Runs on the GUI thread; ignores all errors so we never
         block the exit path.
+
+        Failures still emit ``error_occurred`` so a debug build (or a test
+        sitting on the queue) records them — a stuck-keyed rig at shutdown
+        is a real safety concern even if the GUI itself is going away.
         """
         try:
             with self._rig_lock:
                 self._rig.set_ptt(False)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            self.error_occurred.emit("emergency_unkey", exc)
 
     @Slot(object, object)
-    def transmit(self, image: "PILImage", mode: Mode) -> None:
+    def transmit(self, image: PILImage, mode: Mode) -> None:
         """Encode and transmit one image. Worker-thread entry point.
 
         Always emits exactly one of ``transmission_complete`` or
@@ -709,10 +719,10 @@ class TxWorker(QObject):
 
     def _run_tx(
         self,
-        samples: "NDArray",
-        rig: "Rig",
+        samples: NDArray,
+        rig: Rig,
         live_gain: bool = False,
-    ) -> "bool | None":
+    ) -> bool | None:
         """Key PTT, play *samples*, unkey PTT.
 
         Parameters
@@ -880,6 +890,9 @@ class RxWorker(QObject):
     image_complete = Signal(object, object, int)  # (PIL.Image, Mode, vis_code)
     status_update = Signal(str)  # periodic progress text
     error = Signal(str)
+    #: Centralized exception channel — same contract as TxWorker's
+    #: equivalent.  See TxWorker.error_occurred docstring.
+    error_occurred = Signal(str, object)  # (slot_name, exception)
     #: Emitted after ``reset()`` finishes on the worker thread.  MainWindow
     #: uses this to order "reset → start_capture" across the two worker
     #: threads (OP-05): without it, a fresh chunk from an already-open
@@ -907,7 +920,7 @@ class RxWorker(QObject):
             incremental_decode=incremental_decode,
         )
         self._decoder.set_cancel_event(self._cancel_event)
-        self._scratch: list["NDArray[np.float64]"] = []
+        self._scratch: list[NDArray[np.float64]] = []
         self._scratch_samples: int = 0
         self._total_samples: int = 0
         self._decoding: bool = False
@@ -949,7 +962,7 @@ class RxWorker(QObject):
         self._decoding_mode: Mode | None = None
         self._decoding_vis: int = 0
         self._decoding_lines_total: int = 0
-        self._last_progress_image: "PILImage | None" = None
+        self._last_progress_image: PILImage | None = None
         self._last_progress_lines: int = 0
         # v0.2.1: independent wall-clock tick for the watchdog.
         # Created lazily on the worker thread — see
@@ -1080,7 +1093,7 @@ class RxWorker(QObject):
     # === slots ===
 
     @Slot(object)
-    def feed_chunk(self, chunk: "NDArray") -> None:
+    def feed_chunk(self, chunk: NDArray) -> None:
         """Buffer one audio chunk; flush to the decoder on a cadence.
 
         Safe to invoke via queued connection from the audio worker
@@ -1510,6 +1523,11 @@ class RxWorker(QObject):
                             exc,
                             exc_info=True,
                         )
+                        # Surface through the centralized error channel so
+                        # the UI can offer a "slant correction failed —
+                        # using progressive result" hint instead of users
+                        # silently wondering why the toggle "did nothing".
+                        self.error_occurred.emit("dispatch.slant_correction", exc)
             self.image_complete.emit(final_image, event.mode, event.vis_code)
             # v0.1.36: clean completion — clear watchdog state so the
             # next VIS starts with a fresh deadline.

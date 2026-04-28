@@ -18,20 +18,31 @@ Signals
 template_selected(object):
     Emitted when the user clicks a thumbnail.  Carries the selected
     ``Template`` instance, or ``None`` when the selection is cleared.
+new_template_requested():
+    Emitted when the user clicks "+ New…" in the header.
+edit_template_requested(object, object):
+    User asked to edit a template.  Carries ``(Template, Path)``.
+duplicate_template_requested(object):
+    User asked to duplicate a template.  Carries the source ``Path``.
+rename_template_requested(object, object):
+    User asked to rename a template.  Carries ``(Template, Path)``.
+delete_template_requested(object, object):
+    User asked to delete a template.  Carries ``(Template, Path)``.
 """
 from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QPoint, QRect, QSize, QTimer, Qt, Signal, Slot
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, QTimer, Signal, Slot
+from PySide6.QtGui import QAction, QFont, QFontMetrics, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLayout,
+    QMenu,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -40,7 +51,7 @@ from PySide6.QtWidgets import (
 )
 
 from open_sstv.templates.manager import list_templates, load_by_path
-from open_sstv.templates.model import QSOState, TXContext, Template
+from open_sstv.templates.model import QSOState, Template, TXContext
 from open_sstv.templates.renderer import render_template
 from open_sstv.ui.utils import pil_to_pixmap
 
@@ -58,6 +69,14 @@ _log = logging.getLogger(__name__)
 _MAX_THUMB_W: int = 140
 _MIN_THUMB_W: int = 60
 _THUMB_W: int = _MAX_THUMB_W  # kept for backward-compat with existing tests
+
+# Caption font pixel size.  Set on the QLabel via QFont (not stylesheet)
+# so QFontMetrics reflects the rendered glyphs and we can size the label
+# height deterministically.
+_CAPTION_PX: int = 10
+# Maximum wrapped lines for the caption.  Long names truncate visually
+# (Qt elides at the wrap boundary); the card height stays uniform.
+_CAPTION_LINES: int = 2
 
 # Role labels shown in the filter bar.
 _ROLE_LABELS: tuple[tuple[str, str | None], ...] = (
@@ -144,14 +163,24 @@ class _ThumbnailCard(QWidget):
     """One card in the gallery: thumbnail image + name label."""
 
     clicked = Signal(object)  # Template
+    double_clicked = Signal(object, object)  # (Template, Path)
+    context_menu_requested = Signal(object, object, object)  # (Template, Path, QPoint)
 
-    def __init__(self, template: Template, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        template: Template,
+        path: Path | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self._template = template
+        self._path = path
         self._selected = False
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._on_context_menu)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(3, 3, 3, 8)  # extra bottom margin for descenders
+        layout.setContentsMargins(3, 3, 3, 3)
         layout.setSpacing(4)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
@@ -169,15 +198,23 @@ class _ThumbnailCard(QWidget):
         )
         layout.addWidget(self._thumb_label)
 
-        # Template name caption.
+        # Caption label.  Size deterministically via QFontMetrics +
+        # setFixedHeight: _FlowLayout lays out cards using sizeHint(), and
+        # a word-wrapped QLabel's sizeHint excludes both setMinimumHeight
+        # and stylesheet vertical padding — which is why the previous
+        # font-size/padding/min-height tweaks left descenders clipped.
+        caption_font = QFont()
+        caption_font.setPixelSize(_CAPTION_PX)
         self._name_label = QLabel(template.name)
+        self._name_label.setFont(caption_font)
         self._name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._name_label.setFixedWidth(_THUMB_W)
-        self._name_label.setMinimumHeight(32)
         self._name_label.setWordWrap(True)
-        self._name_label.setStyleSheet(
-            "QLabel { font-size: 9px; padding: 2px 0px 6px 0px; }"
-        )
+        fm = QFontMetrics(caption_font)
+        # fm.height() already covers ascent + descent + leading.  We add a
+        # 4 px tail so descenders (g, p, y, q) on the last wrapped line are
+        # never cropped by sub-pixel rounding or platform-specific metrics.
+        self._name_label.setFixedHeight(fm.height() * _CAPTION_LINES + 4)
         layout.addWidget(self._name_label)
 
         self._set_border()
@@ -200,6 +237,10 @@ class _ThumbnailCard(QWidget):
     def template(self) -> Template:
         return self._template
 
+    @property
+    def path(self) -> Path | None:
+        return self._path
+
     # --- private ---
 
     def _set_border(self) -> None:
@@ -212,6 +253,19 @@ class _ThumbnailCard(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit(self._template)
         super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.double_clicked.emit(self._template, self._path)
+        super().mouseDoubleClickEvent(event)
+
+    @Slot(QPoint)
+    def _on_context_menu(self, pos: QPoint) -> None:
+        # Forward in global coords so the gallery can show the menu rooted
+        # at the click position regardless of which child widget triggered.
+        self.context_menu_requested.emit(
+            self._template, self._path, self.mapToGlobal(pos),
+        )
 
 
 class TemplateGallery(QWidget):
@@ -231,20 +285,26 @@ class TemplateGallery(QWidget):
     """
 
     template_selected = Signal(object)  # Template | None
+    new_template_requested = Signal()
+    edit_template_requested = Signal(object, object)  # (Template, Path)
+    duplicate_template_requested = Signal(object)  # Path
+    rename_template_requested = Signal(object, object)  # (Template, Path)
+    delete_template_requested = Signal(object, object)  # (Template, Path)
 
     def __init__(
         self,
-        app_config: "AppConfig | None" = None,
-        templates_dir: "Path | None" = None,
+        app_config: AppConfig | None = None,
+        templates_dir: Path | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
 
         self._app_config = app_config
         self._templates_dir = templates_dir
-        self._photo: "PILImage | None" = None
+        self._photo: PILImage | None = None
+        self._rx_image: PILImage | None = None
         self._qso_state: QSOState = QSOState()
-        self._mode: "Mode | None" = None
+        self._mode: Mode | None = None
         self._selected_template: Template | None = None
         self._active_role: str | None = None  # None = All
         self._cards: list[_ThumbnailCard] = []
@@ -276,6 +336,12 @@ class TemplateGallery(QWidget):
             filter_row.addWidget(btn)
         self._role_group.buttonClicked.connect(self._on_role_filter_changed)
         filter_row.addStretch(1)
+
+        # "+ New…" launches the template editor with a blank Template.
+        self._new_btn = QPushButton("+ New…")
+        self._new_btn.setToolTip("Create a new template")
+        self._new_btn.clicked.connect(self._on_new_clicked)
+        filter_row.addWidget(self._new_btn)
         outer.addLayout(filter_row)
 
         # --- Scroll area with wrapping card grid ---
@@ -303,13 +369,18 @@ class TemplateGallery(QWidget):
 
     # === Public API ===
 
-    def set_app_config(self, cfg: "AppConfig") -> None:
+    def set_app_config(self, cfg: AppConfig) -> None:
         """Update the config used for token resolution."""
         self._app_config = cfg
 
-    def set_photo(self, photo: "PILImage | None") -> None:
+    def set_photo(self, photo: PILImage | None) -> None:
         """Update the base photo; re-renders all visible thumbnails."""
         self._photo = photo
+        self._rerender_all()
+
+    def set_rx_image(self, rx_image: PILImage | None) -> None:
+        """Update the user-selected RX image; re-renders all thumbnails."""
+        self._rx_image = rx_image
         self._rerender_all()
 
     def set_qso_state(self, qso_state: QSOState) -> None:
@@ -317,7 +388,7 @@ class TemplateGallery(QWidget):
         self._qso_state = qso_state
         self._rerender_all()
 
-    def set_mode(self, mode: "Mode") -> None:
+    def set_mode(self, mode: Mode) -> None:
         """Update SSTV mode (affects aspect ratio); re-renders all thumbnails."""
         self._mode = mode
         self._rerender_all()
@@ -325,12 +396,12 @@ class TemplateGallery(QWidget):
     def reload_templates(self) -> None:
         """Reload the templates directory and rebuild the grid."""
         entries = list_templates(self._templates_dir)
-        templates: list[Template] = []
+        items: list[tuple[Template, Path]] = []
         for _name, _role, path in entries:
             t = load_by_path(path)
             if t is not None:
-                templates.append(t)
-        self._rebuild_strip(templates)
+                items.append((t, path))
+        self._rebuild_strip(items)
 
     def selected_template(self) -> Template | None:
         return self._selected_template
@@ -356,10 +427,76 @@ class TemplateGallery(QWidget):
             card.set_selected(card.template is template)
         self.template_selected.emit(template)
 
+    @Slot(object, object)
+    def _on_card_double_clicked(
+        self, template: Template, path: Path | None
+    ) -> None:
+        if path is not None:
+            self.edit_template_requested.emit(template, path)
+
+    @Slot(object, object, QPoint)
+    def _on_card_context_menu(
+        self, template: Template, path: Path | None, global_pos: QPoint
+    ) -> None:
+        if path is None:
+            return
+        # Make sure the right-clicked card is also visually selected so the
+        # menu actions match what the user sees highlighted.
+        self._on_card_clicked(template)
+
+        menu = QMenu(self)
+        edit_act = QAction("Edit…", menu)
+        edit_act.triggered.connect(self._dispatch_context_action)
+        edit_act.setData(("edit", template, path))
+        menu.addAction(edit_act)
+
+        dup_act = QAction("Duplicate", menu)
+        dup_act.triggered.connect(self._dispatch_context_action)
+        dup_act.setData(("duplicate", template, path))
+        menu.addAction(dup_act)
+
+        rename_act = QAction("Rename…", menu)
+        rename_act.triggered.connect(self._dispatch_context_action)
+        rename_act.setData(("rename", template, path))
+        menu.addAction(rename_act)
+
+        menu.addSeparator()
+
+        del_act = QAction("Delete…", menu)
+        del_act.triggered.connect(self._dispatch_context_action)
+        del_act.setData(("delete", template, path))
+        menu.addAction(del_act)
+
+        menu.exec(global_pos)
+
+    @Slot()
+    def _dispatch_context_action(self) -> None:
+        action = self.sender()
+        if not isinstance(action, QAction):
+            return
+        data = action.data()
+        if not isinstance(data, tuple) or len(data) != 3:
+            return
+        kind, template, path = data
+        if kind == "edit":
+            self.edit_template_requested.emit(template, path)
+        elif kind == "duplicate":
+            self.duplicate_template_requested.emit(path)
+        elif kind == "rename":
+            self.rename_template_requested.emit(template, path)
+        elif kind == "delete":
+            self.delete_template_requested.emit(template, path)
+
+    @Slot()
+    def _on_new_clicked(self) -> None:
+        self.new_template_requested.emit()
+
     # === Private ===
 
-    def _rebuild_strip(self, templates: list[Template]) -> None:
-        """Replace all cards with new ones for *templates*."""
+    def _rebuild_strip(
+        self, templates: list[tuple[Template, Path]]
+    ) -> None:
+        """Replace all cards with new ones for *templates* (Template, Path pairs)."""
         for card in self._cards:
             self._strip_layout.removeWidget(card)
             card.deleteLater()
@@ -370,9 +507,11 @@ class TemplateGallery(QWidget):
         )
         self._selected_template = None
 
-        for t in templates:
-            card = _ThumbnailCard(t, self._strip_widget)
+        for t, p in templates:
+            card = _ThumbnailCard(t, p, self._strip_widget)
             card.clicked.connect(self._on_card_clicked)
+            card.double_clicked.connect(self._on_card_double_clicked)
+            card.context_menu_requested.connect(self._on_card_context_menu)
             self._strip_layout.addWidget(card)
             self._cards.append(card)
             if t.name == prev_name:
@@ -426,6 +565,7 @@ class TemplateGallery(QWidget):
             mode_display_name=mode.value,
             frame_size=(spec.width, spec.display_height),
             photo_image=self._photo,
+            rx_image=self._rx_image,
         )
         try:
             img = render_template(

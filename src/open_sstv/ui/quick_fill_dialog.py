@@ -24,7 +24,6 @@ from PySide6.QtWidgets import (
 
 from open_sstv.config.templates import QSOTemplate, needs_user_input, resolve_placeholders
 
-
 # Session-level memory for the last entered callsign.
 _last_theircall: str = ""
 

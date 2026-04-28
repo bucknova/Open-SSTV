@@ -12,11 +12,15 @@ swallowed — an update check failing is never surfaced as an error.
 from __future__ import annotations
 
 import json
+import logging
 import urllib.request
+from urllib.error import URLError
 
 from PySide6.QtCore import QObject, Signal, Slot
 
 from open_sstv import __version__
+
+_log = logging.getLogger(__name__)
 
 _API_URL = "https://api.github.com/repos/bucknova/Open-SSTV/releases/latest"
 _TIMEOUT_S = 3
@@ -62,8 +66,12 @@ class UpdateCheckerWorker(QObject):
             url = data.get("html_url", _API_URL)
             if tag and _parse_version(tag) > _parse_version(__version__):
                 self.update_available.emit(tag.lstrip("v"), url)
-        except Exception:  # noqa: BLE001 — network failures silently skipped
-            pass
+        except (URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+            # Network hiccups, DNS failures, malformed JSON, and offline
+            # mode are all expected and silent — but keep a debug-level
+            # trace so a real bug (TypeError, AttributeError, …) can't
+            # hide behind a bare ``except Exception``.
+            _log.debug("update check failed: %s", exc)
         finally:
             self.check_complete.emit()
 

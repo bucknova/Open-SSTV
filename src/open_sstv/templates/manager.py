@@ -60,6 +60,15 @@ def default_templates_dir() -> Path:
     return Path(platformdirs.user_config_dir(_APP_NAME)) / "templates"
 
 
+def default_station_assets_dir() -> Path:
+    """Return the user-config station assets directory (may not exist yet).
+
+    StationImageLayer.path values are resolved relative to this directory,
+    and the renderer rejects any resolved path that escapes it.
+    """
+    return Path(platformdirs.user_config_dir(_APP_NAME)) / "assets"
+
+
 def _bundled_templates_dir() -> Path:
     """Return the path to the shipped assets/templates directory."""
     anchor = importlib.resources.files("open_sstv") / "assets" / "templates"
@@ -159,6 +168,58 @@ def delete(path: Path) -> None:
     path.unlink()
 
 
+def duplicate_template(path: Path) -> Path:
+    """Create a copy of the template at *path*, returning the new file path.
+
+    The copy's ``name`` field gets ``" (copy)"`` appended (or ``" (copy 2)"``,
+    ``" (copy 3)"``, … if a sibling with that name already exists), and the
+    written filename is derived from the new name through the same slug
+    rules as :func:`save` so the gallery loads it on the next refresh.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the source template does not exist.
+    TemplateLoadError / SchemaVersionError
+        If the source template cannot be loaded.
+    OSError
+        On permission or I/O errors writing the copy.
+    """
+    src = load_template(path)
+    tdir = path.parent
+
+    existing = {p.stem for p in tdir.glob("*.toml")}
+
+    base_name = src.name + " (copy)"
+    new_name = base_name
+    n = 2
+    while True:
+        slug = "".join(
+            c for c in new_name.replace(" ", "_").replace("/", "_").lower()
+            if c.isalnum() or c in "_-"
+        ) or "template"
+        # Both checks are deliberate, not redundant.  ``existing`` was
+        # snapshotted from one ``glob()`` call before the loop, so it can
+        # miss a sibling template that another process (a parallel CLI run,
+        # an editor "Save As") wrote between the snapshot and this iteration.
+        # The ``path.exists()`` check covers that race.  Conversely, when the
+        # candidate slug also collides with itself across iterations of this
+        # very loop (we just appended " (copy 2)", " (copy 3)", …), the
+        # in-memory ``existing`` set is the authoritative answer because the
+        # files we'd be racing with don't exist yet — we haven't written
+        # them.  Either alone leaves a real gap, so keep both.  The remaining
+        # TOCTOU window between the check and ``save_template`` is bounded
+        # by ``os.replace`` atomicity (overwrites are deliberate in ``save``)
+        # and isn't worsened by this guard.
+        if slug not in existing and not (tdir / f"{slug}.toml").exists():
+            break
+        new_name = f"{src.name} (copy {n})"
+        n += 1
+
+    src.name = new_name
+    return save(src, tdir, filename=f"{slug}.toml")
+
+
 # ---------------------------------------------------------------------------
 # Starter pack
 # ---------------------------------------------------------------------------
@@ -218,6 +279,7 @@ __all__ = [
     "STARTER_TEMPLATE_FILENAMES",
     "default_templates_dir",
     "delete",
+    "duplicate_template",
     "get_templates_by_role",
     "install_starter_pack",
     "list_templates",

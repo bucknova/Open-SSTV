@@ -66,9 +66,10 @@ from its neighbor, and converts YCbCr→RGB via Pillow.
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 import numpy as np
 from PIL import Image
@@ -83,6 +84,8 @@ from open_sstv.core.dsp_utils import bandpass_sos
 from open_sstv.core.modes import MODE_TABLE, Mode, ModeSpec, mode_from_vis
 from open_sstv.core.robot36_dsp import (
     sample_scan as _robot36_sample_scan,
+)
+from open_sstv.core.robot36_dsp import (
     ycbcr_to_rgb as _robot36_ycbcr_to_rgb,
 )
 from open_sstv.core.slant import slant_corrected_line_starts
@@ -879,7 +882,7 @@ def _trim_to_buffer(line_starts: list[int], buf_size: int) -> list[int]:
 def _partial_decode(
     mode: Mode,
     spec: ModeSpec,
-    inst: "NDArray",
+    inst: NDArray,
     fs: int,
     vis_end: int,
     *,
@@ -936,7 +939,7 @@ def _partial_decode(
 
 
 def _partial_decode_robot36(
-    inst: "NDArray",
+    inst: NDArray,
     fs: int,
     spec: ModeSpec,
     vis_end: int,
@@ -1110,7 +1113,7 @@ class Decoder:
         # Incremental decoder instance — used when incremental_decode is True.
         # Annotated against the IncrementalDecoder Protocol so mypy accepts
         # any concrete backend (Scottie, Martin, PD, Wraase, Pasokon, Robot 36).
-        self._incremental_dec: "IncrementalDecoder | None" = None
+        self._incremental_dec: IncrementalDecoder | None = None
         # How many samples of joined[] have been fed to the incremental decoder.
         self._incremental_total_fed: int = 0
         # High-water mark for lines_decoded; prevents backward progress events
@@ -1154,7 +1157,7 @@ class Decoder:
         """Return True if the registered cancel event has been set."""
         return self._cancel is not None and self._cancel.is_set()
 
-    def feed(self, samples: "NDArray") -> list[DecoderEvent]:
+    def feed(self, samples: NDArray) -> list[DecoderEvent]:
         """Append a chunk of audio and return any decoder events it
         triggered. Safe to call from a worker thread.
 
@@ -1178,7 +1181,7 @@ class Decoder:
             return self._feed_idle(joined)
         return self._feed_decoding(joined)
 
-    def _feed_idle(self, joined: "NDArray") -> list[DecoderEvent]:
+    def _feed_idle(self, joined: NDArray) -> list[DecoderEvent]:
         """Hunt for a VIS header in the buffered audio."""
         filtered = _bandpass(joined, self._fs)
         vis_result = detect_vis(filtered, self._fs, weak_signal=self._weak_signal)
@@ -1261,7 +1264,7 @@ class Decoder:
         events.extend(progress_events)
         return events
 
-    def _feed_decoding(self, joined: "NDArray") -> list[DecoderEvent]:
+    def _feed_decoding(self, joined: NDArray) -> list[DecoderEvent]:
         """Decode available lines from the growing audio buffer."""
         if self._incremental_decode and self._incremental_dec is not None:
             return self._feed_decoding_incremental(joined)
@@ -1276,7 +1279,7 @@ class Decoder:
             inst, self._mode, self._spec, self._vis_code  # type: ignore[arg-type]
         )
 
-    def _feed_decoding_incremental(self, joined: "NDArray") -> list[DecoderEvent]:
+    def _feed_decoding_incremental(self, joined: NDArray) -> list[DecoderEvent]:
         """Incremental decode: feed only the new audio chunk to the streaming decoder.
 
         ``joined`` is the full accumulated buffer. We track how much of it has
@@ -1330,7 +1333,7 @@ class Decoder:
 
     def _decode_progress(
         self,
-        inst: "NDArray",
+        inst: NDArray,
         mode: Mode,
         spec: ModeSpec,
         vis_code: int,
@@ -1385,7 +1388,7 @@ class Decoder:
         self._incremental_total_fed = 0
         self._incremental_max_row = 0
 
-    def _joined(self) -> "NDArray":
+    def _joined(self) -> NDArray:
         if not self._buffer:
             return np.array([], dtype=np.float64)
         if len(self._buffer) == 1:

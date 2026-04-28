@@ -323,7 +323,7 @@ class InputStreamWorker(QObject):
 
     def _audio_callback(
         self,
-        indata: "NDArray[np.float32]",
+        indata: NDArray[np.float32],
         frames: int,  # noqa: ARG002 — PortAudio API
         time_info: object,  # noqa: ARG002
         status: sd.CallbackFlags,

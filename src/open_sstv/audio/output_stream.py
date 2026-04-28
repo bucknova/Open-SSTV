@@ -24,7 +24,7 @@ Public API:
 from __future__ import annotations
 
 import threading
-from typing import TYPE_CHECKING, Callable
+from collections.abc import Callable
 
 import numpy as np
 import sounddevice as sd
@@ -36,10 +36,10 @@ def play_blocking(
     samples: np.ndarray,
     sample_rate: int,
     device: AudioDevice | int | None = None,
-    progress_callback: "Callable[[int, int], None] | None" = None,
-    stop_event: "threading.Event | None" = None,
-    gain_provider: "Callable[[], float] | None" = None,
-    periodic_check: "Callable[[], None] | None" = None,
+    progress_callback: Callable[[int, int], None] | None = None,
+    stop_event: threading.Event | None = None,
+    gain_provider: Callable[[], float] | None = None,
+    periodic_check: Callable[[], None] | None = None,
 ) -> None:
     """Play a buffer of samples and block until playback finishes.
 

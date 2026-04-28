@@ -26,6 +26,11 @@ image_saved(PIL.Image.Image, Mode):
     the context menu). Wired by ``MainWindow`` to a ``QFileDialog``.
     Single-click on a thumbnail instead loads it into the main preview
     via ``_show_gallery_image`` — no save dialog, no disk round-trip.
+rx_image_selected(PIL.Image.Image):
+    User single-clicked a gallery thumbnail (or invoked *View* from the
+    context menu). Wired by ``MainWindow`` to ``TxPanel.set_rx_image``
+    so reply/exchange templates can render that image in the
+    ``{rx_image}`` slot.
 """
 from __future__ import annotations
 
@@ -55,13 +60,14 @@ class RxPanel(QWidget):
     capture_requested = Signal(bool)
     clear_requested = Signal()
     image_saved = Signal(object, object)  # (PIL.Image, Mode)
+    rx_image_selected = Signal(object)  # PIL.Image — for template {rx_image} slot
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
 
         self._capturing: bool = False
         self._current_mode: Mode | None = None
-        self._current_pil_image: "PILImage | None" = None
+        self._current_pil_image: PILImage | None = None
         # Full-resolution source pixmap for the most recent decode.
         # ``resizeEvent`` scales from here rather than from the label's
         # already-scaled pixmap so the preview stays crisp on upscale.
@@ -157,7 +163,7 @@ class RxPanel(QWidget):
     @Slot(object, object, int, int, int)
     def show_image_progress(
         self,
-        image: "PILImage",
+        image: PILImage,
         mode: Mode,
         vis_code: int,
         lines_decoded: int,
@@ -180,7 +186,7 @@ class RxPanel(QWidget):
 
     @Slot(object, object, int)
     def show_image_complete(
-        self, image: "PILImage", mode: Mode, vis_code: int
+        self, image: PILImage, mode: Mode, vis_code: int
     ) -> None:
         """Update the preview and add the image to the gallery.
 
@@ -222,7 +228,7 @@ class RxPanel(QWidget):
         )
 
     @Slot(object, object)
-    def _show_gallery_image(self, image: "PILImage", mode: Mode) -> None:
+    def _show_gallery_image(self, image: PILImage, mode: Mode) -> None:
         """Load a gallery thumbnail into the main preview (v0.2.7).
 
         Wired to ``ImageGalleryWidget.image_preview_requested`` so a
@@ -254,6 +260,10 @@ class RxPanel(QWidget):
         self._status.setText(
             f"Viewing {mode_enum.value} ({image.width}×{image.height})"
         )
+        # Selecting a thumbnail also pins it as the active "RX image" for
+        # reply/exchange templates so {rx_image} resolves to what the user
+        # is looking at, not the most recent decode.
+        self.rx_image_selected.emit(image)
 
     # === private slots ===
 
