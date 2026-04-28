@@ -166,6 +166,13 @@ class ImageGalleryWidget(QListView):
                 old_path = evicted.data(_IMAGE_PATH_ROLE)
                 if old_path:
                     Path(old_path).unlink(missing_ok=True)
+                # In the in-memory fallback path the PIL image lives in
+                # the item's data; ``removeRow`` should drop the QStandardItem
+                # but Qt's PyObject ownership across the C++ boundary has bit
+                # us before — explicitly null the role so the PIL handle is
+                # released even if a stray Python reference (e.g. a slot
+                # closure) still holds the item itself.
+                evicted.setData(None, _PIL_IMAGE_ROLE)
             self._model.removeRow(last_row)
 
     def clear(self) -> None:
@@ -176,6 +183,10 @@ class ImageGalleryWidget(QListView):
                 old_path = item.data(_IMAGE_PATH_ROLE)
                 if old_path:
                     Path(old_path).unlink(missing_ok=True)
+                # Symmetric with the eviction path: drop the in-memory PIL
+                # ref before model.clear() so the handle is gone even if
+                # something else still references the item.
+                item.setData(None, _PIL_IMAGE_ROLE)
         self._model.clear()
 
     def count(self) -> int:
