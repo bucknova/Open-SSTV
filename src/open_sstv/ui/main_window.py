@@ -67,10 +67,13 @@ threads, and finally close the rig.
 from __future__ import annotations
 
 import datetime
+import logging
 import subprocess
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+_log = logging.getLogger(__name__)
 
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence, QShortcut
@@ -522,6 +525,7 @@ class MainWindow(QMainWindow):
         self._tx_worker.tx_image_prepared.connect(self._on_tx_image_prepared)
         self._tx_worker.watchdog_fired.connect(self._on_watchdog_fired)
         self._tx_worker.error.connect(self._on_tx_error)
+        self._tx_worker.error_occurred.connect(self._handle_worker_error)
         self._tx_worker.rig_disconnected.connect(self._on_radio_disconnected)
 
         # --- Wire RX signals ---
@@ -572,6 +576,7 @@ class MainWindow(QMainWindow):
         self._rx_worker.image_complete.connect(self._on_rx_image_complete)
         self._rx_worker.status_update.connect(self._on_rx_status_update)
         self._rx_worker.error.connect(self._on_rx_error)
+        self._rx_worker.error_occurred.connect(self._handle_worker_error)
 
         # --- Rig poll: lightweight 1 Hz timer on GUI thread dispatches to
         #     _RigPollWorker on its own thread so blocking serial/socket calls
@@ -1322,6 +1327,28 @@ class MainWindow(QMainWindow):
     def _on_rx_error(self, message: str) -> None:
         self._rx_panel.set_status(f"RX: {message}")
         self.statusBar().showMessage(message, 5000)
+
+    @Slot(str, object)
+    def _handle_worker_error(self, slot_name: str, exc: object) -> None:
+        """Centralized worker-error sink (M4 audit follow-up).
+
+        TxWorker / RxWorker emit ``error_occurred(slot_name, exc)`` for
+        failures that previously got logged-and-swallowed.  Surfacing them
+        through one slot means we get:
+
+        * a single place to log the full traceback (via ``exc_info=True``)
+        * a consistent status-bar message format
+        * an obvious target for tests to assert against
+
+        ``slot_name`` identifies the worker entry point that raised so the
+        log is grep-able; ``exc`` is the live exception object so the log
+        captures the type and message and traceback without the worker
+        having to stringify them.
+        """
+        _log.error(
+            "Worker error in %s: %s", slot_name, exc, exc_info=exc if isinstance(exc, BaseException) else None,
+        )
+        self.statusBar().showMessage(f"{slot_name}: {exc}", 5000)
 
     @Slot(str)
     def _on_rx_audio_error(self, message: str) -> None:

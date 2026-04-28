@@ -316,6 +316,12 @@ class TxWorker(QObject):
     transmission_progress = Signal(int, int)  # (samples_played, samples_total)
     transmission_complete = Signal()
     transmission_aborted = Signal()
+    #: Centralized exception channel.  Carries the originating slot name
+    #: and the live ``Exception`` object so MainWindow can log a full
+    #: traceback while still showing a short status-bar message.  Use this
+    #: instead of swallowing failures with a bare ``pass`` — the UI handler
+    #: is responsible for deciding whether to surface to the user.
+    error_occurred = Signal(str, object)  # (slot_name, exception)
     #: v0.2.8: emitted once the exact image that will be transmitted is
     #: finalised (after any TX-banner compositing, before SSTV encoding).
     #: Carries the PIL image and the Mode so the UI can auto-save the
@@ -485,12 +491,16 @@ class TxWorker(QObject):
         Called from closeEvent if the TX thread doesn't join within the
         timeout.  Runs on the GUI thread; ignores all errors so we never
         block the exit path.
+
+        Failures still emit ``error_occurred`` so a debug build (or a test
+        sitting on the queue) records them — a stuck-keyed rig at shutdown
+        is a real safety concern even if the GUI itself is going away.
         """
         try:
             with self._rig_lock:
                 self._rig.set_ptt(False)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            self.error_occurred.emit("emergency_unkey", exc)
 
     @Slot(object, object)
     def transmit(self, image: "PILImage", mode: Mode) -> None:
@@ -880,6 +890,9 @@ class RxWorker(QObject):
     image_complete = Signal(object, object, int)  # (PIL.Image, Mode, vis_code)
     status_update = Signal(str)  # periodic progress text
     error = Signal(str)
+    #: Centralized exception channel — same contract as TxWorker's
+    #: equivalent.  See TxWorker.error_occurred docstring.
+    error_occurred = Signal(str, object)  # (slot_name, exception)
     #: Emitted after ``reset()`` finishes on the worker thread.  MainWindow
     #: uses this to order "reset → start_capture" across the two worker
     #: threads (OP-05): without it, a fresh chunk from an already-open
@@ -1510,6 +1523,11 @@ class RxWorker(QObject):
                             exc,
                             exc_info=True,
                         )
+                        # Surface through the centralized error channel so
+                        # the UI can offer a "slant correction failed —
+                        # using progressive result" hint instead of users
+                        # silently wondering why the toggle "did nothing".
+                        self.error_occurred.emit("dispatch.slant_correction", exc)
             self.image_complete.emit(final_image, event.mode, event.vis_code)
             # v0.1.36: clean completion — clear watchdog state so the
             # next VIS starts with a fresh deadline.
