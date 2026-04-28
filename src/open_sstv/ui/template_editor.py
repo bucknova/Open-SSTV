@@ -8,7 +8,7 @@ A non-modal QDialog with three panels:
   aspect ratio.  Rebuilt 300 ms after the last property change so dragging
   spin-boxes doesn't thrash the renderer.
 * **Right** — scrollable property inspector whose fields swap based on the
-  selected layer's type (Text / Rect / Gradient / Photo / Image).
+  selected layer's type (Text / Rect / Gradient / Photo / RX Image / Image).
 
 The dialog never mutates the caller's template; it works on a deep copy
 and emits ``template_saved(Path)`` after a successful save so the gallery
@@ -380,6 +380,7 @@ class TemplateEditor(QDialog):
             ("+Text", "text"),
             ("+Rect", "rect"),
             ("+Image", "photo"),
+            ("+RX Image", "rx_image"),
             ("+Gradient", "gradient"),
         ):
             btn = QPushButton(label)
@@ -601,6 +602,17 @@ class TemplateEditor(QDialog):
                 anchor="FILL",
                 fit="cover",
             )
+        if kind == "rx_image":
+            return RxImageLayer(
+                id=layer_id,
+                name="RX Image",
+                anchor="BR",
+                width_pct=30.0,
+                height_pct=25.0,
+                offset_x_pct=2.0,
+                offset_y_pct=2.0,
+                fit="cover",
+            )
         return None
 
     @Slot()
@@ -651,8 +663,8 @@ class TemplateEditor(QDialog):
 
         if layer is None:
             placeholder = QLabel(
-                "No layer selected.\n\nUse the +Text / +Rect / +Image / +Gradient "
-                "buttons to add a layer, or click an entry in the list."
+                "No layer selected.\n\nUse the +Text / +Rect / +Image / +RX Image "
+                "/ +Gradient buttons to add a layer, or click an entry in the list."
             )
             placeholder.setWordWrap(True)
             placeholder.setStyleSheet("color: palette(mid);")
