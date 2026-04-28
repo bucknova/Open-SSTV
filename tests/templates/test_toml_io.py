@@ -81,6 +81,69 @@ class TestTemplateMetadata:
         rt = _save_load(t, tmp_path)
         assert rt.reference_frame == (640, 496)
 
+    def test_reference_frame_floats_are_rounded_with_warning(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        """L3: ``reference_frame = [320.7, 256.3]`` should round (not
+        truncate) and surface a warning so the author notices the field
+        is integer-only.
+
+        Pre-fix the loader did ``int(320.7) → 320`` and ``int(256.3) → 256``
+        silently — the rounding *direction* matters for percentage-based
+        layer placement on the rendered canvas.
+        """
+        p = tmp_path / "f.toml"
+        p.write_text(
+            '[template]\nname = "t"\nreference_frame = [320.7, 256.3]\n'
+        )
+        with caplog.at_level("WARNING", logger="open_sstv.templates.toml_io"):
+            rt = load_template(p)
+        # 320.7 → 321 (round-half-to-even still rounds UP from .7), 256.3 → 256.
+        assert rt.reference_frame == (321, 256)
+        assert any(
+            "reference_frame" in rec.message and "rounding" in rec.message
+            for rec in caplog.records
+        )
+
+    def test_reference_frame_ints_do_not_warn(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        """The complementary path: clean integer input is silent."""
+        p = tmp_path / "i.toml"
+        p.write_text(
+            '[template]\nname = "t"\nreference_frame = [320, 256]\n'
+        )
+        with caplog.at_level("WARNING", logger="open_sstv.templates.toml_io"):
+            rt = load_template(p)
+        assert rt.reference_frame == (320, 256)
+        assert not any(
+            "reference_frame" in rec.message for rec in caplog.records
+        )
+
+    def test_reference_frame_rejects_non_numeric(self, tmp_path: Path) -> None:
+        p = tmp_path / "s.toml"
+        p.write_text(
+            '[template]\nname = "t"\nreference_frame = ["320", "256"]\n'
+        )
+        with pytest.raises(TemplateLoadError, match="reference_frame"):
+            load_template(p)
+
+    def test_reference_frame_rejects_wrong_arity(self, tmp_path: Path) -> None:
+        p = tmp_path / "a.toml"
+        p.write_text(
+            '[template]\nname = "t"\nreference_frame = [320]\n'
+        )
+        with pytest.raises(TemplateLoadError, match="reference_frame"):
+            load_template(p)
+
+    def test_reference_frame_rejects_non_positive(self, tmp_path: Path) -> None:
+        p = tmp_path / "z.toml"
+        p.write_text(
+            '[template]\nname = "t"\nreference_frame = [0, 256]\n'
+        )
+        with pytest.raises(TemplateLoadError, match="positive"):
+            load_template(p)
+
     def test_schema_version_survives(self, tmp_path: Path) -> None:
         t = Template(name="t", schema_version=1)
         rt = _save_load(t, tmp_path)

@@ -125,6 +125,50 @@ def _base_kwargs(d: dict) -> dict:
     return kw
 
 
+def _coerce_reference_frame(
+    raw: object, file_name: str
+) -> tuple[int, int]:
+    """Validate and coerce a TOML ``reference_frame`` value to ``(int, int)``.
+
+    Accepts a 2-element sequence of ints or floats.  Floats are rounded
+    (``round`` not ``int``) and surface a warning so a template author who
+    typed ``reference_frame = [320.7, 256.3]`` notices that the field is
+    integer-only — the previous ``int(…)`` path silently truncated to
+    ``(320, 256)`` and shifted every percentage-based layer by sub-pixel
+    amounts, which is the kind of bug nobody catches in review.
+    """
+    if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+        raise TemplateLoadError(
+            f"Template {file_name!r}: reference_frame must be a 2-element "
+            f"list, got {raw!r}"
+        )
+    coerced: list[int] = []
+    for i, v in enumerate(raw):
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            # ``bool`` is a subclass of ``int``; reject explicitly so
+            # ``reference_frame = [true, 256]`` doesn't load as ``(1, 256)``.
+            raise TemplateLoadError(
+                f"Template {file_name!r}: reference_frame[{i}] must be a "
+                f"number, got {type(v).__name__} {v!r}"
+            )
+        if isinstance(v, float):
+            _log.warning(
+                "Template %r: reference_frame[%d] = %r is a float; "
+                "rounding to %d. reference_frame is integer-pixel-only — "
+                "use an int to silence this warning.",
+                file_name, i, v, round(v),
+            )
+            coerced.append(round(v))
+        else:
+            coerced.append(v)
+    if coerced[0] <= 0 or coerced[1] <= 0:
+        raise TemplateLoadError(
+            f"Template {file_name!r}: reference_frame must be positive, "
+            f"got {tuple(coerced)!r}"
+        )
+    return (coerced[0], coerced[1])
+
+
 def _validate_station_image_path(path: str) -> None:
     """Raise ``TemplateLoadError`` if *path* would escape the assets dir.
 
@@ -366,7 +410,7 @@ def load_template(path: Path) -> Template:
         raise TemplateLoadError(f"Template file {path.name!r} is missing the 'name' field.")
 
     ref_raw = tpl_raw.get("reference_frame", [320, 256])
-    reference_frame: tuple[int, int] = (int(ref_raw[0]), int(ref_raw[1]))
+    reference_frame = _coerce_reference_frame(ref_raw, path.name)
 
     layers: list[Layer] = []
     for layer_raw in raw.get("layer", []):
