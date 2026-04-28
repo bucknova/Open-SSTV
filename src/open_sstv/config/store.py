@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import tomllib
 from dataclasses import asdict, fields
 from pathlib import Path
@@ -24,6 +25,17 @@ from open_sstv.config.schema import AppConfig
 
 _APP_NAME = "open_sstv"
 _CONFIG_FILENAME = "config.toml"
+
+#: Serializes concurrent ``save_config()`` calls.  ``save_config`` is
+#: invoked from the GUI thread (Settings dialog Save), but background
+#: paths — Phase 3 auto-save toggles, future first-launch dialog flows,
+#: and tests that exercise the writer from a worker — can race.  The
+#: tmp-file + ``os.replace`` is atomic per call, but two interleaved
+#: writes could still produce a final file from one call and a
+#: half-written ``.tmp`` from the other (visible to the next ``load_config``
+#: as a stray sibling).  A module-level lock keeps the section single-
+#: writer without forcing every caller to know about the threading model.
+_save_lock = threading.Lock()
 
 
 def config_path() -> Path:
@@ -91,16 +103,17 @@ def save_config(cfg: AppConfig, path: Path | None = None) -> None:
     if path is None:
         path = config_path()
     tmp = path.with_suffix(path.suffix + ".tmp")
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        data = {k: v for k, v in asdict(cfg).items() if v is not None}
-        with tmp.open("wb") as f:
-            tomli_w.dump(data, f)
-        os.replace(tmp, path)
-    except OSError as exc:
-        _log.error("Could not save config to %s: %s", path, exc)
-        tmp.unlink(missing_ok=True)
-        raise
+    with _save_lock:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            data = {k: v for k, v in asdict(cfg).items() if v is not None}
+            with tmp.open("wb") as f:
+                tomli_w.dump(data, f)
+            os.replace(tmp, path)
+        except OSError as exc:
+            _log.error("Could not save config to %s: %s", path, exc)
+            tmp.unlink(missing_ok=True)
+            raise
 
 
 __all__ = ["config_path", "load_config", "save_config"]
