@@ -242,10 +242,88 @@ class TestUpdates:
     def test_set_photo_triggers_rerender(
         self, qtbot, gallery_with_templates: TemplateGallery, tmp_path: Path
     ) -> None:
+        # Cards must be visible so ``_rerender_all`` doesn't skip them.
+        # ``addWidget`` already keeps the gallery alive but doesn't ``show()``
+        # it; manually mark each card visible so ``isVisible()`` flips.
+        gallery_with_templates.show()
+        qtbot.waitExposed(gallery_with_templates)
+
         img = Image.new("RGB", (320, 256), color=(100, 150, 200))
         gallery_with_templates.set_photo(img)
         for card in gallery_with_templates._cards:
-            assert card._thumb_label.pixmap() is not None
+            pix = card._thumb_label.pixmap()
+            # ``pixmap()`` returns a QPixmap object even when no pixmap has
+            # been set, so the previous ``is not None`` check passed
+            # vacuously.  Tighten to verify the pixmap actually carries
+            # a rendered thumbnail.
+            assert not pix.isNull(), (
+                f"Card '{card.template.name}' has a null pixmap after "
+                f"set_photo — render didn't reach the label."
+            )
+            assert pix.size().width() > 0 and pix.size().height() > 0
+
+    def test_set_photo_forces_repaint_of_thumbnail_labels(
+        self, qtbot, gallery_with_templates: TemplateGallery
+    ) -> None:
+        """Regression: thumbnails went blank after ``load_image`` until the
+        user resized the window.
+
+        Root cause: ``QLabel.setPixmap`` schedules a deferred paint via
+        ``update()``.  When the cards' fixed sizes don't change (same
+        aspect-ratio mode → same ``thumb_w`` in/out) no layout pass fires,
+        and on some Qt platforms the queued paint gets coalesced and never
+        reaches the screen.  A window resize forces a fresh layout + paint
+        cycle which then picks up the already-set pixmap.
+
+        Fix: ``set_pixmap`` now calls ``self._thumb_label.update()``
+        explicitly after ``setPixmap``, and ``_rerender_all`` calls
+        ``self._strip_widget.update()`` after the batch.  This test wraps
+        both to count invocations and asserts both fire on every
+        ``set_photo``.
+        """
+        gallery_with_templates.show()
+        qtbot.waitExposed(gallery_with_templates)
+
+        # Spy on per-card and strip-level ``update()`` calls.
+        thumb_updates: list[str] = []
+        strip_updates: list[int] = [0]
+        for card in gallery_with_templates._cards:
+            real_update = card._thumb_label.update
+            tname = card.template.name
+
+            def _spy(*args, _real=real_update, _name=tname, **kw):
+                thumb_updates.append(_name)
+                return _real(*args, **kw)
+
+            card._thumb_label.update = _spy  # type: ignore[method-assign]
+
+        real_strip_update = gallery_with_templates._strip_widget.update
+
+        def _strip_spy(*args, _real=real_strip_update, **kw):
+            strip_updates[0] += 1
+            return _real(*args, **kw)
+
+        gallery_with_templates._strip_widget.update = _strip_spy  # type: ignore[method-assign]
+
+        img = Image.new("RGB", (320, 256), color=(220, 80, 50))
+        gallery_with_templates.set_photo(img)
+
+        # Every visible card must have had its label's update() forced.
+        visible_names = [
+            c.template.name
+            for c in gallery_with_templates._cards
+            if c.isVisible()
+        ]
+        for name in visible_names:
+            assert name in thumb_updates, (
+                f"Card '{name}' visible but ``_thumb_label.update()`` was "
+                f"not called — the explicit repaint trigger is missing"
+            )
+        # Strip-level update() also fires once per ``_rerender_all``.
+        assert strip_updates[0] >= 1, (
+            "_strip_widget.update() was not called after _rerender_all — "
+            "the batch repaint backstop is missing"
+        )
 
     def test_set_qso_state_triggers_rerender(
         self, gallery_with_templates: TemplateGallery

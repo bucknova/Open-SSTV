@@ -228,6 +228,16 @@ class _ThumbnailCard(QWidget):
         self._thumb_label.setFixedHeight(scaled.height())
         self._thumb_label.setPixmap(scaled)
         self._name_label.setFixedWidth(thumb_w)
+        # ``setPixmap`` schedules a deferred paint via ``update()``, but when
+        # the fixed size doesn't change (same aspect-ratio mode → same
+        # ``thumb_w`` in/out) Qt's layout engine never fires a layout pass,
+        # and on some platforms the queued paint gets coalesced and never
+        # reaches the screen.  Symptom: after ``load_image`` swaps the photo
+        # in, every thumbnail goes visually blank until the window is
+        # resized — a resize forces a fresh layout + paint cycle which then
+        # picks up the already-set pixmap.  Explicit ``update()`` here makes
+        # the repaint guarantee independent of layout invalidation.
+        self._thumb_label.update()
 
     def set_selected(self, selected: bool) -> None:
         self._selected = selected
@@ -551,6 +561,14 @@ class TemplateGallery(QWidget):
             if not card.isVisible():
                 continue
             self._render_card(card)
+        # Backstop the per-card ``update()`` calls in ``set_pixmap`` by
+        # asking the strip-widget parent to repaint as well.  A batch
+        # ``set_photo`` updates 8+ cards in a tight loop; without this, the
+        # individual queued paints can get coalesced into a single no-op
+        # layout pass that never lands on screen until the user resizes
+        # the window.  See the ``set_pixmap`` docstring for the underlying
+        # Qt timing the bug exploits.
+        self._strip_widget.update()
 
     def _render_card(self, card: _ThumbnailCard) -> None:
         """Render one thumbnail synchronously and update the card."""
