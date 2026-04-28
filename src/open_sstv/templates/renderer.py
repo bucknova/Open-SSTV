@@ -553,7 +553,8 @@ def _wrap_text(
         cur: list[str] = []
         for word in words:
             candidate = " ".join(cur + [word])
-            w = _text_bbox(font, candidate)[2] - _text_bbox(font, candidate)[0]
+            bbox = _text_bbox(font, candidate)
+            w = bbox[2] - bbox[0]
             if w > max_w and cur:
                 out_lines.append(" ".join(cur))
                 cur = [word]
