@@ -57,6 +57,7 @@
     - [Fonts](#137-fonts)
     - [Text Features: Stacking, Auto-Shrink, Stroke, Shadow](#138-text-features-stacking-auto-shrink-stroke-shadow)
     - [TOML Files & Sharing Templates](#139-toml-files--sharing-templates)
+    - [RX-to-TX Image Workflow](#1310-rx-to-tx-image-workflow)
 14. [Image Editor Reference](#14-image-editor-reference)
 15. [Command-Line Interface](#15-command-line-interface)
     - [open-sstv-encode](#151-open-sstv-encode)
@@ -257,7 +258,10 @@ The app includes automatic **slant correction**: if the transmitting and receivi
 
 The gallery at the bottom of the Receive panel holds up to 20 thumbnails (160x120 pixels each) of recently decoded images, displayed newest-first (left to right). When a 21st image arrives, the oldest one is dropped.
 
-Double-click any thumbnail to save it. Right-click a thumbnail to access a context menu with two options: "Save As..." (opens a file dialog) and "Copy to Clipboard" (copies the image to the system clipboard for pasting into other applications).
+Three interactions, each with a different intent:
+- **Single-click** — surface the thumbnail in the Receive panel's main preview *and* pin it as the active RX image for any v0.3 reply template (see [13.10](#1310-rx-to-tx-image-workflow)). Use this to review an older decode at full size or to set up a one-click reply.
+- **Double-click** — open a Save As… dialog so you can write the image to disk.
+- **Right-click** — context menu with **View** (same as single-click), **Save As…**, and **Copy to Clipboard** (places the image on the system clipboard for pasting into other applications).
 
 ### 7.4 Saving Received Images
 
@@ -709,6 +713,15 @@ The editor is **non-modal** — you can leave it open while operating, change yo
 
 A common pattern: a Gradient layer pinned to **Fill** with `from = (0,0,0,180)` and `to = (0,0,0,0)` at 270° darkens the bottom of a photo so white text reads cleanly without fully obscuring the image.
 
+**RX Image** — A slot that displays the most-recently-pinned received image, cropped/scaled by the same **Fit** modes as Photo. Use it on **Reply** templates to show "the picture I just received from you" alongside your reply. Properties are the shared anchor/size/fit set; no fill or stroke. When no RX image has been pinned yet, the editor preview shows a white-bordered placeholder box with an "RX" label so you can see where the slot will land — at TX time the same slot renders as the actual received picture (no border). See [13.10](#1310-rx-to-tx-image-workflow) for the full pin-and-reply flow.
+
+**Pattern** — A repeating geometric tile (checkered, diagonal stripes, or dots) tinted with an RGBA colour. Useful as a subtle decorative band — for example, a 6-%-tall diagonal-stripes pattern under a gradient for a contest-style banner. Properties:
+- **Pattern ID** — `checkered`, `diagonal_stripes`, or `dots`.
+- **Tint** (RGBA) — multiplied with the pattern's white/transparent tile, so a tint of `(255, 0, 0, 200)` produces semi-transparent red shapes on a transparent background.
+- **Cell size (%)** — pattern unit size as a percentage of frame width. Defaults to `2.0`. Smaller values produce a finer texture; larger values give bold geometric blocks.
+
+**Station Image** — A static image file from your local **assets** directory (next to your templates dir, see [13.9](#139-toml-files--sharing-templates)). Use it for QSL-card backgrounds, club logos, hand-lettered "73" graphics, or any custom artwork you want available across multiple templates. Set the `path` to a name like `qsl_card.png` or `logos/club.svg`; Open-SSTV resolves it relative to `{user_config_dir}/open_sstv/assets/`. **Absolute paths and `..` segments are refused at load time** (templates can't reach outside the assets dir even if hand-edited maliciously). The same **Fit** modes as Photo apply.
+
 ### 13.5 Token Reference
 
 Tokens are placeholders in text layers that resolve to live values at TX time. Two equivalent forms are accepted everywhere; pick whichever reads better. The single-letter `%` form matches MMSSTV muscle memory; the `{name}` form is more readable.
@@ -809,6 +822,21 @@ slashed_zero = true
 ```
 
 The `schema_version` field is `1` for all v0.3 templates. Future major template-format changes will bump it; older builds will refuse to load a higher schema version rather than misinterpreting it.
+
+### 13.10 RX-to-TX Image Workflow
+
+A common QSO move: you receive a picture, then you want to reply with a card that shows their picture next to your callsign. v0.3 makes this one click.
+
+1. **Decode and pin.** When an image lands in the **RX history gallery** (bottom strip of the Receive panel), single-click the thumbnail. Two things happen at once:
+   - The Receive panel's main preview swaps to that image so you can see it at full size without having to save it.
+   - The same image is *pinned* into the TX side as the active **RX image**.
+2. **Pick a Reply template.** Switch to the TX panel and choose any template containing an `rx_image` layer (the bundled **Reply Exchange** template is the canonical example — its slot sits in the bottom-right corner). Every template thumbnail re-renders with the pinned image filling its `rx_image` slot, so you can see exactly which template will look best with their picture.
+3. **Type their callsign / RST.** Use the QSO State widget — the dynamic tokens (`%o`, `%r`, `%name_o`) update both the editor preview and the gallery thumbnails in real time.
+4. **Transmit.** The composited image — your photo, their picture in the slot, your callsign and theirs as text — is encoded directly. No save-and-reopen, no manual cropping, no separate "burn-in" step.
+
+**Clearing.** If you want to send a Reply template *without* an RX image (the slot then renders as the editor's white-bordered placeholder), there's no separate "clear" button — pin a different decoded image, restart the app, or pick a non-Reply template.
+
+**Right-click on a gallery thumbnail** still offers the older actions: **View** (same as single-click), **Save As…**, and **Copy to Clipboard** — useful when you want to save a card you decoded but not pin it for reply.
 
 ---
 
