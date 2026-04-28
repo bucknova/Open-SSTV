@@ -32,12 +32,24 @@ _log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Maps normalised family name → TTF filename inside assets/fonts/.
+#
+# Orbitron, Oswald, and Exo 2 are variable fonts (single TTF carrying the
+# whole weight axis).  The renderer's `_load_font` snaps the wght axis to
+# Bold when the family name carries Bold intent — see renderer.py.
 _SHIPPED_FONTS: dict[str, str] = {
     "dejavusansbold": "DejaVuSans-Bold.ttf",
     "inter": "Inter-Bold.ttf",
     "interbold": "Inter-Bold.ttf",
     "pressstart2p": "PressStart2P-Regular.ttf",
     "pressstart": "PressStart2P-Regular.ttf",
+    "orbitron": "Orbitron[wght].ttf",
+    "orbitronbold": "Orbitron[wght].ttf",
+    "bebasneue": "BebasNeue-Regular.ttf",
+    "sharetechmono": "ShareTechMono-Regular.ttf",
+    "oswald": "Oswald[wght].ttf",
+    "oswaldbold": "Oswald[wght].ttf",
+    "exo2": "Exo2[wght].ttf",
+    "exo2bold": "Exo2[wght].ttf",
 }
 
 _FALLBACK_FAMILY = "dejavusansbold"
@@ -168,6 +180,11 @@ def list_available_fonts(user_fonts_dir: Path | None = None) -> list[str]:
         "DejaVu Sans Bold",
         "Inter Bold",
         "Press Start 2P",
+        "Orbitron Bold",
+        "Bebas Neue",
+        "Share Tech Mono",
+        "Oswald Bold",
+        "Exo 2 Bold",
     ]:
         if is_font_available(display, user_fonts_dir):
             names.append(display)

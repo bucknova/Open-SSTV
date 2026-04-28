@@ -249,7 +249,17 @@ def _load_font(
     font_family: str, font_size_px: int, user_fonts_dir: Path | None = None
 ) -> PIL.ImageFont.FreeTypeFont:
     path = resolve_font_path(font_family, user_fonts_dir=user_fonts_dir)
-    return PIL.ImageFont.truetype(str(path), font_size_px)
+    font = PIL.ImageFont.truetype(str(path), font_size_px)
+    # Variable fonts (e.g. shipped Orbitron[wght].ttf) load at their default
+    # axis position — Regular for every Tier-1 we ship.  When the family
+    # name carries Bold intent, snap to the Bold named instance.  No-ops on
+    # static fonts since OSError is swallowed.
+    if "bold" in font_family.lower():
+        try:
+            font.set_variation_by_name(b"Bold")
+        except OSError:
+            pass
+    return font
 
 
 def _text_bbox(
