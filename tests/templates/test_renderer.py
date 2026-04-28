@@ -38,7 +38,11 @@ from open_sstv.templates.renderer import (
     _wrap_text,
     render_template,
 )
-from open_sstv.templates.renderer import _load_font, _text_bbox
+from open_sstv.templates.renderer import (
+    _load_font,
+    _resolve_station_image_path,
+    _text_bbox,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -734,6 +738,45 @@ class TestWrapText:
         font = _font(20)
         assert _wrap_text(font, "hello world", 0) == "hello world"
 
+    def test_negative_max_width_returns_unchanged(self) -> None:
+        """L6: a negative width is nonsensical but must not crash — the
+        ``max_w <= 0`` early-return handles it.  Symmetric with the
+        zero-width case."""
+        font = _font(20)
+        assert _wrap_text(font, "hello world", -5) == "hello world"
+
+    def test_single_unwrappable_word_is_returned_intact(self) -> None:
+        """L6: a single word wider than max_w cannot be broken — the
+        wrapper has no inter-word break point.  It must still return the
+        word (so the caller can decide what to do, e.g. shrink the font),
+        not an empty string or a crash.
+
+        Regression guard: a naive wrapper could split mid-glyph or drop
+        the word; ours falls through with ``cur=[word]`` and emits the
+        single oversized line at the end of the loop.
+        """
+        font = _font(40)
+        long_word = "Supercalifragilistic"
+        result = _wrap_text(font, long_word, 20)
+        # Same word returned (no split) and no extra newlines fabricated.
+        assert result == long_word
+        assert "\n" not in result
+
+    def test_unwrappable_word_followed_by_words(self) -> None:
+        """L6: an oversized first word must not eat the rest of the input.
+
+        With ``cur=[]`` and a single oversized word, the inner ``if`` falls
+        through (``cur`` is empty so the wrap branch is skipped) and the
+        word ends up on its own line followed by the remaining words on a
+        second line.  Regression guard against an off-by-one that swallows
+        the second word.
+        """
+        font = _font(40)
+        result = _wrap_text(font, "Supercalifragilistic and more", 60)
+        # Both halves of the input must appear in the output, somewhere.
+        assert "Supercalifragilistic" in result
+        assert "more" in result
+
 
 class TestFitText:
     def _layer(self, font_size_pct: float = 8.0) -> TextLayer:
@@ -807,3 +850,85 @@ class TestTextOverflowIntegration:
         t = Template(name="t", layers=[layer])
         img = _render(t, ctx=_ctx(frame_size=(320, 256)))
         assert img.size == (320, 256)
+
+
+# ---------------------------------------------------------------------------
+# L6: renderer-side symlink-escape defense for StationImageLayer
+# ---------------------------------------------------------------------------
+
+
+import sys
+from pathlib import Path as _Path
+
+
+class TestStationImagePathResolution:
+    """L6: ``_resolve_station_image_path`` is the renderer's defense-in-depth
+    check against a TOML that smuggles a symlink past the loader.
+
+    The toml_io static check (C1) rejects literal absolute paths and ``..``
+    components, but a *symlink inside the assets directory* still parses as
+    a clean relative name.  At render time we resolve and re-verify the
+    result is_relative_to(assets_dir.resolve()) so the symlink target is
+    the thing we contain — not the link's name.
+    """
+
+    def test_returns_resolved_path_for_safe_relative(self, tmp_path: _Path) -> None:
+        assets = tmp_path / "assets"
+        assets.mkdir()
+        (assets / "qsl.png").write_bytes(b"")  # any content
+        out = _resolve_station_image_path("qsl.png", assets)
+        assert out == (assets / "qsl.png").resolve()
+
+    def test_returns_none_for_empty_path(self, tmp_path: _Path) -> None:
+        # Empty path is a sentinel: the layer renders blank.
+        assert _resolve_station_image_path("", tmp_path) is None
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="symlink creation needs admin / dev mode on Windows; the "
+               "Unix-flavoured test below adequately covers the escape path",
+    )
+    def test_symlink_pointing_outside_assets_dir_is_refused(
+        self, tmp_path: _Path
+    ) -> None:
+        """The smuggled-symlink attack: a TOML names ``link.png``; on disk
+        that file is a symlink to ``../../etc/passwd``.
+
+        The toml_io check sees only the plain name and accepts it.  The
+        renderer's ``is_relative_to`` check after ``resolve()`` follows the
+        symlink and refuses the load — return value is ``None`` so the
+        layer falls through to a blank cell instead of leaking file bytes.
+        """
+        assets = tmp_path / "assets"
+        assets.mkdir()
+        outside = tmp_path / "outside.txt"
+        outside.write_text("secret")
+        link = assets / "link.png"
+        link.symlink_to(outside)
+
+        result = _resolve_station_image_path("link.png", assets)
+        assert result is None, (
+            f"Symlink that points outside the assets dir must be refused; "
+            f"got {result!r}"
+        )
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="symlink semantics differ on Windows; Unix coverage is sufficient",
+    )
+    def test_symlink_pointing_inside_assets_dir_is_accepted(
+        self, tmp_path: _Path
+    ) -> None:
+        """The complementary case: a symlink that *stays inside* the assets
+        dir is fine — users may legitimately keep a single QSL card on disk
+        and link to it from multiple template-named filenames.
+        """
+        assets = tmp_path / "assets"
+        assets.mkdir()
+        target = assets / "shared.png"
+        target.write_bytes(b"")
+        link = assets / "alias.png"
+        link.symlink_to(target)
+
+        result = _resolve_station_image_path("alias.png", assets)
+        assert result == target.resolve()
