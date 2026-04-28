@@ -25,7 +25,9 @@ from open_sstv.templates.model import (
     PhotoLayer,
     QSOState,
     RectLayer,
+    RxImageLayer,
     ShadowSpec,
+    StationImageLayer,
     StrokeSpec,
     TXContext,
     Template,
@@ -349,6 +351,126 @@ class TestPhotoLayer:
         # Top row should be black (letterboxed)
         r, g, b = img.getpixel((160, 0))
         assert r == 0 and g == 0 and b == 0
+
+
+# ---------------------------------------------------------------------------
+# RxImageLayer — image-present vs empty-slot placeholder
+# ---------------------------------------------------------------------------
+
+
+class TestRxImageLayer:
+    """Two visual contracts the renderer must hold for an RxImageLayer:
+
+    * Image present → paste cleanly with **no** border or fill, indistinguish-
+      able from a PhotoLayer holding the same picture.
+    * Image absent → show a white-bordered placeholder box (with an "RX"
+      label) so the slot's position is visible in the editor preview.
+    """
+
+    def _layer(self, **kw) -> RxImageLayer:
+        defaults = dict(
+            id="rx", anchor="BR",
+            width_pct=30.0, height_pct=25.0,
+            offset_x_pct=2.0, offset_y_pct=2.0,
+            fit="cover",
+        )
+        defaults.update(kw)
+        return RxImageLayer(**defaults)
+
+    def test_image_present_renders_without_border(self) -> None:
+        """Spec: when an RX image is present, the slot must NOT be framed.
+
+        We sample one pixel just *inside* the slot's outer edge.  If a
+        bordering implementation snuck back in, that pixel would be white
+        from the border; with the correct implementation it shows the
+        underlying image's red.
+        """
+        rx_img = _solid_color_image(100, 100, (255, 0, 0))
+        t = Template(name="t", layers=[self._layer()])
+        img = _render(t, ctx=_ctx(rx_image=rx_img))
+        # The slot is anchored BR with width_pct=30, height_pct=25.
+        # That's a 96×64 region offset 6px / 5px from the bottom-right
+        # of a 320×256 frame → slot rect is roughly x∈[212, 308),
+        # y∈[185, 249).  Sample one pixel from the slot's interior.
+        sx, sy = 220, 195
+        r, g, b = img.getpixel((sx, sy))
+        assert (r, g, b) == (255, 0, 0), (
+            f"RX image present must render the image without an overlaid "
+            f"border; got pixel {(r, g, b)} at {(sx, sy)} (expected red)"
+        )
+
+    def test_image_present_corner_is_image_not_border(self) -> None:
+        """Tighter regression: the *outermost* slot pixel still belongs to
+        the image, not a border.  Catches a 1-px white outline that the
+        previous guard (sampled mid-slot) would miss."""
+        rx_img = _solid_color_image(100, 100, (0, 200, 50))
+        t = Template(name="t", layers=[self._layer(anchor="TL", offset_x_pct=0, offset_y_pct=0)])
+        img = _render(t, ctx=_ctx(rx_image=rx_img))
+        # Anchor TL @ offset 0,0 → slot starts at (0, 0).
+        r, g, b = img.getpixel((0, 0))
+        assert (g > 150 and b < 100), (
+            f"Outermost slot pixel must be the image (green), not a "
+            f"border outline; got {(r, g, b)}"
+        )
+
+    def test_image_absent_shows_bordered_placeholder(self) -> None:
+        """Spec: empty slot draws a visible white-ish placeholder box.
+
+        Sample one pixel near the slot's outer edge — must not be the
+        canvas's solid black background.
+        """
+        t = Template(name="t", layers=[self._layer(anchor="TL", offset_x_pct=0, offset_y_pct=0)])
+        img = _render(t, ctx=_ctx(rx_image=None))
+        # Top-left pixel of the slot must be the white border (or the
+        # very-light placeholder fill underneath it).
+        r, g, b = img.getpixel((0, 0))
+        # Anything substantially brighter than the black canvas confirms
+        # the placeholder draws.  A solid black canvas would give (0,0,0).
+        assert max(r, g, b) > 50, (
+            f"Empty RX slot must draw a visible placeholder, not leave "
+            f"the canvas black; got {(r, g, b)} at the slot's TL corner"
+        )
+
+    def test_image_absent_then_present_paints_image_over_placeholder(
+        self,
+    ) -> None:
+        """Sanity check: switching from no-image to image must produce a
+        different rendering — there's no caching that pins the placeholder
+        once it's drawn."""
+        t = Template(name="t", layers=[self._layer(anchor="TL", offset_x_pct=0, offset_y_pct=0)])
+        empty = _render(t, ctx=_ctx(rx_image=None))
+        rx_img = _solid_color_image(100, 100, (10, 20, 220))
+        with_img = _render(t, ctx=_ctx(rx_image=rx_img))
+        # Two completely different pixel sets; not even worth sampling
+        # one position — the data should differ broadly.
+        assert list(empty.getdata()) != list(with_img.getdata())
+
+    def test_station_image_layer_unaffected(self) -> None:
+        """Regression: only RxImageLayer gets the placeholder behaviour.
+
+        StationImageLayer used to share the same rasterizer and a previous
+        WIP attempt mutated the shared function — that would have drawn
+        the same RX placeholder over every blank station-image slot too.
+        Verify a missing station image leaves the canvas alone (no border
+        painted) the way it always has.
+        """
+        layer = StationImageLayer(
+            id="si", anchor="TL", path="missing.png",
+            width_pct=30.0, height_pct=25.0,
+            offset_x_pct=0.0, offset_y_pct=0.0,
+        )
+        t = Template(name="t", layers=[layer])
+        # Empty assets dir → station image fails to load → cell should be None
+        # → composite skips → canvas stays black at the slot location.
+        import tempfile
+        from pathlib import Path as _P
+        with tempfile.TemporaryDirectory() as td:
+            img = _render(t, assets_dir=_P(td))
+        r, g, b = img.getpixel((10, 10))
+        assert (r, g, b) == (0, 0, 0), (
+            f"Missing StationImage must NOT trigger the RX placeholder; "
+            f"got {(r, g, b)} at TL of the slot"
+        )
 
 
 # ---------------------------------------------------------------------------

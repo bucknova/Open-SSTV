@@ -470,6 +470,79 @@ def _rasterize_image_layer(
     return _apply_opacity(cell, layer.opacity)
 
 
+def _rasterize_rx_image(
+    layer: RxImageLayer,
+    canvas_w: int,
+    canvas_h: int,
+    img: PIL.Image.Image | None,
+) -> PIL.Image.Image:
+    """Render an RxImageLayer slot.
+
+    Two visual contracts:
+
+    * **Image present** — paste the fitted image with no border or fill.
+      The slot looks identical to a PhotoLayer holding the same picture.
+    * **Image absent** — show a white-bordered placeholder box with an
+      "RX" label.  Lets template authors see the slot's position and
+      size in the editor preview before any RX image has been received.
+
+    StationImage and Photo layers continue to use ``_rasterize_image_layer`` —
+    keeping the placeholder behaviour confined to RxImage avoids surprise
+    borders on station-image overlays that intentionally render blank when
+    their asset file is missing.
+    """
+    if layer.anchor == "FILL":
+        bbox_w, bbox_h = canvas_w, canvas_h
+        x, y = 0, 0
+    else:
+        bbox_w, bbox_h = _layer_bbox(layer, canvas_w, canvas_h)
+        x, y = _anchor_top_left(
+            layer.anchor, layer.offset_x_pct, layer.offset_y_pct,
+            bbox_w, bbox_h, canvas_w, canvas_h,
+        )
+
+    cell = PIL.Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+
+    if img is not None:
+        # Spec: when an RX image is present, render it cleanly — no border,
+        # no fill.  The user sees a real picture, not a framed placeholder.
+        fitted = _fit_image(img, bbox_w, bbox_h, layer.fit)
+        cell.paste(fitted, (x, y), fitted)
+        return _apply_opacity(cell, layer.opacity)
+
+    # Spec: empty slot is a visible white-ish box so the editor preview
+    # shows where the RX image will land.  Semi-transparent fill so any
+    # photo layer composited below still reads through; "RX" label makes
+    # the intent unambiguous.
+    placeholder = PIL.Image.new("RGBA", (bbox_w, bbox_h), (255, 255, 255, 80))
+    cell.paste(placeholder, (x, y), placeholder)
+
+    draw = PIL.ImageDraw.Draw(cell)
+    draw.rectangle(
+        [x, y, x + bbox_w - 1, y + bbox_h - 1],
+        outline=(255, 255, 255, 220), width=2,
+    )
+
+    label = "RX"
+    label_size_px = max(8, int(min(bbox_w, bbox_h) * 0.30))
+    try:
+        label_font = _load_font("DejaVu Sans Bold", label_size_px)
+        lb = _text_bbox(label_font, label)
+        lw = lb[2] - lb[0]
+        lh = lb[3] - lb[1]
+        # Subtract the bbox origin so the *ink* centres in the cell, not the
+        # bbox top-left (which sits above the ascender for many fonts).
+        lx = x + (bbox_w - lw) // 2 - lb[0]
+        ly = y + (bbox_h - lh) // 2 - lb[1]
+        draw.text((lx, ly), label, font=label_font, fill=(120, 120, 120, 220))
+    except OSError:
+        # Font resolution failed (CI without DejaVu, etc.) — silently skip
+        # the label; the bordered box alone is still a clear placeholder.
+        pass
+
+    return _apply_opacity(cell, layer.opacity)
+
+
 def _rasterize_rect(
     layer: RectLayer, canvas_w: int, canvas_h: int
 ) -> PIL.Image.Image:
@@ -720,7 +793,7 @@ def render_template(
             cell = _rasterize_photo(layer, W, H, tx_context.photo_image)
 
         elif isinstance(layer, RxImageLayer):
-            cell = _rasterize_image_layer(layer, W, H, tx_context.rx_image)
+            cell = _rasterize_rx_image(layer, W, H, tx_context.rx_image)
 
         elif isinstance(layer, StationImageLayer):
             if layer.path and layer.path not in _station_img_cache:
