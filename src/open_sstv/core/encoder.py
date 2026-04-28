@@ -134,7 +134,12 @@ class Robot36LinePair(Robot36):
             yield FREQ_VIS_START, self.PORCH
 
             # ---- Cr channel (44 ms, averaged from both rows) ----
-            for ep, op in zip(even_pixels, odd_pixels):
+            # strict=True: even and odd rows are both built from the same
+            # ``range(self.WIDTH)``, so any future change that diverges
+            # them (a slicing bug, an early-break optimisation, a half-row
+            # tail) raises ValueError instead of silently shortening the
+            # chroma row to the shorter list and producing a torn image.
+            for ep, op in zip(even_pixels, odd_pixels, strict=True):
                 cr = (ep[2] + op[2]) / 2
                 yield byte_to_freq(cr), c_pixel_ms
 
@@ -157,7 +162,8 @@ class Robot36LinePair(Robot36):
             yield FREQ_VIS_START, self.PORCH
 
             # ---- Cb channel (44 ms, averaged from both rows) ----
-            for ep, op in zip(even_pixels, odd_pixels):
+            # strict=True for the same reason as the Cr pairing above.
+            for ep, op in zip(even_pixels, odd_pixels, strict=True):
                 cb = (ep[1] + op[1]) / 2
                 yield byte_to_freq(cb), c_pixel_ms
 
