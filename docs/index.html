@@ -631,6 +631,26 @@
     .footer-links a { color: var(--muted); font-size: 14px; }
     .footer-links a:hover { color: var(--text); }
 
+    /* Buy Me a Coffee — official #FFDD00 yellow + black ink */
+    .btn-coffee {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: #FFDD00;
+      color: #000;
+      padding: 8px 18px;
+      border-radius: var(--radius);
+      font-size: 14px;
+      font-weight: 600;
+      transition: transform 0.15s, box-shadow 0.15s;
+    }
+    .btn-coffee:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(255, 221, 0, 0.3);
+      text-decoration: none;
+      color: #000;
+    }
+
     /* ── Responsive ── */
     @media (max-width: 900px) {
       .hero { grid-template-columns: 1fr; gap: 48px; padding: 64px 24px; }
@@ -1000,6 +1020,10 @@
       <a href="https://github.com/bucknova/Open-SSTV/issues" target="_blank">Issues</a>
     </div>
     <div>Created by <a href="https://github.com/bucknova" target="_blank">Kevin (W0AEZ)</a> · Open source, always.</div>
+    <a class="btn-coffee" href="https://buymeacoffee.com/w0aez" target="_blank" rel="noopener" aria-label="Buy Me a Coffee — support Open-SSTV development">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20 3H4v10a4 4 0 0 0 4 4h6a4 4 0 0 0 4-4v-2h2a3 3 0 0 0 0-6zm0 4h-2V5h2a1 1 0 0 1 0 2zM3 19h16v2H3z"/></svg>
+      Buy Me a Coffee
+    </a>
   </div>
 </footer>
 

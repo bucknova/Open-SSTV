@@ -1,6 +1,6 @@
 # Open-SSTV
 
-**Created by Kevin (W0AEZ)**
+**Created by Kevin (W0AEZ)** &nbsp;·&nbsp; [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-support-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/w0aez)
 
 An open-source, cross-platform SSTV (Slow Scan Television) transceiver for amateur
 radio. Receives and decodes SSTV images live off your radio, and encodes and
