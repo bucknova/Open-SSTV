@@ -76,6 +76,7 @@ from open_sstv.core.demod import SSTV_BLACK_HZ, SSTV_WHITE_HZ, instantaneous_fre
 from open_sstv.core.dsp_utils import bandpass_sos
 from open_sstv.core.modes import Mode, ModeSpec, SyncPosition
 from open_sstv.core.robot36_dsp import (
+    sample_pixel as _sample_pixel_slowrx,  # noqa: F401 — re-exported for tests
     sample_scan as _sample_scan_slowrx,
     ycbcr_to_rgb as _ycbcr_to_rgb_slowrx,
 )
