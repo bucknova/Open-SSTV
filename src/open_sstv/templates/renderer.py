@@ -749,6 +749,16 @@ def render_template(
             )
             if resolved:
                 cell = _rasterize_text(layer, resolved, W, H)
+            else:
+                # An empty resolved string (e.g. ``%r`` before any RST is
+                # entered) used to skip rasterization entirely.  That's
+                # invisible until the *next* layer below paints into the
+                # would-have-been text bbox, which then "moves" because the
+                # layer above isn't reserving its cell.  A transparent
+                # full-canvas cell keeps the layer present in the composite
+                # pipeline so layout decisions and debug overlays remain
+                # stable across token-resolution edge cases.
+                cell = PIL.Image.new("RGBA", (W, H), (0, 0, 0, 0))
 
         elif isinstance(layer, RectLayer):
             cell = _rasterize_rect(layer, W, H)

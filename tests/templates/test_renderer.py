@@ -449,8 +449,19 @@ class TestTextLayer:
         img = _render(t)
         assert img.size == _FRAME
 
-    def test_text_empty_after_resolve_skipped(self) -> None:
-        """A text layer whose resolved text is empty doesn't crash."""
+    def test_text_empty_after_resolve_renders_transparent_cell(self) -> None:
+        """An empty resolved text layer produces a transparent cell, not a skip.
+
+        The pre-fix behaviour was to skip rasterization entirely whenever the
+        token resolved to ``""`` (e.g. ``%r`` before any RST is entered).  That
+        broke layout stability — a debug overlay or a future "selection bbox"
+        feature would see N-1 layers in the composite path on one frame and N
+        on the next, depending on which tokens happened to be populated.
+
+        The new contract: every visible TextLayer contributes a (possibly
+        transparent) cell to the composite pipeline.  Visually identical to
+        the skip path for the empty-text case, but layer count is stable.
+        """
         layer = TextLayer(
             id="t", anchor="TL",
             text_raw="",
@@ -462,6 +473,32 @@ class TestTextLayer:
         t = Template(name="t", layers=[layer])
         img = _render(t)
         assert img.size == _FRAME
+        # The empty text cell is fully transparent, so the canvas must remain
+        # identical to a render with no layers at all (solid black background).
+        empty_img = _render(Template(name="empty", layers=[]))
+        assert list(img.getdata()) == list(empty_img.getdata())
+
+    def test_text_empty_layer_does_not_obscure_layer_below(self) -> None:
+        """Empty text in front of a coloured rect must not blacken the rect.
+
+        Direct regression check on the "transparent cell" property — if the
+        new path accidentally composited a black RGBA cell instead of a fully
+        transparent one, the underlying red would be wiped out.
+        """
+        rect = RectLayer(id="bg", anchor="FILL", fill=(255, 0, 0, 255))
+        empty_text = TextLayer(
+            id="t", anchor="TL",
+            text_raw="",
+            font_family="DejaVu Sans Bold",
+            font_size_pct=10.0,
+            fill=(255, 255, 255, 255),
+            slashed_zero=False,
+        )
+        t = Template(name="t", layers=[rect, empty_text])
+        img = _render(t)
+        # Sample the centre — a transparent overlay leaves the red rect alone.
+        r, g, b = img.getpixel((_FRAME[0] // 2, _FRAME[1] // 2))[:3]
+        assert (r, g, b) == (255, 0, 0)
 
     def test_bottom_anchored_text_not_clipped(self) -> None:
         """Regression: BC-anchored text at offset_y_pct=0 must not be clipped.
