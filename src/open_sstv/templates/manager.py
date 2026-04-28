@@ -198,6 +198,19 @@ def duplicate_template(path: Path) -> Path:
             c for c in new_name.replace(" ", "_").replace("/", "_").lower()
             if c.isalnum() or c in "_-"
         ) or "template"
+        # Both checks are deliberate, not redundant.  ``existing`` was
+        # snapshotted from one ``glob()`` call before the loop, so it can
+        # miss a sibling template that another process (a parallel CLI run,
+        # an editor "Save As") wrote between the snapshot and this iteration.
+        # The ``path.exists()`` check covers that race.  Conversely, when the
+        # candidate slug also collides with itself across iterations of this
+        # very loop (we just appended " (copy 2)", " (copy 3)", …), the
+        # in-memory ``existing`` set is the authoritative answer because the
+        # files we'd be racing with don't exist yet — we haven't written
+        # them.  Either alone leaves a real gap, so keep both.  The remaining
+        # TOCTOU window between the check and ``save_template`` is bounded
+        # by ``os.replace`` atomicity (overwrites are deliberate in ``save``)
+        # and isn't worsened by this guard.
         if slug not in existing and not (tdir / f"{slug}.toml").exists():
             break
         new_name = f"{src.name} (copy {n})"
