@@ -11,6 +11,99 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.0] — 2026-04-28
+
+The headline release: a full layered template compositor replaces the old
+text-overlay button bar, plus a thorough security and stability audit.
+
+### Added
+
+- **Layered template compositor.**  Each template is now a stack of layers
+  (photo, text, rect, gradient, pattern, station_image, rx_image) composited
+  at TX time onto the selected mode's native frame size.  Positions and sizes
+  are stored as percentages so one template renders cleanly at every
+  resolution from Robot 36's 320×240 to PD-290's 800×616.
+- **Template gallery on the TX panel.**  Live thumbnails of every template
+  rendered with the user's current photo and QSO state, filtered by role
+  (CQ / Reply / 73 / Custom).  Single-click selects, double-click opens the
+  editor, right-click offers Edit / Duplicate / Rename / Delete.
+- **Three-panel template editor** with a live preview, scrollable property
+  inspector, and reorderable layer list.  Non-modal — operate while you
+  edit.
+- **MMSSTV-style and named tokens.**  `%c` / `{callsign}`, `%o` / `{tocall}`,
+  `%r` / `{rst}`, `%name_o` / `{tocallname}`, `%n` / `{name}`, `%g` / `{grid}`,
+  `%m` / `{mode}`, `%d` / `{date}`, `%t` / `{time}`, `%f` / `{freq}`,
+  `%b` / `{band}`, `%q` / `{qso_serial}`, `%v` / `{version}`.  Unknown
+  tokens pass through unchanged for forward compatibility.
+- **QSO State widget** (ToCall / RST / Name) that drives every dynamic
+  token in real time across the gallery and editor previews.
+- **RX-to-TX image pipeline.**  Single-click any thumbnail in the RX history
+  gallery to pin it as the active RX image; any Reply template with an
+  `rx_image` slot then composites it into every gallery thumbnail and the
+  TX preview, so a one-click reply with their picture in your card is the
+  default workflow.
+- **Stacked vertical text** orientation for classic side-of-photo callsign
+  banners; auto-shrink + word-wrap so long contest exchanges never overflow.
+- **Three shipped fonts** — DejaVu Sans Bold, Inter Bold, Press Start 2P —
+  plus drop-in support for user-supplied `.ttf` / `.otf` files in
+  `{user_config_dir}/open_sstv/fonts/`.
+- **TOML template format** for sharing templates between operators.
+  Schema-versioned (`schema_version = 1`) so future builds can refuse
+  templates from a newer format rather than misinterpret them.
+
+### Security
+
+- **Confine `StationImageLayer.path` to the assets directory.**  Template
+  files can no longer reach `/etc/passwd` or smuggle a path past the
+  renderer via absolute paths or `..` segments — both are rejected at
+  TOML load time, and the renderer re-verifies `is_relative_to(assets_dir)`
+  after symlink resolution as defense-in-depth.
+- **PIL decompression-bomb cap.**  `MAX_IMAGE_PIXELS` is pinned to 32 MP at
+  package import; every entry point (GUI, CLI, tests) catches
+  `DecompressionBombError` and surfaces it as a clean error rather than
+  letting a crafted PNG OOM the process.
+
+### Fixed
+
+- **Stable layer count for empty-text TextLayers.**  An empty resolved
+  string now reserves a transparent cell instead of skipping the layer
+  entirely, so the composite pipeline's layer count is data-independent.
+- **`reference_frame` floats are rounded, not truncated.**  `[320.7, 256.3]`
+  used to silently become `(320, 256)` via `int()`; now it rounds to
+  `(321, 256)` and warns that the field is integer-only.
+- **Concurrent `save_config` writes are serialised** with a module-level
+  `threading.Lock` so future background-thread callers can't interleave
+  tmp-then-replace sequences.
+- **`ImageGalleryWidget` releases evicted PIL handles** in the in-memory
+  fallback path — the disk-backed path was already ref-clean, but the
+  fallback used to keep PIL.Image objects alive past `_MAX_IMAGES`.
+- **Centralised worker exception handler** (`MainWindow._handle_worker_error`)
+  surfaces previously-silent except blocks (TxWorker emergency unkey,
+  RxWorker slant-correction fallback) as status-bar messages with full
+  exc_info logging.
+- **Robot-36 chroma pairing uses `zip(strict=True)`** so a future
+  even/odd-row length divergence raises `ValueError` at encode time
+  instead of silently truncating a chroma row.
+- **RGBA short-list warning.**  TOML `fill = [255, 128, 0]` (no alpha)
+  still loads as opaque but now logs a warning so authors notice the
+  missing channel.
+- **`duplicate_template` slug double-check** now documents *why* the
+  two-condition guard is intentional, not redundant.
+- Renderer's `PatternLayer` tint vectorised with NumPy (~10× faster on
+  large patterns).
+- Multiple smaller fixes: narrow `except` in update-checker, RX slot
+  empty-state placeholder ("RX" label + bordered box; no border when an
+  image is present), `_text_bbox` cached once per candidate in
+  `_wrap_text`.
+
+### Changed
+
+- 20 unused imports cleaned up across the package (`ruff F401`).
+- Pre-release `ruff` sweep applied 180+ safe auto-fixes (UP037 quoted
+  annotations, I001 import order, UP017 `datetime.UTC`).
+
+---
+
 ## [0.2.16] — 2026-04-24
 
 ### Added

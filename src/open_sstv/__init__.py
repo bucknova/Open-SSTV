@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from open_sstv.security import apply_pil_security_limits
 
-__version__ = "0.2.16"
+__version__ = "0.3.0"
 __all__ = ["__version__"]
 
 # Apply PIL decompression-bomb cap on package import so every entry point
