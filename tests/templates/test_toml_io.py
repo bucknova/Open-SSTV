@@ -420,6 +420,43 @@ class TestLayerBaseFields:
 
 
 # ---------------------------------------------------------------------------
+# RGBA short-list warning
+# ---------------------------------------------------------------------------
+
+
+def test_rgba_three_element_list_warns(tmp_path: Path, caplog) -> None:
+    """A ``fill = [R, G, B]`` (no alpha) should load as opaque *and* warn.
+
+    Backwards-compatible: alpha still defaults to 255 so old templates keep
+    rendering, but the warning surfaces the omission so authors who forgot
+    the channel notice before shipping a template.
+    """
+    p = tmp_path / "short_rgba.toml"
+    p.write_text(
+        '[template]\nname = "t"\n\n'
+        '[[layer]]\ntype = "rect"\nid = "r"\nanchor = "FILL"\n'
+        "fill = [255, 128, 0]\n"
+    )
+    with caplog.at_level("WARNING", logger="open_sstv.templates.toml_io"):
+        tpl = load_template(p)
+    assert tpl.layers[0].fill == (255, 128, 0, 255)
+    assert any("only 3 elements" in rec.message for rec in caplog.records)
+
+
+def test_rgba_four_element_list_does_not_warn(tmp_path: Path, caplog) -> None:
+    """The complementary path: a complete RGBA list is silent."""
+    p = tmp_path / "full_rgba.toml"
+    p.write_text(
+        '[template]\nname = "t"\n\n'
+        '[[layer]]\ntype = "rect"\nid = "r"\nanchor = "FILL"\n'
+        "fill = [255, 128, 0, 200]\n"
+    )
+    with caplog.at_level("WARNING", logger="open_sstv.templates.toml_io"):
+        load_template(p)
+    assert not any("elements" in rec.message for rec in caplog.records)
+
+
+# ---------------------------------------------------------------------------
 # Layer ordering
 # ---------------------------------------------------------------------------
 

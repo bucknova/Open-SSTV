@@ -88,6 +88,17 @@ class TemplateLoadError(ValueError):
 def _rgba(lst: list[int]) -> RGBA:
     if len(lst) < 3:
         raise TemplateLoadError(f"RGBA list must have at least 3 elements, got {lst!r}")
+    if len(lst) < 4:
+        # A 3-element list is treated as fully opaque, but a template author
+        # who wrote ``fill = [255, 128, 0]`` almost certainly forgot the alpha
+        # channel rather than deliberately omitting it.  Surface a warning so
+        # the surprise doesn't show up later as "why is my translucent layer
+        # opaque?"
+        _log.warning(
+            "RGBA list %r has only %d elements; defaulting alpha to 255 "
+            "(fully opaque). Add a 4th element to silence this warning.",
+            lst, len(lst),
+        )
     return (lst[0], lst[1], lst[2], lst[3] if len(lst) >= 4 else 255)
 
 
