@@ -32,14 +32,14 @@ from typing import TYPE_CHECKING
 import numpy as np
 from PIL import Image
 from pysstv.color import (
-    MartinM1,
-    MartinM2,
     PD90,
     PD120,
     PD160,
     PD180,
     PD240,
     PD290,
+    MartinM1,
+    MartinM2,
     PasokonP3,
     PasokonP5,
     PasokonP7,
@@ -51,11 +51,11 @@ from pysstv.color import (
     WraaseSC2180,
 )
 from pysstv.sstv import (
-    SSTV,
     FREQ_BLACK,
     FREQ_SYNC,
     FREQ_VIS_START,
     FREQ_WHITE,
+    SSTV,
     byte_to_freq,
 )
 
@@ -261,7 +261,7 @@ _BITS_PER_SAMPLE = 16
 
 
 def encode(
-    image: Image.Image | str | "PathLike[str]",
+    image: Image.Image | str | PathLike[str],
     mode: Mode,
     sample_rate: int = DEFAULT_SAMPLE_RATE,
 ) -> np.ndarray:

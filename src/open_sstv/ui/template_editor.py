@@ -28,7 +28,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QSize, QTimer, Qt, Signal, Slot
+from PySide6.QtCore import QSize, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -222,9 +222,9 @@ class TemplateEditor(QDialog):
         template: Template,
         *,
         path: Path | None = None,
-        app_config: "AppConfig",
+        app_config: AppConfig,
         templates_dir: Path | None = None,
-        current_photo: "PILImage | None" = None,
+        current_photo: PILImage | None = None,
         current_mode: Mode | None = None,
         parent: QWidget | None = None,
     ) -> None:
@@ -242,7 +242,7 @@ class TemplateEditor(QDialog):
         self._path: Path | None = path
         self._app_config = app_config
         self._templates_dir = templates_dir or manager.default_templates_dir()
-        self._photo: "PILImage | None" = current_photo
+        self._photo: PILImage | None = current_photo
         self._mode: Mode = current_mode or Mode("scottie_s1")
 
         # Sample QSO state for preview token resolution.  Pre-filled with
@@ -270,7 +270,7 @@ class TemplateEditor(QDialog):
 
     # === Public API ===
 
-    def set_photo(self, photo: "PILImage | None") -> None:
+    def set_photo(self, photo: PILImage | None) -> None:
         """Update the photo used in the preview (call when TX photo changes)."""
         self._photo = photo
         self._schedule_preview()

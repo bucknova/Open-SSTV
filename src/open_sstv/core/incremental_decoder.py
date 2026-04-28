@@ -77,7 +77,11 @@ from open_sstv.core.dsp_utils import bandpass_sos
 from open_sstv.core.modes import Mode, ModeSpec, SyncPosition
 from open_sstv.core.robot36_dsp import (
     sample_pixel as _sample_pixel_slowrx,  # noqa: F401 — re-exported for tests
+)
+from open_sstv.core.robot36_dsp import (
     sample_scan as _sample_scan_slowrx,
+)
+from open_sstv.core.robot36_dsp import (
     ycbcr_to_rgb as _ycbcr_to_rgb_slowrx,
 )
 from open_sstv.core.sync import find_sync_candidates, walk_sync_grid
@@ -115,7 +119,7 @@ class IncrementalDecoder(Protocol):
     @property
     def total_fed(self) -> int: ...
 
-    def feed(self, chunk: "NDArray") -> "list[tuple[int, NDArray[np.uint8]]]": ...
+    def feed(self, chunk: NDArray) -> list[tuple[int, NDArray[np.uint8]]]: ...
 
     def get_image(self) -> Image.Image: ...
 
@@ -145,7 +149,7 @@ _SYNC_REJECT_HZ: float = 1400.0
 # ---------------------------------------------------------------------------
 
 
-def _bp_window(x: "NDArray", fs: int) -> "NDArray":
+def _bp_window(x: NDArray, fs: int) -> NDArray:
     """Zero-phase bandpass the SSTV signalling band.
 
     Mirrors ``decoder._bandpass`` exactly so filtered values are identical
@@ -161,14 +165,14 @@ def _bp_window(x: "NDArray", fs: int) -> "NDArray":
 
 
 def _sample_pixels_inc(
-    inst: "NDArray",
+    inst: NDArray,
     start: float,
     span_samples: float,
     width: int,
     track_len: int,
     *,
     chroma: bool = False,
-) -> "NDArray[np.uint8]":
+) -> NDArray[np.uint8]:
     """Slice a frequency-track span into ``width`` pixel medians.
 
     **Diverges from ``decoder._sample_pixels``** on two points:
@@ -370,11 +374,11 @@ class IncrementalDecoderBase:
 
     def _decode_window(
         self,
-        inst: "NDArray",
+        inst: NDArray,
         sync_in_win: int,
         n: int,
         grid_index: int,
-    ) -> list[tuple[int, "NDArray[np.uint8]"]]:
+    ) -> list[tuple[int, NDArray[np.uint8]]]:
         """Sample pixels from the bandpass-filtered Hilbert track.
 
         ``grid_index`` is the zero-based index of the sync pulse within the
@@ -410,7 +414,7 @@ class IncrementalDecoderBase:
         """Return the current image (partial until ``complete`` is True)."""
         return Image.fromarray(self._image)
 
-    def feed(self, chunk: "NDArray") -> list[tuple[int, "NDArray[np.uint8]"]]:
+    def feed(self, chunk: NDArray) -> list[tuple[int, NDArray[np.uint8]]]:
         """Feed a new audio chunk.
 
         Appends ``chunk`` to the internal buffer, searches for new sync
@@ -502,7 +506,7 @@ class IncrementalDecoderBase:
     def _try_decode_next(
         self,
         current_abs: int,
-        out: list[tuple[int, "NDArray[np.uint8]"]],
+        out: list[tuple[int, NDArray[np.uint8]]],
     ) -> bool:
         """Attempt to decode the next pending line.
 
@@ -634,11 +638,11 @@ class ScottieIncrementalDecoder(IncrementalDecoderBase):
 
     def _decode_window(
         self,
-        inst: "NDArray",
+        inst: NDArray,
         sync_in_win: int,
         n: int,
         grid_index: int,
-    ) -> list[tuple[int, "NDArray[np.uint8]"]]:
+    ) -> list[tuple[int, NDArray[np.uint8]]]:
         width = self._spec.width
         row: NDArray[np.uint8] = np.zeros((width, 3), dtype=np.uint8)
         row[:, 1] = _sample_pixels_inc(
@@ -708,11 +712,11 @@ class MartinIncrementalDecoder(IncrementalDecoderBase):
 
     def _decode_window(
         self,
-        inst: "NDArray",
+        inst: NDArray,
         sync_in_win: int,
         n: int,
         grid_index: int,
-    ) -> list[tuple[int, "NDArray[np.uint8]"]]:
+    ) -> list[tuple[int, NDArray[np.uint8]]]:
         width = self._spec.width
         row: NDArray[np.uint8] = np.zeros((width, 3), dtype=np.uint8)
         row[:, 1] = _sample_pixels_inc(
@@ -777,11 +781,11 @@ class WraaseIncrementalDecoder(IncrementalDecoderBase):
 
     def _decode_window(
         self,
-        inst: "NDArray",
+        inst: NDArray,
         sync_in_win: int,
         n: int,
         grid_index: int,
-    ) -> list[tuple[int, "NDArray[np.uint8]"]]:
+    ) -> list[tuple[int, NDArray[np.uint8]]]:
         width = self._spec.width
         row: NDArray[np.uint8] = np.zeros((width, 3), dtype=np.uint8)
         row[:, 0] = _sample_pixels_inc(
@@ -846,11 +850,11 @@ class PasokonIncrementalDecoder(IncrementalDecoderBase):
 
     def _decode_window(
         self,
-        inst: "NDArray",
+        inst: NDArray,
         sync_in_win: int,
         n: int,
         grid_index: int,
-    ) -> list[tuple[int, "NDArray[np.uint8]"]]:
+    ) -> list[tuple[int, NDArray[np.uint8]]]:
         width = self._spec.width
         row: NDArray[np.uint8] = np.zeros((width, 3), dtype=np.uint8)
         row[:, 0] = _sample_pixels_inc(
@@ -929,11 +933,11 @@ class PDIncrementalDecoder(IncrementalDecoderBase):
 
     def _decode_window(
         self,
-        inst: "NDArray",
+        inst: NDArray,
         sync_in_win: int,
         n: int,
         grid_index: int,
-    ) -> list[tuple[int, "NDArray[np.uint8]"]]:
+    ) -> list[tuple[int, NDArray[np.uint8]]]:
         width = self._spec.width
         y0 = _sample_pixels_inc(
             inst, sync_in_win + self._y0_off, self._ch_span, width, n
@@ -1085,11 +1089,11 @@ class _Robot36PerLineIncrementalDecoder(IncrementalDecoderBase):
 
     def _decode_window(
         self,
-        inst: "NDArray",
+        inst: NDArray,
         sync_in_win: int,
         n: int,
         grid_index: int,
-    ) -> list[tuple[int, "NDArray[np.uint8]"]]:
+    ) -> list[tuple[int, NDArray[np.uint8]]]:
         width = self._spec.width
         y_row = _sample_scan_slowrx(
             inst, sync_in_win + self._y_off, self._y_span, width, n
@@ -1131,7 +1135,7 @@ class _Robot36PerLineIncrementalDecoder(IncrementalDecoderBase):
         if 0 <= src < h:
             plane[row] = plane[src]
 
-    def _emit_row(self, row: int) -> "NDArray[np.uint8]":
+    def _emit_row(self, row: int) -> NDArray[np.uint8]:
         rgb = _ycbcr_to_rgb_slowrx(
             self._y_plane[row : row + 1],
             self._cb_plane[row : row + 1],
@@ -1214,11 +1218,11 @@ class _Robot36LinePairIncrementalDecoder(IncrementalDecoderBase):
 
     def _decode_window(
         self,
-        inst: "NDArray",
+        inst: NDArray,
         sync_in_win: int,
         n: int,
         grid_index: int,
-    ) -> list[tuple[int, "NDArray[np.uint8]"]]:
+    ) -> list[tuple[int, NDArray[np.uint8]]]:
         width = self._spec.width
         y0 = _sample_scan_slowrx(
             inst, sync_in_win + self._y0_off, self._y_span, width, n
@@ -1357,8 +1361,8 @@ class Robot36IncrementalDecoder:
         return Image.fromarray(self._placeholder)
 
     def feed(
-        self, chunk: "NDArray"
-    ) -> list[tuple[int, "NDArray[np.uint8]"]]:
+        self, chunk: NDArray
+    ) -> list[tuple[int, NDArray[np.uint8]]]:
         arr = np.asarray(chunk, dtype=np.float64)
         if arr.ndim != 1 or arr.size == 0:
             return []

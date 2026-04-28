@@ -16,7 +16,7 @@ import logging
 import os
 import tomllib
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 _log = logging.getLogger(__name__)
@@ -138,7 +138,7 @@ def resolve_placeholders(
 
     Unknown placeholders are left as-is (no crash).
     """
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(UTC)
     return (
         text
         .replace("{mycall}", mycall)

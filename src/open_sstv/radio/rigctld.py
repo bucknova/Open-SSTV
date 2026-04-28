@@ -81,7 +81,7 @@ class RigctldClient:
         with self._lock:
             self._close_locked()
 
-    def __enter__(self) -> "RigctldClient":
+    def __enter__(self) -> RigctldClient:
         self.open()
         return self
 

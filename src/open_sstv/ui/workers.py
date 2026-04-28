@@ -266,7 +266,7 @@ _TEST_TONE_FREQ_LO: float = 700.0
 _TEST_TONE_FREQ_HI: float = 1900.0
 
 
-def _make_two_tone(sample_rate: int, duration_s: float) -> "NDArray[np.int16]":
+def _make_two_tone(sample_rate: int, duration_s: float) -> NDArray[np.int16]:
     """Generate a two-tone test signal (700 Hz + 1900 Hz) as int16 PCM.
 
     The two equal-amplitude sine waves are summed and the result is scaled
@@ -503,7 +503,7 @@ class TxWorker(QObject):
             self.error_occurred.emit("emergency_unkey", exc)
 
     @Slot(object, object)
-    def transmit(self, image: "PILImage", mode: Mode) -> None:
+    def transmit(self, image: PILImage, mode: Mode) -> None:
         """Encode and transmit one image. Worker-thread entry point.
 
         Always emits exactly one of ``transmission_complete`` or
@@ -719,10 +719,10 @@ class TxWorker(QObject):
 
     def _run_tx(
         self,
-        samples: "NDArray",
-        rig: "Rig",
+        samples: NDArray,
+        rig: Rig,
         live_gain: bool = False,
-    ) -> "bool | None":
+    ) -> bool | None:
         """Key PTT, play *samples*, unkey PTT.
 
         Parameters
@@ -920,7 +920,7 @@ class RxWorker(QObject):
             incremental_decode=incremental_decode,
         )
         self._decoder.set_cancel_event(self._cancel_event)
-        self._scratch: list["NDArray[np.float64]"] = []
+        self._scratch: list[NDArray[np.float64]] = []
         self._scratch_samples: int = 0
         self._total_samples: int = 0
         self._decoding: bool = False
@@ -962,7 +962,7 @@ class RxWorker(QObject):
         self._decoding_mode: Mode | None = None
         self._decoding_vis: int = 0
         self._decoding_lines_total: int = 0
-        self._last_progress_image: "PILImage | None" = None
+        self._last_progress_image: PILImage | None = None
         self._last_progress_lines: int = 0
         # v0.2.1: independent wall-clock tick for the watchdog.
         # Created lazily on the worker thread — see
@@ -1093,7 +1093,7 @@ class RxWorker(QObject):
     # === slots ===
 
     @Slot(object)
-    def feed_chunk(self, chunk: "NDArray") -> None:
+    def feed_chunk(self, chunk: NDArray) -> None:
         """Buffer one audio chunk; flush to the decoder on a cadence.
 
         Safe to invoke via queued connection from the audio worker

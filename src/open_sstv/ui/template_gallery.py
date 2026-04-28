@@ -34,7 +34,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QPoint, QRect, QSize, QTimer, Qt, Signal, Slot
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QFont, QFontMetrics, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -51,7 +51,7 @@ from PySide6.QtWidgets import (
 )
 
 from open_sstv.templates.manager import list_templates, load_by_path
-from open_sstv.templates.model import QSOState, TXContext, Template
+from open_sstv.templates.model import QSOState, Template, TXContext
 from open_sstv.templates.renderer import render_template
 from open_sstv.ui.utils import pil_to_pixmap
 
@@ -169,7 +169,7 @@ class _ThumbnailCard(QWidget):
     def __init__(
         self,
         template: Template,
-        path: "Path | None" = None,
+        path: Path | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -238,7 +238,7 @@ class _ThumbnailCard(QWidget):
         return self._template
 
     @property
-    def path(self) -> "Path | None":
+    def path(self) -> Path | None:
         return self._path
 
     # --- private ---
@@ -293,18 +293,18 @@ class TemplateGallery(QWidget):
 
     def __init__(
         self,
-        app_config: "AppConfig | None" = None,
-        templates_dir: "Path | None" = None,
+        app_config: AppConfig | None = None,
+        templates_dir: Path | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
 
         self._app_config = app_config
         self._templates_dir = templates_dir
-        self._photo: "PILImage | None" = None
-        self._rx_image: "PILImage | None" = None
+        self._photo: PILImage | None = None
+        self._rx_image: PILImage | None = None
         self._qso_state: QSOState = QSOState()
-        self._mode: "Mode | None" = None
+        self._mode: Mode | None = None
         self._selected_template: Template | None = None
         self._active_role: str | None = None  # None = All
         self._cards: list[_ThumbnailCard] = []
@@ -369,16 +369,16 @@ class TemplateGallery(QWidget):
 
     # === Public API ===
 
-    def set_app_config(self, cfg: "AppConfig") -> None:
+    def set_app_config(self, cfg: AppConfig) -> None:
         """Update the config used for token resolution."""
         self._app_config = cfg
 
-    def set_photo(self, photo: "PILImage | None") -> None:
+    def set_photo(self, photo: PILImage | None) -> None:
         """Update the base photo; re-renders all visible thumbnails."""
         self._photo = photo
         self._rerender_all()
 
-    def set_rx_image(self, rx_image: "PILImage | None") -> None:
+    def set_rx_image(self, rx_image: PILImage | None) -> None:
         """Update the user-selected RX image; re-renders all thumbnails."""
         self._rx_image = rx_image
         self._rerender_all()
@@ -388,7 +388,7 @@ class TemplateGallery(QWidget):
         self._qso_state = qso_state
         self._rerender_all()
 
-    def set_mode(self, mode: "Mode") -> None:
+    def set_mode(self, mode: Mode) -> None:
         """Update SSTV mode (affects aspect ratio); re-renders all thumbnails."""
         self._mode = mode
         self._rerender_all()
@@ -396,7 +396,7 @@ class TemplateGallery(QWidget):
     def reload_templates(self) -> None:
         """Reload the templates directory and rebuild the grid."""
         entries = list_templates(self._templates_dir)
-        items: list[tuple[Template, "Path"]] = []
+        items: list[tuple[Template, Path]] = []
         for _name, _role, path in entries:
             t = load_by_path(path)
             if t is not None:
@@ -429,14 +429,14 @@ class TemplateGallery(QWidget):
 
     @Slot(object, object)
     def _on_card_double_clicked(
-        self, template: Template, path: "Path | None"
+        self, template: Template, path: Path | None
     ) -> None:
         if path is not None:
             self.edit_template_requested.emit(template, path)
 
     @Slot(object, object, QPoint)
     def _on_card_context_menu(
-        self, template: Template, path: "Path | None", global_pos: QPoint
+        self, template: Template, path: Path | None, global_pos: QPoint
     ) -> None:
         if path is None:
             return
@@ -494,7 +494,7 @@ class TemplateGallery(QWidget):
     # === Private ===
 
     def _rebuild_strip(
-        self, templates: list[tuple[Template, "Path"]]
+        self, templates: list[tuple[Template, Path]]
     ) -> None:
         """Replace all cards with new ones for *templates* (Template, Path pairs)."""
         for card in self._cards:

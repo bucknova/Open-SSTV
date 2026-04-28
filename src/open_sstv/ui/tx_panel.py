@@ -51,10 +51,11 @@ from open_sstv.config.templates import (
 from open_sstv.core.encoder import DEFAULT_SAMPLE_RATE
 from open_sstv.core.modes import MODE_TABLE, Mode
 
+
 def _make_tx_context(
     mode: Mode,
-    photo: "PILImage | None",
-    rx_image: "PILImage | None" = None,
+    photo: PILImage | None,
+    rx_image: PILImage | None = None,
 ) -> TXContext:
     """Build a TXContext for the given mode, photo, and selected RX image."""
     spec = MODE_TABLE[mode]
@@ -65,7 +66,7 @@ def _make_tx_context(
         rx_image=rx_image,
     )
 from open_sstv.templates import manager as template_manager
-from open_sstv.templates.model import QSOState, TXContext, Template
+from open_sstv.templates.model import QSOState, Template, TXContext
 from open_sstv.templates.renderer import render_template
 from open_sstv.ui.draw_text import draw_text_overlay
 from open_sstv.ui.image_editor import ImageEditorDialog
@@ -99,18 +100,18 @@ class TxPanel(QWidget):
         self,
         templates: list[QSOTemplate] | None = None,
         default_mode: str | None = None,
-        app_config: "AppConfig | None" = None,
+        app_config: AppConfig | None = None,
         templates_dir: Path | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
 
-        self._current_image: "PILImage | None" = None
-        self._base_image: "PILImage | None" = None
+        self._current_image: PILImage | None = None
+        self._base_image: PILImage | None = None
         self._current_path: Path | None = None
-        self._rx_image: "PILImage | None" = None
+        self._rx_image: PILImage | None = None
         self._callsign: str = ""
-        self._app_config: "AppConfig | None" = app_config
+        self._app_config: AppConfig | None = app_config
         self._templates_dir: Path | None = templates_dir
         self._selected_template: Template | None = None
         # v0.2 compat: kept so set_templates() callers don't break.
@@ -256,10 +257,10 @@ class TxPanel(QWidget):
     # === Public API ===
 
     @property
-    def current_image(self) -> "PILImage | None":
+    def current_image(self) -> PILImage | None:
         return self._current_image
 
-    def set_app_config(self, cfg: "AppConfig") -> None:
+    def set_app_config(self, cfg: AppConfig) -> None:
         """Push updated config to gallery for token resolution."""
         self._app_config = cfg
         self._gallery.set_app_config(cfg)
@@ -355,7 +356,7 @@ class TxPanel(QWidget):
         self._v2_templates = templates
 
     @Slot(object)
-    def set_rx_image(self, img: "PILImage | None") -> None:
+    def set_rx_image(self, img: PILImage | None) -> None:
         """Store the user-selected RX image and re-render template previews."""
         self._rx_image = img
         self._gallery.set_rx_image(img)
@@ -369,7 +370,7 @@ class TxPanel(QWidget):
         self._update_preview_pixmap()
 
     @Slot(object)
-    def _on_v3_template_selected(self, template: "Template | None") -> None:
+    def _on_v3_template_selected(self, template: Template | None) -> None:
         self._selected_template = template
         self.template_composited.emit(template is not None)
         self._refresh_composite_preview()
@@ -546,7 +547,7 @@ class TxPanel(QWidget):
 
     # === Preview helpers ===
 
-    def _compose_template(self) -> "PILImage | None":
+    def _compose_template(self) -> PILImage | None:
         """Render the selected template over the base photo. Returns None on error."""
         if self._selected_template is None or self._base_image is None:
             return None
@@ -688,7 +689,7 @@ class TxPanel(QWidget):
     # -----------------------------------------------------------------------
 
     @Slot(object)
-    def _on_template_activated(self, tpl: "QSOTemplate") -> None:
+    def _on_template_activated(self, tpl: QSOTemplate) -> None:
         """Apply a v0.2 QSOTemplate overlay onto the base image."""
         if self._current_image is None:
             self._status.setText("Load an image first before applying a template.")

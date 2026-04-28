@@ -56,9 +56,9 @@ from open_sstv.templates.model import (
     RectLayer,
     RxImageLayer,
     StationImageLayer,
-    TXContext,
     Template,
     TextLayer,
+    TXContext,
 )
 from open_sstv.templates.tokens import resolve_text
 
@@ -310,7 +310,10 @@ def _render_horizontal_text(
     text_x0 = pad_left + stroke_w
     text_y0 = pad_top + stroke_w
 
-    for i, (line, lw) in enumerate(zip(lines, line_widths)):
+    # strict=True: ``line_widths`` is derived 1:1 from ``lines`` via
+    # ``_text_bbox`` so the lengths cannot legitimately diverge — a future
+    # bug that changes that should fail loudly here.
+    for i, (line, lw) in enumerate(zip(lines, line_widths, strict=True)):
         y = text_y0 + i * spacing
         if layer.align == "left":
             x = text_x0
@@ -445,7 +448,7 @@ def _rasterize_photo(
 
 
 def _rasterize_image_layer(
-    layer: "RxImageLayer | StationImageLayer",
+    layer: RxImageLayer | StationImageLayer,
     canvas_w: int,
     canvas_h: int,
     img: PIL.Image.Image | None,
@@ -740,7 +743,7 @@ def _resolve_station_image_path(rel_path: str, assets_dir: Path) -> Path | None:
 def render_template(
     template: Template,
     qso_state: QSOState,
-    app_config: "AppConfig",
+    app_config: AppConfig,
     tx_context: TXContext,
     *,
     now_utc: datetime.datetime | None = None,
@@ -771,7 +774,7 @@ def render_template(
         RGB image at ``tx_context.frame_size``.
     """
     if now_utc is None:
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        now_utc = datetime.datetime.now(datetime.UTC)
 
     if assets_dir is None:
         from open_sstv.templates.manager import default_station_assets_dir

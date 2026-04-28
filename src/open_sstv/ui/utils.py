@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
 
 
-def pil_to_pixmap(image: "PILImage") -> QPixmap:
+def pil_to_pixmap(image: PILImage) -> QPixmap:
     """Convert a PIL ``Image`` to a ``QPixmap`` without leaking buffers.
 
     Going via ``Image.tobytes`` + ``QImage`` is the portable path —

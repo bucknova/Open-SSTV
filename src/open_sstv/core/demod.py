@@ -60,7 +60,7 @@ SSTV_WHITE_HZ: float = 2300.0
 SSTV_SYNC_HZ: float = 1200.0
 
 
-def analytic_signal(x: "NDArray") -> "NDArray[np.complex128]":
+def analytic_signal(x: NDArray) -> NDArray[np.complex128]:
     """Compute the analytic representation of a real-valued buffer.
 
     Wraps ``scipy.signal.hilbert``: returns ``x + j·H{x}`` so the magnitude
@@ -75,7 +75,7 @@ def analytic_signal(x: "NDArray") -> "NDArray[np.complex128]":
     return signal.hilbert(arr)
 
 
-def instantaneous_frequency(x: "NDArray", fs: float) -> "NDArray[np.float64]":
+def instantaneous_frequency(x: NDArray, fs: float) -> NDArray[np.float64]:
     """Per-sample instantaneous frequency in Hz.
 
     Computes the unwrapped phase of the analytic signal, takes the discrete
@@ -96,8 +96,8 @@ def instantaneous_frequency(x: "NDArray", fs: float) -> "NDArray[np.float64]":
 
 
 def freq_to_luma(
-    freq_hz: "NDArray | float",
-) -> "NDArray[np.uint8] | int":
+    freq_hz: NDArray | float,
+) -> NDArray[np.uint8] | int:
     """Map an SSTV color tone to a 0..255 byte luma.
 
     Linear FM: 1500 Hz → 0, 2300 Hz → 255. Frequencies outside the

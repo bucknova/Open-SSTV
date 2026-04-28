@@ -124,7 +124,7 @@ class ImageGalleryWidget(QListView):
             shutil.rmtree(self._tmpdir, ignore_errors=True)
             self._tmpdir = None
 
-    def add_image(self, image: "PILImage", mode: Mode) -> None:
+    def add_image(self, image: PILImage, mode: Mode) -> None:
         """Prepend a freshly decoded image to the gallery strip.
 
         When a temp directory is available, the PIL image is written to
@@ -286,7 +286,7 @@ class ImageGalleryWidget(QListView):
             QApplication.clipboard().setPixmap(_pil_to_pixmap(image))
 
 
-def _load_item_image(item: QStandardItem) -> "PILImage | None":
+def _load_item_image(item: QStandardItem) -> PILImage | None:
     """Load the PIL Image for a gallery item.
 
     Tries the on-disk path first (disk-backed mode); falls back to the

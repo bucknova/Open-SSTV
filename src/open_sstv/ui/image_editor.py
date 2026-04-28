@@ -77,10 +77,10 @@ _EDITOR_TARGET_MULTIPLIER: int = 3
 
 
 def _shrink_source_for_editor(
-    image: "PILImage",
+    image: PILImage,
     target_w: int,
     target_h: int,
-) -> "PILImage":
+) -> PILImage:
     """Return a copy of *image* scaled down to a size that's comfortable
     to edit at, preserving aspect ratio and never upscaling.
 
@@ -131,7 +131,7 @@ class _CropRect(QGraphicsRectItem):
     can sync its spinboxes.
     """
 
-    on_moved: "Callable[[int, int], None] | None" = None
+    on_moved: Callable[[int, int], None] | None = None
 
     def __init__(self, rect: QRectF, parent=None) -> None:
         super().__init__(rect, parent)
@@ -158,7 +158,7 @@ class ImageEditorDialog(QDialog):
 
     def __init__(
         self,
-        image: "PILImage",
+        image: PILImage,
         mode: Mode,
         callsign: str = "",
         parent: QWidget | None = None,
@@ -519,7 +519,7 @@ class ImageEditorDialog(QDialog):
             f"Text layers: {len(self._text_overlays)}"
         )
 
-    def _build_display_image(self) -> "PILImage":
+    def _build_display_image(self) -> PILImage:
         """Working image with text overlays burned in."""
         img = self._working_image.copy()
         draw = ImageDraw.Draw(img)
@@ -730,7 +730,8 @@ class ImageEditorDialog(QDialog):
         if pos == "Custom":
             return
         text = self._text_input.text().strip() or "Ag"  # placeholder for bbox
-        from PIL import Image as _PILImage, ImageDraw, ImageFont
+        from PIL import Image as _PILImage
+        from PIL import ImageDraw, ImageFont
         font = ImageFont.load_default(size=self._font_size.value())
         tmp = _PILImage.new("RGB", (self._target_w, self._target_h))
         draw = ImageDraw.Draw(tmp)
@@ -807,11 +808,11 @@ class ImageEditorDialog(QDialog):
         self._result_image = img
         self.accept()
 
-    def result_image(self) -> "PILImage | None":
+    def result_image(self) -> PILImage | None:
         """Return the edited image with text overlays, or None if cancelled."""
         return self._result_image
 
-    def result_base_image(self) -> "PILImage | None":
+    def result_base_image(self) -> PILImage | None:
         """Return the edited image WITHOUT text overlays, or None if cancelled.
 
         This is the crop/rotation/filter result before any text was drawn.

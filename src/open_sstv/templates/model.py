@@ -254,8 +254,8 @@ class TXContext:
     mode_display_name: str = ""
     frame_size: tuple[int, int] = (320, 256)
     frequency_hz: float | None = None
-    photo_image: "PIL.Image.Image | None" = None
-    rx_image: "PIL.Image.Image | None" = None
+    photo_image: PIL.Image.Image | None = None
+    rx_image: PIL.Image.Image | None = None
 
 
 __all__ = [

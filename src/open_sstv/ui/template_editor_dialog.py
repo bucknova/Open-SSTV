@@ -33,7 +33,6 @@ from open_sstv.config.templates import (
 )
 from open_sstv.ui.draw_text import POSITIONS, draw_text_overlay, position_to_xy
 
-
 #: Preview canvas size used by the template editor.  X/Y spin boxes are
 #: scoped to this coordinate space so the values the user sees match
 #: the live preview below.  At render time the real target image may
@@ -367,7 +366,8 @@ class TemplateEditorDialog(QDialog):
         expected to have ``_updating_fields`` True so the spin-box
         writes don't re-trigger ``_on_xy_changed``.
         """
-        from PIL import Image as _PILImage, ImageDraw, ImageFont
+        from PIL import Image as _PILImage
+        from PIL import ImageDraw, ImageFont
 
         if position == "Custom":
             return

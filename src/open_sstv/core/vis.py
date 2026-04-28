@@ -83,7 +83,7 @@ VIS_DATA_BITS: int = 7
 
 
 def detect_vis(
-    samples: "NDArray", fs: int, *, weak_signal: bool = False
+    samples: NDArray, fs: int, *, weak_signal: bool = False
 ) -> tuple[int, int] | None:
     """Scan an audio buffer for a VIS header.
 
@@ -242,7 +242,7 @@ def detect_vis(
     return None
 
 
-def _find_runs(mask: "NDArray[np.bool_]") -> list[tuple[int, int]]:
+def _find_runs(mask: NDArray[np.bool_]) -> list[tuple[int, int]]:
     """Return ``[(start, end), …]`` for each maximal True run in ``mask``.
 
     ``end`` is exclusive (slice-friendly). Empty input returns an empty

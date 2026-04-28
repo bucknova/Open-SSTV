@@ -67,7 +67,7 @@ class RxPanel(QWidget):
 
         self._capturing: bool = False
         self._current_mode: Mode | None = None
-        self._current_pil_image: "PILImage | None" = None
+        self._current_pil_image: PILImage | None = None
         # Full-resolution source pixmap for the most recent decode.
         # ``resizeEvent`` scales from here rather than from the label's
         # already-scaled pixmap so the preview stays crisp on upscale.
@@ -163,7 +163,7 @@ class RxPanel(QWidget):
     @Slot(object, object, int, int, int)
     def show_image_progress(
         self,
-        image: "PILImage",
+        image: PILImage,
         mode: Mode,
         vis_code: int,
         lines_decoded: int,
@@ -186,7 +186,7 @@ class RxPanel(QWidget):
 
     @Slot(object, object, int)
     def show_image_complete(
-        self, image: "PILImage", mode: Mode, vis_code: int
+        self, image: PILImage, mode: Mode, vis_code: int
     ) -> None:
         """Update the preview and add the image to the gallery.
 
@@ -228,7 +228,7 @@ class RxPanel(QWidget):
         )
 
     @Slot(object, object)
-    def _show_gallery_image(self, image: "PILImage", mode: Mode) -> None:
+    def _show_gallery_image(self, image: PILImage, mode: Mode) -> None:
         """Load a gallery thumbnail into the main preview (v0.2.7).
 
         Wired to ``ImageGalleryWidget.image_preview_requested`` so a
