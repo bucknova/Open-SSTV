@@ -65,6 +65,41 @@ def _make_tx_context(
         photo_image=photo,
         rx_image=rx_image,
     )
+
+
+def _center_crop_to_size(
+    photo: PILImage, target_w: int, target_h: int
+) -> PILImage:
+    """Center-crop *photo* to ``(target_w, target_h)``'s aspect ratio,
+    then LANCZOS-resize to those exact dimensions.  Returns *photo*
+    unchanged when its size already matches.
+
+    Used right before the template compositor so banners and overlays
+    sit at predictable positions regardless of the user's source image
+    dimensions.  The original image is never mutated — this returns a
+    new ``PIL.Image`` whenever a crop or resize is applied.
+    """
+    if photo.size == (target_w, target_h):
+        return photo
+
+    src_w, src_h = photo.size
+    target_aspect = target_w / target_h
+    src_aspect = src_w / src_h
+
+    if src_aspect > target_aspect:
+        # Source is wider than target — crop horizontal margins.
+        new_w = int(round(src_h * target_aspect))
+        x_off = (src_w - new_w) // 2
+        cropped = photo.crop((x_off, 0, x_off + new_w, src_h))
+    elif src_aspect < target_aspect:
+        # Source is taller than target — crop vertical margins.
+        new_h = int(round(src_w / target_aspect))
+        y_off = (src_h - new_h) // 2
+        cropped = photo.crop((0, y_off, src_w, y_off + new_h))
+    else:
+        cropped = photo
+
+    return cropped.resize((target_w, target_h), Image.Resampling.LANCZOS)
 from open_sstv.templates import manager as template_manager
 from open_sstv.templates.model import QSOState, Template, TXContext
 from open_sstv.templates.renderer import render_template
@@ -554,8 +589,18 @@ class TxPanel(QWidget):
         if self._app_config is None:
             return None
         mode = self.selected_mode()
+        spec = MODE_TABLE[mode]
+        # Center-crop+resize the source photo to the mode's native frame
+        # size before handing it to the renderer.  Keeps banner/overlay
+        # placement predictable regardless of the user's source image
+        # dimensions.  No-op when the photo already matches; never
+        # mutates ``self._base_image`` so the editor still sees the
+        # original.
+        photo = _center_crop_to_size(
+            self._base_image, spec.width, spec.display_height
+        )
         qso = self._qso_widget.get_state()
-        ctx = _make_tx_context(mode, self._base_image, self._rx_image)
+        ctx = _make_tx_context(mode, photo, self._rx_image)
         try:
             return render_template(self._selected_template, qso, self._app_config, ctx)
         except Exception as exc:  # noqa: BLE001
