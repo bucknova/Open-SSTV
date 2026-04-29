@@ -16,6 +16,7 @@ their callsign later in Settings without being nagged every launch.
 """
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -49,10 +50,15 @@ class FirstLaunchDialog(QDialog):
             "image banner and keyed as the CW station ID at the end of "
             "every transmission, which covers FCC §97.119 identification "
             "rules (and equivalents in other administrations).\n\n"
+            "Name, grid square, and QTH are optional — fill them in if "
+            "you'd like the v0.3 template tokens "
+            "(<tt>{name}</tt>, <tt>{grid}</tt>, <tt>{qth}</tt>) to "
+            "resolve to your station info on every TX.\n\n"
             "If you're only planning to listen, click *Skip for now* — "
-            "you can set your callsign later under File → Settings."
+            "you can set everything later under File → Settings."
         )
         intro.setWordWrap(True)
+        intro.setTextFormat(Qt.TextFormat.RichText)
         layout.addWidget(intro)
 
         form = QFormLayout()
@@ -63,6 +69,27 @@ class FirstLaunchDialog(QDialog):
         self._callsign_input.setMaxLength(12)
         self._callsign_input.textChanged.connect(self._on_text_changed)
         form.addRow("Callsign:", self._callsign_input)
+
+        # v0.3.4: optional operator-info fields.  Empty submissions are
+        # fine — they leave the corresponding AppConfig field at its
+        # current value (empty on a fresh install).
+        self._name_input = QLineEdit()
+        self._name_input.setPlaceholderText("e.g. Kevin")
+        form.addRow("Name:", self._name_input)
+
+        self._grid_input = QLineEdit()
+        self._grid_input.setPlaceholderText("e.g. EM29")
+        # Maidenhead grid is at most 6 characters (subsquare precision).
+        self._grid_input.setMaxLength(6)
+        # Force uppercase as the user types — Maidenhead is conventionally
+        # rendered with the field letters uppercase.
+        self._grid_input.textChanged.connect(self._on_grid_changed)
+        form.addRow("Grid Square:", self._grid_input)
+
+        self._qth_input = QLineEdit()
+        self._qth_input.setPlaceholderText("e.g. Kansas City, MO")
+        form.addRow("QTH:", self._qth_input)
+
         layout.addLayout(form)
 
         self._check_updates = QCheckBox("Check for updates on startup")
@@ -111,6 +138,19 @@ class FirstLaunchDialog(QDialog):
         finally:
             self._callsign_input.blockSignals(False)
 
+    def _on_grid_changed(self, text: str) -> None:
+        """Force uppercase on the grid input — same pattern as callsign."""
+        upper = text.upper()
+        if upper == text:
+            return
+        cursor = self._grid_input.cursorPosition()
+        self._grid_input.blockSignals(True)
+        try:
+            self._grid_input.setText(upper)
+            self._grid_input.setCursorPosition(cursor)
+        finally:
+            self._grid_input.blockSignals(False)
+
     def check_updates_enabled(self) -> bool:
         """Return whether the user opted in to startup update checks."""
         return self._check_updates.isChecked()
@@ -125,6 +165,18 @@ class FirstLaunchDialog(QDialog):
         with empty).
         """
         return self._callsign_input.text().strip().upper()
+
+    def operator_name(self) -> str:
+        """Return the (trimmed) operator name. May be empty."""
+        return self._name_input.text().strip()
+
+    def grid_square(self) -> str:
+        """Return the (trimmed, uppercased) Maidenhead grid. May be empty."""
+        return self._grid_input.text().strip().upper()
+
+    def qth(self) -> str:
+        """Return the (trimmed) QTH free-text. May be empty."""
+        return self._qth_input.text().strip()
 
 
 __all__ = ["FirstLaunchDialog"]

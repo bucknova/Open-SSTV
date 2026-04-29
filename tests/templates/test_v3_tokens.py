@@ -313,15 +313,70 @@ def test_no_tokens_passthrough() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AppConfig missing optional fields (grid, op_name) degrade gracefully
+# v0.3.4 — operator-info tokens resolve from AppConfig
 # ---------------------------------------------------------------------------
+#
+# Before v0.3.4 the resolver speculatively read from `app_config.op_name`
+# and `app_config.grid` via `hasattr` — fields that never actually
+# existed.  Those reads are now wired to the real `operator_name` /
+# `grid_square` / `qth` fields, with `getattr(..., "")` for forward
+# compatibility if a future schema rev removes them.
 
 
-def test_grid_token_empty_when_field_absent() -> None:
+def test_grid_token_empty_when_unset() -> None:
+    """Default AppConfig has empty grid_square; %g resolves to ''."""
     cfg = _cfg()
-    assert not hasattr(cfg, "grid") or rt("%g", cfg=cfg) in ("", getattr(cfg, "grid", ""))
+    assert rt("%g", cfg=cfg) == ""
+    assert rt("{grid}", cfg=cfg) == ""
 
 
-def test_name_token_empty_when_field_absent() -> None:
+def test_grid_token_resolves_from_config() -> None:
+    cfg = _cfg(grid_square="EM29")
+    assert rt("%g", cfg=cfg) == "EM29"
+    assert rt("{grid}", cfg=cfg) == "EM29"
+
+
+def test_name_token_empty_when_unset() -> None:
     cfg = _cfg()
-    assert not hasattr(cfg, "op_name") or rt("%n", cfg=cfg) in ("", getattr(cfg, "op_name", ""))
+    assert rt("%n", cfg=cfg) == ""
+    assert rt("{name}", cfg=cfg) == ""
+
+
+def test_name_token_resolves_from_config() -> None:
+    cfg = _cfg(operator_name="Kevin")
+    assert rt("%n", cfg=cfg) == "Kevin"
+    assert rt("{name}", cfg=cfg) == "Kevin"
+
+
+def test_qth_token_empty_when_unset() -> None:
+    """{qth} is the new v0.3.4 named-form token.  No percent-form is
+    provided because %q is already taken by qso_serial."""
+    cfg = _cfg()
+    assert rt("{qth}", cfg=cfg) == ""
+
+
+def test_qth_token_resolves_from_config() -> None:
+    cfg = _cfg(qth="Kansas City, MO")
+    assert rt("{qth}", cfg=cfg) == "Kansas City, MO"
+
+
+def test_qth_does_not_have_percent_form() -> None:
+    """%q is the QSO serial — must not be repurposed for QTH even when
+    operator_name and qth are both set.  Pre-v0.3.4 templates that use
+    %q for serial must keep working unchanged."""
+    cfg = _cfg(qth="Boston, MA")
+    qso = _qso(serial=42)
+    assert rt("%q", cfg=cfg, qso=qso) == "42"
+
+
+def test_operator_info_combined_template() -> None:
+    """A template using all three operator-info tokens together resolves
+    each from its own AppConfig field."""
+    cfg = _cfg(
+        callsign="W0AEZ",
+        operator_name="Kevin",
+        grid_square="EM29",
+        qth="Kansas City, MO",
+    )
+    out = rt("{callsign} {name} {grid} {qth}", cfg=cfg)
+    assert out == "WØAEZ Kevin EM29 Kansas City, MO"

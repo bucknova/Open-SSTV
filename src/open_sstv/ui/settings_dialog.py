@@ -131,6 +131,11 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(self)
 
         tabs = QTabWidget()
+        # v0.3.4: General tab is first — Callsign, operator info, default
+        # TX mode, and the update checker collected in one place so users
+        # don't have to hunt through Audio/Radio/Images for app-level
+        # settings.  Audio/Radio/Images stay focused on their domains.
+        tabs.addTab(self._build_general_tab(), "General")
         tabs.addTab(self._build_audio_tab(), "Audio")
         tabs.addTab(self._build_radio_tab(), "Radio")
         tabs.addTab(self._build_images_tab(), "Images")
@@ -145,6 +150,87 @@ class SettingsDialog(QDialog):
         layout.addWidget(buttons)
 
     # === Tab builders ===
+
+    def _build_general_tab(self) -> QWidget:
+        """v0.3.4: app-level settings collected on the first tab.
+
+        - **Identity**: callsign (moved from Radio tab) plus the optional
+          operator name / grid square / QTH that the v0.3 template
+          token system can resolve into ``{name}`` / ``{grid}`` /
+          ``{qth}`` overlays.
+        - **Defaults**: pre-selected TX mode for new sessions (moved
+          from Images tab).
+        - **Updates**: the "Check for updates on startup" checkbox
+          (moved from Images tab).
+        """
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        # --- Identity ---
+        identity_group = QGroupBox("Identity")
+        identity_form = QFormLayout(identity_group)
+
+        self._callsign = QLineEdit(self._config.callsign)
+        self._callsign.setPlaceholderText("e.g. W0AEZ")
+        # Live-update the banner preview when the callsign changes.
+        # The preview lives on the Images tab; this connection ensures
+        # it stays in sync without the user having to switch tabs first.
+        self._callsign.textChanged.connect(self._refresh_banner_preview_if_built)
+        identity_form.addRow("Callsign:", self._callsign)
+
+        self._operator_name = QLineEdit(self._config.operator_name)
+        self._operator_name.setPlaceholderText("e.g. Kevin")
+        identity_form.addRow("Name:", self._operator_name)
+
+        self._grid_square = QLineEdit(self._config.grid_square)
+        self._grid_square.setPlaceholderText("e.g. EM29")
+        # Maidenhead grid is at most 6 characters (subsquare precision).
+        self._grid_square.setMaxLength(6)
+        identity_form.addRow("Grid Square:", self._grid_square)
+
+        self._qth = QLineEdit(self._config.qth)
+        self._qth.setPlaceholderText("e.g. Kansas City, MO")
+        identity_form.addRow("QTH:", self._qth)
+
+        layout.addWidget(identity_group)
+
+        # --- Defaults ---
+        defaults_group = QGroupBox("Defaults")
+        defaults_form = QFormLayout(defaults_group)
+
+        # Default TX mode — moved here from the Images tab.  Same
+        # widget attribute name (``self._tx_mode``) so existing
+        # autosave-preview wiring keeps working.
+        self._tx_mode = QComboBox()
+        for mode in Mode:
+            self._tx_mode.addItem(mode.value, mode.value)
+        idx = self._tx_mode.findData(self._config.default_tx_mode)
+        if idx >= 0:
+            self._tx_mode.setCurrentIndex(idx)
+        # Drives the autosave filename preview on the Images tab so
+        # ``%m`` shows a realistic placeholder.
+        self._tx_mode.currentIndexChanged.connect(
+            lambda _=None: self._refresh_autosave_preview()
+        )
+        defaults_form.addRow("Default TX mode:", self._tx_mode)
+
+        layout.addWidget(defaults_group)
+
+        # --- Updates ---
+        updates_group = QGroupBox("Updates")
+        updates_form = QFormLayout(updates_group)
+        self._check_updates_setting = QCheckBox("Check for updates on startup")
+        self._check_updates_setting.setToolTip(
+            "On startup, Open-SSTV makes a read-only HTTPS request to\n"
+            "github.com/bucknova/Open-SSTV to check for newer releases.\n"
+            "No data is sent."
+        )
+        self._check_updates_setting.setChecked(self._config.check_for_updates)
+        updates_form.addRow(self._check_updates_setting)
+
+        layout.addWidget(updates_group)
+        layout.addStretch(1)
+        return tab
 
     def _build_audio_tab(self) -> QWidget:
         tab = QWidget()
@@ -423,6 +509,12 @@ class SettingsDialog(QDialog):
         )
         rigctld_help.setWordWrap(True)
         rigctld_help.setTextFormat(Qt.TextFormat.RichText)
+        # v0.3.5: Qt's QLabel.sizeHint() underestimates the height of
+        # word-wrapped rich text inside a QFormLayout — the third
+        # rendered line was getting clipped at the top of the label box.
+        # Reserve enough vertical room for 3 wrapped lines using font
+        # metrics so the fix scales with the user's UI font size.
+        rigctld_help.setMinimumHeight(rigctld_help.fontMetrics().height() * 3 + 4)
         rigctld_form.addRow(rigctld_help)
 
         self._rigctld_host = QLineEdit(self._config.rigctld_host)
@@ -496,8 +588,11 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(self._rigctld_group)
 
-        # --- PTT and identity (always visible) ---
-        misc_group = QGroupBox("PTT / Identity")
+        # --- PTT (always visible) ---
+        # v0.3.4: Callsign moved to the General tab.  This group is now
+        # PTT-only; it stays on the Radio tab because PTT delay is a
+        # rig-timing concern, not an app-level setting.
+        misc_group = QGroupBox("PTT")
         misc_form = QFormLayout(misc_group)
 
         self._ptt_delay = QDoubleSpinBox()
@@ -507,14 +602,6 @@ class SettingsDialog(QDialog):
         self._ptt_delay.setSuffix(" s")
         self._ptt_delay.setValue(self._config.ptt_delay_s)
         misc_form.addRow("PTT delay:", self._ptt_delay)
-
-        self._callsign = QLineEdit(self._config.callsign)
-        self._callsign.setPlaceholderText("e.g. W0AEZ")
-        # Live-update the banner preview when the callsign changes.
-        # The preview lives on the Images tab; this connection ensures it
-        # stays in sync without the user having to switch tabs first.
-        self._callsign.textChanged.connect(self._refresh_banner_preview_if_built)
-        misc_form.addRow("Callsign:", self._callsign)
 
         layout.addWidget(misc_group)
 
@@ -681,19 +768,10 @@ class SettingsDialog(QDialog):
         tab = QWidget()
         form = QFormLayout(tab)
 
-        # Default TX mode
-        self._tx_mode = QComboBox()
-        for mode in Mode:
-            self._tx_mode.addItem(mode.value, mode.value)
-        idx = self._tx_mode.findData(self._config.default_tx_mode)
-        if idx >= 0:
-            self._tx_mode.setCurrentIndex(idx)
-        # v0.2.8: the autosave preview uses the default TX mode as a
-        # realistic placeholder so the user sees how ``%m`` will render.
-        self._tx_mode.currentIndexChanged.connect(
-            lambda _=None: self._refresh_autosave_preview()
-        )
-        form.addRow("Default TX mode:", self._tx_mode)
+        # v0.3.4: Default TX mode moved to the General tab.  The
+        # autosave-preview wiring still uses ``self._tx_mode`` as the
+        # mode source, but the widget itself is constructed earlier
+        # (during ``_build_general_tab``).
 
         # Auto-save (RX)
         self._auto_save = QCheckBox("Auto-save received images")
@@ -740,7 +818,21 @@ class SettingsDialog(QDialog):
         self._autosave_pattern.textChanged.connect(
             self._refresh_autosave_preview
         )
-        form.addRow("Filename template:", self._autosave_pattern)
+        # v0.3.4: surface the filename-token reference as a clickable
+        # "?" button next to the field.  The hover tooltip stayed
+        # invisible to most users (especially on macOS, where QLineEdit
+        # tooltips don't always trigger reliably) so the same content
+        # is now one click away.
+        self._autosave_pattern_help_btn = QPushButton("?")
+        self._autosave_pattern_help_btn.setFixedWidth(28)
+        self._autosave_pattern_help_btn.setToolTip("Show filename token reference")
+        self._autosave_pattern_help_btn.clicked.connect(
+            self._show_autosave_pattern_help
+        )
+        pattern_row = QHBoxLayout()
+        pattern_row.addWidget(self._autosave_pattern, stretch=1)
+        pattern_row.addWidget(self._autosave_pattern_help_btn)
+        form.addRow("Filename template:", pattern_row)
 
         # File format — drop-down so hand-edited values (or unknown
         # formats) can't silently land users on a non-standard extension.
@@ -839,18 +931,7 @@ class SettingsDialog(QDialog):
 
         form.addRow(banner_group)
 
-        # --- Updates ---
-        updates_group = QGroupBox("Updates")
-        updates_layout = QFormLayout(updates_group)
-        self._check_updates_setting = QCheckBox("Check for updates on startup")
-        self._check_updates_setting.setToolTip(
-            "On startup, Open-SSTV makes a read-only HTTPS request to\n"
-            "github.com/bucknova/Open-SSTV to check for newer releases.\n"
-            "No data is sent."
-        )
-        self._check_updates_setting.setChecked(self._config.check_for_updates)
-        updates_layout.addRow(self._check_updates_setting)
-        form.addRow(updates_group)
+        # v0.3.4: Updates group moved to the General tab.
 
         return tab
 
@@ -999,6 +1080,38 @@ class SettingsDialog(QDialog):
         )
         if directory:
             self._save_dir.setText(directory)
+
+    def _show_autosave_pattern_help(self) -> None:
+        """Pop a modal QMessageBox listing every supported filename
+        token.  Same vocabulary as the field's hover tooltip, but in a
+        click-driven dialog so users (especially on macOS, where
+        QLineEdit tooltips can be unreliable) actually find it."""
+        QMessageBox.information(
+            self,
+            "Filename Template Tokens",
+            "<p>The auto-save filename template is rendered at save time "
+            "using these tokens:</p>"
+            "<table cellpadding='4'>"
+            "<tr><td><b><tt>%d</tt></b></td>"
+            "<td>UTC date (YYYY-MM-DD)</td></tr>"
+            "<tr><td><b><tt>%t</tt></b></td>"
+            "<td>UTC time (HHMMSS)</td></tr>"
+            "<tr><td><b><tt>%ts</tt></b></td>"
+            "<td>Unix epoch timestamp</td></tr>"
+            "<tr><td><b><tt>%c</tt></b></td>"
+            "<td>Your callsign</td></tr>"
+            "<tr><td><b><tt>%m</tt></b></td>"
+            "<td>SSTV mode (e.g. <tt>Scottie-S1</tt>)</td></tr>"
+            "<tr><td><b><tt>%rx_tx</tt></b></td>"
+            "<td>Literal <tt>RX</tt> or <tt>TX</tt></td></tr>"
+            "<tr><td><b><tt>%%</tt></b></td>"
+            "<td>Literal percent sign</td></tr>"
+            "</table>"
+            "<p>Named-form aliases (<tt>{date}</tt>, <tt>{time}</tt>, "
+            "<tt>{callsign}</tt>, <tt>{mode}</tt>, …) also work.</p>"
+            "<p><b>Example:</b> <tt>%d_%t_%m</tt> renders as<br>"
+            "<tt>2026-04-29_153000_Scottie-S1.png</tt></p>",
+        )
 
     def _refresh_autosave_preview(self) -> None:
         """Re-render the auto-save filename preview from the current inputs.
@@ -1283,6 +1396,9 @@ class SettingsDialog(QDialog):
             cw_id_wpm=self._cw_wpm.value(),
             cw_id_tone_hz=self._cw_tone_hz.value(),
             callsign=self._callsign.text().strip().upper(),
+            operator_name=self._operator_name.text().strip(),
+            grid_square=self._grid_square.text().strip().upper(),
+            qth=self._qth.text().strip(),
             images_save_dir=self._save_dir.text(),
             auto_save=self._auto_save.isChecked(),
             autosave_tx=self._autosave_tx.isChecked(),

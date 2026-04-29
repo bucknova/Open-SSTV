@@ -729,11 +729,23 @@ class MainWindow(QMainWindow):
         dlg = FirstLaunchDialog(self)
         accepted = dlg.exec() == FirstLaunchDialog.DialogCode.Accepted
         typed = dlg.callsign() if accepted else ""
+        # v0.3.4: optional operator-info fields. Only persist on Accept;
+        # on Skip we leave the existing values (empty for fresh install)
+        # untouched so the user isn't surprised by partial state.
+        typed_name = dlg.operator_name() if accepted else ""
+        typed_grid = dlg.grid_square() if accepted else ""
+        typed_qth = dlg.qth() if accepted else ""
 
         self._config.first_launch_seen = True
         self._config.check_for_updates = dlg.check_updates_enabled()
         if typed:
             self._config.callsign = typed
+        if typed_name:
+            self._config.operator_name = typed_name
+        if typed_grid:
+            self._config.grid_square = typed_grid
+        if typed_qth:
+            self._config.qth = typed_qth
 
         try:
             save_config(self._config)

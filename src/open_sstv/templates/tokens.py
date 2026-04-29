@@ -240,8 +240,8 @@ def _v3_percent_table(
     )
     table: dict[str, str] = {
         "c": _apply_slashed_zero(callsign) if slashed_zero else callsign,
-        "g": app_config.grid if hasattr(app_config, "grid") else "",
-        "n": app_config.op_name if hasattr(app_config, "op_name") else "",
+        "g": getattr(app_config, "grid_square", "") or "",
+        "n": getattr(app_config, "operator_name", "") or "",
         "o": _apply_slashed_zero(tocall) if slashed_zero else tocall,
         "r": qso_state.rst,
         "m": tx_context.mode_display_name,
@@ -249,6 +249,8 @@ def _v3_percent_table(
         "t": now_utc.strftime(time_format),
         "f": freq_str,
         "b": band_str,
+        # ``%q`` is the QSO serial; QTH only has the named form ``{qth}``
+        # to avoid breaking templates that already use ``%q`` for serial.
         "q": str(qso_state.serial),
         "v": _open_sstv_version(),
     }
@@ -283,8 +285,9 @@ def _v3_named_table(
     )
     return {
         "callsign": _apply_slashed_zero(callsign) if slashed_zero else callsign,
-        "grid": app_config.grid if hasattr(app_config, "grid") else "",
-        "name": app_config.op_name if hasattr(app_config, "op_name") else "",
+        "grid": getattr(app_config, "grid_square", "") or "",
+        "name": getattr(app_config, "operator_name", "") or "",
+        "qth": getattr(app_config, "qth", "") or "",
         "tocall": _apply_slashed_zero(tocall) if slashed_zero else tocall,
         "rst": qso_state.rst,
         "tocallname": qso_state.tocall_name,

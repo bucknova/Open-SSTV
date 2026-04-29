@@ -188,6 +188,35 @@ class TestRigctldGroupFitsAtDefaultWidth:
         need re-evaluating."""
         assert dialog._rigctld_group.title() == "rigctld — Hamlib Daemon"
 
+    def test_rigctld_help_label_has_room_for_three_wrapped_lines(
+        self, dialog: SettingsDialog
+    ) -> None:
+        """v0.3.5 regression: the rigctld help QLabel has setWordWrap(True)
+        but Qt underestimates its height inside a QFormLayout, so the
+        third wrapped line ("Hamlib installed.") was getting clipped at
+        the top of the label box.  We reserve room for ~3 lines of
+        wrapped text using font metrics; this test pins that the
+        minimum height is at least that much so a future refactor that
+        drops the explicit minimum reverts the clip."""
+        from PySide6.QtWidgets import QLabel
+        # The help label is the only QLabel inside the rigctld group
+        # whose text mentions "Hamlib".
+        help_labels = [
+            lbl for lbl in dialog._rigctld_group.findChildren(QLabel)
+            if "Hamlib" in lbl.text()
+        ]
+        assert len(help_labels) == 1, (
+            f"expected one help label in rigctld group, found {len(help_labels)}"
+        )
+        help_label = help_labels[0]
+        fm_h = help_label.fontMetrics().height()
+        # Minimum height must accommodate at least ~3 wrapped lines.
+        assert help_label.minimumHeight() >= fm_h * 3, (
+            f"rigctld help label minimumHeight={help_label.minimumHeight()} "
+            f"is below 3 line-heights ({fm_h} px each); wrapped text will "
+            f"clip when the dialog is at its minimum width"
+        )
+
     def test_rigctld_group_size_hint_fits_minimum_width(
         self, dialog: SettingsDialog
     ) -> None:
@@ -205,3 +234,219 @@ class TestRigctldGroupFitsAtDefaultWidth:
             f"rigctld group sizeHint width {hint_w} exceeds "
             f"available budget {budget} (dialog min {dialog.minimumWidth()})"
         )
+
+
+# ---------------------------------------------------------------------------
+# v0.3.4 — General tab as the first settings tab
+# ---------------------------------------------------------------------------
+
+
+class TestGeneralTabIsFirst:
+    """The new General tab consolidates app-level settings (identity,
+    default TX mode, update checker) on the first tab, with Audio /
+    Radio / Images focused on their own domains."""
+
+    def test_general_tab_is_present(self, dialog: SettingsDialog) -> None:
+        from PySide6.QtWidgets import QTabWidget
+        tabs = dialog.findChild(QTabWidget)
+        assert tabs is not None
+        labels = [tabs.tabText(i) for i in range(tabs.count())]
+        assert "General" in labels
+
+    def test_general_tab_is_at_index_zero(self, dialog: SettingsDialog) -> None:
+        from PySide6.QtWidgets import QTabWidget
+        tabs = dialog.findChild(QTabWidget)
+        assert tabs is not None
+        assert tabs.tabText(0) == "General"
+
+    def test_tab_order_general_audio_radio_images(
+        self, dialog: SettingsDialog
+    ) -> None:
+        from PySide6.QtWidgets import QTabWidget
+        tabs = dialog.findChild(QTabWidget)
+        labels = [tabs.tabText(i) for i in range(tabs.count())]
+        assert labels == ["General", "Audio", "Radio", "Images"]
+
+
+class TestIdentityGroupOnGeneralTab:
+    """Identity group: callsign + the three new operator-info fields."""
+
+    def test_callsign_widget_still_findable(
+        self, dialog: SettingsDialog
+    ) -> None:
+        """Existing tests grab `dialog._callsign` directly — the move
+        from Radio tab to General tab must not change the attribute name."""
+        assert dialog._callsign is not None
+        assert dialog._callsign.text() == "W0AEZ"
+
+    def test_operator_name_widget_exists(
+        self, dialog: SettingsDialog
+    ) -> None:
+        assert dialog._operator_name is not None
+        assert dialog._operator_name.text() == ""
+
+    def test_grid_square_widget_exists(
+        self, dialog: SettingsDialog
+    ) -> None:
+        assert dialog._grid_square is not None
+        assert dialog._grid_square.maxLength() == 6
+
+    def test_qth_widget_exists(self, dialog: SettingsDialog) -> None:
+        assert dialog._qth is not None
+        assert dialog._qth.text() == ""
+
+    def test_pre_populated_from_config(
+        self, qtbot
+    ) -> None:
+        """If AppConfig already carries operator info, the General tab's
+        widgets pre-populate from those values."""
+        cfg = AppConfig(
+            callsign="W0AEZ",
+            operator_name="Kevin",
+            grid_square="EM29",
+            qth="Kansas City, MO",
+        )
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        assert dlg._callsign.text() == "W0AEZ"
+        assert dlg._operator_name.text() == "Kevin"
+        assert dlg._grid_square.text() == "EM29"
+        assert dlg._qth.text() == "Kansas City, MO"
+
+
+class TestResultConfigIncludesOperatorInfo:
+    """``result_config()`` must return AppConfig with the operator-info
+    fields populated from the General tab widgets."""
+
+    def test_empty_widgets_yield_empty_strings(
+        self, dialog: SettingsDialog
+    ) -> None:
+        cfg = dialog.result_config()
+        assert cfg.operator_name == ""
+        assert cfg.grid_square == ""
+        assert cfg.qth == ""
+
+    def test_populated_widgets_propagate_to_result(
+        self, dialog: SettingsDialog
+    ) -> None:
+        dialog._operator_name.setText("Kevin")
+        dialog._grid_square.setText("em29")
+        dialog._qth.setText("  Kansas City, MO  ")
+        cfg = dialog.result_config()
+        assert cfg.operator_name == "Kevin"
+        assert cfg.grid_square == "EM29"  # uppercased on save
+        assert cfg.qth == "Kansas City, MO"  # whitespace stripped
+
+
+class TestRadioTabPttGroupRenamed:
+    """After moving Callsign out, the Radio tab's group is just "PTT" —
+    no longer "PTT / Identity"."""
+
+    def test_callsign_not_in_radio_tab_ptt_group(
+        self, dialog: SettingsDialog
+    ) -> None:
+        """The Callsign widget should not be a descendant of any group
+        box on the Radio tab — it lives on the General tab now."""
+        from PySide6.QtWidgets import QGroupBox
+        # Find every group box; verify the one titled "PTT" doesn't
+        # contain the callsign widget.
+        for group in dialog.findChildren(QGroupBox):
+            if group.title() == "PTT":
+                assert dialog._callsign not in group.findChildren(
+                    type(dialog._callsign)
+                )
+
+    def test_ptt_group_title_is_just_ptt(self, dialog: SettingsDialog) -> None:
+        from PySide6.QtWidgets import QGroupBox
+        titles = [g.title() for g in dialog.findChildren(QGroupBox)]
+        # The renamed group is present; the old title is gone.
+        assert "PTT" in titles
+        assert "PTT / Identity" not in titles
+
+
+class TestImagesTabHasNoUpdatesGroup:
+    """The Updates group moved from Images to General; the Images tab
+    must no longer carry an Updates QGroupBox."""
+
+    def test_no_updates_group_on_images(
+        self, dialog: SettingsDialog
+    ) -> None:
+        from PySide6.QtWidgets import QGroupBox
+        titles = [g.title() for g in dialog.findChildren(QGroupBox)]
+        # "Updates" still appears once — on the General tab, not Images.
+        # Counting > 1 would mean we duplicated; counting 0 would mean
+        # we lost the move target.
+        assert titles.count("Updates") == 1
+
+
+class TestDefaultTxModeOnGeneralTab:
+    """``default_tx_mode`` was on the Images tab pre-v0.3.4; it now
+    lives on General with the same widget attribute name (``_tx_mode``)
+    so existing autosave-preview wiring keeps working."""
+
+    def test_tx_mode_widget_still_findable(
+        self, dialog: SettingsDialog
+    ) -> None:
+        assert dialog._tx_mode is not None
+
+    def test_tx_mode_pre_selects_config_value(self, qtbot) -> None:
+        cfg = AppConfig(callsign="W0AEZ", default_tx_mode="robot_36")
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        assert dlg._tx_mode.currentData() == "robot_36"
+
+    def test_tx_mode_propagates_to_result_config(
+        self, dialog: SettingsDialog
+    ) -> None:
+        idx = dialog._tx_mode.findData("scottie_s1")
+        assert idx >= 0
+        dialog._tx_mode.setCurrentIndex(idx)
+        cfg = dialog.result_config()
+        assert cfg.default_tx_mode == "scottie_s1"
+
+
+class TestAutosavePatternHelpButton:
+    """v0.3.4 polish: a "?" button next to the filename template field
+    surfaces the token reference more discoverably than the hover-only
+    tooltip — macOS Qt sometimes fails to show QLineEdit tooltips
+    reliably and new users don't know to hover."""
+
+    def test_help_button_exists(self, dialog: SettingsDialog) -> None:
+        assert dialog._autosave_pattern_help_btn is not None
+
+    def test_help_button_has_question_mark_label(
+        self, dialog: SettingsDialog
+    ) -> None:
+        assert dialog._autosave_pattern_help_btn.text() == "?"
+
+    def test_help_button_sits_next_to_pattern_field(
+        self, dialog: SettingsDialog
+    ) -> None:
+        """Both the field and button must share a parent layout so they
+        appear on the same form row.  We assert their parent widget is
+        the same (the row container)."""
+        assert dialog._autosave_pattern.parentWidget() is (
+            dialog._autosave_pattern_help_btn.parentWidget()
+        )
+
+    def test_help_button_click_invokes_message_box(
+        self, dialog: SettingsDialog
+    ) -> None:
+        """Clicking the button calls QMessageBox.information with content
+        that includes the token reference (<tt>%d</tt>, <tt>%c</tt>, etc.).
+        We patch QMessageBox.information so the test doesn't actually
+        pop a modal dialog."""
+        with patch(
+            "open_sstv.ui.settings_dialog.QMessageBox.information"
+        ) as mock_info:
+            dialog._autosave_pattern_help_btn.click()
+            assert mock_info.called
+            args, _kwargs = mock_info.call_args
+            # args[0] is the parent widget; args[1] is the title;
+            # args[2] is the body text.
+            assert args[0] is dialog
+            assert "Filename Template" in args[1]
+            body = args[2]
+            # Spot-check that the body lists the load-bearing tokens.
+            for token in ("%d", "%t", "%c", "%m", "%%"):
+                assert token in body, f"help body missing token reference {token!r}"

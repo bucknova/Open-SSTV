@@ -62,6 +62,50 @@ def test_load_fills_missing_keys_with_defaults(tmp_path: Path) -> None:
     assert loaded.callsign == ""
 
 
+# ---------------------------------------------------------------------------
+# v0.3.4 — operator-info fields (operator_name / grid_square / qth)
+# ---------------------------------------------------------------------------
+
+
+def test_operator_info_fields_default_to_empty_string() -> None:
+    """Fresh AppConfig must have empty defaults for the new fields so
+    pre-v0.3.4 configs roundtrip without acquiring values they didn't
+    have before."""
+    cfg = AppConfig()
+    assert cfg.operator_name == ""
+    assert cfg.grid_square == ""
+    assert cfg.qth == ""
+
+
+def test_operator_info_fields_round_trip(tmp_path: Path) -> None:
+    """Set the three new fields, save, reload, assert equality."""
+    cfg = AppConfig(
+        callsign="W0AEZ",
+        operator_name="Kevin",
+        grid_square="EM29",
+        qth="Kansas City, MO",
+    )
+    p = tmp_path / "config.toml"
+    save_config(cfg, path=p)
+    loaded = load_config(path=p)
+    assert loaded.operator_name == "Kevin"
+    assert loaded.grid_square == "EM29"
+    assert loaded.qth == "Kansas City, MO"
+
+
+def test_pre_v0_3_4_config_loads_without_operator_info(tmp_path: Path) -> None:
+    """A TOML file written before v0.3.4 (no operator_name / grid_square /
+    qth keys) must load with the new fields at their empty defaults
+    rather than crashing or reporting them as missing."""
+    p = tmp_path / "config.toml"
+    p.write_text('callsign = "W0AEZ"\nfirst_launch_seen = true\n')
+    loaded = load_config(path=p)
+    assert loaded.callsign == "W0AEZ"
+    assert loaded.operator_name == ""
+    assert loaded.grid_square == ""
+    assert loaded.qth == ""
+
+
 def test_save_creates_parent_dirs(tmp_path: Path) -> None:
     deep = tmp_path / "a" / "b" / "c" / "config.toml"
     save_config(AppConfig(), path=deep)

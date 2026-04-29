@@ -152,3 +152,109 @@ def test_toml_with_explicit_true_is_respected(tmp_path: Path) -> None:
     cfg = load_config(path=toml_path)
 
     assert cfg.first_launch_seen is True
+
+
+# ---------------------------------------------------------------------------
+# v0.3.4 — optional Name / Grid Square / QTH inputs
+# ---------------------------------------------------------------------------
+
+
+class TestOperatorInfoInputs:
+    """The first-launch dialog gained three optional fields in v0.3.4 so
+    new users can populate the v0.3 template tokens (``{name}``,
+    ``{grid}``, ``{qth}``) without immediately hunting through Settings.
+    All three are optional; empty submissions still flow through the
+    Save / Skip dispatch unchanged."""
+
+    def test_inputs_exist(self, qapp, qtbot) -> None:
+        dlg = FirstLaunchDialog()
+        qtbot.addWidget(dlg)
+        assert dlg._name_input is not None
+        assert dlg._grid_input is not None
+        assert dlg._qth_input is not None
+
+    def test_all_three_default_empty(self, qapp, qtbot) -> None:
+        dlg = FirstLaunchDialog()
+        qtbot.addWidget(dlg)
+        assert dlg.operator_name() == ""
+        assert dlg.grid_square() == ""
+        assert dlg.qth() == ""
+
+    def test_grid_input_forces_uppercase(self, qapp, qtbot) -> None:
+        """Maidenhead grid renders canonically with the field letters
+        uppercase (EM29, FN42, etc.).  Same as-you-type pattern as
+        callsign."""
+        dlg = FirstLaunchDialog()
+        qtbot.addWidget(dlg)
+        dlg._grid_input.setText("em29lk")
+        assert dlg._grid_input.text() == "EM29LK"
+
+    def test_grid_input_max_length_is_six(self, qapp, qtbot) -> None:
+        """6-character subsquare precision is the practical maximum;
+        anything longer is non-standard."""
+        dlg = FirstLaunchDialog()
+        qtbot.addWidget(dlg)
+        assert dlg._grid_input.maxLength() == 6
+
+    def test_name_input_does_not_force_uppercase(self, qapp, qtbot) -> None:
+        """Operator name should preserve mixed case — it's a display
+        string, not a callsign."""
+        dlg = FirstLaunchDialog()
+        qtbot.addWidget(dlg)
+        dlg._name_input.setText("Kevin")
+        assert dlg._name_input.text() == "Kevin"
+
+    def test_qth_input_does_not_force_uppercase(self, qapp, qtbot) -> None:
+        dlg = FirstLaunchDialog()
+        qtbot.addWidget(dlg)
+        dlg._qth_input.setText("Kansas City, MO")
+        assert dlg._qth_input.text() == "Kansas City, MO"
+
+    def test_accessors_trim_whitespace(self, qapp, qtbot) -> None:
+        dlg = FirstLaunchDialog()
+        qtbot.addWidget(dlg)
+        dlg._name_input.setText("  Kevin  ")
+        dlg._grid_input.setText("  em29  ")
+        dlg._qth_input.setText("  Kansas City, MO  ")
+        assert dlg.operator_name() == "Kevin"
+        assert dlg.grid_square() == "EM29"
+        assert dlg.qth() == "Kansas City, MO"
+
+    def test_save_with_all_fields_populated(self, qapp, qtbot) -> None:
+        dlg = FirstLaunchDialog()
+        qtbot.addWidget(dlg)
+        dlg.show()
+        qtbot.waitExposed(dlg)
+
+        dlg._callsign_input.setText("w0aez")
+        dlg._name_input.setText("Kevin")
+        dlg._grid_input.setText("em29")
+        dlg._qth_input.setText("Kansas City, MO")
+        dlg._save_btn.click()
+
+        assert dlg.result() == QDialog.DialogCode.Accepted
+        assert dlg.callsign() == "W0AEZ"
+        assert dlg.operator_name() == "Kevin"
+        assert dlg.grid_square() == "EM29"
+        assert dlg.qth() == "Kansas City, MO"
+
+    def test_save_with_only_callsign_leaves_optional_fields_empty(
+        self, qapp, qtbot
+    ) -> None:
+        """The optional-fields contract: a user who only fills callsign
+        and clicks Save should not silently get garbage in the other
+        fields — they stay empty and the caller decides whether to
+        write them."""
+        dlg = FirstLaunchDialog()
+        qtbot.addWidget(dlg)
+        dlg.show()
+        qtbot.waitExposed(dlg)
+
+        dlg._callsign_input.setText("w0aez")
+        dlg._save_btn.click()
+
+        assert dlg.result() == QDialog.DialogCode.Accepted
+        assert dlg.callsign() == "W0AEZ"
+        assert dlg.operator_name() == ""
+        assert dlg.grid_square() == ""
+        assert dlg.qth() == ""

@@ -117,6 +117,14 @@ class AppConfig:
 
     # --- Identity ---
     callsign: str = ""
+    # v0.3.4: persistent operator-info defaults.  Empty by default so
+    # existing configs roundtrip unchanged; the first-launch dialog and
+    # the General settings tab let the user fill them in.  Template
+    # tokens (``{name}`` / ``%n``, ``{grid}`` / ``%g``, ``{qth}``) read
+    # from these fields when QSO state has nothing to say.
+    operator_name: str = ""
+    grid_square: str = ""
+    qth: str = ""
     # v0.2.7: one-shot flag for the welcome-callsign dialog.  False on a
     # truly fresh install (no config file on disk); True for any user
     # upgrading from ≤ v0.2.6 (see ``store.load_config`` — the migration

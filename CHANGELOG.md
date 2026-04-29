@@ -11,6 +11,79 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.4] — 2026-04-29
+
+### Added
+
+- **General settings tab** — new first tab consolidating app-level
+  settings: callsign + operator info (name / grid / QTH), default TX
+  mode, and the update checker.  Audio / Radio / Images stay focused
+  on their own domains.
+- **Persistent operator info in `AppConfig`.**  Three new fields with
+  empty-string defaults, surviving roundtrip through TOML:
+  - `operator_name` — short display name (e.g. "Kevin")
+  - `grid_square` — Maidenhead grid locator (e.g. "EM29")
+  - `qth` — free-text location (e.g. "Kansas City, MO")
+  Pre-v0.3.4 configs load unchanged; the new fields just appear with
+  empty defaults.
+- **First-launch dialog gained three optional fields** — Name, Grid
+  Square, QTH — sitting below the existing Callsign input.  All three
+  are optional; Skip and empty-Save still behave the same way.  Grid
+  Square forces uppercase as the user types; Name and QTH preserve
+  case.  Intro copy now mentions the v0.3 template tokens.
+- **`{qth}` template token** for the v0.3 image-template compositor,
+  resolving from `AppConfig.qth`.  Named-form only — no percent-form
+  because `%q` is already the QSO serial token (introduced in v0.3.0)
+  and a breaking change there would silently rewrite existing
+  templates.
+- **`{name}` and `{grid}` tokens (and their `%n` / `%g` percent
+  equivalents) now read from the new `operator_name` and `grid_square`
+  AppConfig fields.**  Pre-v0.3.4 the resolver speculatively read from
+  fields that never existed (`op_name`, `grid`) and always returned
+  empty; templates that used these tokens will now resolve real values
+  for users who have them set.
+
+### Changed
+
+- **Callsign moved from the Radio tab to the new General tab.**  The
+  Radio tab's PTT/Identity group is renamed to "PTT" (PTT delay
+  remains there).  Existing tests and integrations that grab
+  `dialog._callsign` keep working — the attribute name is unchanged,
+  only the tab placement moved.
+- **Default TX mode picker moved from the Images tab to the General
+  tab's Defaults group.**  Single source of truth for the setting.
+- **Update checker checkbox moved from the Images tab to the General
+  tab's Updates group.**  Images tab is now focused purely on
+  image-related settings (auto-save, TX banner).
+
+### Fixed
+
+- **rigctld help text vertical clipping in the Settings dialog.**
+  Qt's QLabel.sizeHint() underestimates height for word-wrapped rich
+  text inside QFormLayout — at the dialog's minimum width the third
+  rendered line ("Hamlib installed.") was clipping at the top.
+  Reserve room for ~3 wrapped lines using font metrics so the fix
+  scales with the user's UI font size.
+
+### Added
+
+- **"?" help button next to the auto-save filename template field**
+  on the Images tab.  Clicking it pops a modal listing every supported
+  filename token (`%d`, `%t`, `%c`, `%m`, `%rx_tx`, …) with a
+  rendered example.  The hover-only tooltip from v0.2.8 stayed
+  invisible to most users — especially on macOS where QLineEdit
+  tooltips don't always trigger reliably — so the same content is
+  now one click away.
+
+### Notes
+
+- The original feature spec mentioned a "Check now button + status
+  label" alongside the Updates checkbox.  Those don't exist on the
+  Images tab today (only the checkbox), so they aren't part of the
+  move; the General tab Updates group is checkbox-only for now.
+
+---
+
 ## [0.3.3] — 2026-04-29
 
 ### Fixed
