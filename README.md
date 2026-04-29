@@ -6,7 +6,7 @@ An open-source, cross-platform SSTV (Slow Scan Television) transceiver for amate
 radio. Receives and decodes SSTV images live off your radio, and encodes and
 transmits images back, with optional Hamlib or direct serial PTT and frequency control.
 
-**Status: Beta (v0.3.0) — ready for user testing and feedback.** TX and RX paths work
+**Status: Beta (v0.3.2) — ready for user testing and feedback.** TX and RX paths work
 end-to-end across all 22 supported modes. Rig control via rigctld or direct serial CAT
 is functional. Weak-signal decode is usable down to roughly 0 dB SNR on Robot 36.
 
@@ -47,6 +47,31 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
   auto-fill from settings or prompt only for what's needed. Custom templates can be
   created, edited, and saved. Re-clicking a template auto-clears the previous text;
   a dedicated Clear Text button restores the clean image.
+- **Layered template compositor (v0.3)** -- richer per-mode templates built from
+  photo, text, rectangle, gradient, RX-image, and station-image layers, composited
+  at TX time onto the mode's native frame size. Live template gallery on the TX
+  panel and a non-modal three-panel editor (Layers / live preview / Properties)
+  with MMSSTV-style and named tokens (`%c` / `{callsign}`, `%o` / `{tocall}`, etc.).
+- **+RX Image slot** in the template editor (v0.3.1) for one-click reply layouts —
+  composites the most-recently-received image into your outgoing TX frame. Default
+  geometry sits in the bottom-right at 30%×25% with a small inset; resize and
+  reposition like any other layer.
+- **8 bundled fonts** (v0.3.1) -- DejaVu Sans Bold, Inter Bold, Press Start 2P,
+  Orbitron Bold, Oswald Bold, Exo 2 Bold, Bebas Neue, Share Tech Mono. Orbitron,
+  Oswald, and Exo 2 ship as Google variable fonts and snap to their Bold weight
+  axis automatically when the family name carries Bold intent. Drop-in
+  user-supplied `.ttf` / `.otf` files in `{user_config_dir}/open_sstv/fonts/`
+  are still picked up automatically.
+- **Rainbow gradient text mode** (v0.3.1) -- per-text-layer Solid/Rainbow toggle.
+  Rainbow paints a smooth HSV hue sweep through the glyph mask while preserving
+  uniform stroke colour and the layer's alpha; horizontal text sweeps left-to-
+  right, stacked text top-to-bottom.
+- **Auto center-crop on TX** (v0.3.2) -- before template compositing, the source
+  photo is center-cropped to the mode's native aspect ratio and resized to the
+  mode's frame size. Banner and overlay placement stays predictable for any input
+  aspect (phone portrait, 4:3, 16:9, etc.) without distorting the photo. The
+  original image is never modified; the manual image editor remains available
+  for finer control.
 - **Correct Robot 36 encoding** -- custom line-pair encoder emits the canonical
   format that all real-world decoders (MMSSTV, SimpleSSTV, QSSTV, slowrx) expect.
   PySSTV's upstream Robot 36 produces a single-line format that most decoders cannot
@@ -211,7 +236,7 @@ Robot 12, Robot 24, Robot 72. Planned for a future release.
 | ![Audio settings](docs/screenshots/settings-audio.png) | ![Radio settings](docs/screenshots/settings-radio.png) |
 | *Audio tab — device, gain sliders, weak-signal mode, incremental decode* | *Radio tab — Direct Serial / Icom CI-V, PTT delay, CW Station ID* |
 | ![Images settings](docs/screenshots/settings-images.png) | ![About dialog](docs/screenshots/about-dialog.png) |
-| *Images tab — auto-save, TX banner with live preview, update-check opt-in* | *About dialog — v0.3.0, 22 modes, GPL-3.0-or-later* |
+| *Images tab — auto-save, TX banner with live preview, update-check opt-in* | *About dialog — v0.3, 22 modes, GPL-3.0-or-later* |
 
 ## Architecture
 
@@ -349,7 +374,7 @@ open-sstv-decode in.wav -o out.png                    # CLI decoder
 
 ## Testing focus areas
 
-If you're kicking the tyres on the v0.3.0 beta, these are the surfaces we'd most
+If you're kicking the tyres on the v0.3.2 beta, these are the surfaces we'd most
 like eyes on. File an [issue](https://github.com/bucknova/Open-SSTV/issues)
 with what you tried and what happened.
 

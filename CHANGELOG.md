@@ -11,6 +11,50 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.2] — 2026-04-28
+
+### Fixed
+
+- **TX source images are center-cropped to the SSTV mode's frame size before
+  template compositing.**  Banner and overlay placement is now predictable for
+  any source aspect (phone portrait, 4:3, 16:9, etc.) without distorting the
+  photo.  The original image is never mutated — the editor and preview still
+  see the user's source.  Photos already at the mode's exact frame size pass
+  through with object identity preserved, so there's no spurious LANCZOS
+  resample on the hot path.  Both TX and live preview share the same compose
+  path, so what you see in the preview is exactly what gets transmitted.
+
+---
+
+## [0.3.1] — 2026-04-28
+
+### Added
+
+- **+RX Image layer button** in the v0.3 template editor.  Surfaces the
+  existing `RxImageLayer` model so users can author received-image insets
+  without hand-editing TOML.  Default geometry: BR-anchored 30%×25% with
+  a 2% inset and `fit="cover"` — the conventional RX-preview placement.
+- **Five new bundled OFL-licensed fonts** — Orbitron Bold, Oswald Bold,
+  Exo 2 Bold, Bebas Neue, Share Tech Mono.  Total shipped fonts: 8.
+- **Variable-font Bold-axis support.**  Orbitron, Oswald, and Exo 2 ship
+  as variable fonts; the renderer's `_load_font` snaps the `wght` axis
+  to the "Bold" named instance when the family name carries Bold intent.
+  Static fonts (Inter Bold, DejaVu Sans Bold) are unaffected — the
+  variation call swallows `OSError` on fonts without a weight axis.
+- **Rainbow gradient text mode** for text layers.  New `color_mode` field
+  on `TextLayer` with values `"solid"` (default) and `"rainbow"`.  In
+  rainbow mode the renderer paints the full glyph silhouette in the
+  stroke colour first, then composites a smooth HSV hue sweep through a
+  glyph-only mask — horizontal text gets a left-to-right gradient,
+  stacked text gets a top-to-bottom gradient.  Stroke ring keeps its
+  uniform colour.  Alpha is taken from `layer.fill[3]` so semi-transparent
+  rainbow text remains possible.  Default `"solid"` is omitted from TOML
+  output so existing templates roundtrip unchanged.
+- **Solid/Rainbow combo** in the text-layer inspector.  Switching to
+  Rainbow drops the now-meaningless Fill picker from the form.
+
+---
+
 ## [0.3.0] — 2026-04-28
 
 The headline release: a full layered template compositor replaces the old
