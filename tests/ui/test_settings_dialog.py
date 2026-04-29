@@ -157,3 +157,51 @@ class TestBannerPreviewLiveCallsign:
         after = call_count[0]
 
         assert after > before, "textChanged should have triggered _refresh_banner_preview"
+
+
+# ---------------------------------------------------------------------------
+# v0.3.3 — minimum width bumped 480 → 640 so the rigctld group renders
+# without truncation at default size
+# ---------------------------------------------------------------------------
+
+
+class TestRigctldGroupFitsAtDefaultWidth:
+    """The Radio tab's rigctld group has a long title ("rigctld — Hamlib
+    Daemon"), a wrapped help paragraph, a verbose checkbox label
+    ("Auto-launch rigctld on Connect"), and a multi-button row.  At the
+    pre-v0.3.3 minimum of 480 px these all clipped and the user had to
+    drag the dialog wider before they could read the panel.
+
+    The fix is a higher floor on the dialog's minimum width.  These
+    tests pin that floor and the size-hint fit so a future refactor
+    that re-narrows the dialog or adds longer labels gets caught here.
+    """
+
+    def test_minimum_width_is_at_least_640(self, dialog: SettingsDialog) -> None:
+        assert dialog.minimumWidth() >= 640
+
+    def test_rigctld_group_title_is_the_expected_string(
+        self, dialog: SettingsDialog
+    ) -> None:
+        """Sanity: the title we sized the dialog around hasn't changed.
+        If a future commit extends or renames it, the width budget may
+        need re-evaluating."""
+        assert dialog._rigctld_group.title() == "rigctld — Hamlib Daemon"
+
+    def test_rigctld_group_size_hint_fits_minimum_width(
+        self, dialog: SettingsDialog
+    ) -> None:
+        """Qt's preferred size for the rigctld group must fit within the
+        dialog's minimum width, with a small margin reserved for the
+        QTabWidget frame and dialog padding.  If a future change adds a
+        wider widget, sizeHint().width() will exceed this budget and
+        signal that the floor needs another bump."""
+        # Conservative margin: the QTabWidget frame and dialog content
+        # margins together reserve roughly 30 px on most platforms.
+        margin = 30
+        hint_w = dialog._rigctld_group.sizeHint().width()
+        budget = dialog.minimumWidth() - margin
+        assert hint_w <= budget, (
+            f"rigctld group sizeHint width {hint_w} exceeds "
+            f"available budget {budget} (dialog min {dialog.minimumWidth()})"
+        )

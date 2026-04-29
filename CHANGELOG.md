@@ -11,6 +11,34 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.3] — 2026-04-29
+
+### Fixed
+
+- **`__version__` now reads from package metadata via
+  `importlib.metadata.version("open_sstv")`** instead of being hardcoded
+  in `src/open_sstv/__init__.py`.  `pyproject.toml` is the single source
+  of truth for the version string going forward.  Prior releases left
+  `__version__ = "0.3.0"` stale through 0.3.1 and 0.3.2, which fed
+  wrong values into the About dialog, the TX banner stamped on every
+  transmitted image, and the update checker's "newer version available"
+  comparison.  A `PackageNotFoundError` fallback (`"0.0.0-dev"`)
+  preserves the previous "always importable" behaviour for unpacked-
+  source runs without an install.
+- **JACK host-API audio devices are filtered out on Linux.**  PortAudio
+  enumerates the same physical card under both ALSA and the JACK virtual
+  routing daemon, producing confusing duplicate entries in the device
+  picker.  On Linux only, devices whose host API name contains "jack"
+  (case-insensitive) are now hidden.  All other platforms unchanged.
+- **Settings dialog default minimum width bumped from 480 to 640 px.**
+  At the prior minimum the Radio tab's rigctld group title, wrapped
+  help paragraph, and "Auto-launch rigctld on Connect" checkbox label
+  all clipped, forcing users to manually resize before they could read
+  the panel.  640 gives every form row breathing room without making
+  the dialog feel oversized on small screens.
+
+---
+
 ## [0.3.2] — 2026-04-28
 
 ### Fixed

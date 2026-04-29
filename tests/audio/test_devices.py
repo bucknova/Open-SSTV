@@ -114,3 +114,170 @@ def test_audio_device_fields_round_trip() -> None:
     assert speaker.max_input_channels == 0
     assert speaker.max_output_channels == 2
     assert speaker.default_sample_rate == 48000.0
+
+
+# ---------------------------------------------------------------------------
+# v0.3.3 — JACK host-API filter on Linux
+# ---------------------------------------------------------------------------
+#
+# JACK's PortAudio host API enumerates the same physical sound card as the
+# underlying ALSA hardware, producing confusing duplicate entries in the
+# device picker.  On Linux only, we drop everything whose host API name
+# matches "jack" (case-insensitive).  Other platforms are unaffected.
+
+_JACK_HOSTAPIS = [
+    {"name": "ALSA"},
+    {"name": "JACK Audio Connection Kit"},
+]
+_JACK_DEVICES = [
+    # Two ALSA devices.
+    {
+        "index": 0,
+        "name": "USB Codec (ALSA)",
+        "hostapi": 0,
+        "max_input_channels": 2,
+        "max_output_channels": 2,
+        "default_samplerate": 48000.0,
+    },
+    {
+        "index": 1,
+        "name": "Built-in Audio (ALSA)",
+        "hostapi": 0,
+        "max_input_channels": 2,
+        "max_output_channels": 2,
+        "default_samplerate": 48000.0,
+    },
+    # Two JACK devices that mirror the same hardware.
+    {
+        "index": 2,
+        "name": "system",
+        "hostapi": 1,
+        "max_input_channels": 2,
+        "max_output_channels": 2,
+        "default_samplerate": 48000.0,
+    },
+    {
+        "index": 3,
+        "name": "alsa_pcm",
+        "hostapi": 1,
+        "max_input_channels": 2,
+        "max_output_channels": 2,
+        "default_samplerate": 48000.0,
+    },
+]
+
+
+def _patch_sd_with_jack(default_device=(0, 1)):
+    return patch.multiple(
+        "open_sstv.audio.devices.sd",
+        query_devices=lambda: list(_JACK_DEVICES),
+        query_hostapis=lambda: list(_JACK_HOSTAPIS),
+        default=type("D", (), {"device": default_device})(),
+    )
+
+
+def _patch_platform(system: str):
+    return patch("open_sstv.audio.devices.platform.system", return_value=system)
+
+
+class TestJackFilterOnLinux:
+    """JACK devices must be hidden from the picker on Linux so users
+    don't see the same hardware twice."""
+
+    def test_inputs_drop_jack_devices(self) -> None:
+        with _patch_sd_with_jack(), _patch_platform("Linux"):
+            inputs = devices.list_input_devices()
+        names = [d.name for d in inputs]
+        assert "system" not in names
+        assert "alsa_pcm" not in names
+        # ALSA-side devices are kept.
+        assert "USB Codec (ALSA)" in names
+        assert "Built-in Audio (ALSA)" in names
+
+    def test_outputs_drop_jack_devices(self) -> None:
+        with _patch_sd_with_jack(), _patch_platform("Linux"):
+            outputs = devices.list_output_devices()
+        names = [d.name for d in outputs]
+        assert "system" not in names
+        assert "alsa_pcm" not in names
+        assert "USB Codec (ALSA)" in names
+        assert "Built-in Audio (ALSA)" in names
+
+    def test_case_insensitive_jack_match(self) -> None:
+        """A host API named e.g. 'jack' or 'Jack Audio' must also be filtered."""
+        hostapis_lowercase = [{"name": "ALSA"}, {"name": "jack"}]
+        devs = [
+            {
+                "index": 0,
+                "name": "ALSA Device",
+                "hostapi": 0,
+                "max_input_channels": 2,
+                "max_output_channels": 2,
+                "default_samplerate": 48000.0,
+            },
+            {
+                "index": 1,
+                "name": "JACK Device",
+                "hostapi": 1,
+                "max_input_channels": 2,
+                "max_output_channels": 2,
+                "default_samplerate": 48000.0,
+            },
+        ]
+        with patch.multiple(
+            "open_sstv.audio.devices.sd",
+            query_devices=lambda: list(devs),
+            query_hostapis=lambda: list(hostapis_lowercase),
+            default=type("D", (), {"device": (0, 0)})(),
+        ), _patch_platform("Linux"):
+            inputs = devices.list_input_devices()
+        assert "JACK Device" not in [d.name for d in inputs]
+        assert "ALSA Device" in [d.name for d in inputs]
+
+
+class TestJackFilterIsLinuxOnly:
+    """On macOS and Windows the JACK filter is inactive even if (somehow)
+    a JACK host API is reported."""
+
+    def test_macos_does_not_filter_jack(self) -> None:
+        with _patch_sd_with_jack(), _patch_platform("Darwin"):
+            inputs = devices.list_input_devices()
+        names = [d.name for d in inputs]
+        # All four devices visible on macOS.
+        assert "system" in names
+        assert "alsa_pcm" in names
+        assert "USB Codec (ALSA)" in names
+
+    def test_windows_does_not_filter_jack(self) -> None:
+        with _patch_sd_with_jack(), _patch_platform("Windows"):
+            outputs = devices.list_output_devices()
+        names = [d.name for d in outputs]
+        assert "system" in names
+        assert "alsa_pcm" in names
+
+
+class TestJackFilterNoOpWhenNoJackHostApi:
+    """A Linux box without any JACK install should not have devices
+    silently dropped — the filter is a no-op when no host API name
+    contains 'jack'."""
+
+    def test_linux_alsa_only_passes_through(self) -> None:
+        alsa_only = [{"name": "ALSA"}]
+        devs = [
+            {
+                "index": 0,
+                "name": "USB Codec",
+                "hostapi": 0,
+                "max_input_channels": 2,
+                "max_output_channels": 2,
+                "default_samplerate": 48000.0,
+            },
+        ]
+        with patch.multiple(
+            "open_sstv.audio.devices.sd",
+            query_devices=lambda: list(devs),
+            query_hostapis=lambda: list(alsa_only),
+            default=type("D", (), {"device": (0, 0)})(),
+        ), _patch_platform("Linux"):
+            inputs = devices.list_input_devices()
+        assert [d.name for d in inputs] == ["USB Codec"]

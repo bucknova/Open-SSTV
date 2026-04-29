@@ -116,7 +116,13 @@ class SettingsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.setMinimumWidth(480)
+        # 480 px was too narrow for the Radio tab's rigctld group: the
+        # group title ("rigctld — Hamlib Daemon"), the wrapped help label,
+        # and the "Auto-launch rigctld on Connect" checkbox all clipped
+        # at the default size, forcing users to manually resize before
+        # they could read the panel.  640 gives every form row breathing
+        # room without making the dialog feel oversized on small screens.
+        self.setMinimumWidth(640)
         self._config = config
         self._rig_connected = rig_connected
         self._tx_image = tx_image  # PIL Image from the TX panel, or None

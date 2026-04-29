@@ -25,6 +25,7 @@ This is the only module that imports ``sounddevice`` from outside
 """
 from __future__ import annotations
 
+import platform
 from dataclasses import dataclass
 
 import sounddevice as sd
@@ -74,9 +75,24 @@ def _all_devices() -> list[AudioDevice]:
     Called by both the input and output listings; cheap enough that we
     don't bother caching across calls (the UI re-queries on every settings
     dialog open so users see hot-plugged devices).
+
+    On Linux, devices exposed under the JACK host API are filtered out:
+    JACK is a virtual-routing daemon, and its devices show up in the
+    picker as confusing duplicates of the underlying ALSA hardware.
+    Users running a JACK setup who *want* to target it directly are an
+    advanced minority and can drop the filter via a future Settings
+    toggle if needed.
     """
     host_apis = sd.query_hostapis()
     host_api_names = [str(h["name"]) for h in host_apis]
+    # Index → True iff the host API name contains "jack" (case-insensitive).
+    # Linux-only: JACK doesn't ship as a PortAudio host API on macOS or
+    # Windows in any standard install, so the check is a no-op elsewhere
+    # but we still gate on platform to make the intent explicit.
+    on_linux = platform.system() == "Linux"
+    is_jack_hostapi = [
+        on_linux and "jack" in name.lower() for name in host_api_names
+    ]
     devices = sd.query_devices()
     out: list[AudioDevice] = []
     for pa_index, raw in enumerate(devices):
@@ -86,6 +102,9 @@ def _all_devices() -> list[AudioDevice]:
         # Using len(out) would be wrong when earlier devices were skipped.
         if "index" not in raw:
             raw = {**raw, "index": pa_index}
+        hostapi_idx = int(raw["hostapi"])
+        if 0 <= hostapi_idx < len(is_jack_hostapi) and is_jack_hostapi[hostapi_idx]:
+            continue
         out.append(_build(dict(raw), host_api_names))
     return out
 
