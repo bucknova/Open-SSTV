@@ -517,14 +517,17 @@ class TciRig:
             except (ValueError, IndexError):
                 pass
         elif lower.startswith("trx:"):
-            # trx:0,false  or  trx:0,true,tci  — field [1] is the bool,
-            # field [2] (optional) is the keying source; ignore it.
+            # trx:<trx>,<bool>[,<source>]  e.g. trx:0,false  or  trx:0,true,tci
+            # Only accept TRX 0 events; a hypothetical second receiver sending
+            # trx:1,true; would otherwise be misread as PTT on our TRX.
             try:
                 parts = msg.split(",")
-                val = parts[1].strip().lower() if len(parts) >= 2 else ""
-                self._last_ptt = val == "true"
-                self._ptt_received = True
-                self._ptt_event.set()
+                trx_field = parts[0].split(":")[-1].strip()
+                if trx_field == "0" and len(parts) >= 2:
+                    val = parts[1].strip().lower()
+                    self._last_ptt = val == "true"
+                    self._ptt_received = True
+                    self._ptt_event.set()
             except (ValueError, IndexError):
                 pass
         elif lower.startswith("rx_smeter:"):

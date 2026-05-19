@@ -109,6 +109,15 @@ if TYPE_CHECKING:
 #: 500 ms gives the receiver AGC time to settle before the CW tone starts.
 _CW_GAP_S: float = 0.500
 
+#: Silent tail appended to the TCI TX buffer so the server's audio pipeline
+#: drains completely before _play_via_tci returns and PTT drops.  AetherSDR's
+#: measured pipeline delay is ~700–800 ms; 1.5 s gives comfortable headroom.
+_TCI_PIPELINE_TAIL_S: float = 1.5
+
+#: How many chunks to send between periodic rig-health checks in _play_via_tci.
+#: At 100 ms/chunk this is a ~1 s poll interval, matching the rig poll timer.
+_TCI_HEALTH_CHECK_INTERVAL: int = 10
+
 #: Default delay between keying PTT and starting audio playback. Most
 #: rigs need ~50–200 ms for the relay to settle and the SSB filter to
 #: open. 200 ms is on the safe side; advanced users can override per-rig
@@ -377,6 +386,10 @@ class TxWorker(QObject):
         # PortAudio.  Accepts any object with a send_tx_audio_chunk() method
         # (duck-typed so workers.py doesn't import from radio.tci).
         self._tci_connection: object | None = None
+        # Sender-side waterfall gate: when False, tx_audio_chunk is not
+        # emitted, avoiding a cross-thread signal per chunk (~10 Hz) during
+        # a multi-minute TX when the waterfall window is hidden.
+        self._waterfall_active: bool = False
 
     def set_tci_connection(self, conn: object | None) -> None:
         """Set (or clear) the TCI connection used for TX audio output.
@@ -390,6 +403,15 @@ class TxWorker(QObject):
         the PortAudio output path.
         """
         self._tci_connection = conn
+
+    def set_waterfall_active(self, active: bool) -> None:
+        """Enable or disable tx_audio_chunk emission for the waterfall.
+
+        Called by MainWindow when the waterfall window is shown or hidden.
+        Skipping the emit when the window is invisible avoids ~10 cross-thread
+        signals per second through a multi-minute SSTV transmission.
+        """
+        self._waterfall_active = bool(active)
 
     def set_output_device(self, device: AudioDevice | int | None) -> None:
         """Change the output device at runtime (e.g. after settings save)."""
@@ -789,7 +811,6 @@ class TxWorker(QObject):
         # dah into a dit (Y → C, etc.).
         # Silence carries no RF so it does not matter if the tail itself gets
         # cut when PTT drops — only the content before it needs to play fully.
-        _TCI_PIPELINE_TAIL_S = 1.5
         tail_n = int(_TCI_PIPELINE_TAIL_S * self._sample_rate)
         samples_f32 = np.concatenate(
             [samples_f32, np.zeros(tail_n, dtype=np.float32)]
@@ -797,7 +818,6 @@ class TxWorker(QObject):
         content_total = len(samples) # original sample count for progress reporting
         total = len(samples_f32)
 
-        _CHECK_INTERVAL = 10
         _check_counter = 0
         written = 0
 
@@ -815,7 +835,7 @@ class TxWorker(QObject):
 
             if periodic_check is not None:
                 _check_counter += 1
-                if _check_counter % _CHECK_INTERVAL == 0:
+                if _check_counter % _TCI_HEALTH_CHECK_INTERVAL == 0:
                     try:
                         periodic_check()
                     except Exception:  # noqa: BLE001
@@ -841,7 +861,8 @@ class TxWorker(QObject):
                 self.error.emit(f"TCI TX audio error: {exc}")
                 return False
 
-            self.tx_audio_chunk.emit(chunk_f32)
+            if self._waterfall_active:
+                self.tx_audio_chunk.emit(chunk_f32)
             written = end
             self.transmission_progress.emit(
                 min(written, content_total), content_total
@@ -961,7 +982,10 @@ class TxWorker(QObject):
                         (lambda: self._output_gain) if live_gain else None
                     ),
                     periodic_check=_rig_health_check,
-                    chunk_callback=lambda chunk: self.tx_audio_chunk.emit(chunk),
+                    chunk_callback=(
+                        (lambda chunk: self.tx_audio_chunk.emit(chunk))
+                        if self._waterfall_active else None
+                    ),
                 )
                 playback_succeeded = not self._stop_event.is_set()
         except sd.PortAudioError as exc:

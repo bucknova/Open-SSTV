@@ -1958,7 +1958,6 @@ class MainWindow(QMainWindow):
         # Wire the new worker.
         new = new_worker  # type: ignore[assignment]
         new.moveToThread(self._audio_thread)
-        self._audio_thread.finished.connect(new.deleteLater)
         new.chunk_ready.connect(self._rx_worker.feed_chunk)
         new.stopped.connect(self._rx_worker.flush)
         new.started.connect(self._on_rx_started)
@@ -2008,6 +2007,10 @@ class MainWindow(QMainWindow):
             if self._waterfall_window is not None:
                 self._waterfall_window.hide()
         self._set_waterfall_config(checked)
+        # Sender-side gate: skip cross-thread tx_audio_chunk signals when
+        # the window is hidden so ~10 Hz signal overhead doesn't accumulate
+        # across a multi-minute SSTV transmission.
+        self._tx_worker.set_waterfall_active(checked)
 
     def _set_waterfall_config(self, visible: bool) -> None:
         """Persist the waterfall visibility into the in-memory config."""
