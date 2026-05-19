@@ -247,7 +247,7 @@ class WaterfallWidget(QWidget):
         pixmap = QPixmap.fromImage(img).scaled(
             w, h,
             Qt.AspectRatioMode.IgnoreAspectRatio,
-            Qt.TransformationMode.FastTransformation,
+            Qt.TransformationMode.SmoothTransformation,
         )
         painter.drawPixmap(0, 0, pixmap)
 
