@@ -869,7 +869,7 @@ class TestUnkeyResilience:
 
         worker.transmit(gradient_image, Mode.ROBOT_36)
 
-        assert log["error"] and "Audio device disconnected" in log["error"][0]
+        assert log["error"] and "Audio output device error" in log["error"][0]
         assert log["aborted"] == [True], "GUI must unfreeze after playback error"
         assert log["complete"] == []
 
