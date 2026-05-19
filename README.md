@@ -6,7 +6,7 @@ An open-source, cross-platform SSTV (Slow Scan Television) transceiver for amate
 radio. Receives and decodes SSTV images live off your radio, and encodes and
 transmits images back, with optional Hamlib or direct serial PTT and frequency control.
 
-**Status: Beta (v0.3.4) — ready for user testing and feedback.** TX and RX paths work
+**Status: Beta (v0.3.5) — ready for user testing and feedback.** TX and RX paths work
 end-to-end across all 22 supported modes. Rig control via rigctld or direct serial CAT
 is functional. Weak-signal decode is usable down to roughly 0 dB SNR on Robot 36.
 
@@ -150,6 +150,12 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
   (`sstv_<mode>_YYYYMMDD_HHMMSS.png`).
 - **Save images** -- manual Save button, Ctrl+S shortcut, gallery double-click,
   or right-click → Save As…
+- **FFT waterfall (v0.3.5)** -- floating spectrogram window (View → Waterfall)
+  showing the 0–4 kHz SSTV audio band as a scrolling FFT, with distinct cool
+  and warm palettes for RX and TX traffic and dotted reference lines at the
+  1200 / 1500 / 1900 / 2300 Hz SSTV tones. Hidden (not destroyed) when
+  toggled off, so scroll history is preserved across openings; visibility
+  persists across app restarts.
 
 ### Radio Control
 - **rigctld (Hamlib)** -- TCP client for `rigctld`, supporting PTT, frequency,
@@ -159,6 +165,11 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
   - **Kenwood / Elecraft** -- standard Kenwood command protocol
   - **Yaesu CAT** -- Yaesu serial protocol
   - **PTT Only (DTR/RTS)** -- simple serial PTT via DTR or RTS line
+- **TCI (v0.3.5)** -- WebSocket-based control for the Expert Electronics
+  SunSDR2 family (ExpertSDR2 / ExpertSDR3) and the AetherSDR. A single
+  `ws://host:port` connection (default `127.0.0.1:40001`) carries both CAT
+  control and binary PCM audio, so rig control and RX/TX audio share one
+  transport with no virtual audio cables required.
 - **Configurable baud rate** -- 4800, 9600, 19200, 38400, 57600, or 115200 baud.
 - **Rig status bar** -- frequency, mode, and S-meter polled at 1 Hz when connected.
   Graceful disconnect: non-modal status bar message, auto-reconnect on next poll.
@@ -374,7 +385,7 @@ open-sstv-decode in.wav -o out.png                    # CLI decoder
 
 ## Testing focus areas
 
-If you're kicking the tyres on the v0.3.4 beta, these are the surfaces we'd most
+If you're kicking the tyres on the v0.3.5 beta, these are the surfaces we'd most
 like eyes on. File an [issue](https://github.com/bucknova/Open-SSTV/issues)
 with what you tried and what happened.
 

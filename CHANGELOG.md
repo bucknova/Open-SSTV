@@ -11,6 +11,83 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.5] — 2026-05-19
+
+### Added
+
+- **TCI (Transceiver Control Interface) rig support** — for the Expert
+  Electronics SunSDR2 family (ExpertSDR2 / ExpertSDR3) and the
+  AetherSDR.  A single WebSocket connection carries both CAT control
+  and binary PCM audio, so rig control and RX/TX audio routing flow
+  through one configurable host:port (default `127.0.0.1:40001`).
+  Configure via Settings → Radio → Connection mode → "TCI (ExpertSDR2
+  / SunSDR)".  `websocket-client` is added as a runtime dependency and
+  lazily imported, so users who never enable TCI don't pay for it at
+  startup.
+- **FFT waterfall display** — floating spectrogram window accessible
+  via View → Waterfall.  Shows the 0–4 kHz SSTV audio band as a
+  scrolling FFT spectrogram with distinct cool (RX) and warm (TX)
+  palettes, plus dotted reference lines at the 1200 / 1500 / 1900 /
+  2300 Hz SSTV tones.  Lazy-created on first open and hidden (not
+  destroyed) on uncheck so scroll history is preserved between
+  toggles; visibility persists across app restarts.
+
+### Fixed
+
+- **Windows WDM-KS output devices are excluded from the output device
+  picker.**  PortAudio's blocking output API is not implemented for
+  the Windows WDM-KS host (e.g. DAX Audio virtual cables), so a saved
+  WDM-KS output caused every transmission to abort immediately with
+  PaErrorCode -9999.  WDM-KS input devices are unaffected
+  (callback-based) and continue to appear normally.  The filter is a
+  no-op on Linux and macOS.
+- **"Transmission aborted" no longer overwrites the real TX error
+  message.**  `_on_tx_error` and `_on_tx_aborted` are queued Qt
+  signals that fire back-to-back on a fatal playback error; the abort
+  handler was unconditionally wiping the explanatory text from the
+  status bar.  A pending-error flag now keeps the actual error
+  visible for its full 8 s timeout.
+- **TCI audio hot-swap now stops the old worker cleanly and restarts
+  capture on the new one.**  The previous implementation tore down
+  the old `InputStreamWorker` without invoking its `stop()` slot, so
+  `audio_stop:0;` never reached the TCI server, and any RX capture
+  that was active when the user connected to (or disconnected from)
+  TCI silently died until the user restarted it manually.  Both are
+  now handled inside `_swap_audio_worker`: `stop()` is dispatched via
+  a blocking queued invocation so the audio thread actually runs it
+  before teardown, and capture is re-emitted on the new worker if it
+  was active before the swap.
+- **TCI VFO B updates no longer clobber the operating frequency
+  cache.**  `TciRig._on_text` accepted every `vfo:` event into
+  `_last_freq`, so the post-`READY:` state burst — which sends both
+  VFO A and VFO B — flipped the displayed frequency between the two.
+  Filtered to VFO index `0` (VFO A) only.
+- **TCI reconnect now starts cold.**  `_freq_received` /
+  `_mode_received` / `_ptt_received` and their `threading.Event`
+  partners are reset in `TciRig.close()` so a reconnect re-populates
+  the cache from the new `READY:` state burst rather than serving
+  stale values from the previous session.
+
+### Changed
+
+- **Default window size bumped to 1280×720, splitter biased toward the
+  TX panel.**  The previous 1100×640 with a 1:1 splitter put the TX
+  panel at ~550 px, where the template gallery's flow layout could
+  only fit 3 cards per row with ~58 px of trailing whitespace.  The
+  new defaults give the TX panel ~640 px out of the box (`setSizes([640,
+  540])`), enough for a clean 4-card row at the 140 px max thumbnail
+  width.  Stretch factors stay 1:1 so the gallery still reflows when
+  the user resizes.
+- **`sounddevice` pin narrowed to Windows only.**  The `<0.5` cap
+  exists to work around a stack overrun in `Pa_Initialize` that only
+  affects Windows; on Linux and macOS the 0.5.x release is fine.  The
+  dependency now reads `sounddevice>=0.4.6,<1` for all platforms with
+  an additional `sounddevice<0.5; sys_platform=='win32'` constraint,
+  so macOS and Linux users on 0.5+ no longer get a forced downgrade
+  when reinstalling.
+
+---
+
 ## [0.3.4] — 2026-04-29
 
 ### Added
