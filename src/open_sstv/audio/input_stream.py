@@ -354,8 +354,15 @@ class InputStreamWorker(QObject):
         # the queue.
         chunk = indata[:, 0].copy()
 
+        # Guard against teardown race: PortAudio's RT thread can fire
+        # this callback after Python's GC has started clearing the
+        # object's __dict__ (e.g. during app close or hot-swap). Using
+        # getattr avoids an AttributeError if _queue is already gone.
+        q = getattr(self, "_queue", None)
+        if q is None:
+            return
         try:
-            self._queue.put_nowait(chunk)
+            q.put_nowait(chunk)
         except queue.Full:
             # Consumer is stalled — drop the newest chunk rather than
             # block the RT thread. The drop counter is surfaced via

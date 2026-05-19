@@ -115,8 +115,20 @@ def list_input_devices() -> list[AudioDevice]:
 
 
 def list_output_devices() -> list[AudioDevice]:
-    """All devices with at least one output channel, in PortAudio order."""
-    return [d for d in _all_devices() if d.is_output]
+    """All output devices that support PortAudio's blocking write API.
+
+    Windows WDM-KS devices are excluded: PortAudio's blocking OutputStream
+    is not implemented for WDM-KS (returns PaErrorCode -9999 "Blocking API
+    not supported yet").  WDM-KS input devices work fine (callback-based)
+    and are not excluded from ``list_input_devices``.  On non-Windows
+    systems WDM-KS never appears so the filter is a no-op.
+    """
+    on_windows = platform.system() == "Windows"
+    return [
+        d for d in _all_devices()
+        if d.is_output
+        and not (on_windows and "wdm-ks" in d.host_api.lower())
+    ]
 
 
 def default_input_device() -> AudioDevice | None:

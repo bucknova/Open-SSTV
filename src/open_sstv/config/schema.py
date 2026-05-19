@@ -53,6 +53,8 @@ class AppConfig:
     rig_connection_mode: str = RigConnectionMode.MANUAL.value
     rigctld_host: str = "127.0.0.1"
     rigctld_port: int = 4532
+    tci_host: str = "127.0.0.1"
+    tci_port: int = 40001
     ptt_delay_s: float = 0.2
     rig_model_id: int = 0
     rig_serial_port: str = ""
@@ -109,6 +111,9 @@ class AppConfig:
     # Set to False to fall back to the legacy batch decoder.
     # Old config key "experimental_incremental_decode" is migrated in store.py.
     incremental_decode: bool = True
+
+    # --- UI ---
+    show_waterfall: bool = False
 
     # --- Update checker ---
     # v0.2.16: when True, a background HTTPS GET to the GitHub releases API

@@ -40,6 +40,7 @@ def play_blocking(
     stop_event: threading.Event | None = None,
     gain_provider: Callable[[], float] | None = None,
     periodic_check: Callable[[], None] | None = None,
+    chunk_callback: Callable[[np.ndarray], None] | None = None,
 ) -> None:
     """Play a buffer of samples and block until playback finishes.
 
@@ -79,6 +80,11 @@ def play_blocking(
         write loop exits immediately.  The callable is responsible for
         emitting any user-visible error signal before raising.  Runs on
         the calling thread.
+    chunk_callback:
+        Optional callable invoked as ``chunk_callback(chunk)`` with each
+        audio chunk (after gain scaling, before writing to the device).
+        Used by TxWorker to feed the waterfall display.  Runs on the
+        calling thread — must be fast and non-blocking.
 
     Raises
     ------
@@ -102,6 +108,7 @@ def play_blocking(
         and stop_event is None
         and gain_provider is None
         and periodic_check is None
+        and chunk_callback is None
     ):
         # Fast path: no progress reporting, no stop, no live gain, no
         # health check needed.
@@ -164,6 +171,8 @@ def play_blocking(
                             -1.0,
                             1.0,
                         ).astype(chunk.dtype)
+            if chunk_callback is not None:
+                chunk_callback(chunk)
             stream.write(chunk.reshape(-1, 1))
             written = end
             if progress_callback is not None:

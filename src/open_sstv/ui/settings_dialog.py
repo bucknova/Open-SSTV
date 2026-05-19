@@ -240,7 +240,7 @@ class SettingsDialog(QDialog):
         self._input_combo = QComboBox()
         self._input_combo.addItem("System default", None)
         self._input_devices: list[AudioDevice] = []
-        for dev in list_input_devices():
+        for dev in sorted(list_input_devices(), key=lambda d: d.name.lower()):
             label = f"{dev.name} ({dev.host_api})"
             self._input_combo.addItem(label, dev.name)
             self._input_devices.append(dev)
@@ -252,7 +252,7 @@ class SettingsDialog(QDialog):
         self._output_combo = QComboBox()
         self._output_combo.addItem("System default", None)
         self._output_devices: list[AudioDevice] = []
-        for dev in list_output_devices():
+        for dev in sorted(list_output_devices(), key=lambda d: d.name.lower()):
             label = f"{dev.name} ({dev.host_api})"
             self._output_combo.addItem(label, dev.name)
             self._output_devices.append(dev)
@@ -411,6 +411,9 @@ class SettingsDialog(QDialog):
         )
         self._conn_mode_combo.addItem(
             "rigctld (Hamlib daemon)", RigConnectionMode.RIGCTLD.value,
+        )
+        self._conn_mode_combo.addItem(
+            "TCI (ExpertSDR2 / SunSDR)", RigConnectionMode.TCI.value,
         )
         idx = self._conn_mode_combo.findData(self._config.rig_connection_mode)
         if idx >= 0:
@@ -588,6 +591,27 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(self._rigctld_group)
 
+        # === TCI group ===
+        self._tci_group = QGroupBox("TCI — Transceiver Control Interface")
+        tci_form = QFormLayout(self._tci_group)
+
+        tci_help = QLabel(
+            "Connect to an ExpertSDR2 / SunSDR2 TCI server for both CAT control "
+            "and RX audio over a single WebSocket connection."
+        )
+        tci_help.setWordWrap(True)
+        tci_form.addRow(tci_help)
+
+        self._tci_host = QLineEdit(self._config.tci_host)
+        tci_form.addRow("TCI host:", self._tci_host)
+
+        self._tci_port = QSpinBox()
+        self._tci_port.setRange(1, 65535)
+        self._tci_port.setValue(self._config.tci_port)
+        tci_form.addRow("TCI port:", self._tci_port)
+
+        layout.addWidget(self._tci_group)
+
         # --- PTT (always visible) ---
         # v0.3.4: Callsign moved to the General tab.  This group is now
         # PTT-only; it stays on the Radio tab because PTT delay is a
@@ -661,10 +685,11 @@ class SettingsDialog(QDialog):
         return tab
 
     def _on_conn_mode_changed(self) -> None:
-        """Show/hide the serial and rigctld groups based on the selected mode."""
+        """Show/hide the serial, rigctld, and TCI groups based on the selected mode."""
         mode = self._conn_mode_combo.currentData()
         self._serial_group.setVisible(mode == RigConnectionMode.SERIAL)
         self._rigctld_group.setVisible(mode == RigConnectionMode.RIGCTLD)
+        self._tci_group.setVisible(mode == RigConnectionMode.TCI)
         if mode == RigConnectionMode.SERIAL:
             self._on_serial_protocol_changed()
 
@@ -1378,6 +1403,9 @@ class SettingsDialog(QDialog):
             rig_connection_mode=conn_mode,
             rigctld_host=self._rigctld_host.text().strip(),
             rigctld_port=self._rigctld_port.value(),
+            tci_host=self._tci_host.text().strip(),
+            tci_port=self._tci_port.value(),
+            show_waterfall=self._config.show_waterfall,
             ptt_delay_s=self._ptt_delay.value(),
             rig_model_id=self._custom_model_id.value(),
             rig_serial_port=serial_port,

@@ -96,6 +96,7 @@ from open_sstv.audio.input_stream import (
     DEFAULT_BLOCKSIZE,
     InputStreamWorker,
 )
+from open_sstv.audio.tci_input_stream import TciInputStreamWorker
 from open_sstv.config.schema import AppConfig
 from open_sstv.config.store import load_config, save_config
 from open_sstv.config.templates import load_templates
@@ -111,6 +112,7 @@ from open_sstv.ui.rx_panel import RxPanel
 from open_sstv.ui.settings_dialog import SettingsDialog
 from open_sstv.ui.tx_panel import TxPanel
 from open_sstv.ui.update_checker import UpdateCheckerWorker
+from open_sstv.ui.waterfall_widget import WaterfallWindow
 from open_sstv.ui.workers import RxWorker, TxWorker
 
 if TYPE_CHECKING:
@@ -193,9 +195,17 @@ class _RigConnectWorker(QObject):
                 return
             self.succeeded.emit(self._rig)
         except RigError as exc:
+            try:
+                self._rig.close()
+            except Exception:  # noqa: BLE001
+                pass
             if not self._cancel.is_set():
                 self.failed.emit(str(exc))
         except Exception as exc:  # noqa: BLE001
+            try:
+                self._rig.close()
+            except Exception:  # noqa: BLE001
+                pass
             if not self._cancel.is_set():
                 self.failed.emit(str(exc))
 
@@ -334,6 +344,7 @@ class MainWindow(QMainWindow):
                 )
         self._input_device = input_device
         self._rigctld_proc: subprocess.Popen | None = None
+        self._waterfall_window: WaterfallWindow | None = None
         self._capture_running: bool = False
         self._last_abort_was_watchdog: bool = False
         #: Set by _on_audio_device_lost so _on_rx_stopped can re-show the
@@ -353,6 +364,9 @@ class MainWindow(QMainWindow):
         #: transmission, see ``_compute_playback_watchdog_s``).
         self._last_watchdog_duration_s: float = 0.0
         self._last_tx_was_test_tone: bool = False
+        #: Set by _on_tx_error so _on_tx_aborted doesn't wipe the error
+        #: message with "Transmission aborted." before the user can read it.
+        self._tx_error_pending: bool = False
         #: v0.2.8: latest TX image captured (after banner compositing, before
         #: encoding) so it can be auto-saved on ``transmission_complete``
         #: when ``autosave_tx`` is enabled.  Cleared after each save so a
@@ -578,6 +592,17 @@ class MainWindow(QMainWindow):
         self._rx_worker.error.connect(self._on_rx_error)
         self._rx_worker.error_occurred.connect(self._handle_worker_error)
 
+        # --- Wire waterfall signals ---
+        # Both workers emit audio chunks that the waterfall window consumes.
+        # The window is created lazily on first show; we connect the signals
+        # unconditionally so they can be routed when the window exists.
+        self._rx_worker.waterfall_chunk.connect(self._on_rx_waterfall_chunk)
+        self._tx_worker.tx_audio_chunk.connect(self._on_tx_waterfall_chunk)
+
+        # Show waterfall on startup if it was open when the user last quit.
+        if self._config.show_waterfall:
+            QTimer.singleShot(0, lambda: self._on_toggle_waterfall(True))
+
         # --- Rig poll: lightweight 1 Hz timer on GUI thread dispatches to
         #     _RigPollWorker on its own thread so blocking serial/socket calls
         #     never stall the event loop. ---
@@ -665,6 +690,14 @@ class MainWindow(QMainWindow):
         quit_action = QAction("&Quit", self)
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
+
+        view_menu = mb.addMenu("&View")
+        waterfall_action = QAction("&Waterfall", self)
+        waterfall_action.setCheckable(True)
+        waterfall_action.setChecked(self._config.show_waterfall)
+        waterfall_action.triggered.connect(self._on_toggle_waterfall)
+        view_menu.addAction(waterfall_action)
+        self._waterfall_action = waterfall_action
 
         help_menu = mb.addMenu("&Help")
         about_action = QAction("&About Open-SSTV", self)
@@ -1068,7 +1101,13 @@ class MainWindow(QMainWindow):
         # not be auto-saved on the next successful TX.
         self._last_tx_image = None
         self._last_tx_mode = None
-        if self._last_abort_was_watchdog:
+        if self._tx_error_pending:
+            # _on_tx_error already set the status and status bar message;
+            # don't overwrite it — the error text is more useful than
+            # "Transmission aborted." and the status bar already has an
+            # 8-second timeout on the error string.
+            self._tx_error_pending = False
+        elif self._last_abort_was_watchdog:
             self._last_abort_was_watchdog = False
             msg = (
                 f"TX watchdog: exceeded {self._last_watchdog_duration_s:.0f} s "
@@ -1095,7 +1134,8 @@ class MainWindow(QMainWindow):
         self._last_tx_mode = None
         self._tx_panel.set_transmitting(False)
         self._tx_panel.set_status(f"Error: {message}")
-        self.statusBar().showMessage(message, 5000)
+        self.statusBar().showMessage(message, 8000)
+        self._tx_error_pending = True
         self._unlock_rig_controls()
         self._schedule_rx_resume()
 
@@ -1403,6 +1443,8 @@ class MainWindow(QMainWindow):
 
         if mode == RigConnectionMode.SERIAL:
             self._connect_serial()
+        elif mode == RigConnectionMode.TCI:
+            self._connect_tci()
         else:
             self._connect_rigctld()
 
@@ -1708,6 +1750,132 @@ class MainWindow(QMainWindow):
 
         self._start_rig_connect_thread(client, _on_success, _on_error)
 
+    def _connect_tci(self) -> None:
+        """Create a TciRig + TciInputStreamWorker and start audio + CAT."""
+        from open_sstv.radio.tci import TciRig
+
+        host = self._config.tci_host
+        port = self._config.tci_port
+        rig = TciRig(host, port)
+
+        self._radio_panel.set_connecting()
+        self.statusBar().showMessage(f"Connecting to TCI server at {host}:{port}…")
+
+        def _on_success(connected_rig: object) -> None:
+            if not self.isVisible():
+                try:
+                    connected_rig.close()  # type: ignore[union-attr]
+                except Exception:  # noqa: BLE001
+                    pass
+                return
+            self._rig = connected_rig  # type: ignore[assignment]
+            self._tx_worker.set_rig(connected_rig)  # type: ignore[arg-type]
+            self._tx_worker.set_tci_connection(connected_rig.connection)  # type: ignore[union-attr]
+            self._rig_poll_worker.set_rig(connected_rig)  # type: ignore[arg-type]
+            # Hot-swap the audio worker to the TCI input stream.
+            tci_audio = TciInputStreamWorker(connected_rig)
+            self._swap_audio_worker(tci_audio)
+            self._radio_panel.set_connected(True)
+            self._rig_poll_timer.start()
+            self.statusBar().showMessage(
+                f"Connected to TCI at {host}:{port}", 3000
+            )
+
+        def _on_error(message: str) -> None:
+            if not self.isVisible():
+                return
+            self._radio_panel.set_connection_error()
+            self.statusBar().showMessage(
+                f"TCI connection failed at {host}:{port} — {message}", 5000
+            )
+
+        self._start_rig_connect_thread(rig, _on_success, _on_error)
+
+    def _swap_audio_worker(self, new_worker: object) -> None:
+        """Hot-swap the audio input worker on the audio thread.
+
+        Stops the current audio worker, disconnects its signals, moves
+        the new worker to the audio thread, wires the same signal set,
+        and replaces ``self._audio_worker``.  The new worker's ``start``
+        is not called here — the caller decides when to begin capture.
+        """
+        old = self._audio_worker
+
+        # Disconnect old worker from consumers.
+        for signal, slot in (
+            (old.chunk_ready, self._rx_worker.feed_chunk),
+            (old.stopped, self._rx_worker.flush),
+            (old.started, self._on_rx_started),
+            (old.stopped, self._on_rx_stopped),
+            (old.error, self._on_rx_audio_error),
+            (old.stream_error, self._on_audio_device_lost),
+        ):
+            try:
+                signal.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+
+        # Wire the new worker.
+        new = new_worker  # type: ignore[assignment]
+        new.moveToThread(self._audio_thread)
+        self._audio_thread.finished.connect(new.deleteLater)
+        new.chunk_ready.connect(self._rx_worker.feed_chunk)
+        new.stopped.connect(self._rx_worker.flush)
+        new.started.connect(self._on_rx_started)
+        new.stopped.connect(self._on_rx_stopped)
+        new.error.connect(self._on_rx_audio_error)
+        new.stream_error.connect(self._on_audio_device_lost)
+
+        # Reconnect the dispatch signals to the new worker.
+        self._request_start_capture.disconnect()
+        self._request_stop_capture.disconnect()
+        self._request_start_capture.connect(new.start)
+        self._request_stop_capture.connect(new.stop)
+
+        self._audio_worker = new  # type: ignore[assignment]
+
+        # Schedule old worker deletion on the audio thread.
+        try:
+            old.deleteLater()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # === Waterfall ===
+
+    @Slot(bool)
+    def _on_toggle_waterfall(self, checked: bool) -> None:
+        """Show or hide the floating waterfall window."""
+        if checked:
+            if self._waterfall_window is None:
+                self._waterfall_window = WaterfallWindow(self)
+                self._waterfall_window.set_sample_rate(self._config.sample_rate)
+                self._waterfall_window.closed.connect(
+                    lambda: self._waterfall_action.setChecked(False)
+                )
+                self._waterfall_window.closed.connect(
+                    lambda: self._set_waterfall_config(False)
+                )
+            self._waterfall_window.show()
+            self._waterfall_window.raise_()
+        else:
+            if self._waterfall_window is not None:
+                self._waterfall_window.hide()
+        self._set_waterfall_config(checked)
+
+    def _set_waterfall_config(self, visible: bool) -> None:
+        """Persist the waterfall visibility into the in-memory config."""
+        self._config.show_waterfall = visible
+
+    @Slot(object)
+    def _on_rx_waterfall_chunk(self, chunk: object) -> None:
+        if self._waterfall_window is not None and self._waterfall_window.isVisible():
+            self._waterfall_window.add_rx_column(chunk)
+
+    @Slot(object)
+    def _on_tx_waterfall_chunk(self, chunk: object) -> None:
+        if self._waterfall_window is not None and self._waterfall_window.isVisible():
+            self._waterfall_window.add_tx_column(chunk)
+
     @Slot()
     def _on_rig_disconnect(self) -> None:
         """Stop polling and tear down the rig link."""
@@ -1718,8 +1886,12 @@ class MainWindow(QMainWindow):
             pass
         self._rig = ManualRig()
         self._tx_worker.set_rig(self._rig)
+        self._tx_worker.set_tci_connection(None)
         self._rig_poll_worker.set_rig(self._rig)
         self._radio_panel.set_connected(False)
+        # If we were using TCI, swap the audio worker back to PortAudio.
+        if isinstance(self._audio_worker, TciInputStreamWorker):
+            self._swap_audio_worker(InputStreamWorker())
         # Stop rigctld if we launched it
         self._kill_rigctld()
         self.statusBar().showMessage("Rig disconnected.", 3000)
@@ -1738,8 +1910,12 @@ class MainWindow(QMainWindow):
         old_rig = self._rig
         self._rig = ManualRig()
         self._tx_worker.set_rig(self._rig)
+        self._tx_worker.set_tci_connection(None)
         self._rig_poll_worker.set_rig(self._rig)
         self._radio_panel.set_connected(False)
+        # If we were using TCI, swap the audio worker back to PortAudio.
+        if isinstance(self._audio_worker, TciInputStreamWorker):
+            self._swap_audio_worker(InputStreamWorker())
         # Abort any in-flight TX immediately so audio doesn't continue
         # playing through Mac speakers after the USB device is gone.
         self._tx_worker.request_stop()

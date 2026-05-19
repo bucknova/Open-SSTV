@@ -339,6 +339,9 @@ class TxWorker(QObject):
     #: mid-transmission).  Delivered to the GUI thread so ``_on_radio_disconnected``
     #: can update the radio panel immediately, without waiting for TX to finish.
     rig_disconnected = Signal()
+    #: Emitted with each audio chunk during playback so the waterfall can
+    #: show the TX signal.  Chunk is int16 PCM (post-gain, pre-device-write).
+    tx_audio_chunk = Signal(object)
 
     def __init__(
         self,
@@ -370,6 +373,23 @@ class TxWorker(QObject):
         self._v3_template_active: bool = False
         self._stop_event = threading.Event()
         self._watchdog_triggered: bool = False
+        # When set, TX audio is routed via this TCI connection instead of
+        # PortAudio.  Accepts any object with a send_tx_audio_chunk() method
+        # (duck-typed so workers.py doesn't import from radio.tci).
+        self._tci_connection: object | None = None
+
+    def set_tci_connection(self, conn: object | None) -> None:
+        """Set (or clear) the TCI connection used for TX audio output.
+
+        When *conn* is not ``None``, ``transmit()`` sends audio via the TCI
+        WebSocket instead of PortAudio.  *conn* must expose a
+        ``send_tx_audio_chunk(samples_f32: np.ndarray)`` method matching
+        ``TciConnection.send_tx_audio_chunk``.
+
+        Call with ``None`` when the TCI rig is disconnected to revert to
+        the PortAudio output path.
+        """
+        self._tci_connection = conn
 
     def set_output_device(self, device: AudioDevice | int | None) -> None:
         """Change the output device at runtime (e.g. after settings save)."""
@@ -621,10 +641,12 @@ class TxWorker(QObject):
         # encoding for any other reason), don't begin playback.
         if self._stop_event.is_set():
             if self._watchdog_triggered:
+                _log.warning("TX encode watchdog fired — aborting")
                 self.transmission_aborted.emit()
             else:
                 # User pressed Stop during encode (very rare since encode
                 # is fast) — also surface as an abort.
+                _log.debug("TX stop requested during encode — aborting")
                 self.transmission_aborted.emit()
             return
 
@@ -650,12 +672,14 @@ class TxWorker(QObject):
         if result is None:
             return  # PTT failed; error already emitted
         if self._stop_event.is_set():
+            _log.debug("TX stopped by request — aborting")
             self.transmission_aborted.emit()
         elif result:
             self.transmission_complete.emit()
         else:
             # Playback error — error signal already emitted; still signal
             # the GUI that TX ended so it can reset to idle.
+            _log.debug("TX _run_tx returned False (playback did not complete)")
             self.transmission_aborted.emit()
 
     @Slot()
@@ -716,6 +740,123 @@ class TxWorker(QObject):
             self.transmission_complete.emit()
         else:
             self.transmission_aborted.emit()
+
+    def _play_via_tci(
+        self,
+        samples: NDArray,
+        *,
+        live_gain: bool = False,
+        periodic_check: Callable[[], None] | None = None,
+    ) -> bool:
+        """Stream *samples* to the TCI server as TX audio binary frames.
+
+        Mirrors the PortAudio chunked-write loop in ``play_blocking``:
+        100 ms chunks, real-time pacing via ``time.sleep``, stop-event
+        check at each chunk boundary, optional live-gain scaling, optional
+        periodic health check, and waterfall chunk emission.
+
+        Returns ``True`` if all samples were sent without interruption,
+        ``False`` if the stop event was set or an error occurred.
+        """
+        conn = self._tci_connection  # snapshot — may be cleared by GUI thread
+        if conn is None:
+            self.error.emit("TCI connection unavailable for TX audio.")
+            return False
+
+        # Ensure audio is enabled server-side (sets client.audioEnabled=true).
+        # Safe to send even if TCI RX audio is already running — idempotent.
+        try:
+            conn.send("audio_start:0;")  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001
+            _log.error("TCI audio_start failed: %s", exc)
+            self.error.emit(f"TCI audio_start failed: {exc}")
+            return False
+
+        chunk_size = int(self._sample_rate * 0.1)  # 100 ms per chunk
+
+        # int16 PCM → float32 [-1, 1] for TCI.  Gain is already baked in
+        # by transmit() for the normal path; live_gain re-applies here for
+        # the test-tone path (where pre-scaling is skipped).
+        samples_f32 = samples.astype(np.float32) / 32768.0
+
+        # Append a silent tail so the TCI server's audio pipeline drains
+        # completely before we return and the caller drops PTT.  Unlike
+        # PortAudio (which blocks until the DAC finishes), the send loop below
+        # returns as soon as the last chunk is *sent*, not when it is *played*.
+        # The server buffers audio and plays it with some pipeline delay D
+        # (measured at ~700–800 ms for AetherSDR).  Without the tail, PTT
+        # drops D ms before the last CW element finishes, turning the last
+        # dah into a dit (Y → C, etc.).
+        # Silence carries no RF so it does not matter if the tail itself gets
+        # cut when PTT drops — only the content before it needs to play fully.
+        _TCI_PIPELINE_TAIL_S = 1.5
+        tail_n = int(_TCI_PIPELINE_TAIL_S * self._sample_rate)
+        samples_f32 = np.concatenate(
+            [samples_f32, np.zeros(tail_n, dtype=np.float32)]
+        )
+        content_total = len(samples) # original sample count for progress reporting
+        total = len(samples_f32)
+
+        _CHECK_INTERVAL = 10
+        _check_counter = 0
+        written = 0
+
+        # Absolute-deadline pacing: track when each batch of samples should
+        # have finished playing and sleep only for what's left.  A plain
+        # time.sleep(chunk_duration) accumulates Windows timer granularity
+        # (~15 ms per tick) as an unbounded lag; the absolute approach
+        # self-corrects each overshoot so the TCI server's buffer never
+        # drains mid-element — which would corrupt CW timing.
+        tx_start = time.perf_counter()
+
+        while written < total:
+            if self._stop_event.is_set():
+                break
+
+            if periodic_check is not None:
+                _check_counter += 1
+                if _check_counter % _CHECK_INTERVAL == 0:
+                    try:
+                        periodic_check()
+                    except Exception:  # noqa: BLE001
+                        if not self._stop_event.is_set():
+                            self._stop_event.set()
+                        break
+
+            end = min(written + chunk_size, total)
+            chunk_f32 = samples_f32[written:end]
+
+            if live_gain:
+                gain = self._output_gain
+                if gain != 1.0:
+                    chunk_f32 = np.clip(chunk_f32 * gain, -1.0, 1.0).astype(np.float32)
+
+            try:
+                conn.send_tx_audio_chunk(  # type: ignore[attr-defined]
+                    chunk_f32,
+                    sample_rate=self._sample_rate,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _log.error("TCI TX audio chunk error: %s", exc)
+                self.error.emit(f"TCI TX audio error: {exc}")
+                return False
+
+            self.tx_audio_chunk.emit(chunk_f32)
+            written = end
+            self.transmission_progress.emit(
+                min(written, content_total), content_total
+            )
+
+            # Sleep until the samples just sent should have finished playing.
+            # Using an absolute target (tx_start + samples_so_far / rate)
+            # means any single sleep overshoot is corrected next iteration
+            # instead of compounding across the whole transmission.
+            target = tx_start + written / self._sample_rate
+            gap = target - time.perf_counter()
+            if gap > 0:
+                time.sleep(gap)
+
+        return not self._stop_event.is_set()
 
     def _run_tx(
         self,
@@ -789,8 +930,27 @@ class TxWorker(QObject):
             time.sleep(self._ptt_delay_s)
             if self._stop_event.is_set():
                 # Stop pressed during the PTT delay window, before any audio.
-                pass
+                _log.debug("TX stop requested during PTT delay — skipping playback")
+            elif self._tci_connection is not None:
+                _log.info(
+                    "TX via TCI: samples=%d rate=%d dtype=%s",
+                    len(samples),
+                    self._sample_rate,
+                    samples.dtype,
+                )
+                playback_succeeded = self._play_via_tci(
+                    samples,
+                    live_gain=live_gain,
+                    periodic_check=_rig_health_check,
+                )
             else:
+                _log.info(
+                    "TX via PortAudio: device=%r samples=%d rate=%d dtype=%s",
+                    self._output_device,
+                    len(samples),
+                    self._sample_rate,
+                    samples.dtype,
+                )
                 output_stream.play_blocking(
                     samples,
                     self._sample_rate,
@@ -801,11 +961,24 @@ class TxWorker(QObject):
                         (lambda: self._output_gain) if live_gain else None
                     ),
                     periodic_check=_rig_health_check,
+                    chunk_callback=lambda chunk: self.tx_audio_chunk.emit(chunk),
                 )
                 playback_succeeded = not self._stop_event.is_set()
-        except sd.PortAudioError:
-            self.error.emit("Audio device disconnected during transmission.")
+        except sd.PortAudioError as exc:
+            _log.error("TX PortAudioError: %s", exc)
+            msg = str(exc)
+            if "Blocking API not supported" in msg or "WDM-KS" in msg:
+                self.error.emit(
+                    "Output device does not support playback (Windows WDM-KS). "
+                    "Open Settings → Audio and choose a WASAPI or MME output device."
+                )
+            else:
+                self.error.emit(
+                    "Audio output device error during transmission — "
+                    "check Settings → Audio."
+                )
         except Exception as exc:  # noqa: BLE001
+            _log.error("TX playback exception: %s", exc, exc_info=True)
             self.error.emit(f"Playback failed: {exc}")
         finally:
             # ALWAYS unkey, even on error or stop, so the rig never gets
@@ -898,6 +1071,9 @@ class RxWorker(QObject):
     #: threads (OP-05): without it, a fresh chunk from an already-open
     #: audio stream could be fed into the decoder before the reset slot ran.
     reset_done = Signal()
+    #: Emitted with each audio chunk (after input gain) so the waterfall can
+    #: display incoming RX audio.  Chunk is float64.
+    waterfall_chunk = Signal(object)
 
     def __init__(
         self,
@@ -1128,6 +1304,7 @@ class RxWorker(QObject):
 
         if self._input_gain != 1.0:
             arr = arr * self._input_gain
+        self.waterfall_chunk.emit(arr)
         self._scratch.append(arr)
         self._scratch_samples += arr.size
         self._total_samples += arr.size

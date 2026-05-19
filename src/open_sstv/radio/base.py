@@ -43,6 +43,7 @@ class RigConnectionMode(StrEnum):
     MANUAL = "manual"
     SERIAL = "serial"
     RIGCTLD = "rigctld"
+    TCI = "tci"
 
 
 @runtime_checkable

@@ -19,6 +19,15 @@ from open_sstv import __version__
 
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the ``open-sstv`` console script and ``python -m open_sstv``."""
+    import logging  # noqa: PLC0415
+    import os       # noqa: PLC0415
+    log_level = logging.DEBUG if os.environ.get("OPEN_SSTV_DEBUG") else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
     # v0.1.34: log the runtime version and the module path immediately
     # so a stale install vs current source mismatch is obvious.  If the
     # terminal shows a different version than the About dialog, the
