@@ -75,7 +75,7 @@ from typing import TYPE_CHECKING
 
 _log = logging.getLogger(__name__)
 
-from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QMetaObject, QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -1794,12 +1794,38 @@ class MainWindow(QMainWindow):
     def _swap_audio_worker(self, new_worker: object) -> None:
         """Hot-swap the audio input worker on the audio thread.
 
-        Stops the current audio worker, disconnects its signals, moves
-        the new worker to the audio thread, wires the same signal set,
-        and replaces ``self._audio_worker``.  The new worker's ``start``
-        is not called here — the caller decides when to begin capture.
+        Stops the current worker cleanly, disconnects its signals, moves the
+        new worker to the audio thread, wires the same signal set, and
+        re-starts capture if it was already running.
+
+        Two correctness requirements drive the implementation:
+
+        **C1 — stop before teardown.**  Simply calling ``deleteLater()`` on
+        the old worker without first stopping it leaves the TCI subscription
+        alive (``audio_stop:0;`` never reaches the server) and leaks the
+        PortAudio stream.  ``QMetaObject.invokeMethod`` with
+        ``BlockingQueuedConnection`` runs the ``stop`` slot on the audio
+        thread and blocks the GUI thread until it completes, so the worker
+        is fully quiesced before we touch its signal connections.
+
+        **C2 — restore capture state.**  If RX was active when the swap was
+        triggered (TCI connect/disconnect while capturing), the new worker
+        must be started immediately after wiring so the user sees no
+        interruption.  We snapshot ``_capture_running`` before teardown and
+        re-emit ``_request_start_capture`` on the new worker afterward.
         """
         old = self._audio_worker
+
+        # C1: stop the old worker on its own thread before disconnecting.
+        # BlockingQueuedConnection blocks this (GUI) thread until the audio
+        # thread has finished running stop(), ensuring the PortAudio stream
+        # and any TCI subscription are cleanly torn down.
+        was_capturing = self._capture_running
+        QMetaObject.invokeMethod(
+            old,  # type: ignore[arg-type]
+            "stop",
+            Qt.ConnectionType.BlockingQueuedConnection,
+        )
 
         # Disconnect old worker from consumers.
         for signal, slot in (
@@ -1839,6 +1865,13 @@ class MainWindow(QMainWindow):
             old.deleteLater()
         except Exception:  # noqa: BLE001
             pass
+
+        # C2: if capture was running before the swap, restart it on the
+        # new worker so the user sees no gap in the RX stream.
+        if was_capturing:
+            self._request_start_capture.emit(
+                self._input_device, self._config.sample_rate, DEFAULT_BLOCKSIZE
+            )
 
     # === Waterfall ===
 

@@ -421,6 +421,14 @@ class TciRig:
             self.connection.disconnect()
         except Exception:  # noqa: BLE001
             pass
+        # Reset cache-populated flags so a reconnect re-populates from the
+        # fresh READY: state burst rather than serving stale values.
+        self._freq_received = False
+        self._mode_received = False
+        self._ptt_received = False
+        self._freq_event.clear()
+        self._mode_event.clear()
+        self._ptt_event.clear()
 
     def get_freq(self) -> int:
         if self._freq_received:
@@ -488,11 +496,16 @@ class TciRig:
     def _on_text(self, msg: str) -> None:
         lower = msg.lower()
         if lower.startswith("vfo:"):
-            # vfo:0,0,14074000
+            # vfo:<trx>,<vfo_index>,<freq>  e.g. vfo:0,0,14074000
+            # Only accept VFO A (index 0) on TRX 0 — the post-READY: burst
+            # includes VFO B (index 1) and any secondary TRX, which would
+            # otherwise clobber the operating frequency with a wrong value.
             try:
-                self._last_freq = int(msg.split(",")[-1])
-                self._freq_received = True
-                self._freq_event.set()
+                parts = msg.split(",")
+                if len(parts) >= 3 and parts[1].strip() == "0":
+                    self._last_freq = int(parts[2].strip())
+                    self._freq_received = True
+                    self._freq_event.set()
             except (ValueError, IndexError):
                 pass
         elif lower.startswith("modulation:"):

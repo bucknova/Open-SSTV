@@ -30,7 +30,8 @@ dependencies = [
     "PySide6>=6.6,<7",       # Qt 6 bindings (LGPL-3) — official Qt project
     "numpy>=1.26,<3",        # DSP arrays (1.26 = first wheel with py3.12 macOS arm64)
     "scipy>=1.11,<2",        # signal.hilbert, butter, sosfiltfilt, resample_poly
-    "sounddevice>=0.4.6,<0.5", # PortAudio I/O (MIT) — 0.5.x crashes on Windows (stack overrun in Pa_Initialize)
+    "sounddevice>=0.4.6,<1",   # PortAudio I/O (MIT)
+    "sounddevice<0.5; sys_platform=='win32'", # 0.5.x stack overrun in Pa_Initialize on Windows
     "PySSTV>=0.5.6,<1",      # TX encoder (MIT) — covers Martin/Scottie/Robot/PD
     "Pillow>=10.1,<12",      # Image load/resize for TX, save for RX (>=10.1 for ImageFont.load_default(size=...))
     "platformdirs>=4.0,<5",  # XDG-correct config and data dirs

@@ -15,6 +15,12 @@ FFT parameters (follow the design in docs/waterfall_scope.md)
 --------------------------------------------------------------
 Window size : 1024 samples at 48 kHz → ~21 ms, ~47 Hz / bin
 Window fn   : Hann — good sidelobe rejection for SSTV tones
+Overlap     : 512-sample tail carried into the next chunk via _overlap
+              buffer.  One FFT column is produced per chunk call, so
+              the effective stride matches the audio chunk size (~4800
+              samples at 48 kHz / 100 ms) — not a fixed 512-sample
+              stride.  The tail prevents discontinuities at chunk
+              boundaries; it is not true 50%-overlap.
 Display bins: 0–85  →  0–4031 Hz at 48 kHz
 Display size: 200 px height (frequency), 400 px width (time axis)
 
@@ -148,7 +154,8 @@ class WaterfallWidget(QWidget):
 
         self._sample_rate: int = 48_000
 
-        # Rolling overlap buffer for 50 % FFT overlap (512 samples).
+        # Tail buffer: last 512 samples of the previous chunk, prepended
+        # to the next to avoid discontinuities at chunk boundaries.
         self._overlap = np.zeros(_FFT_SIZE // 2, dtype=np.float64)
 
         # Repaint timer: independent of audio chunk rate (50 ms cadence).
