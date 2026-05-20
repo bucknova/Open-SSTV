@@ -9,6 +9,20 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Band-plan tuning no longer clobbers data-variant rig modes.**
+  Picking a band-plan entry while in IC-7300 `USB-D`, Yaesu `USB-DATA`,
+  Kenwood / Hamlib `PKTUSB`, or any other data variant of a sideband
+  family used to drop the rig back to the literal `USB` / `LSB` mode
+  stored in `SSTV_BAND_PLAN`, which broke SSTV TX immediately — loss
+  of USB-Audio Data-IN routing and the speech processor re-enabled.
+  The tune slot now classifies the current and target modes into a
+  sideband family (USB / LSB / FM) and only calls `set_mode` when
+  the family actually changes — so 20 m USB-D → 14.230 MHz USB
+  preserves USB-D, but 20 m USB-D → 40 m LSB still flips sideband
+  correctly.
+
 ---
 
 ## [0.3.6] — 2026-05-20
