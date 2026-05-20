@@ -8,7 +8,12 @@ from __future__ import annotations
 
 import pytest
 
-from open_sstv.radio.band_plan import BandEntry, SSTV_BAND_PLAN, primary_entry
+from open_sstv.radio.band_plan import (
+    BandEntry,
+    SSTV_BAND_PLAN,
+    mode_family,
+    primary_entry,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -126,3 +131,112 @@ class TestBandEntryFrozen:
     def test_cannot_mutate_mode(self) -> None:
         with pytest.raises(Exception):
             primary_entry().rig_mode = "AM"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# mode_family() — sideband-family classifier for band-plan tuning
+# ---------------------------------------------------------------------------
+
+class TestModeFamily:
+    """The family check lets band-plan tuning preserve a user's data-variant
+    mode (USB-D, USB-DATA, PKTUSB, …) when the target band's sideband matches
+    what they're already on, while still switching at band-edge crossings.
+    """
+
+    # --- USB family ---------------------------------------------------------
+
+    def test_plain_usb_is_usb_family(self) -> None:
+        assert mode_family("USB") == "USB"
+
+    def test_icom_usb_d_is_usb_family(self) -> None:
+        """IC-7300 USB-D (USB Data) — the canonical SSTV-on-Icom mode."""
+        assert mode_family("USB-D") == "USB"
+
+    def test_icom_usb_d_variants_are_usb_family(self) -> None:
+        """IC-7610 / IC-9700 sometimes report USB-D1 / USB-D2 / USB-D3."""
+        for variant in ("USB-D1", "USB-D2", "USB-D3"):
+            assert mode_family(variant) == "USB", variant
+
+    def test_yaesu_usb_data_is_usb_family(self) -> None:
+        """FTDX10 / FTDX101 report USB-DATA."""
+        assert mode_family("USB-DATA") == "USB"
+
+    def test_hamlib_pktusb_is_usb_family(self) -> None:
+        """Hamlib's RIG_MODE_PKTUSB — covers Kenwood, Yaesu PKT modes."""
+        assert mode_family("PKTUSB") == "USB"
+
+    def test_single_char_u_is_usb_family(self) -> None:
+        """Some rigs report just 'U' for USB."""
+        assert mode_family("U") == "USB"
+
+    def test_lowercase_usb_is_usb_family(self) -> None:
+        assert mode_family("usb") == "USB"
+
+    def test_usb_with_whitespace_is_usb_family(self) -> None:
+        assert mode_family("  USB  ") == "USB"
+
+    # --- LSB family ---------------------------------------------------------
+
+    def test_plain_lsb_is_lsb_family(self) -> None:
+        assert mode_family("LSB") == "LSB"
+
+    def test_icom_lsb_d_is_lsb_family(self) -> None:
+        assert mode_family("LSB-D") == "LSB"
+
+    def test_hamlib_pktlsb_is_lsb_family(self) -> None:
+        assert mode_family("PKTLSB") == "LSB"
+
+    def test_single_char_l_is_lsb_family(self) -> None:
+        assert mode_family("L") == "LSB"
+
+    # --- FM family ----------------------------------------------------------
+
+    def test_plain_fm_is_fm_family(self) -> None:
+        assert mode_family("FM") == "FM"
+
+    def test_fm_narrow_is_fm_family(self) -> None:
+        assert mode_family("FM-N") == "FM"
+
+    def test_hamlib_pktfm_is_fm_family(self) -> None:
+        assert mode_family("PKTFM") == "FM"
+
+    # --- Distinct families pass through ------------------------------------
+
+    def test_cw_is_distinct_family(self) -> None:
+        """CW must NOT classify as USB / LSB / FM — picking a USB band from
+        CW should trigger a mode change."""
+        assert mode_family("CW") == "CW"
+        assert mode_family("CW") != "USB"
+
+    def test_am_is_distinct_family(self) -> None:
+        assert mode_family("AM") == "AM"
+
+    def test_rtty_is_distinct_family(self) -> None:
+        assert mode_family("RTTY") == "RTTY"
+
+    def test_empty_string_returns_empty(self) -> None:
+        """An empty current-mode (rig returned nothing / get_mode failed)
+        must not collide with any real family, so the tune triggers
+        set_mode as a safe default."""
+        assert mode_family("") == ""
+        assert mode_family("") != "USB"
+
+    # --- Band-plan tune use case (the whole reason this exists) -------------
+
+    def test_usb_d_to_usb_target_same_family_preserves_data_variant(self) -> None:
+        """The IC-7300 USB-D scenario: user is on USB-D, picks 20 m
+        (target USB).  Families match → tune must NOT call set_mode."""
+        current = "USB-D"
+        target = "USB"
+        assert mode_family(current) == mode_family(target)
+
+    def test_usb_to_lsb_target_different_family_switches(self) -> None:
+        """User on 20 m USB picks 40 m LSB.  Families differ → tune DOES
+        call set_mode (sideband flip is expected at the band-edge)."""
+        current = "USB"
+        target = "LSB"
+        assert mode_family(current) != mode_family(target)
+
+    def test_pktusb_to_usb_target_same_family_preserves_pkt(self) -> None:
+        """Hamlib-mediated PKTUSB → picking a USB band must preserve PKTUSB."""
+        assert mode_family("PKTUSB") == mode_family("USB")

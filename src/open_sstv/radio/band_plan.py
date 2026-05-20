@@ -157,4 +157,45 @@ def primary_entry() -> BandEntry:
     return SSTV_BAND_PLAN[0]
 
 
-__all__ = ["BandEntry", "SSTV_BAND_PLAN", "primary_entry"]
+def mode_family(mode: str) -> str:
+    """Return the sideband family of a rig-reported mode string.
+
+    Used by band-plan tuning so a user's data-variant mode (IC-7300
+    ``USB-D``, Yaesu ``USB-DATA``, Kenwood / Hamlib ``PKTUSB``, …) is
+    preserved when the band-plan target's sideband family matches what
+    they're already on.  Without this, every band-plan pick would clobber
+    the rig's data-IN routing and re-enable the speech processor — which
+    breaks SSTV TX immediately on Icom rigs.
+
+    Family classification:
+
+    * ``"USB"`` — anything containing ``"USB"`` (case-insensitive) or the
+      single-character ``"U"`` some rigs report.
+      Covers: USB, USB-D, USB-D1/2/3, USB-DATA, PKTUSB.
+    * ``"LSB"`` — symmetric; covers LSB, LSB-D, PKTLSB, etc.
+    * ``"FM"`` — anything containing ``"FM"``: FM, FM-N, PKTFM.
+    * Anything else is returned uppercased + stripped (CW, AM, RTTY,
+      empty string, …).  The band-plan tune treats it as a distinct
+      family, so picking a USB / LSB / FM band from CW correctly
+      switches modes.
+
+    The substring match is deliberate so unfamiliar variant names
+    (e.g. a future ``"USB-D4"``) classify correctly without a code
+    change.  Rigs reporting truly opaque mode names (e.g. K3's
+    ``"DATA-A"`` over direct serial CAT, which is upper-sideband data
+    but doesn't contain ``"USB"``) will fall through to a mode change;
+    report any such case and we'll extend the matcher.
+    """
+    m = mode.upper().strip()
+    if not m:
+        return ""
+    if "USB" in m or m == "U":
+        return "USB"
+    if "LSB" in m or m == "L":
+        return "LSB"
+    if "FM" in m:
+        return "FM"
+    return m
+
+
+__all__ = ["BandEntry", "SSTV_BAND_PLAN", "mode_family", "primary_entry"]

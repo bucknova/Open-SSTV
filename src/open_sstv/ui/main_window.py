@@ -104,6 +104,7 @@ from open_sstv.config.schema import AppConfig
 from open_sstv.config.store import load_config, save_config
 from open_sstv.config.templates import load_templates
 from open_sstv.core.modes import Mode
+from open_sstv.radio.band_plan import mode_family
 from open_sstv.radio.base import ManualRig, Rig, RigConnectionMode
 from open_sstv.radio.exceptions import RigError
 from open_sstv.radio.rigctld import RigctldClient, is_safe_rigctld_arg
@@ -177,11 +178,25 @@ class _RigPollWorker(QObject):
         signal) so it cannot race with the 1 Hz ``poll`` slot — both live on
         the same event loop.  Errors are swallowed silently; the poll cycle
         will surface any persistent connection problem within 3 s.
+
+        Mode is only re-sent if the current mode's **sideband family** differs
+        from the target's.  This preserves data-variant modes (IC-7300
+        ``USB-D``, Yaesu ``USB-DATA``, Kenwood / Hamlib ``PKTUSB``, …) when
+        the band-plan entry's family matches what the user is already on.
+        Without this, every band-plan pick would clobber the rig's data
+        routing and re-enable the speech processor.  Band-edge crossings
+        that flip sideband (e.g. 20 m USB → 40 m LSB) still switch correctly
+        because the family changes.
         """
         try:
             self._rig.set_freq(freq_hz)
             if mode:
-                self._rig.set_mode(mode, passband_hz)
+                try:
+                    current_mode, _ = self._rig.get_mode()
+                except Exception:  # noqa: BLE001 — same tolerance as poll()
+                    current_mode = ""
+                if mode_family(current_mode) != mode_family(mode):
+                    self._rig.set_mode(mode, passband_hz)
         except Exception:  # noqa: BLE001 — same tolerance as poll()
             pass
 
