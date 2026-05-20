@@ -76,6 +76,12 @@ class AppConfig:
     # v0.1.13: relaxes VIS leader presence (0.40 → 0.25) and start-bit
     # minimum duration (20 ms → 15 ms) for weak/fading signal conditions.
     rx_weak_signal_mode: bool = False
+    # v0.3.7: how many seconds without a new decoded line before the RX
+    # watchdog abandons an in-progress decode and keeps the partial image.
+    # The total-elapsed guard (mode duration × 1.5, min 15 s) is separate
+    # and fires regardless.  10 s is the default; raise in Settings for
+    # propagation conditions with longer, deeper QSB fading cycles.
+    rx_watchdog_timeout_s: int = 5
     # v0.1.18: when True, the completed image is re-decoded in a single pass
     # with slant correction (np.polyfit across all sync candidates). Off by
     # default because polyfit has no outlier rejection — on weak/marginal

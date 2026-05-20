@@ -96,12 +96,12 @@ def detect_vis(
         Sample rate of ``samples`` in Hz.
     weak_signal:
         When ``True``, relaxes the leader-presence threshold
-        (0.40 → 0.25) and the minimum start-bit duration
-        (20 ms → 15 ms) to improve detection of signals buried in
+        (0.35 → 0.20) and the minimum start-bit duration
+        (17 ms → 15 ms) to improve detection of signals buried in
         noise or fading conditions.  More permissive thresholds
-        increase the false-positive rate; D-1 already handles unknown
-        VIS codes gracefully so the cost is one spurious IDLE reset,
-        not an error surfaced to the user.
+        increase the false-positive rate; the caller already handles
+        unknown VIS codes gracefully so the cost is one spurious IDLE
+        reset, not an error surfaced to the user.
 
     Returns
     -------
@@ -127,13 +127,29 @@ def detect_vis(
     else:
         smooth = inst
 
+    # Wider smooth used *only* for the leader-fraction check below.
+    # The 2 ms smooth preserves bit-edge timing for start/data/stop bit
+    # classification; 20 ms averages over roughly 10 independent noise
+    # samples and gives a far more stable 1900 Hz leader estimate when
+    # the signal is weak.  At 44.1 kHz this is ~882 samples vs. 88 for
+    # the main smooth — the leader is 300 ms, so edge smearing at the
+    # boundaries of the 200 ms check window is only ~10 % of samples.
+    leader_smooth_n = max(1, int(round(0.020 * fs)))
+    if leader_smooth_n > smooth_n:
+        lk = np.ones(leader_smooth_n, dtype=np.float64) / leader_smooth_n
+        leader_smooth = np.convolve(inst, lk, mode="same")
+    else:
+        leader_smooth = smooth
+
     bit_samples = int(round(VIS_BIT_DURATION_S * fs))
     # The mid-leader break is 10 ms; require start-bit candidates to be at
-    # least 20 ms long so we never mistake the break for the start bit.
-    # In weak-signal mode we relax this to 15 ms — a fading signal may not
-    # produce a full-duration run, but 15 ms is still safely longer than
-    # the 10 ms break.
-    min_start_bit_samples = int(round((0.015 if weak_signal else 0.020) * fs))
+    # least 17 ms long so we never mistake the break for the start bit.
+    # 17 ms gives 7 ms of margin above the 10 ms break while allowing for
+    # noise-fragmented start bits that fall short of the ideal 30 ms.
+    # In weak-signal mode we relax further to 15 ms — a fading signal may
+    # not produce a full-duration run, but 15 ms is still safely longer
+    # than the 10 ms break.
+    min_start_bit_samples = int(round((0.015 if weak_signal else 0.017) * fs))
 
     sync_mask = (smooth > 1100.0) & (smooth < 1300.0)
     runs = _find_runs(sync_mask)
@@ -158,12 +174,12 @@ def detect_vis(
     # being lenient avoids rejecting real signals where the first
     # leader half was clipped by the recording start.
     leader_check_samples = int(round(0.200 * fs))
-    # Require at least 40 % of those samples to be in the leader band
-    # (1800–2000 Hz). This threshold is low enough to tolerate noisy
-    # acoustic audio yet high enough to reject random noise.
-    # In weak-signal mode the threshold is dropped to 25 % so faint or
-    # intermittently fading leader tones can still pass validation.
-    leader_frac_threshold = 0.25 if weak_signal else 0.40
+    # Require at least 35 % of the leader_smooth samples to be in the
+    # leader band (1800–2000 Hz).  The 20 ms smooth already suppresses
+    # most per-sample IF noise, so a marginally weak 1900 Hz leader
+    # reliably lands above 35 %.  In weak-signal mode the threshold
+    # drops to 20 % for signals deep in the noise.
+    leader_frac_threshold = 0.20 if weak_signal else 0.35
 
     for run_start, run_end in runs:
         if (run_end - run_start) < min_start_bit_samples:
@@ -176,7 +192,7 @@ def detect_vis(
         leader_end = max(0, run_start - int(round(0.005 * fs)))  # skip transition
         leader_start = max(0, leader_end - leader_check_samples)
         if leader_end > leader_start:
-            leader_region = smooth[leader_start:leader_end]
+            leader_region = leader_smooth[leader_start:leader_end]
             leader_in_band = float(np.mean(
                 (leader_region > 1800.0) & (leader_region < 2000.0)
             ))

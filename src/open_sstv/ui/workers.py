@@ -179,18 +179,18 @@ _RX_WATCHDOG_TOTAL_FLOOR_S: float = 15.0
 
 #: Per-line RX decoder watchdog: N × ``spec.line_time_ms`` without a
 #: new ``ImageProgress`` event ⇒ the signal has faded mid-image.
-#: Catches signal fade faster than the total-elapsed guard above:
-#: 3 line periods is ~1.3 s on Robot 36 (too short, will cause false
-#: resets on a brief fade), 5 line periods gives ~2.1 s on Robot 36
-#: and ~2.6 s on Scottie S1 — comfortable margin against a one-line
-#: dropout while still reacting to a real fade within a handful of
-#: seconds.
+#: This multiplier alone gives sub-second timeouts on fast modes, so
+#: the floor below always dominates in practice — the multiplier is
+#: kept for documentation symmetry with the total-elapsed guard.
 _RX_WATCHDOG_LINE_MULTIPLIER: float = 5.0
 
-#: Minimum absolute "no-progress" timeout regardless of mode.  Protects
-#: the narrow fast modes from hair-trigger resets: 5 × 150 ms = 0.75 s
-#: on Robot 36 would be too twitchy, so 5 s gives breathing room even
-#: on the fastest mode.
+#: Minimum absolute "no-progress" timeout regardless of mode.
+#: Default is 10 s — enough to ride out a brief signal dip without
+#: keeping a decode alive so long that the resulting image is useless.
+#: Users can raise this via Settings → Receive → No-progress timeout
+#: if their propagation conditions have longer QSB fading cycles.
+#: The total-elapsed watchdog (mode duration × 1.5, 15 s floor) still
+#: fires independently regardless of this value.
 _RX_WATCHDOG_LINE_FLOOR_S: float = 5.0
 
 #: Wall-clock tick interval for the independent watchdog check, in
@@ -1245,6 +1245,7 @@ class RxWorker(QObject):
         sample_rate: int = DEFAULT_SAMPLE_RATE,
         flush_samples: int | None = None,
         weak_signal: bool = False,
+        watchdog_timeout_s: int | None = None,
         final_slant_correction: bool = False,
         incremental_decode: bool = True,
         parent: QObject | None = None,
@@ -1252,6 +1253,11 @@ class RxWorker(QObject):
         super().__init__(parent)
         self._sample_rate = sample_rate
         self._weak_signal = weak_signal
+        self._watchdog_line_floor_s: float = (
+            float(watchdog_timeout_s)
+            if watchdog_timeout_s is not None
+            else _RX_WATCHDOG_LINE_FLOOR_S
+        )
         self._final_slant_correction = final_slant_correction
         self._incremental_decode = incremental_decode
         self._cancel_event = threading.Event()
@@ -1339,6 +1345,15 @@ class RxWorker(QObject):
         # stale samples from the old decoder's time window.
         self._scratch.clear()
         self._scratch_samples = 0
+
+    @Slot(int)
+    def set_watchdog_timeout(self, seconds: int) -> None:
+        """Set the no-progress watchdog floor (seconds).
+
+        Takes effect on the next watchdog tick; does not affect a decode
+        already in progress until the next ``_check_rx_watchdog`` call.
+        """
+        self._watchdog_line_floor_s = float(max(1, seconds))
 
     @Slot(bool)
     def set_incremental_decode(self, enabled: bool) -> None:
@@ -1668,7 +1683,9 @@ class RxWorker(QObject):
 
         2. **No new progress** for
            ``max(_RX_WATCHDOG_LINE_FLOOR_S, 5 × line_time_ms)`` — lines
-           have stopped arriving mid-image.
+           have stopped arriving mid-image.  The floor is user-
+           configurable (default 5 s) via Settings → Receive so
+           operators can tune it for their propagation conditions.
 
         On trip, emit a truncated ``image_complete`` carrying whatever
         lines we managed to decode so the user still gets the partial
@@ -1691,7 +1708,7 @@ class RxWorker(QObject):
             spec.total_duration_s * _RX_WATCHDOG_TOTAL_MULTIPLIER,
         )
         line_budget_s = max(
-            _RX_WATCHDOG_LINE_FLOOR_S,
+            self._watchdog_line_floor_s,
             _RX_WATCHDOG_LINE_MULTIPLIER * spec.line_time_ms / 1000.0,
         )
 

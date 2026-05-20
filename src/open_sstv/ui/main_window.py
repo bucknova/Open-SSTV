@@ -340,6 +340,7 @@ class MainWindow(QMainWindow):
     #: Settings-change dispatchers — queued to RxWorker so decoder rebuilds
     #: happen on the worker thread, never racing with feed_chunk.
     _rx_weak_signal_changed = Signal(bool)
+    _rx_watchdog_timeout_changed = Signal(int)
     _rx_incremental_decode_changed = Signal(bool)
     _rx_sample_rate_changed = Signal(int)
     #: OP-09: cover the previously-direct-call settings too so every
@@ -585,6 +586,7 @@ class MainWindow(QMainWindow):
         self._rx_worker = RxWorker(
             sample_rate=self._config.sample_rate,
             weak_signal=self._config.rx_weak_signal_mode,
+            watchdog_timeout_s=self._config.rx_watchdog_timeout_s,
             final_slant_correction=self._config.apply_final_slant_correction,
             incremental_decode=self._config.incremental_decode,
         )
@@ -642,6 +644,7 @@ class MainWindow(QMainWindow):
         # Because rx_worker lives on rx_thread, Qt auto-promotes these to
         # QueuedConnection, so the decoder rebuilds happen on the worker thread.
         self._rx_weak_signal_changed.connect(self._rx_worker.set_weak_signal)
+        self._rx_watchdog_timeout_changed.connect(self._rx_worker.set_watchdog_timeout)
         self._rx_incremental_decode_changed.connect(self._rx_worker.set_incremental_decode)
         self._rx_sample_rate_changed.connect(self._rx_worker.set_sample_rate)
         # OP-09: previously-direct calls now flow through queued signals too.
@@ -1020,6 +1023,7 @@ class MainWindow(QMainWindow):
         # thread, not the GUI thread (H-02 fix; OP-09 extended to cover
         # set_final_slant_correction too).
         self._rx_weak_signal_changed.emit(self._config.rx_weak_signal_mode)
+        self._rx_watchdog_timeout_changed.emit(self._config.rx_watchdog_timeout_s)
         self._rx_final_slant_correction_changed.emit(
             self._config.apply_final_slant_correction
         )
