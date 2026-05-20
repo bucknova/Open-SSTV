@@ -366,6 +366,19 @@ class InputStreamWorker(QObject):
         # leaving a view into PortAudio's recycled buffer that gets
         # overwritten by the next callback before the consumer drains
         # the queue.
+        #
+        # M11: the per-callback ``.copy()`` allocates ~4 KB float32 on
+        # the RT thread (CPython GIL).  Under contention with a big
+        # Hilbert transform on the worker thread this is the most
+        # likely cause of input_overflow drops on long PD modes.  A
+        # ring of pre-allocated buffers rotated by index would avoid
+        # the allocation but adds non-trivial complexity (must
+        # synchronise the ring head against queue consumption to
+        # avoid overwriting buffers still in flight, and the queue
+        # has maxsize=256 chunks which would require an equally
+        # large ring — comparable memory to the current per-callback
+        # allocation).  Left as a known cost; revisit if real-world
+        # measurements show the drop rate is unacceptable.
         chunk = indata[:, 0].copy()
 
         # Guard against teardown race: PortAudio's RT thread can fire
@@ -414,12 +427,23 @@ class InputStreamWorker(QObject):
 
     @Slot()
     def _on_watchdog_timeout(self) -> None:
-        """No audio for _DEVICE_WATCHDOG_MS ms — treat the device as lost."""
+        """No audio for _DEVICE_WATCHDOG_MS ms — treat the device as lost.
+
+        M12: schedule ``stop()`` via a single-shot zero-delay QTimer
+        instead of calling it synchronously.  ``stop()`` calls
+        ``self._stream.stop()/close()`` which can take >100 ms on a
+        wedged macOS Core Audio device — blocking the worker event
+        loop and any further drain.  Posting via QTimer.singleShot(0)
+        re-enters the event loop, so the watchdog slot returns
+        immediately and the actual stop runs on the next loop tick
+        (still on this same worker thread, so QTimer affinity is
+        preserved).
+        """
         self._device_lost = True
         self.stream_error.emit(
             "Audio device disconnected — replug and click Start to recover"
         )
-        self.stop()
+        QTimer.singleShot(0, self.stop)
 
     def _on_pa_stream_finished(self) -> None:
         """PortAudio finished callback — called on PortAudio's internal thread.

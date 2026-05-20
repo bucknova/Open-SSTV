@@ -468,6 +468,18 @@ class SettingsDialog(QDialog):
         idx = self._serial_protocol_combo.findText(self._config.rig_serial_protocol)
         if idx >= 0:
             self._serial_protocol_combo.setCurrentIndex(idx)
+        elif self._config.rig_serial_protocol:
+            # M4: log when a stored protocol no longer matches any combo
+            # item.  Without this, the silent fall-back to index 0
+            # ("PTT Only (DTR/RTS)") would silently overwrite the user's
+            # stored choice on the next save round-trip — a renamed
+            # protocol or hand-edited TOML would vanish without trace.
+            _log.warning(
+                "Settings: stored rig_serial_protocol %r not in combo — "
+                "falling back to %r",
+                self._config.rig_serial_protocol,
+                self._serial_protocol_combo.currentText(),
+            )
         self._serial_protocol_combo.currentIndexChanged.connect(
             self._on_serial_protocol_changed
         )

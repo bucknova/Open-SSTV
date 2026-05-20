@@ -145,7 +145,18 @@ class TciInputStreamWorker(QObject):
         # of view we are no longer interested in RX audio.
         conn.mark_rx_audio_subscribed(False)
 
-        self._drain_queue()
+        # M14: discard any chunks the recv thread enqueued just before
+        # unregister.  Previously we called ``_drain_queue`` here, which
+        # emitted ``chunk_ready`` for those stale samples and reseeded a
+        # downstream RxWorker that ``_swap_audio_worker`` had already
+        # reset — corrupting the next decode.  Audio that's <100 ms old
+        # is not worth saving across a worker swap; drop the queue
+        # silently instead.
+        while True:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                break
 
         if self._dropped_chunks > 0:
             self.error.emit(

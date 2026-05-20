@@ -202,6 +202,35 @@ class TestModeFamily:
 
     # --- Distinct families pass through ------------------------------------
 
+    # --- M6: explicit DATA / PSK / FT8 aliases without a sideband substring ---
+
+    def test_k3_data_a_classifies_as_usb(self) -> None:
+        """Elecraft K3 reports `DATA-A` (upper-sideband data) over direct
+        serial CAT — doesn't contain "USB" but is functionally USB-family.
+        Without the alias, every band-plan pick on a K3 would clobber
+        the DATA mode."""
+        assert mode_family("DATA-A") == "USB"
+
+    def test_k3_data_b_classifies_as_lsb(self) -> None:
+        """K3 `DATA-B` is lower-sideband data."""
+        assert mode_family("DATA-B") == "LSB"
+
+    def test_yaesu_data_u_classifies_as_usb(self) -> None:
+        """Yaesu FTDX10/FTDX101 report `DATA-U` (alongside the older
+        `USB-DATA`); covered by the alias as well as a fallback."""
+        assert mode_family("DATA-U") == "USB"
+
+    def test_yaesu_data_l_classifies_as_lsb(self) -> None:
+        assert mode_family("DATA-L") == "LSB"
+
+    def test_psk_u_classifies_as_usb(self) -> None:
+        assert mode_family("PSK-U") == "USB"
+
+    def test_ft8_l_classifies_as_lsb(self) -> None:
+        assert mode_family("FT8-L") == "LSB"
+
+    # --- distinct families pass through ---
+
     def test_cw_is_distinct_family(self) -> None:
         """CW must NOT classify as USB / LSB / FM — picking a USB band from
         CW should trigger a mode change."""

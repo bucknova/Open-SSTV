@@ -137,17 +137,24 @@ def test_stop_during_ptt_delay_aborts_before_audio(
     """If the user clicks Stop while the worker is in the PTT settle
     delay, no audio should be played — but PTT must still be unkeyed.
 
-    We simulate "stop pressed during the sleep" by replacing
-    ``time.sleep`` with a function that sets the stop flag, since
-    ``transmit`` clears the flag at entry so the test can't pre-set it."""
+    M7 changed the PTT settle from ``time.sleep`` to
+    ``self._stop_event.wait(...)`` so a Stop click during the delay is
+    honoured immediately instead of holding the rig keyed for the full
+    delay.  Simulate "stop pressed during the wait" by replacing
+    ``threading.Event.wait`` with a function that sets the flag, since
+    ``transmit`` clears it at entry so the test can't pre-set it.
+    """
     rig = MagicMock(spec=["set_ptt"])
     worker = TxWorker(rig=rig, ptt_delay_s=0.1)
     log = _record_signals(worker)
 
-    def stop_during_sleep(_secs: float) -> None:
-        worker._stop_event.set()
+    real_wait = worker._stop_event.wait
 
-    monkeypatch.setattr("open_sstv.ui.workers.time.sleep", stop_during_sleep)
+    def stop_during_wait(timeout: float | None = None) -> bool:
+        worker._stop_event.set()
+        return True
+
+    monkeypatch.setattr(worker._stop_event, "wait", stop_during_wait)
 
     worker.transmit(gradient_image, Mode.ROBOT_36)
 
@@ -156,6 +163,8 @@ def test_stop_during_ptt_delay_aborts_before_audio(
     assert log["complete"] == []
     # PTT must still be cycled cleanly even on abort.
     assert [c.args for c in rig.set_ptt.call_args_list] == [(True,), (False,)]
+    # Restore so the qapp teardown doesn't see a mocked method.
+    _ = real_wait  # silence unused-var if monkeypatch auto-restores
 
 
 # === error paths ===

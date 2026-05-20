@@ -169,29 +169,38 @@ def mode_family(mode: str) -> str:
 
     Family classification:
 
-    * ``"USB"`` — anything containing ``"USB"`` (case-insensitive) or the
+    * ``"USB"`` — anything containing ``"USB"`` (USB, USB-D, USB-D1/2/3,
+      USB-DATA, PKTUSB), explicit upper-data variants from Yaesu / K3
+      (``"DATA-U"``, ``"DATA-A"``, ``"PSK-U"``, ``"FT8-U"``), or the
       single-character ``"U"`` some rigs report.
-      Covers: USB, USB-D, USB-D1/2/3, USB-DATA, PKTUSB.
-    * ``"LSB"`` — symmetric; covers LSB, LSB-D, PKTLSB, etc.
-    * ``"FM"`` — anything containing ``"FM"``: FM, FM-N, PKTFM.
+    * ``"LSB"`` — symmetric: LSB / LSB-D / PKTLSB, plus ``"DATA-L"``,
+      ``"DATA-B"`` (K3 lower-data), ``"PSK-L"``, ``"FT8-L"``, ``"L"``.
+    * ``"FM"`` — anything containing ``"FM"``: FM, FM-N, PKTFM,
+      DATA-FM.
     * Anything else is returned uppercased + stripped (CW, AM, RTTY,
       empty string, …).  The band-plan tune treats it as a distinct
       family, so picking a USB / LSB / FM band from CW correctly
       switches modes.
 
-    The substring match is deliberate so unfamiliar variant names
-    (e.g. a future ``"USB-D4"``) classify correctly without a code
-    change.  Rigs reporting truly opaque mode names (e.g. K3's
-    ``"DATA-A"`` over direct serial CAT, which is upper-sideband data
-    but doesn't contain ``"USB"``) will fall through to a mode change;
-    report any such case and we'll extend the matcher.
+    M6: extended the matcher to recognise explicit ``DATA-U`` /
+    ``DATA-A`` style mode strings reported by Elecraft K3 over direct
+    serial CAT (PKTUSB via Hamlib was already covered) and the
+    ``PSK-*`` / ``FT8-*`` strings some rigs emit for those operating
+    modes.  Substring match for ``"USB"`` / ``"LSB"`` / ``"FM"`` stays
+    in place so unfamiliar variant names still classify if they happen
+    to contain the sideband substring; the explicit alias map covers
+    the strings that don't.
     """
     m = mode.upper().strip()
     if not m:
         return ""
-    if "USB" in m or m == "U":
+    # Explicit aliases for mode strings that don't contain a sideband
+    # substring (K3 DATA-A/DATA-B, PSK-U/L, FT8-U/L on some firmware).
+    _USB_ALIASES = {"DATA-U", "DATA-A", "PSK-U", "FT8-U", "U"}
+    _LSB_ALIASES = {"DATA-L", "DATA-B", "PSK-L", "FT8-L", "L"}
+    if m in _USB_ALIASES or "USB" in m:
         return "USB"
-    if "LSB" in m or m == "L":
+    if m in _LSB_ALIASES or "LSB" in m:
         return "LSB"
     if "FM" in m:
         return "FM"

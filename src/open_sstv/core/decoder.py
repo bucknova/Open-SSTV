@@ -1203,7 +1203,18 @@ class Decoder:
             # detected header end, stay in IDLE, and keep hunting. Never
             # emit a DecodeError for this: false VIS detections are expected
             # on low-SNR or silent inputs and should not alarm the user.
-            self._buffer = [joined[vis_end:]]
+            #
+            # M15: keep a small preamble window (200 ms) before the
+            # rejected vis_end so a genuine VIS arriving tightly behind
+            # the noise spike (e.g. signal coming up mid-preamble while a
+            # false detection has just resolved) is still discoverable on
+            # the next feed.  Trimming exactly to vis_end was swallowing
+            # the leading 1900 Hz leader tone of a real VIS that landed
+            # within ~100 ms of a noise-induced false detect.
+            _PREAMBLE_WINDOW_S = 0.2
+            preamble_samples = int(_PREAMBLE_WINDOW_S * self._fs)
+            keep_start = max(0, vis_end - preamble_samples)
+            self._buffer = [joined[keep_start:]]
             return []
 
         spec = MODE_TABLE[mode]

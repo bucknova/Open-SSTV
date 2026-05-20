@@ -665,7 +665,13 @@ def test_watchdog_sets_device_lost_flag(
     qapp, fake_stream_cls: type[_FakeStream], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """_on_watchdog_timeout must set _device_lost; stop() must leave the flag
-    set so start() can call _pa_reset() at the right moment."""
+    set so start() can call _pa_reset() at the right moment.
+
+    M12: stop() is now dispatched via ``QTimer.singleShot(0, self.stop)``
+    so a wedged PortAudio close can't block the worker event loop.  The
+    test must pump the event loop to let the deferred stop run before
+    asserting on ``is_running``.
+    """
     monkeypatch.setattr("open_sstv.audio.input_stream.sd._terminate", lambda: None)
     monkeypatch.setattr("open_sstv.audio.input_stream.sd._initialize", lambda: None)
 
@@ -675,8 +681,14 @@ def test_watchdog_sets_device_lost_flag(
     assert worker._device_lost is False
     worker._on_watchdog_timeout()
 
-    # stop() leaves _device_lost set; start() will clear it after _pa_reset().
+    # _device_lost is set synchronously by the watchdog slot.
     assert worker._device_lost is True, "flag must remain set for start() to call _pa_reset()"
+
+    # M12: stop() is deferred via QTimer.singleShot(0); pump the event
+    # loop so the queued slot runs before we assert is_running.
+    from PySide6.QtWidgets import QApplication
+    QApplication.processEvents()
+
     assert worker.is_running is False
 
 

@@ -202,12 +202,19 @@ class _RigPollWorker(QObject):
             if mode:
                 try:
                     current_mode, _ = self._rig.get_mode()
-                except Exception:  # noqa: BLE001 — same tolerance as poll()
+                except Exception as exc:  # noqa: BLE001 — same tolerance as poll()
+                    _log.debug("tune: get_mode failed, assuming mode switch needed: %s", exc)
                     current_mode = ""
                 if mode_family(current_mode) != mode_family(mode):
                     self._rig.set_mode(mode, passband_hz)
-        except Exception:  # noqa: BLE001 — same tolerance as poll()
-            pass
+        except Exception as exc:  # noqa: BLE001 — same tolerance as poll()
+            # M10: log so failures are visible in OPEN_SSTV_DEBUG=1.  Persistent
+            # connection loss is still surfaced via the next poll cycle within
+            # ~3 s; this just makes transient errors (band-edge reject, brief
+            # CAT timeout) observable instead of vanishing.
+            _log.warning(
+                "tune to %d Hz (%s) failed: %s", freq_hz, mode or "mode unchanged", exc
+            )
 
 
 class _RigConnectWorker(QObject):
@@ -427,6 +434,12 @@ class MainWindow(QMainWindow):
         #: (which fires a noisy ``RuntimeWarning`` from PySide6 when
         #: there's nothing to disconnect).
         self._start_once_closure: object | None = None
+        #: M16: set by ``_on_audio_device_lost`` so ``_start_once``
+        #: knows to re-resolve the PortAudio index for the saved device
+        #: name (USB replug typically reassigns the index).  Avoids the
+        #: 50–500 ms ``sd.query_devices()`` GUI-thread freeze on every
+        #: capture start in the common case where nothing changed.
+        self._input_device_needs_relookup: bool = False
         #: v0.2.8: latest TX image captured (after banner compositing, before
         #: encoding) so it can be auto-saved on ``transmission_complete``
         #: when ``autosave_tx`` is enabled.  Cleared after each save so a
@@ -849,15 +862,23 @@ class MainWindow(QMainWindow):
         typed_qth = dlg.qth() if accepted else ""
 
         self._config.first_launch_seen = True
-        self._config.check_for_updates = dlg.check_updates_enabled()
-        if typed:
-            self._config.callsign = typed
-        if typed_name:
-            self._config.operator_name = typed_name
-        if typed_grid:
-            self._config.grid_square = typed_grid
-        if typed_qth:
-            self._config.qth = typed_qth
+        # M5: only honour the update-checker checkbox when the user
+        # clicked Save.  On Skip we leave every preference untouched —
+        # previously the typed callsign was discarded (correct intent
+        # "dismiss without saving") but ``check_updates_enabled`` was
+        # read unconditionally, so a user who typed their callsign,
+        # unchecked the updates box, and clicked Skip lost their
+        # callsign AND saved the unchecked preference.  Asymmetric.
+        if accepted:
+            self._config.check_for_updates = dlg.check_updates_enabled()
+            if typed:
+                self._config.callsign = typed
+            if typed_name:
+                self._config.operator_name = typed_name
+            if typed_grid:
+                self._config.grid_square = typed_grid
+            if typed_qth:
+                self._config.qth = typed_qth
 
         try:
             save_config(self._config)
@@ -1293,10 +1314,24 @@ class MainWindow(QMainWindow):
                 # Re-enumerate AFTER _pa_reset (which fires before reset_done)
                 # so a USB replug gets the new PortAudio device index rather
                 # than the stale pre-reset index captured before the reset.
-                if self._config.audio_input_device:
-                    fresh = find_input_device_by_name(self._config.audio_input_device)
+                #
+                # M16: only re-resolve if the device is actually known to
+                # have changed (``_input_device_needs_relookup`` is set by
+                # ``_on_audio_device_lost``).  ``sd.query_devices()`` can
+                # block the GUI thread for 50–500 ms on macOS Core Audio
+                # after a USB event; gating on the lost-flag means the
+                # common case (clean start, no replug) skips the lookup
+                # entirely.
+                if (
+                    self._input_device_needs_relookup
+                    and self._config.audio_input_device
+                ):
+                    fresh = find_input_device_by_name(
+                        self._config.audio_input_device
+                    )
                     if fresh is not None:
                         self._input_device = fresh
+                    self._input_device_needs_relookup = False
                 self._request_start_capture.emit(
                     self._input_device, self._config.sample_rate, DEFAULT_BLOCKSIZE
                 )
@@ -1351,6 +1386,10 @@ class MainWindow(QMainWindow):
         self._suppress_rx_status_updates = True
         self._rx_panel.set_status(message)
         self.statusBar().showMessage(message)  # sticky — no timeout
+        # M16: USB replug typically reassigns PortAudio device indices.
+        # Signal _start_once that it must re-resolve the saved device
+        # name on the next capture start.
+        self._input_device_needs_relookup = True
 
     @Slot(str)
     def _on_rx_status_update(self, text: str) -> None:
@@ -2332,9 +2371,53 @@ class MainWindow(QMainWindow):
         # Stop RX audio capture via the queued signal so the actual
         # PortAudio/QTimer teardown runs on the audio worker thread
         # (touching a QTimer across thread affinity is illegal and
-        # raises warnings). The queued stop lands on the audio
-        # thread's event loop before ``quit()`` drains it.
+        # raises warnings).
+        #
+        # M2: previously the stop emission was followed immediately by
+        # ``_audio_thread.quit()`` later in this method; if quit posted
+        # before the worker had drained the stop event, the thread's
+        # event loop could exit without running stop() — leaving the
+        # TCI ``audio_stop:0;`` unsent and the server still subscribed
+        # when ``self._rig.close()`` ran below.  Mirror the H8 pattern:
+        # wait for the worker's ``stopped`` signal with a bounded event
+        # loop before letting the thread quit.
+        _stop_done = threading.Event()
+
+        def _on_close_stop_done() -> None:
+            _stop_done.set()
+
+        try:
+            self._audio_worker.stopped.connect(  # type: ignore[union-attr]
+                _on_close_stop_done, Qt.ConnectionType.QueuedConnection
+            )
+        except Exception:  # noqa: BLE001
+            pass
         self._request_stop_capture.emit()
+
+        _close_loop = QEventLoop()
+        _close_timer = QTimer()
+        _close_timer.setSingleShot(True)
+        _close_timer.timeout.connect(_close_loop.quit)
+        try:
+            self._audio_worker.stopped.connect(  # type: ignore[union-attr]
+                _close_loop.quit, Qt.ConnectionType.QueuedConnection
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        _close_timer.start(2000)
+        if not _stop_done.is_set():
+            _close_loop.exec()
+        _close_timer.stop()
+        for _slot in (_on_close_stop_done, _close_loop.quit):
+            try:
+                self._audio_worker.stopped.disconnect(_slot)  # type: ignore[union-attr]
+            except (RuntimeError, TypeError):
+                pass
+        if not _stop_done.is_set():
+            _log.warning(
+                "closeEvent: audio worker stop() did not complete in 2 s — "
+                "proceeding; TCI audio_stop may not have reached the server"
+            )
         # Same reasoning for RxWorker's wall-clock watchdog QTimer —
         # it lives on the RX decode thread (created lazily in
         # ``_ensure_watchdog_timer``) and has no implicit stop path.

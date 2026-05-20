@@ -215,10 +215,36 @@ class AppConfig:
         # fall back to "png" for unknown values so a hand-edited TOML
         # can't put us into a state where the filename builder silently
         # produces files that no viewer can open.
+        original_fmt = self.autosave_file_format
         fmt = (self.autosave_file_format or "").lower().lstrip(".")
         if fmt not in ("png", "jpg", "jpeg"):
+            # M3: log so a user who hand-edited TOML to "webp" / future
+            # formats sees why their preference was discarded.  Without
+            # this the coercion silently rewrote the value on every
+            # load→save cycle.
+            if original_fmt and fmt:
+                _log.warning(
+                    "AppConfig: unknown autosave_file_format %r — falling back to 'png'",
+                    original_fmt,
+                )
             fmt = "png"
         self.autosave_file_format = "jpg" if fmt == "jpeg" else fmt
+
+        # M3: same symmetry for rx_audio_format — previously had no
+        # validation at all in __post_init__; the Settings combo
+        # silently selected index 0 ("wav") for unknown values and
+        # result_config() wrote that back, dropping user preferences
+        # without trace.
+        rx_fmt_original = self.rx_audio_format
+        rx_fmt = (self.rx_audio_format or "").lower().lstrip(".")
+        if rx_fmt not in ("wav", "flac"):
+            if rx_fmt_original and rx_fmt:
+                _log.warning(
+                    "AppConfig: unknown rx_audio_format %r — falling back to 'wav'",
+                    rx_fmt_original,
+                )
+            rx_fmt = "wav"
+        self.rx_audio_format = rx_fmt
 
 
 __all__ = ["AppConfig"]

@@ -660,6 +660,23 @@ class TxWorker(QObject):
                             cw.astype(np.float64) * self._output_gain,
                             -32768, 32767,
                         ).astype(np.int16)
+                    # M9: ramp down the last 5 ms of SSTV before the silence
+                    # gap.  PySSTV's encoder ends on a sync-tone tail at full
+                    # amplitude; a hard zero-cut at the SSTV→silence boundary
+                    # can leak a faint key-click into the RF passband at
+                    # high TX gain.  Symmetric with make_cw's 5 ms key-click
+                    # envelope: a half-cosine ramp from 1.0 → 0.0 over the
+                    # last 5 ms.  Inaudible to the listener, eliminates the
+                    # spectral edge.
+                    _RAMP_MS = 5
+                    ramp_n = int(self._sample_rate * _RAMP_MS / 1000)
+                    if samples.size >= ramp_n and ramp_n > 0:
+                        ramp = np.cos(
+                            np.linspace(0.0, np.pi / 2, ramp_n, dtype=np.float64)
+                        )
+                        tail = samples[-ramp_n:].astype(np.float64) * ramp
+                        samples = samples.copy()
+                        samples[-ramp_n:] = tail.astype(samples.dtype)
                     samples = np.concatenate([samples, gap, cw])
                 else:
                     _log.warning(
@@ -683,8 +700,16 @@ class TxWorker(QObject):
             return
 
         # === Per-transmission playback watchdog ===
+        # M8: when using TCI, _play_via_tci appends _TCI_PIPELINE_TAIL_S of
+        # silent samples to drain the server-side audio pipeline before
+        # the caller drops PTT.  The actual paced playback is therefore
+        # longer than samples.size / sample_rate; include the tail in
+        # the budget so the watchdog can't false-fire on the silence.
+        effective_samples = samples.size
+        if self._tci_connection is not None:
+            effective_samples += int(_TCI_PIPELINE_TAIL_S * self._sample_rate)
         playback_budget_s = _compute_playback_watchdog_s(
-            samples.size, self._sample_rate, self._ptt_delay_s
+            effective_samples, self._sample_rate, self._ptt_delay_s
         )
         playback_watchdog = threading.Timer(
             playback_budget_s,
@@ -1026,7 +1051,12 @@ class TxWorker(QObject):
                 raise
 
         try:
-            time.sleep(self._ptt_delay_s)
+            # M7: use _stop_event.wait() instead of bare time.sleep so a
+            # Stop click during the PTT settle window is honoured within
+            # milliseconds rather than holding the rig keyed for the full
+            # delay (typically 200 ms, up to 2 s on slow relays).  Returns
+            # True if the event was set during the wait, False on timeout.
+            self._stop_event.wait(self._ptt_delay_s)
             if self._stop_event.is_set():
                 # Stop pressed during the PTT delay window, before any audio.
                 _log.debug("TX stop requested during PTT delay — skipping playback")
@@ -1796,7 +1826,19 @@ class RxWorker(QObject):
             # whether we re-decode from it).
             raw = self._decoder.consume_last_buffer()
             if raw is not None and isinstance(raw, np.ndarray) and raw.size > 0:
-                self.rx_audio_ready.emit(raw, event.mode, event.vis_code, self._sample_rate)
+                # M13: ``raw`` is consumed by two paths from here — the
+                # ``rx_audio_ready`` slot writes it to disk on the GUI
+                # thread, and the slant-correction branch below feeds
+                # the same ndarray to ``decode_wav`` on the worker
+                # thread.  Today both consumers only read (np.clip +
+                # multiply allocates new arrays) so no race, but if
+                # either is ever modified to filter in-place the shared
+                # reference would corrupt the other.  Emit a copy so
+                # the disk-write path can't observe in-flight mutations
+                # from a future decode_wav rewrite.
+                self.rx_audio_ready.emit(
+                    raw.copy(), event.mode, event.vis_code, self._sample_rate
+                )
             final_image = event.image
             if self._final_slant_correction:
                 # Opt-in: run a full single-pass re-decode with global

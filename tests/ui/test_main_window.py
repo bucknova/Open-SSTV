@@ -800,9 +800,17 @@ class TestAudioDeviceReplug:
     def test_capture_start_re_enumerates_input_device_by_name(
         self, window: MainWindow, qtbot, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """When the user clicks Start, MainWindow must look up the configured
-        input device by name so a replug (new PortAudio index) is handled
-        transparently — the stale cached index is not passed to start().
+        """After a device-lost event, MainWindow must look up the configured
+        input device by name on the next Start so a replug (new PortAudio
+        index) is handled transparently.
+
+        M16: the re-enumeration is now gated on
+        ``_input_device_needs_relookup`` (set by
+        ``_on_audio_device_lost``).  Without a prior device-lost event,
+        the cached index is reused — this avoids 50-500ms GUI freezes
+        from ``sd.query_devices()`` on every capture start in the
+        common case where nothing has changed.  The test simulates the
+        replug scenario by flipping the flag before calling Start.
         """
         from open_sstv.audio.devices import AudioDevice
 
@@ -819,6 +827,9 @@ class TestAudioDeviceReplug:
             default_sample_rate=48000.0,
         )
         window._input_device = stale_device
+        # M16: simulate a prior device-lost event so _start_once knows
+        # to re-resolve the PortAudio index by name on this Start.
+        window._input_device_needs_relookup = True
 
         # The fresh device after replug — correct new index 7.
         fresh_device = AudioDevice(

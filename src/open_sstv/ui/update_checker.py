@@ -11,6 +11,7 @@ swallowed — an update check failing is never surfaced as an error.
 """
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import urllib.request
@@ -62,11 +63,29 @@ class UpdateCheckerWorker(QObject):
             )
             with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as resp:
                 data = json.loads(resp.read())
+            # M1: a rate-limit / abuse-detection JSON from GitHub is a
+            # *dict* with different keys, but a hypothetical malformed
+            # response (or a future GitHub API change returning a list)
+            # would make ``data.get`` raise ``AttributeError`` that
+            # bypassed every except below.  Guard explicitly.
+            if not isinstance(data, dict):
+                _log.debug("update check: unexpected response type %s", type(data).__name__)
+                return
             tag = data.get("tag_name", "")
             url = data.get("html_url", _API_URL)
             if tag and _parse_version(tag) > _parse_version(__version__):
                 self.update_available.emit(tag.lstrip("v"), url)
-        except (URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        except (
+            URLError,
+            TimeoutError,
+            json.JSONDecodeError,
+            OSError,
+            # M1: ``http.client.HTTPException`` (IncompleteRead, BadStatusLine,
+            # etc.) is NOT an OSError subclass — a malformed response chunk
+            # would otherwise crash the worker thread and the ``finally``
+            # block would leave the worker in an indeterminate state.
+            http.client.HTTPException,
+        ) as exc:
             # Network hiccups, DNS failures, malformed JSON, and offline
             # mode are all expected and silent — but keep a debug-level
             # trace so a real bug (TypeError, AttributeError, …) can't
