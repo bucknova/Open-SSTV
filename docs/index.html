@@ -9,7 +9,7 @@
   <link rel="icon" type="image/png" href="icon.png" />
   <link rel="apple-touch-icon" href="icon.png" />
   <meta property="og:title" content="Open-SSTV — Open-Source SSTV Transceiver for Amateur Radio" />
-  <meta property="og:description" content="Open-source cross-platform SSTV transceiver for amateur radio. Receives, decodes, and transmits all 22 supported modes with optional rigctld or direct serial CAT/PTT." />
+  <meta property="og:description" content="Open-source cross-platform SSTV transceiver for amateur radio. Receives, decodes, and transmits all 22 supported modes with rigctld, direct serial CAT/PTT, or TCI (ExpertSDR2 / SunSDR2 / AetherSDR) rig control." />
   <meta property="og:image" content="icon.png" />
   <meta property="og:type" content="website" />
   <meta name="twitter:card" content="summary_large_image" />
@@ -696,7 +696,7 @@
 <!-- ── Hero ── -->
 <div class="hero">
   <div>
-    <div class="hero-badge" id="version-badge">Beta · v0.3.2</div>
+    <div class="hero-badge" id="version-badge">Beta · v0.3.5</div>
     <h1>Open-Source<br /><span>SSTV Transceiver</span><br />for Amateur Radio</h1>
     <p>Transmit and receive Slow Scan Television images live from your rig — no external software required. 22 modes, modern Qt 6 GUI, cross-platform.</p>
     <div class="hero-actions">
@@ -775,8 +775,15 @@
       <div class="feature-card">
         <div class="feature-icon">🎛</div>
         <span class="feature-tag">Rig Control</span>
-        <h3>Full Hamlib Integration</h3>
-        <p>rigctld TCP client with auto-launch. Direct serial for Icom CI-V, Kenwood, Yaesu, and DTR/RTS PTT. Frequency &amp; S-meter polling at 1 Hz.</p>
+        <h3>Hamlib, Serial, and TCI</h3>
+        <p>rigctld TCP client with auto-launch. Direct serial for Icom CI-V, Kenwood, Yaesu, and DTR/RTS PTT. TCI WebSocket support for ExpertSDR2/3, AetherSDR, and the SunSDR2 family — single connection carries CAT and audio. Frequency &amp; S-meter polling at 1 Hz.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon">📊</div>
+        <span class="feature-tag">v0.3.5 · Display</span>
+        <h3>FFT Waterfall</h3>
+        <p>Floating spectrogram window over the 0–4 kHz SSTV audio band. Cool palette for RX, warm palette for TX, with dotted reference lines at the 1200 / 1500 / 1900 / 2300 Hz SSTV tones. Toggle from View → Waterfall; hidden (not destroyed) so scroll history is preserved across openings.</p>
       </div>
 
       <div class="feature-card">

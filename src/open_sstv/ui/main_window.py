@@ -310,7 +310,13 @@ class MainWindow(QMainWindow):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Open-SSTV")
-        self.resize(1100, 640)
+        # v0.3.5: default geometry tuned so the TX panel opens wide
+        # enough for exactly 4 template gallery cards in a row at the
+        # 140 px max thumbnail width with the 8 px flow-layout gutter.
+        # Initial splitter sizes apply the 640 / 540 split (see below);
+        # users can resize freely after launch and the gallery flow
+        # layout reflows to fit more or fewer cards per row.
+        self.resize(1280, 720)
 
         self._config = config if config is not None else load_config()
 
@@ -429,6 +435,13 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
         splitter.addWidget(self._tx_panel)
         splitter.addWidget(self._rx_panel)
+        # v0.3.5: bias the initial split toward the TX panel so its
+        # template gallery shows 4 cards in a row out of the box —
+        # 4 × 140 px thumbnails + 3 × 8 px gutters + flow / panel
+        # margins ≈ 632 px, so 640 gives a small buffer.  Stretch
+        # factors stay equal so subsequent window resizes grow both
+        # panels symmetrically.
+        splitter.setSizes([640, 540])
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
 

@@ -4,9 +4,10 @@
 
 An open-source, cross-platform SSTV (Slow Scan Television) transceiver for amateur
 radio. Receives and decodes SSTV images live off your radio, and encodes and
-transmits images back, with optional Hamlib or direct serial PTT and frequency control.
+transmits images back, with optional Hamlib, direct serial, or TCI (ExpertSDR2 /
+SunSDR2 / AetherSDR) rig control.
 
-**Status: Beta (v0.3.4) — ready for user testing and feedback.** TX and RX paths work
+**Status: Beta (v0.3.5) — ready for user testing and feedback.** TX and RX paths work
 end-to-end across all 22 supported modes. Rig control via rigctld or direct serial CAT
 is functional. Weak-signal decode is usable down to roughly 0 dB SNR on Robot 36.
 
@@ -27,8 +28,9 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
 - **Modern, intuitive UI** built on Qt 6 (PySide6).
 - **Lightweight** enough to run on modest hardware. Pure Python + a small set of
   well-maintained scientific dependencies.
-- **Real radio control** via Hamlib's `rigctld` TCP daemon or direct serial
-  (Icom CI-V, Kenwood/Elecraft, Yaesu CAT, DTR/RTS PTT) — so any supported radio
+- **Real radio control** via Hamlib's `rigctld` TCP daemon, direct serial
+  (Icom CI-V, Kenwood/Elecraft, Yaesu CAT, DTR/RTS PTT), or TCI WebSocket
+  (ExpertSDR2 / ExpertSDR3 / AetherSDR / SunSDR2) — so any supported radio
   works out of the box without an external daemon.
 - **Decoder written from scratch** because no maintained Python SSTV decoder exists
   on PyPI today. Algorithms mirror the well-known C reference `slowrx`.
@@ -150,6 +152,12 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
   (`sstv_<mode>_YYYYMMDD_HHMMSS.png`).
 - **Save images** -- manual Save button, Ctrl+S shortcut, gallery double-click,
   or right-click → Save As…
+- **FFT waterfall (v0.3.5)** -- floating spectrogram window (View → Waterfall)
+  showing the 0–4 kHz SSTV audio band as a scrolling FFT, with distinct cool
+  and warm palettes for RX and TX traffic and dotted reference lines at the
+  1200 / 1500 / 1900 / 2300 Hz SSTV tones. Hidden (not destroyed) when
+  toggled off, so scroll history is preserved across openings; visibility
+  persists across app restarts.
 
 ### Radio Control
 - **rigctld (Hamlib)** -- TCP client for `rigctld`, supporting PTT, frequency,
@@ -159,6 +167,11 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
   - **Kenwood / Elecraft** -- standard Kenwood command protocol
   - **Yaesu CAT** -- Yaesu serial protocol
   - **PTT Only (DTR/RTS)** -- simple serial PTT via DTR or RTS line
+- **TCI (v0.3.5)** -- WebSocket-based control for the Expert Electronics
+  SunSDR2 family (ExpertSDR2 / ExpertSDR3) and the AetherSDR. A single
+  `ws://host:port` connection (default `127.0.0.1:40001`) carries both CAT
+  control and binary PCM audio, so rig control and RX/TX audio share one
+  transport with no virtual audio cables required.
 - **Configurable baud rate** -- 4800, 9600, 19200, 38400, 57600, or 115200 baud.
 - **Rig status bar** -- frequency, mode, and S-meter polled at 1 Hz when connected.
   Graceful disconnect: non-modal status bar message, auto-reconnect on next poll.
@@ -374,7 +387,7 @@ open-sstv-decode in.wav -o out.png                    # CLI decoder
 
 ## Testing focus areas
 
-If you're kicking the tyres on the v0.3.4 beta, these are the surfaces we'd most
+If you're kicking the tyres on the v0.3.5 beta, these are the surfaces we'd most
 like eyes on. File an [issue](https://github.com/bucknova/Open-SSTV/issues)
 with what you tried and what happened.
 
@@ -393,6 +406,13 @@ with what you tried and what happened.
   does the green/amber match indicator track what you'd expect?
 - **Rig control edge cases**. Mid-session USB unplug; rigctld daemon crash; Icom
   CI-V addresses other than the default 0x94; Kenwood/Yaesu protocol quirks.
+- **TCI rigs** (v0.3.5). If you have an ExpertSDR2/3, AetherSDR, or another
+  TCI-speaking SDR, on-air reports are especially valuable — this path is
+  newly added and has only been validated against one AetherSDR setup.
+  Confirm TCI connect, RX audio routing, full SSTV TX, and CW ID over TCI.
+- **FFT waterfall** (v0.3.5). Toggle View → Waterfall and confirm RX traffic
+  paints a cool palette and TX audio paints a warm palette during a
+  transmission; report any visible scrolling stalls or palette glitches.
 - **macOS privacy prompts**. If you see Music / iCloud / unexpected access
   requests on launch, note which ones and when — we have a hunch this is PortAudio
   device enumeration but haven't nailed it yet.
@@ -405,8 +425,6 @@ with what you tried and what happened.
 ### Post-beta / v0.3
 - **Remaining SSTV modes** -- Robot 8/12/24/72 (4 modes needing custom YCbCr 4:2:2
   encoders not yet in PySSTV).
-- **Waterfall display** -- live FFT spectrogram in the RX panel
-  (scope: [docs/waterfall_scope.md](docs/waterfall_scope.md)).
 - **Raspberry Pi / ARM support** -- tested on Pi 4/5.
 - **Windows support** -- full validation on real hardware (experimental binaries ship in v0.2.x).
 - **Digital VOX** -- auto-detect incoming SSTV and start decoding without manual

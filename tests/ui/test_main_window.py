@@ -106,6 +106,84 @@ def test_central_widget_hosts_tx_and_rx_panels(window: MainWindow) -> None:
     assert central.findChild(RadioPanel) is not None
 
 
+# ---------------------------------------------------------------------------
+# v0.3.5 — default geometry tuned to fit 4 template gallery cards in TX panel
+# ---------------------------------------------------------------------------
+
+
+def test_default_window_size_is_1280x720(window: MainWindow) -> None:
+    """v0.3.5 bumped the default size from 1100×640 to 1280×720 so the
+    initial split allocates enough TX-panel width for 4 cards in the
+    template gallery's flow layout (4 × 140 px + gutters + margins ≈
+    632 px).  Pin the default geometry so a future tweak that pulls
+    the window narrower without re-checking the gallery math gets
+    flagged here."""
+    sz = window.size()
+    assert sz.width() == 1280
+    assert sz.height() == 720
+
+
+def test_splitter_initial_sizes_favor_tx_panel_for_four_cards(
+    window: MainWindow, qtbot
+) -> None:
+    """The splitter's initial sizes bias TX wider than RX so the first-
+    open template gallery shows 4 cards in a row.  After ``show()`` and
+    ``waitExposed`` the rendered TX-panel width must be at least the
+    4-card budget (~632 px).  Equal-stretch factors mean subsequent
+    user resizes grow both sides symmetrically."""
+    from PySide6.QtWidgets import QSplitter
+
+    window.show()
+    qtbot.waitExposed(window)
+
+    splitter = window.centralWidget().findChild(QSplitter)
+    assert splitter is not None
+    sizes = splitter.sizes()
+    assert len(sizes) == 2, f"expected 2 splitter children, got {len(sizes)}"
+    tx_width, rx_width = sizes
+    # 4-card budget: 4 × 140 px thumbs + 3 × 8 px gutters + flow / panel
+    # margins = ~632 px.  Allow a small safety margin in the assertion
+    # so platform-dependent chrome adjustments don't make the test
+    # flake on tiny rendering differences.
+    assert tx_width >= 632, (
+        f"TX panel rendered at {tx_width} px — below the 4-card budget "
+        f"(~632 px). RX got {rx_width} px."
+    )
+    # RX still gets meaningful room — not so squeezed it's unusable.
+    assert rx_width >= 400, (
+        f"RX panel rendered at {rx_width} px — too narrow for the "
+        f"image gallery to be usable."
+    )
+
+
+def test_user_resize_still_grows_both_panels(
+    window: MainWindow, qtbot
+) -> None:
+    """Stretch factors are kept at 1:1 so dragging the window edge
+    grows both panels.  Verify by resizing the window wider and
+    confirming both panels gained width vs the initial split."""
+    from PySide6.QtWidgets import QSplitter
+
+    window.show()
+    qtbot.waitExposed(window)
+    splitter = window.centralWidget().findChild(QSplitter)
+    initial = splitter.sizes()
+
+    # Resize the window 200 px wider and let the layout settle.
+    window.resize(1480, 720)
+    qtbot.waitUntil(lambda: sum(splitter.sizes()) > sum(initial), timeout=500)
+
+    after = splitter.sizes()
+    # Both panels should have grown (stretch 1:1 means each gets ~half
+    # of the extra 200 px).
+    assert after[0] > initial[0], (
+        f"TX panel did not grow on window resize: {initial[0]} → {after[0]}"
+    )
+    assert after[1] > initial[1], (
+        f"RX panel did not grow on window resize: {initial[1]} → {after[1]}"
+    )
+
+
 def test_transmit_round_trip_through_worker(
     qtbot,
     window: MainWindow,
