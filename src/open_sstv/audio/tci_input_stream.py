@@ -104,6 +104,9 @@ class TciInputStreamWorker(QObject):
             conn.send("audio_stream_sample_type:float32;")
             conn.send("audio_stream_channels:1;")
             conn.send("audio_start:0;")
+            # H6: announce the subscription so TxWorker doesn't double-
+            # start (and double-leak) the RX stream on each transmission.
+            conn.mark_rx_audio_subscribed(True)
         except Exception as exc:  # noqa: BLE001
             conn.unregister_audio_callback(self._audio_callback)
             self._running = False
@@ -137,6 +140,10 @@ class TciInputStreamWorker(QObject):
             conn.send("audio_stop:0;")
         except Exception:  # noqa: BLE001
             pass
+        # H6: clear the subscription flag regardless of whether the stop
+        # command actually reached the server — from the client's point
+        # of view we are no longer interested in RX audio.
+        conn.mark_rx_audio_subscribed(False)
 
         self._drain_queue()
 
@@ -154,9 +161,20 @@ class TciInputStreamWorker(QObject):
 
         ``samples`` is already float32 mono, decoded by ``TciConnection``.
         Fast and non-blocking — mirrors the PortAudio RT callback contract.
+
+        Mirrors the teardown guard from ``InputStreamWorker._audio_callback``:
+        the recv thread can fire this callback after the worker's
+        ``deleteLater`` has run (or during shutdown), at which point
+        ``self._queue`` may already be cleared from ``__dict__`` by GC.
+        ``getattr`` avoids an ``AttributeError`` that would otherwise be
+        silently swallowed by ``TciConnection._dispatch_audio`` and mask
+        the teardown race.
         """
+        q = getattr(self, "_queue", None)
+        if q is None:
+            return
         try:
-            self._queue.put_nowait(samples)
+            q.put_nowait(samples)
         except queue.Full:
             self._dropped_chunks += 1
 

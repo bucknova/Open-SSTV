@@ -78,7 +78,16 @@ import numpy as np
 
 _log = logging.getLogger(__name__)
 
-from PySide6.QtCore import QMetaObject, QObject, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import (
+    QEventLoop,
+    QMetaObject,
+    QObject,
+    Qt,
+    QThread,
+    QTimer,
+    Signal,
+    Slot,
+)
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -412,6 +421,12 @@ class MainWindow(QMainWindow):
         #: Set by _on_tx_error so _on_tx_aborted doesn't wipe the error
         #: message with "Transmission aborted." before the user can read it.
         self._tx_error_pending: bool = False
+        #: H7: tracks the closure currently connected to
+        #: ``RxWorker.reset_done`` so a rapid Start / Stop / Start can
+        #: disconnect-by-reference instead of nuking all connections
+        #: (which fires a noisy ``RuntimeWarning`` from PySide6 when
+        #: there's nothing to disconnect).
+        self._start_once_closure: object | None = None
         #: v0.2.8: latest TX image captured (after banner compositing, before
         #: encoding) so it can be auto-saved on ``transmission_complete``
         #: when ``autosave_tx`` is enabled.  Cleared after each save so a
@@ -915,7 +930,16 @@ class MainWindow(QMainWindow):
             self._config = dlg.result_config()
             # Adopt any rigctld process the dialog launched before trying to
             # persist, so a save failure doesn't orphan the process.
+            #
+            # H2: previously this assignment overwrote ``self._rigctld_proc``
+            # unconditionally — if the main window already owned a rigctld
+            # (auto-launched on Connect), the old process was leaked: still
+            # holding the serial port and TCP socket until the OS reaped it.
+            # Kill the existing one first so adoption replaces rather than
+            # orphans.
             if dlg.rigctld_process is not None:
+                if self._rigctld_proc is not None:
+                    self._kill_rigctld()
                 self._rigctld_proc = dlg.rigctld_process
             # Always apply to in-memory state so the session works even if
             # the disk write fails.
@@ -1237,6 +1261,25 @@ class MainWindow(QMainWindow):
             # cycles (bug R-1: counter climbed past 127s with no image).
             # Defer the start-capture request until reset_done arrives so
             # the two worker threads are ordered correctly (OP-05).
+            #
+            # H7: rapid Start / Stop / Start used to leave stale closures
+            # connected to ``reset_done`` because the disconnect inside
+            # each closure only removed itself.  A second click before
+            # the first reset completed enqueued a second closure;
+            # both fired on the next ``reset_done`` → two
+            # ``_request_start_capture`` emissions → InputStreamWorker
+            # raised "already running" via the error signal.  Disconnect
+            # any prior closure by reference (not nuclear ``disconnect()``,
+            # which prints a RuntimeWarning from PySide6 when there's
+            # nothing connected) before installing the new one.
+            if self._start_once_closure is not None:
+                try:
+                    self._rx_worker.reset_done.disconnect(
+                        self._start_once_closure
+                    )
+                except (RuntimeError, TypeError):
+                    pass
+                self._start_once_closure = None
 
             def _start_once() -> None:
                 # Disconnect ourselves before emitting so a later reset()
@@ -1245,6 +1288,8 @@ class MainWindow(QMainWindow):
                     self._rx_worker.reset_done.disconnect(_start_once)
                 except (RuntimeError, TypeError):
                     pass
+                if self._start_once_closure is _start_once:
+                    self._start_once_closure = None
                 # Re-enumerate AFTER _pa_reset (which fires before reset_done)
                 # so a USB replug gets the new PortAudio device index rather
                 # than the stale pre-reset index captured before the reset.
@@ -1256,6 +1301,7 @@ class MainWindow(QMainWindow):
                     self._input_device, self._config.sample_rate, DEFAULT_BLOCKSIZE
                 )
 
+            self._start_once_closure = _start_once
             self._rx_worker.reset_done.connect(_start_once)
             self._request_rx_reset.emit()
         else:
@@ -1973,16 +2019,65 @@ class MainWindow(QMainWindow):
         """
         old = self._audio_worker
 
-        # C1: stop the old worker on its own thread before disconnecting.
-        # BlockingQueuedConnection blocks this (GUI) thread until the audio
-        # thread has finished running stop(), ensuring the PortAudio stream
-        # and any TCI subscription are cleanly torn down.
+        # C1: stop the old worker on its own thread before disconnecting,
+        # so the PortAudio stream and any TCI subscription are torn down
+        # cleanly (audio_stop:0; reaches the server, stream.close() runs).
+        #
+        # H8: BlockingQueuedConnection would freeze the GUI forever if
+        # stream.stop()/close() hangs — a known macOS Core Audio behaviour
+        # after USB device removal.  Use a bounded wait instead: post the
+        # stop() slot via QueuedConnection and pump the GUI event loop
+        # until either the worker emits ``stopped`` or _SWAP_STOP_TIMEOUT_S
+        # elapses.  On timeout we proceed with teardown anyway — the
+        # wedged worker will leak its stream until process exit, but the
+        # GUI doesn't hang and the user keeps control of the app.
         was_capturing = self._capture_running
+
+        _SWAP_STOP_TIMEOUT_MS = 2000  # 2 s is generous for any real stop
+        _stop_completed = threading.Event()
+
+        def _on_swap_stop_done() -> None:
+            _stop_completed.set()
+
+        old.stopped.connect(  # type: ignore[union-attr]
+            _on_swap_stop_done, Qt.ConnectionType.QueuedConnection
+        )
         QMetaObject.invokeMethod(
             old,  # type: ignore[arg-type]
             "stop",
-            Qt.ConnectionType.BlockingQueuedConnection,
+            Qt.ConnectionType.QueuedConnection,
         )
+
+        # Pump events for up to _SWAP_STOP_TIMEOUT_MS while waiting for the
+        # worker to finish.  QEventLoop runs nested event processing on
+        # the GUI thread so queued ``stopped`` signals (and any other
+        # housekeeping slots) still fire; a QTimer enforces the hard cap.
+        _swap_loop = QEventLoop()
+        _swap_timer = QTimer()
+        _swap_timer.setSingleShot(True)
+        _swap_timer.timeout.connect(_swap_loop.quit)
+        old.stopped.connect(_swap_loop.quit, Qt.ConnectionType.QueuedConnection)  # type: ignore[union-attr]
+        _swap_timer.start(_SWAP_STOP_TIMEOUT_MS)
+        if not _stop_completed.is_set():
+            _swap_loop.exec()
+        _swap_timer.stop()
+        try:
+            old.stopped.disconnect(_on_swap_stop_done)  # type: ignore[union-attr]
+        except (RuntimeError, TypeError):
+            pass
+        try:
+            old.stopped.disconnect(_swap_loop.quit)  # type: ignore[union-attr]
+        except (RuntimeError, TypeError):
+            pass
+
+        if not _stop_completed.is_set():
+            _log.warning(
+                "Audio worker stop() did not complete within %d ms — "
+                "proceeding with teardown; the wedged worker will leak "
+                "its stream until process exit, but the GUI stays "
+                "responsive.",
+                _SWAP_STOP_TIMEOUT_MS,
+            )
 
         # Disconnect old worker from consumers.
         for signal, slot in (
@@ -2022,6 +2117,18 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             pass
 
+        # H1: clear the RX decoder's accumulated state before the new
+        # audio source starts feeding chunks.  PortAudio and TCI samples
+        # have different clock domains; concatenating them through the
+        # incremental decoder's _scratch / _total_samples / half-buffered
+        # VIS would almost guarantee a corrupted first decode after a
+        # hot-swap.  reset() is idempotent and safe to call when the
+        # decoder is already idle.
+        try:
+            self._rx_worker.reset()
+        except Exception as exc:  # noqa: BLE001 — never block the swap
+            _log.warning("RxWorker reset after swap failed: %s", exc)
+
         # C2: if capture was running before the swap, restart it on the
         # new worker so the user sees no gap in the RX stream.
         if was_capturing:
@@ -2056,8 +2163,19 @@ class MainWindow(QMainWindow):
         self._tx_worker.set_waterfall_active(checked)
 
     def _set_waterfall_config(self, visible: bool) -> None:
-        """Persist the waterfall visibility into the in-memory config."""
+        """Persist the waterfall visibility — both in-memory and to TOML.
+
+        H3: the View → Waterfall menu toggle previously only wrote to
+        ``self._config`` in memory and ``closeEvent`` never called
+        ``save_config()`` for that mutation, so a bare toggle was forgotten
+        across restarts unless the user also opened (and OK'd) Settings.
+        Saving here makes the menu toggle stick the same way Settings does.
+        """
         self._config.show_waterfall = visible
+        try:
+            save_config(self._config)
+        except Exception as exc:  # noqa: BLE001 — UI toggle never blocks
+            _log.warning("Could not persist waterfall visibility: %s", exc)
 
     @Slot(object)
     def _on_rx_waterfall_chunk(self, chunk: object) -> None:

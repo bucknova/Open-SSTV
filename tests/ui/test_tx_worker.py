@@ -721,17 +721,18 @@ class TestTwoStageWatchdogIntegration:
         monkeypatch: pytest.MonkeyPatch,
         fake_samples: np.ndarray,
     ) -> None:
-        """transmit() must start a stage-1 encode watchdog AND a stage-2
-        playback watchdog, in that order, with durations that match the
-        _ENCODE_WATCHDOG_S constant and the _compute_playback_watchdog_s
-        formula respectively.
+        """transmit() must start exactly one playback watchdog, sized
+        according to ``_compute_playback_watchdog_s``.
+
+        H11 removed the stage-1 encode watchdog (it could not actually
+        cancel a wedged PySSTV ``encode()`` call — PySSTV doesn't honour
+        ``_stop_event`` so the timer firing just set the flag and
+        waited for encode to return naturally).  This test now asserts
+        the single remaining timer rather than the original two.
         """
         import threading as _threading
 
-        from open_sstv.ui.workers import (
-            _ENCODE_WATCHDOG_S,
-            _compute_playback_watchdog_s,
-        )
+        from open_sstv.ui.workers import _compute_playback_watchdog_s
 
         captured: list[float] = []
         real_timer = _threading.Timer
@@ -746,20 +747,13 @@ class TestTwoStageWatchdogIntegration:
         worker = TxWorker(rig=ManualRig(), ptt_delay_s=0, sample_rate=48_000)
         worker.transmit(gradient_image, Mode.ROBOT_36)
 
-        # Stage 1 + Stage 2 = exactly two timers constructed.
-        assert len(captured) == 2, f"Expected 2 watchdogs, got {len(captured)}: {captured}"
-        assert captured[0] == _ENCODE_WATCHDOG_S, (
-            f"Stage 1 should be {_ENCODE_WATCHDOG_S}s, got {captured[0]}s"
-        )
-        # Stage 2 budget derived from the fake samples (100 zeros) at 48 kHz.
-        # CW tail is appended in transmit() since default cw_id_enabled=False
-        # on this worker (no set_cw_id call) — so samples.size stays at
-        # len(fake_samples) = 100.
-        expected_stage2 = _compute_playback_watchdog_s(
+        # Only the playback watchdog should be constructed now.
+        assert len(captured) == 1, f"Expected 1 watchdog, got {len(captured)}: {captured}"
+        expected = _compute_playback_watchdog_s(
             len(fake_samples), 48_000, 0.0
         )
-        assert captured[1] == expected_stage2, (
-            f"Stage 2 should be {expected_stage2}s, got {captured[1]}s"
+        assert captured[0] == expected, (
+            f"Playback watchdog should be {expected}s, got {captured[0]}s"
         )
 
     def test_watchdog_fired_signal_carries_duration(

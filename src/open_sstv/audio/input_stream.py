@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import threading
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -145,6 +146,14 @@ class InputStreamWorker(QObject):
         self._timer: QTimer | None = None
         self._watchdog: QTimer | None = None
         self._sample_rate: int = DEFAULT_SAMPLE_RATE
+        #: PortAudio drop counter.  ``+= 1`` from the RT callback and the
+        #: queue-full path is read-modify-write, which races with the
+        #: worker-thread reset to 0 in ``start()`` and the read in
+        #: ``stop()``.  Under CPython the GIL makes plain int reads atomic
+        #: but the increment can still lose against a concurrent assignment
+        #: (and free-threaded 3.13t lets the int box itself race).  Guarded
+        #: by ``_drop_lock`` — cheap and makes the contract obvious.
+        self._drop_lock = threading.Lock()
         self._dropped_chunks: int = 0
         # OP-11: first-chunk tracker for cold-start → steady-state
         # watchdog interval switch.  Set back to False on stop().
@@ -190,7 +199,8 @@ class InputStreamWorker(QObject):
             device.index if isinstance(device, AudioDevice) else device
         )
         self._sample_rate = sample_rate
-        self._dropped_chunks = 0
+        with self._drop_lock:
+            self._dropped_chunks = 0
         self._stopping = False
 
         # Drain any stale chunks from a previous session before the
@@ -312,9 +322,11 @@ class InputStreamWorker(QObject):
         # image was in-flight when the user clicked Stop.
         self._drain_queue()
 
-        if self._dropped_chunks > 0:
+        with self._drop_lock:
+            dropped = self._dropped_chunks
+        if dropped > 0:
             self.error.emit(
-                f"Input overflow: dropped {self._dropped_chunks} chunks"
+                f"Input overflow: dropped {dropped} chunks"
             )
 
         self.stopped.emit()
@@ -341,8 +353,10 @@ class InputStreamWorker(QObject):
         """
         if status.input_overflow or status.input_underflow:
             # PortAudio already dropped samples before they reached us.
-            # Record as a drop and keep running.
-            self._dropped_chunks += 1
+            # Record as a drop and keep running.  Lock-guarded against
+            # the worker thread's reset / read in start() / stop().
+            with self._drop_lock:
+                self._dropped_chunks += 1
 
         # Flatten to 1-D mono. ``channels=1`` in ``InputStream`` gives
         # us shape (frames, 1); pull out the column and copy so the
@@ -367,7 +381,8 @@ class InputStreamWorker(QObject):
             # Consumer is stalled — drop the newest chunk rather than
             # block the RT thread. The drop counter is surfaced via
             # ``error`` when we eventually stop or the next drain.
-            self._dropped_chunks += 1
+            with self._drop_lock:
+                self._dropped_chunks += 1
 
     @Slot()
     def _drain_queue(self) -> None:

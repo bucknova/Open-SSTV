@@ -170,6 +170,17 @@ class SerialPttRig:
 # Icom CI-V protocol
 # ============================================================
 
+#: H12: shorter deadline for read-only diagnostic commands (get_freq,
+#: get_mode, get_strength, get_ptt).  The serial lock is held for the
+#: entire round-trip; a stale response holding it for the full 1.0 s
+#: would delay PTT-off writes from the watchdog or Stop button by up
+#: to that long, making "stop doesn't unkey immediately" a real
+#: symptom.  200 ms is enough headroom for any healthy CI-V exchange
+#: and means the lock turns over fast enough for set commands to
+#: pre-empt.  Set commands keep the 1.0 s default — they're rare and
+#: the user wants them to succeed rather than time out.
+_DIAG_DEADLINE_S: float = 0.2
+
 # CI-V frame: FE FE <to> <from> <cmd> [<subcmd>] [<data>...] FD
 _CIV_PREAMBLE = b"\xfe\xfe"
 _CIV_EOM = b"\xfd"
@@ -238,7 +249,9 @@ class IcomCIVRig:
 
     def get_freq(self) -> int:
         """Read the current VFO frequency."""
-        resp = self._command(b"\x03")
+        # H12: diagnostic read — short deadline so a stale response can't
+        # hold the serial lock long enough to delay a PTT-off write.
+        resp = self._command(b"\x03", deadline_s=_DIAG_DEADLINE_S)
         # Response payload: [cmd_echo(0x03), b0, b1, b2, b3, b4] — 6 bytes.
         # Strip the command echo before handing to _bcd_to_freq.
         if len(resp) < 6:
@@ -250,7 +263,7 @@ class IcomCIVRig:
         self._command(b"\x05" + data)
 
     def get_mode(self) -> tuple[str, int]:
-        resp = self._command(b"\x04")
+        resp = self._command(b"\x04", deadline_s=_DIAG_DEADLINE_S)
         # Response payload: [cmd_echo(0x04), mode_byte, passband_byte].
         # resp[0] is the command echo (happens to equal 0x04 = RTTY in the
         # mode_map), so without stripping it the mode always reads as RTTY.
@@ -280,7 +293,7 @@ class IcomCIVRig:
         # Response: [cmd_echo(0x1C), subcmd(0x00), tx_state].
         # resp[0]=0x1C is always non-zero, so without stripping the echo
         # get_ptt() would always return True (rig appears permanently keyed).
-        resp = self._command(b"\x1c\x00")
+        resp = self._command(b"\x1c\x00", deadline_s=_DIAG_DEADLINE_S)
         if len(resp) >= 3:
             return resp[2] != 0x00
         return False
@@ -295,7 +308,7 @@ class IcomCIVRig:
         # Without stripping the echo, raw was always 0x1502=5378 (C-4).
         # The payload bytes are BCD, not binary: S9 is sent as 0x01 0x20
         # (= decimal 120), not 0x00 0x78 (= binary 120).
-        resp = self._command(b"\x15\x02")
+        resp = self._command(b"\x15\x02", deadline_s=_DIAG_DEADLINE_S)
         _log.info("S-meter: resp=%s (%d bytes)", resp.hex() if resp else "(empty)", len(resp))
         if len(resp) >= 4:
             raw = self._bcd_byte_to_int(resp[2]) * 100 + self._bcd_byte_to_int(resp[3])
@@ -311,7 +324,7 @@ class IcomCIVRig:
 
     # === CI-V internals ===
 
-    def _command(self, cmd_data: bytes) -> bytes:
+    def _command(self, cmd_data: bytes, deadline_s: float = 1.0) -> bytes:
         """Send a CI-V command and return the response data payload.
 
         Serial I/O errors (unplug, device busy, timeout) are translated to
@@ -319,6 +332,14 @@ class IcomCIVRig:
         can recover gracefully.  A mid-session USB unplug used to leak a
         raw ``serial.SerialException`` past every ``RigError`` catch in
         the poll thread, killing it silently (OP-02).
+
+        H12: ``deadline_s`` defaults to 1.0 s for set commands but
+        diagnostic getters (get_freq / get_mode / get_strength / get_ptt)
+        pass ``_DIAG_DEADLINE_S`` (200 ms) so a stale response from the
+        rig (rig in tuning mode, brief firmware pause) doesn't hold the
+        shared serial lock long enough to delay an unrelated PTT-off
+        write.  Set commands keep the longer deadline because the user
+        expects them to succeed rather than time out mid-tune.
         """
         with self._lock:
             if self._ser is None:
@@ -333,13 +354,13 @@ class IcomCIVRig:
             try:
                 self._ser.reset_input_buffer()
                 self._ser.write(frame)
-                return self._read_response()
+                return self._read_response(deadline_s=deadline_s)
             except _SERIAL_IO_ERRORS as exc:
                 raise RigConnectionError(
                     f"Icom CI-V serial I/O failed on {self._port}: {exc}"
                 ) from exc
 
-    def _read_response(self) -> bytes:
+    def _read_response(self, deadline_s: float = 1.0) -> bytes:
         """Read and parse a CI-V response frame.
 
         ``serial.SerialException`` raised by ``in_waiting``/``read`` (e.g.
@@ -350,7 +371,7 @@ class IcomCIVRig:
         if self._ser is None:
             raise RigConnectionError("Serial port not open")
         buf = bytearray()
-        deadline = time.monotonic() + 1.0
+        deadline = time.monotonic() + deadline_s
         while time.monotonic() < deadline:
             avail = self._ser.in_waiting
             if avail:
@@ -486,7 +507,7 @@ class KenwoodRig:
                 self._ser = None
 
     def get_freq(self) -> int:
-        resp = self._command("FA")
+        resp = self._command("FA", deadline_s=_DIAG_DEADLINE_S)
         # Response: "FAnnnnnnnnnnnn;" — 11-digit frequency in Hz
         if resp.startswith("FA") and len(resp) >= 13:
             try:
@@ -500,7 +521,7 @@ class KenwoodRig:
         self._write_command(f"FA{hz:011d}")
 
     def get_mode(self) -> tuple[str, int]:
-        resp = self._command("MD")
+        resp = self._command("MD", deadline_s=_DIAG_DEADLINE_S)
         # Response: "MDn;" where n is mode digit
         mode_map = {
             "1": "LSB", "2": "USB", "3": "CW", "4": "FM",
@@ -521,7 +542,7 @@ class KenwoodRig:
         self._write_command(f"MD{digit}")
 
     def get_ptt(self) -> bool:
-        resp = self._command("TX")
+        resp = self._command("TX", deadline_s=_DIAG_DEADLINE_S)
         # Response: "TXn;" where n=0 is RX, n=1 is TX
         if resp.startswith("TX") and len(resp) >= 3:
             return resp[2] != "0"
@@ -535,7 +556,7 @@ class KenwoodRig:
         self._write_command("TX1" if on else "RX")
 
     def get_strength(self) -> int:
-        resp = self._command("SM0")
+        resp = self._command("SM0", deadline_s=_DIAG_DEADLINE_S)
         # Response: "SM0nnnn;" — signal meter 0000-0030
         if resp.startswith("SM0") and len(resp) >= 7:
             try:
@@ -571,12 +592,16 @@ class KenwoodRig:
                     f"Kenwood serial I/O failed on {self._port}: {exc}"
                 ) from exc
 
-    def _command(self, cmd: str) -> str:
+    def _command(self, cmd: str, deadline_s: float = 1.0) -> str:
         """Send a Kenwood read command and return the response.
 
         Wraps ``serial.SerialException`` and ``OSError`` (e.g. termios.error
         on USB unplug) as ``RigConnectionError`` so a mid-session unplug
         is observable to callers that catch ``RigError`` (OP-02).
+
+        H12: ``deadline_s`` shortens to ``_DIAG_DEADLINE_S`` (200 ms) for
+        the diagnostic getters so the shared serial lock doesn't block
+        PTT-off writes for the full 1 s default.
         """
         with self._lock:
             if self._ser is None:
@@ -584,13 +609,17 @@ class KenwoodRig:
             try:
                 self._ser.reset_input_buffer()
                 self._ser.write(f"{cmd};".encode("ascii"))
-                return self._read_response(expected_prefix=cmd[:2])
+                return self._read_response(
+                    expected_prefix=cmd[:2], deadline_s=deadline_s
+                )
             except _SERIAL_IO_ERRORS as exc:
                 raise RigConnectionError(
                     f"Kenwood serial I/O failed on {self._port}: {exc}"
                 ) from exc
 
-    def _read_response(self, expected_prefix: str = "") -> str:
+    def _read_response(
+        self, expected_prefix: str = "", deadline_s: float = 1.0
+    ) -> str:
         """Read until a ``;``-terminated response matching *expected_prefix*.
 
         Discards unsolicited status messages (common when the operator
@@ -606,7 +635,7 @@ class KenwoodRig:
         if self._ser is None:
             raise RigConnectionError("Serial port not open")
         buf = bytearray()
-        deadline = time.monotonic() + 1.0
+        deadline = time.monotonic() + deadline_s
         while time.monotonic() < deadline:
             avail = self._ser.in_waiting
             if avail:
@@ -690,7 +719,7 @@ class YaesuRig:
                 self._ser = None
 
     def get_freq(self) -> int:
-        resp = self._command("FA")
+        resp = self._command("FA", deadline_s=_DIAG_DEADLINE_S)
         # Response: "FAnnnnnnnn;" — 8 or 9 digit frequency in Hz
         if resp.startswith("FA") and len(resp) >= 10:
             try:
@@ -704,7 +733,7 @@ class YaesuRig:
         self._write_command(f"FA{hz:09d}")
 
     def get_mode(self) -> tuple[str, int]:
-        resp = self._command("MD0")
+        resp = self._command("MD0", deadline_s=_DIAG_DEADLINE_S)
         # Response: "MD0n;" where n is mode digit
         mode_map = {
             "1": "LSB", "2": "USB", "3": "CW-U", "4": "FM",
@@ -728,7 +757,7 @@ class YaesuRig:
 
     def get_ptt(self) -> bool:
         # Read TX status
-        resp = self._command("TX")
+        resp = self._command("TX", deadline_s=_DIAG_DEADLINE_S)
         if resp.startswith("TX") and len(resp) >= 3:
             return resp[2] != "0"
         return False
@@ -739,7 +768,7 @@ class YaesuRig:
         self._write_command("TX1" if on else "TX0")
 
     def get_strength(self) -> int:
-        resp = self._command("SM0")
+        resp = self._command("SM0", deadline_s=_DIAG_DEADLINE_S)
         if resp.startswith("SM0") and len(resp) >= 6:
             try:
                 raw = int(resp[3:])
@@ -774,12 +803,16 @@ class YaesuRig:
                     f"Yaesu serial I/O failed on {self._port}: {exc}"
                 ) from exc
 
-    def _command(self, cmd: str) -> str:
+    def _command(self, cmd: str, deadline_s: float = 1.0) -> str:
         """Send a Yaesu read command and return the response.
 
         Wraps ``serial.SerialException`` and ``OSError`` (e.g. termios.error
         on USB unplug) as ``RigConnectionError`` so a mid-session unplug
         is observable to callers that catch ``RigError`` (OP-02).
+
+        H12: ``deadline_s`` shortens to ``_DIAG_DEADLINE_S`` (200 ms) for
+        diagnostic getters so the serial lock turns over fast enough to
+        let PTT-off writes pre-empt within ~200 ms instead of 1 s.
         """
         with self._lock:
             if self._ser is None:
@@ -787,13 +820,17 @@ class YaesuRig:
             try:
                 self._ser.reset_input_buffer()
                 self._ser.write(f"{cmd};".encode("ascii"))
-                return self._read_response(expected_prefix=cmd[:2])
+                return self._read_response(
+                    expected_prefix=cmd[:2], deadline_s=deadline_s
+                )
             except _SERIAL_IO_ERRORS as exc:
                 raise RigConnectionError(
                     f"Yaesu serial I/O failed on {self._port}: {exc}"
                 ) from exc
 
-    def _read_response(self, expected_prefix: str = "") -> str:
+    def _read_response(
+        self, expected_prefix: str = "", deadline_s: float = 1.0
+    ) -> str:
         """Read until a ``;``-terminated response matching *expected_prefix*.
 
         Discards unsolicited status messages and keeps reading until a
@@ -805,7 +842,7 @@ class YaesuRig:
         if self._ser is None:
             raise RigConnectionError("Serial port not open")
         buf = bytearray()
-        deadline = time.monotonic() + 1.0
+        deadline = time.monotonic() + deadline_s
         while time.monotonic() < deadline:
             avail = self._ser.in_waiting
             if avail:

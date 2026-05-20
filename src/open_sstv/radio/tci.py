@@ -99,6 +99,26 @@ class TciConnection:
 
         self._text_callbacks: list[Callable[[str], None]] = []
         self._audio_callbacks: list[Callable[[np.ndarray, int], None]] = []
+        #: H6: tracks whether ``audio_start:0;`` has been sent (and the
+        #: matching ``audio_stop:0;`` has NOT yet been sent).  Used by
+        #: ``_play_via_tci`` to decide whether to start the RX stream
+        #: itself before TX and stop it after — without this tracking,
+        #: every TX-only flow leaked one server-side RX stream that ran
+        #: forever (nobody subscribed → wasted bandwidth on the SDR
+        #: server).  Touched from the audio worker thread (RX start/stop)
+        #: and the TX worker thread (TX bracketing) so it shares the
+        #: send lock (already protects all command writes).
+        self._rx_audio_subscribed: bool = False
+        # H13: register/unregister + the iterating snapshot in _dispatch_*
+        # all touch the same lists from different threads (GUI / worker /
+        # recv).  ``list.append`` and ``list.remove`` are atomic under the
+        # GIL, but a ``register`` between the recv thread's snapshot and
+        # the per-callback call silently drops deliveries, and an
+        # ``unregister`` mid-dispatch can call a callback whose owner has
+        # already torn down its queue.  Guard all four operations with
+        # this lock so the snapshot is taken atomically with respect to
+        # mutations — cheap and makes the contract explicit.
+        self._callbacks_lock = threading.Lock()
 
         # Set when "READY:" is received.
         self._ready_event = threading.Event()
@@ -195,6 +215,25 @@ class TciConnection:
             except Exception as exc:  # noqa: BLE001
                 raise RigConnectionError(f"TCI binary send failed: {exc}") from exc
 
+    def mark_rx_audio_subscribed(self, subscribed: bool) -> None:
+        """Note whether the RX audio stream is currently subscribed.
+
+        Set to ``True`` after a successful ``audio_start:0;`` (from
+        ``TciInputStreamWorker.start``); set back to ``False`` after the
+        matching ``audio_stop:0;`` (from ``stop``).  TxWorker uses
+        ``is_rx_audio_subscribed`` to decide whether to bracket its TX
+        with start/stop itself — see H6 docstring on ``_rx_audio_subscribed``.
+        Guarded by ``_send_lock`` so reads from TX never tear with writes
+        from RX.
+        """
+        with self._send_lock:
+            self._rx_audio_subscribed = subscribed
+
+    def is_rx_audio_subscribed(self) -> bool:
+        """``True`` while ``audio_start:0;`` is outstanding (no matching stop)."""
+        with self._send_lock:
+            return self._rx_audio_subscribed
+
     def send_tx_audio_chunk(
         self,
         samples_f32: np.ndarray,
@@ -257,13 +296,15 @@ class TciConnection:
 
     def register_text_callback(self, fn: Callable[[str], None]) -> None:
         """Register *fn* to be called for every text event received."""
-        self._text_callbacks.append(fn)
+        with self._callbacks_lock:
+            self._text_callbacks.append(fn)
 
     def unregister_text_callback(self, fn: Callable[[str], None]) -> None:
-        try:
-            self._text_callbacks.remove(fn)
-        except ValueError:
-            pass
+        with self._callbacks_lock:
+            try:
+                self._text_callbacks.remove(fn)
+            except ValueError:
+                pass
 
     def register_audio_callback(
         self, fn: Callable[[np.ndarray, int], None]
@@ -273,15 +314,17 @@ class TciConnection:
         ``fn(samples: np.ndarray[int16], sample_rate: int)`` — runs on the
         recv thread.
         """
-        self._audio_callbacks.append(fn)
+        with self._callbacks_lock:
+            self._audio_callbacks.append(fn)
 
     def unregister_audio_callback(
         self, fn: Callable[[np.ndarray, int], None]
     ) -> None:
-        try:
-            self._audio_callbacks.remove(fn)
-        except ValueError:
-            pass
+        with self._callbacks_lock:
+            try:
+                self._audio_callbacks.remove(fn)
+            except ValueError:
+                pass
 
     # --- recv loop ----------------------------------------------------------
 
@@ -319,7 +362,9 @@ class TciConnection:
                     self._sample_rate = int(msg.split(",")[-1])
                 except (ValueError, IndexError):
                     pass
-            for cb in list(self._text_callbacks):
+            with self._callbacks_lock:
+                callbacks = list(self._text_callbacks)
+            for cb in callbacks:
                 try:
                     cb(msg)
                 except Exception:  # noqa: BLE001
@@ -379,7 +424,9 @@ class TciConnection:
             samples = (samples[:n2:2] + samples[1:n2:2]) * 0.5
 
         sr = int(sample_rate) if sample_rate > 0 else self._sample_rate
-        for cb in list(self._audio_callbacks):
+        with self._callbacks_lock:
+            callbacks = list(self._audio_callbacks)
+        for cb in callbacks:
             try:
                 cb(samples, sr)
             except Exception:  # noqa: BLE001

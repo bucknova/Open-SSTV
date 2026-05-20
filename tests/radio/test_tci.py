@@ -287,6 +287,10 @@ class TestSocketTimeout:
         conn._closed = False
         conn._text_callbacks = []
         conn._audio_callbacks = []
+        # H13 added: register/unregister + the dispatch snapshots are
+        # all guarded by this lock now.  Tests using ``__new__`` must
+        # set it manually since ``__init__`` is bypassed.
+        conn._callbacks_lock = __import__("threading").Lock()
         conn._ready_event = __import__("threading").Event()
         conn._sample_rate = 48_000
 

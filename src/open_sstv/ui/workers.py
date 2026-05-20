@@ -217,14 +217,6 @@ _RX_POST_WATCHDOG_COOLDOWN_S: float = 10.0
 
 #: Hard upper bound on the encode / banner-stamp / CW-append stage.
 #: Encoding is CPU-bound and finishes in ~100 ms even for the longest
-#: mode we ship (Pasokon P7), so 30 s is wildly generous — its only job
-#: is to release PTT (we haven't keyed yet at this stage but the user
-#: may have queued the next TX) if the encoder gets wedged on a corrupt
-#: input.  Stage 1 of the two-stage watchdog (OP-01 follow-up): replaces
-#: the old fixed 600 s upper bound with a per-transmission budget once
-#: the encoded sample count is known.
-_ENCODE_WATCHDOG_S: float = 30.0
-
 #: Multiplicative margin on top of the expected wall-clock playback
 #: duration (PTT delay + samples / sample_rate).  20 % absorbs OS-level
 #: audio jitter — driver buffer underruns, scheduling hiccups, brief
@@ -382,6 +374,20 @@ class TxWorker(QObject):
         self._v3_template_active: bool = False
         self._stop_event = threading.Event()
         self._watchdog_triggered: bool = False
+        #: Monotonically-increasing transmission id, incremented at the
+        #: top of ``transmit`` / ``transmit_test_tone``.  Captured by the
+        #: watchdog when it's scheduled and re-checked when it fires —
+        #: ``threading.Timer.cancel()`` is best-effort, so a watchdog that
+        #: was already executing when cancel() was called still completes;
+        #: without this guard a stale fire from a prior transmission could
+        #: set ``_stop_event`` and call the global ``output_stream.stop()``
+        #: just as the next ``transmit()`` is starting, racing the
+        #: ``_stop_event.clear()`` at entry and aborting an unrelated TX
+        #: (or cancelling a concurrent test-tone via the global sd.stop).
+        #: Guarded by ``_tx_id_lock`` because the timer thread reads it
+        #: while the worker thread writes it.
+        self._tx_id_lock = threading.Lock()
+        self._tx_id: int = 0
         # When set, TX audio is routed via this TCI connection instead of
         # PortAudio.  Accepts any object with a send_tx_audio_chunk() method
         # (duck-typed so workers.py doesn't import from radio.tci).
@@ -552,25 +558,35 @@ class TxWorker(QObject):
         ``transmission_aborted`` per call (or, on early encode/PTT
         failure, only ``error``).
 
-        Uses a two-stage watchdog (OP-01 follow-up, v0.1.28):
+        H11: the original design had a two-stage watchdog — stage 1
+        covering encode, stage 2 covering keyed playback.  Stage 1 was
+        removed because PySSTV's ``encode()`` is a synchronous blocking
+        call that doesn't honour ``_stop_event``, so the encode-stage
+        timer firing didn't actually unblock anything — it just set
+        the stop flag and waited for ``encode()`` to return naturally,
+        at which point the post-encode check would notice and abort.
+        Encoding is fast (~100 ms even for Pasokon P7) and not network-
+        bound, so the lack of a timer here is acceptable: a truly
+        wedged encoder would mean Python itself is hung, which the
+        watchdog couldn't help with anyway.  Only the keyed-playback
+        watchdog remains, since that's where stuck PTT actually matters.
 
-        * **Stage 1** covers banner stamping, encoding, gain, and CW
-          append.  Bounded at the fixed ``_ENCODE_WATCHDOG_S`` because
-          the actual sample count isn't known yet.  Encode is CPU-bound
-          and takes ~100 ms, so 30 s is wildly generous — its purpose
-          is to release any held PTT (we haven't keyed yet, but the
-          timer is started for symmetry with stage 2) if the encoder
-          wedges.
+        The post-encode ``_stop_event`` check is still useful: the user
+        can press Stop during the (brief) encode window and we honour
+        it without keying the rig.
 
-        * **Stage 2** covers the keyed playback period.  Budget is
-          computed from the actual encoded sample count + PTT delay via
-          :func:`_compute_playback_watchdog_s`, so it scales with mode
-          duration and CW tail length and tightens stuck-rig exposure
-          from the v0.1.27 "always 600 s" to typically 1.2× the actual
-          TX duration with a 30 s floor.
+        H4: a per-call ``tx_id`` is captured at the top of this method
+        and passed to the playback watchdog so a stale watchdog firing
+        from a prior transmission cannot race the next ``transmit()``
+        call's ``_stop_event.clear()``.
         """
         self._stop_event.clear()
         self._watchdog_triggered = False
+        # Advance the TX id so any in-flight watchdog from a previous
+        # transmission becomes "stale" and no-ops if it fires now.
+        with self._tx_id_lock:
+            self._tx_id += 1
+            this_tx_id = self._tx_id
 
         # Snapshot the rig reference once so a mid-TX call to set_rig()
         # (e.g. user disconnects the radio) cannot swap the backend between
@@ -579,13 +595,7 @@ class TxWorker(QObject):
         with self._rig_lock:
             rig = self._rig
 
-        # === Stage 1: encode-time watchdog ===
-        encode_watchdog = threading.Timer(
-            _ENCODE_WATCHDOG_S,
-            self._watchdog_fire,
-            args=[_ENCODE_WATCHDOG_S],
-        )
-        encode_watchdog.start()
+        # === Encode + CW + gain (no watchdog; see docstring H11) ===
         try:
             # --- Apply TX banner (if enabled and no v0.3 template active) ---
             # OP2-01: catch ValueError (content_height <= 0) so a too-small
@@ -656,30 +666,30 @@ class TxWorker(QObject):
                         "CW ID is enabled but callsign is empty — "
                         "skipping CW tail. Set callsign in Settings."
                     )
-        finally:
-            encode_watchdog.cancel()
+        except BaseException:
+            # Defensive: even if encode raised something exotic, make sure
+            # we don't accidentally proceed into playback.  Specific
+            # ValueError / Exception cases above already emitted an error
+            # signal and returned; this catches anything that escapes.
+            raise
 
-        # If the encode-stage watchdog fired (or stop was requested while
-        # encoding for any other reason), don't begin playback.
+        # User pressed Stop during the (brief) encode window — abort
+        # without keying the rig.  Encode is fast so this is rare, but
+        # honouring Stop here means no extra PTT carrier and no surprise
+        # CW tail on a TX the user already cancelled.
         if self._stop_event.is_set():
-            if self._watchdog_triggered:
-                _log.warning("TX encode watchdog fired — aborting")
-                self.transmission_aborted.emit()
-            else:
-                # User pressed Stop during encode (very rare since encode
-                # is fast) — also surface as an abort.
-                _log.debug("TX stop requested during encode — aborting")
-                self.transmission_aborted.emit()
+            _log.debug("TX stop requested during encode — aborting")
+            self.transmission_aborted.emit()
             return
 
-        # === Stage 2: per-transmission playback watchdog ===
+        # === Per-transmission playback watchdog ===
         playback_budget_s = _compute_playback_watchdog_s(
             samples.size, self._sample_rate, self._ptt_delay_s
         )
         playback_watchdog = threading.Timer(
             playback_budget_s,
             self._watchdog_fire,
-            args=[playback_budget_s],
+            args=[playback_budget_s, this_tx_id],
         )
         playback_watchdog.start()
         try:
@@ -721,6 +731,9 @@ class TxWorker(QObject):
         """
         self._stop_event.clear()
         self._watchdog_triggered = False
+        with self._tx_id_lock:
+            self._tx_id += 1
+            this_tx_id = self._tx_id
 
         with self._rig_lock:
             rig = self._rig
@@ -741,7 +754,7 @@ class TxWorker(QObject):
         watchdog = threading.Timer(
             playback_budget_s,
             self._watchdog_fire,
-            args=[playback_budget_s],
+            args=[playback_budget_s, this_tx_id],
         )
         watchdog.start()
 
@@ -785,14 +798,66 @@ class TxWorker(QObject):
             self.error.emit("TCI connection unavailable for TX audio.")
             return False
 
-        # Ensure audio is enabled server-side (sets client.audioEnabled=true).
-        # Safe to send even if TCI RX audio is already running — idempotent.
+        # H5: validate that the TCI server is operating at the same audio
+        # sample rate the TX path is generating at.  TCI's audio_samplerate
+        # is a global setting that affects both RX and TX, so if the user
+        # has a non-48-kHz RX bandwidth configured (e.g. AetherSDR with
+        # 96 kHz I/Q) and our TxWorker is at the default 48 kHz, the
+        # server will play our samples at whatever its rate is — silently
+        # pitching SSTV off and producing slanted images at the receiver.
+        # Refuse rather than silently corrupt; the user can either change
+        # the TX rate to match, or change the SDR's audio rate to 48 kHz.
         try:
-            conn.send("audio_start:0;")  # type: ignore[attr-defined]
-        except Exception as exc:  # noqa: BLE001
-            _log.error("TCI audio_start failed: %s", exc)
-            self.error.emit(f"TCI audio_start failed: {exc}")
+            server_rate = int(conn.sample_rate)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            server_rate = 0
+        if server_rate and server_rate != self._sample_rate:
+            msg = (
+                f"TCI server audio rate ({server_rate} Hz) does not match "
+                f"TX generation rate ({self._sample_rate} Hz).  Reconfigure "
+                "the SDR to 48 kHz audio, or set the app's sample rate to "
+                "match the SDR — TX is refused to avoid silently pitching "
+                "the SSTV signal off-frequency."
+            )
+            _log.error("TCI TX rate mismatch: %s", msg)
+            self.error.emit(msg)
             return False
+
+        # H6: only start the server-side audio stream if RX hasn't already
+        # subscribed it.  Previously this was unconditional, which meant a
+        # TX-only flow (operator never started RX, or TX before the first
+        # RX) leaked one server-side RX stream per transmission running
+        # forever after TX ended — wasted bandwidth on the SDR server.
+        # We remember whether *we* started it so the matching audio_stop
+        # below only fires when paired with an audio_start we sent.
+        started_rx_for_tx = False
+        try:
+            already_subscribed = bool(
+                conn.is_rx_audio_subscribed()  # type: ignore[attr-defined]
+            )
+        except Exception:  # noqa: BLE001
+            # Older TciConnection without the helper — fall back to the
+            # legacy idempotent send so TX still works.
+            already_subscribed = False
+        if not already_subscribed:
+            try:
+                conn.send("audio_start:0;")  # type: ignore[attr-defined]
+                conn.mark_rx_audio_subscribed(True)  # type: ignore[attr-defined]
+                started_rx_for_tx = True
+            except AttributeError:
+                # Pre-H6 TciConnection: no mark_rx_audio_subscribed helper.
+                # Send the start anyway — at worst we leak one stream as
+                # before (same behaviour as the pre-H6 path).
+                try:
+                    conn.send("audio_start:0;")  # type: ignore[attr-defined]
+                except Exception as exc:  # noqa: BLE001
+                    _log.error("TCI audio_start failed: %s", exc)
+                    self.error.emit(f"TCI audio_start failed: {exc}")
+                    return False
+            except Exception as exc:  # noqa: BLE001
+                _log.error("TCI audio_start failed: %s", exc)
+                self.error.emit(f"TCI audio_start failed: {exc}")
+                return False
 
         chunk_size = int(self._sample_rate * 0.1)  # 100 ms per chunk
 
@@ -829,55 +894,68 @@ class TxWorker(QObject):
         # drains mid-element — which would corrupt CW timing.
         tx_start = time.perf_counter()
 
-        while written < total:
-            if self._stop_event.is_set():
-                break
+        try:
+            while written < total:
+                if self._stop_event.is_set():
+                    break
 
-            if periodic_check is not None:
-                _check_counter += 1
-                if _check_counter % _TCI_HEALTH_CHECK_INTERVAL == 0:
-                    try:
-                        periodic_check()
-                    except Exception:  # noqa: BLE001
-                        if not self._stop_event.is_set():
-                            self._stop_event.set()
-                        break
+                if periodic_check is not None:
+                    _check_counter += 1
+                    if _check_counter % _TCI_HEALTH_CHECK_INTERVAL == 0:
+                        try:
+                            periodic_check()
+                        except Exception:  # noqa: BLE001
+                            if not self._stop_event.is_set():
+                                self._stop_event.set()
+                            break
 
-            end = min(written + chunk_size, total)
-            chunk_f32 = samples_f32[written:end]
+                end = min(written + chunk_size, total)
+                chunk_f32 = samples_f32[written:end]
 
-            if live_gain:
-                gain = self._output_gain
-                if gain != 1.0:
-                    chunk_f32 = np.clip(chunk_f32 * gain, -1.0, 1.0).astype(np.float32)
+                if live_gain:
+                    gain = self._output_gain
+                    if gain != 1.0:
+                        chunk_f32 = np.clip(chunk_f32 * gain, -1.0, 1.0).astype(np.float32)
 
-            try:
-                conn.send_tx_audio_chunk(  # type: ignore[attr-defined]
-                    chunk_f32,
-                    sample_rate=self._sample_rate,
+                try:
+                    conn.send_tx_audio_chunk(  # type: ignore[attr-defined]
+                        chunk_f32,
+                        sample_rate=self._sample_rate,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    _log.error("TCI TX audio chunk error: %s", exc)
+                    self.error.emit(f"TCI TX audio error: {exc}")
+                    return False
+
+                if self._waterfall_active:
+                    self.tx_audio_chunk.emit(chunk_f32)
+                written = end
+                self.transmission_progress.emit(
+                    min(written, content_total), content_total
                 )
-            except Exception as exc:  # noqa: BLE001
-                _log.error("TCI TX audio chunk error: %s", exc)
-                self.error.emit(f"TCI TX audio error: {exc}")
-                return False
 
-            if self._waterfall_active:
-                self.tx_audio_chunk.emit(chunk_f32)
-            written = end
-            self.transmission_progress.emit(
-                min(written, content_total), content_total
-            )
+                # Sleep until the samples just sent should have finished playing.
+                # Using an absolute target (tx_start + samples_so_far / rate)
+                # means any single sleep overshoot is corrected next iteration
+                # instead of compounding across the whole transmission.
+                target = tx_start + written / self._sample_rate
+                gap = target - time.perf_counter()
+                if gap > 0:
+                    time.sleep(gap)
 
-            # Sleep until the samples just sent should have finished playing.
-            # Using an absolute target (tx_start + samples_so_far / rate)
-            # means any single sleep overshoot is corrected next iteration
-            # instead of compounding across the whole transmission.
-            target = tx_start + written / self._sample_rate
-            gap = target - time.perf_counter()
-            if gap > 0:
-                time.sleep(gap)
-
-        return not self._stop_event.is_set()
+            return not self._stop_event.is_set()
+        finally:
+            # H6: if we started the server-side RX stream just for this TX
+            # (no real RX subscription was active), tear it down now so
+            # the server doesn't keep streaming RX audio nobody listens to.
+            # Runs on all exit paths — early return, exception, or normal
+            # completion — so the cleanup is symmetric with the startup.
+            if started_rx_for_tx:
+                try:
+                    conn.send("audio_stop:0;")  # type: ignore[attr-defined]
+                    conn.mark_rx_audio_subscribed(False)  # type: ignore[attr-defined]
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("TCI audio_stop after TX failed: %s", exc)
 
     def _run_tx(
         self,
@@ -1037,14 +1115,25 @@ class TxWorker(QObject):
         """
         return self._stop_event.wait(timeout=timeout)
 
-    def _watchdog_fire(self, duration_s: float = 0.0) -> None:
+    def _watchdog_fire(self, duration_s: float = 0.0, tx_id: int = 0) -> None:
         """Called by a watchdog timer when TX exceeds its allowed budget.
 
         ``duration_s`` is the budget the firing timer was created with —
-        either the fixed encode-stage budget or the per-transmission
-        playback budget computed from sample count + PTT delay.  Passed
-        through to the ``watchdog_fired`` signal so the UI can show
-        the actual figure rather than guessing.
+        the per-transmission playback budget computed from sample count +
+        PTT delay.  Passed through to the ``watchdog_fired`` signal so
+        the UI can show the actual figure rather than guessing.
+
+        ``tx_id`` is the transmission id captured when the timer was
+        scheduled.  H4: if it no longer matches ``self._tx_id`` the firing
+        timer belongs to a transmission that has already ended (either
+        completed normally, was cancelled, or was overtaken by a newer
+        ``transmit()`` call).  ``threading.Timer.cancel()`` is best-effort
+        — a timer thread already running at cancel time still completes
+        — so without this guard a stale fire would set ``_stop_event``
+        and call the global ``output_stream.stop()`` just as the next
+        transmission was starting, racing the ``_stop_event.clear()`` at
+        entry and aborting an unrelated TX (or cancelling a concurrent
+        test-tone via the global ``sd.stop``).
 
         Safe to call from the timer's background thread: signals are Qt
         queued connections (delivered on the GUI thread) and
@@ -1054,6 +1143,14 @@ class TxWorker(QObject):
         display a persistent watchdog message that isn't immediately
         clobbered by the subsequent ``transmission_aborted`` signal.
         """
+        with self._tx_id_lock:
+            current = self._tx_id
+        if tx_id != 0 and tx_id != current:
+            _log.debug(
+                "stale TX watchdog fire ignored (timer tx_id=%d, current=%d)",
+                tx_id, current,
+            )
+            return
         self._watchdog_triggered = True
         self.watchdog_fired.emit(float(duration_s))
         self.request_stop()
