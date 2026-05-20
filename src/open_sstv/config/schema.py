@@ -141,6 +141,17 @@ class AppConfig:
     # --- Directories ---
     images_save_dir: str = field(default_factory=_default_images_dir)
     auto_save: bool = False
+    # v0.3.6: save the raw received audio alongside every decoded image.
+    # Lets the operator re-decode later (e.g. with the CLI) if the live
+    # incremental decoder missed something.  Off by default; uses the same
+    # save directory and filename template as image auto-save.
+    autosave_rx_audio: bool = False
+    # v0.3.6: container format for saved RX audio.  "wav" uses the stdlib
+    # wave module (16-bit PCM, no extra deps).  "flac" uses soundfile
+    # (lossless compression, ~40% smaller files, requires libsndfile).
+    # Both are lossless — lossy formats (MP3, AAC) are deliberately excluded
+    # because compression artefacts degrade re-decode quality.
+    rx_audio_format: str = "wav"
     # v0.2.8: TX auto-save is independent of RX.  Some operators want to
     # keep a log of every image they transmitted (for station-portfolio
     # or contest purposes); others don't.  Default off so upgraders'

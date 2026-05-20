@@ -38,6 +38,7 @@ dependencies = [
     "tomli-w>=1.0,<2",       # TOML write (stdlib tomllib only reads)
     "pyserial>=3.5,<4",      # Direct serial CAT/PTT without external daemons
     "websocket-client>=1.6,<2",  # TCI WebSocket transport (optional at runtime — lazy import)
+    "soundfile>=0.12,<1",        # RX audio recording: FLAC + WAV via libsndfile (pure-Python wheel, bundled DLL on Windows)
 ]
 
 [project.optional-dependencies]

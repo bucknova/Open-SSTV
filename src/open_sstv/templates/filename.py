@@ -150,7 +150,7 @@ def build_autosave_filename(
     resolved = resolve_tokens(pattern, ctx)
     stem = sanitize_filename_component(resolved)
     ext = file_format.lower().lstrip(".")
-    if ext not in ("png", "jpg", "jpeg"):
+    if ext not in ("png", "jpg", "jpeg", "wav", "flac"):
         # Unknown format — default to PNG rather than producing a file
         # the user's viewer can't open.  Silent fallback is acceptable
         # here because the Settings UI constrains the input to PNG/JPG.

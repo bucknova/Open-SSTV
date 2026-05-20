@@ -390,6 +390,34 @@ class SettingsDialog(QDialog):
 
         form.addRow(rx_group)
 
+        # --- RX Audio Recording ---
+        rec_group = QGroupBox("RX Audio Recording")
+        rec_layout = QFormLayout(rec_group)
+
+        self._autosave_rx_audio_check = QCheckBox("Save audio file alongside each decoded image")
+        self._autosave_rx_audio_check.setToolTip(
+            "Saves the raw received audio alongside each decoded image\n"
+            "in the Images save directory.\n\n"
+            "Both WAV and FLAC are lossless — lossy formats (MP3, AAC, MP4)\n"
+            "are excluded because compression artefacts degrade re-decode quality.\n\n"
+            "Files use the same filename stem as the image auto-save pattern\n"
+            "(configured on the Images tab) with a different extension."
+        )
+        self._autosave_rx_audio_check.setChecked(self._config.autosave_rx_audio)
+        rec_layout.addRow(self._autosave_rx_audio_check)
+
+        self._rx_audio_format = QComboBox()
+        self._rx_audio_format.addItem("WAV  (16-bit PCM, lossless, universal)", "wav")
+        self._rx_audio_format.addItem("FLAC (lossless compression, ~40% smaller)", "flac")
+        _fmt_idx = self._rx_audio_format.findData(self._config.rx_audio_format)
+        if _fmt_idx >= 0:
+            self._rx_audio_format.setCurrentIndex(_fmt_idx)
+        self._rx_audio_format.setEnabled(self._config.autosave_rx_audio)
+        self._autosave_rx_audio_check.toggled.connect(self._rx_audio_format.setEnabled)
+        rec_layout.addRow("Format:", self._rx_audio_format)
+
+        form.addRow(rec_group)
+
         return tab
 
     def _build_radio_tab(self) -> QWidget:
@@ -1429,6 +1457,8 @@ class SettingsDialog(QDialog):
             qth=self._qth.text().strip(),
             images_save_dir=self._save_dir.text(),
             auto_save=self._auto_save.isChecked(),
+            autosave_rx_audio=self._autosave_rx_audio_check.isChecked(),
+            rx_audio_format=self._rx_audio_format.currentData() or "wav",
             autosave_tx=self._autosave_tx.isChecked(),
             autosave_filename_pattern=self._autosave_pattern.text(),
             autosave_file_format=self._autosave_format.currentData() or "png",
