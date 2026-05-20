@@ -696,7 +696,7 @@
 <!-- ── Hero ── -->
 <div class="hero">
   <div>
-    <div class="hero-badge" id="version-badge">Beta · v0.3.5</div>
+    <div class="hero-badge" id="version-badge">Beta · v0.3.6</div>
     <h1>Open-Source<br /><span>SSTV Transceiver</span><br />for Amateur Radio</h1>
     <p>Transmit and receive Slow Scan Television images live from your rig — no external software required. 22 modes, modern Qt 6 GUI, cross-platform.</p>
     <div class="hero-actions">
@@ -784,6 +784,20 @@
         <span class="feature-tag">v0.3.5 · Display</span>
         <h3>FFT Waterfall</h3>
         <p>Floating spectrogram window over the 0–4 kHz SSTV audio band. Cool palette for RX, warm palette for TX, with dotted reference lines at the 1200 / 1500 / 1900 / 2300 Hz SSTV tones. Toggle from View → Waterfall; hidden (not destroyed) so scroll history is preserved across openings.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon">🎯</div>
+        <span class="feature-tag">v0.3.6 · Rig Control</span>
+        <h3>Band Plan Helper</h3>
+        <p>One-click tune to any standard SSTV calling frequency. Twelve entries covering HF (80/40/20/17/15/10 m), VHF (2 m), and UHF (70 cm) with the correct mode and passband — 20 m 14.230 MHz USB shown in bold as the global primary. Tune commands serialise on the rig-poll thread so they can't race with status polling.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon">💾</div>
+        <span class="feature-tag">v0.3.6 · Recovery</span>
+        <h3>RX Audio Recording</h3>
+        <p>Opt-in lossless capture of the raw received audio alongside each decoded image — WAV (stdlib) or FLAC (~40 % smaller, optional <code>[flac]</code> extra). Re-decode marginal signals later through the CLI or a different decoder. Lossy formats are deliberately excluded because compression artefacts degrade re-decode quality.</p>
       </div>
 
       <div class="feature-card">

@@ -7,7 +7,7 @@ radio. Receives and decodes SSTV images live off your radio, and encodes and
 transmits images back, with optional Hamlib, direct serial, or TCI (ExpertSDR2 /
 SunSDR2 / AetherSDR) rig control.
 
-**Status: Beta (v0.3.5) — ready for user testing and feedback.** TX and RX paths work
+**Status: Beta (v0.3.6) — ready for user testing and feedback.** TX and RX paths work
 end-to-end across all 22 supported modes. Rig control via rigctld or direct serial CAT
 is functional. Weak-signal decode is usable down to roughly 0 dB SNR on Robot 36.
 
@@ -158,6 +158,13 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
   1200 / 1500 / 1900 / 2300 Hz SSTV tones. Hidden (not destroyed) when
   toggled off, so scroll history is preserved across openings; visibility
   persists across app restarts.
+- **RX audio recording (v0.3.6)** -- opt-in lossless capture of the raw
+  received audio alongside each decoded image. Settings → Audio → "RX Audio
+  Recording" toggles the feature and picks WAV (stdlib) or FLAC (~40 %
+  smaller, requires the optional `[flac]` install extra). Lets operators
+  re-decode marginal signals later via `open-sstv-decode` or a different
+  decoder. Lossy formats are deliberately excluded because compression
+  artefacts degrade re-decode quality.
 
 ### Radio Control
 - **rigctld (Hamlib)** -- TCP client for `rigctld`, supporting PTT, frequency,
@@ -172,6 +179,12 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
   `ws://host:port` connection (default `127.0.0.1:40001`) carries both CAT
   control and binary PCM audio, so rig control and RX/TX audio share one
   transport with no virtual audio cables required.
+- **Band Plan (v0.3.6)** -- one-click "Band Plan" popup button on the radio
+  panel tunes the connected rig to any standard SSTV calling frequency.
+  Twelve entries covering HF (80/40/20/17/15/10 m), VHF (2 m), and UHF
+  (70 cm) with the correct mode (LSB below 10 MHz, USB above, FM on
+  VHF/UHF). The 20 m 14.230 MHz USB primary is shown in bold. Button is
+  disabled when no rig is connected or TX is in progress.
 - **Configurable baud rate** -- 4800, 9600, 19200, 38400, 57600, or 115200 baud.
 - **Rig status bar** -- frequency, mode, and S-meter polled at 1 Hz when connected.
   Graceful disconnect: non-modal status bar message, auto-reconnect on next poll.
@@ -387,7 +400,7 @@ open-sstv-decode in.wav -o out.png                    # CLI decoder
 
 ## Testing focus areas
 
-If you're kicking the tyres on the v0.3.5 beta, these are the surfaces we'd most
+If you're kicking the tyres on the v0.3.6 beta, these are the surfaces we'd most
 like eyes on. File an [issue](https://github.com/bucknova/Open-SSTV/issues)
 with what you tried and what happened.
 

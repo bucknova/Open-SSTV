@@ -11,6 +11,87 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.6] — 2026-05-20
+
+### Added
+
+- **RX audio recording** — opt-in lossless capture of the raw received
+  audio alongside each decoded image, so operators can re-decode later
+  (e.g. through the CLI or a different decoder) if the live incremental
+  decoder missed something on a marginal signal.  Configure via
+  Settings → Audio → "RX Audio Recording": toggle the checkbox and pick
+  WAV (stdlib `wave`, 16-bit PCM) or FLAC (`soundfile`, lossless
+  compressed ~40 % smaller).  Lossy formats are deliberately excluded
+  because compression artefacts degrade re-decode quality.  Audio files
+  share the image's filename stem when `auto_save` is also on; otherwise
+  the auto-save filename template resolves an independent name.
+- **Band-plan frequency helper** — one-click tune to a standard SSTV
+  calling frequency via a new "Band Plan" popup button on the radio
+  panel.  Twelve entries covering HF (80/40/20/17/15/10 m), VHF (2 m),
+  and UHF (70 cm) with correct mode and passband (LSB below 10 MHz,
+  USB above, FM on VHF/UHF).  The 20 m 14.230 MHz USB primary entry
+  is shown in bold.  Button is disabled when no rig is connected or TX
+  is in progress.  Tune commands run on the rig-poll thread via a
+  queued cross-thread signal so they can't race with the 1 Hz poll on
+  a shared serial port or WebSocket.
+
+### Changed
+
+- **`soundfile` moved to an optional `[flac]` extra.**  The library is
+  only needed for FLAC recording; the WAV path uses stdlib `wave`.
+  Install with `pip install "open-sstv[flac]"` if you want FLAC support;
+  WAV-only users no longer pull in `libsndfile` (~10 MB DLL on Windows).
+  Pattern matches the existing `websocket-client` lazy-import gate for
+  TCI.  The FLAC code path gracefully degrades to a user-visible
+  warning when the package isn't installed.
+- **Waterfall paint uses smooth bilinear scaling.**  The pixmap scale
+  now uses `Qt.TransformationMode.SmoothTransformation` instead of
+  `FastTransformation`, eliminating staircase artefacts at the
+  frequency-marker dotted lines.  Negligible cost on the 400×200
+  backing buffer.
+
+### Fixed
+
+- **TCI secondary-TRX events no longer misread as PTT.**  The `trx:`
+  handler now requires the TRX index to be `0` before updating
+  `_last_ptt`; a hypothetical `trx:1,true;` from a second receiver was
+  previously treated as a PTT event on TRX 0.
+- **`_audio_thread.finished` no longer accumulates `deleteLater`
+  connections** across `_swap_audio_worker` calls.  Every TCI
+  connect/disconnect previously added one more queued `deleteLater`
+  slot on thread shutdown.  The existing `old.deleteLater()` further
+  down handles cleanup correctly.
+- **`tx_audio_chunk` cross-thread signal is gated by waterfall
+  visibility.**  Previously emitted ~10 Hz throughout a multi-minute
+  TX even when the waterfall window was hidden, sending ~3000 wasted
+  cross-thread events per Pasokon P7 transmission.  `TxWorker` now
+  exposes `set_waterfall_active(bool)` which `MainWindow` calls from
+  `_on_toggle_waterfall`.
+
+### Testing
+
+- 14 new tests for RX audio recording — signal emission paths
+  (happy path, `None` buffer, `MagicMock` guard, empty buffer), WAV
+  write properties + PCM quantisation, FLAC roundtrip, unknown-format
+  fallback, the standalone-filename branch where `auto_save=False`
+  but `autosave_rx_audio=True`, and the settings dialog state.
+- 18 new tests for TCI — silence-dither correctness (no consecutive
+  equal even/odd pairs, inaudible amplitude, tone passes through
+  unchanged, mixed tone/silence chunks fully protected), 64-byte
+  v2.0 audio header layout (`type=TX_AUDIO`, `format=float32`,
+  `channels=1`, declared rate uses caller-supplied not RX rate), and
+  `_on_text` parser (VFO A stores, VFO B ignored, TRX 1 ignored,
+  malformed/truncated inputs don't raise).
+- 21 new tests for the band-plan feature — data integrity
+  (positive freqs, valid modes, exactly one primary, no duplicates),
+  known-frequency regression guards (20 m USB, 40/80 m LSB, 2 m FM,
+  10/15 m USB, region tags), `primary_entry()` helper, frozen
+  dataclass immutability, and menu structure (region separators
+  land at HF→VHF and VHF→UHF boundaries; default-arg lambda binds
+  the correct entry to each menu action).
+
+---
+
 ## [0.3.5] — 2026-05-19
 
 ### Added
