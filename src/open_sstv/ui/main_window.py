@@ -88,9 +88,11 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
+from PySide6.QtCore import Q_ARG  # for invokeMethod with positional args
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFileDialog,
+    QInputDialog,
     QMainWindow,
     QMessageBox,
     QSplitter,
@@ -126,6 +128,7 @@ from open_sstv.ui.settings_dialog import SettingsDialog
 from open_sstv.ui.tx_panel import TxPanel
 from open_sstv.ui.update_checker import UpdateCheckerWorker
 from open_sstv.ui.waterfall_widget import WaterfallWindow
+from open_sstv.ui.offline_workers import OfflineDecodeWorker, OfflineEncodeWorker
 from open_sstv.ui.workers import RxWorker, TxWorker
 
 if TYPE_CHECKING:
@@ -782,6 +785,22 @@ class MainWindow(QMainWindow):
 
         file_menu.addSeparator()
 
+        # Offline encode / decode — same job as the open-sstv-encode and
+        # open-sstv-decode CLI tools but accessible from the GUI.  Each
+        # runs on its own short-lived QThread so the GUI stays responsive
+        # during a multi-second Pasokon P7 decode / encode.
+        encode_file_action = QAction("&Encode Image to Audio…", self)
+        encode_file_action.setMenuRole(QAction.MenuRole.NoRole)
+        encode_file_action.triggered.connect(self._on_encode_file_action)
+        file_menu.addAction(encode_file_action)
+
+        decode_file_action = QAction("&Decode Audio File…", self)
+        decode_file_action.setMenuRole(QAction.MenuRole.NoRole)
+        decode_file_action.triggered.connect(self._on_decode_file_action)
+        file_menu.addAction(decode_file_action)
+
+        file_menu.addSeparator()
+
         quit_action = QAction("&Quit", self)
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
@@ -999,6 +1018,171 @@ class MainWindow(QMainWindow):
                 )
             else:
                 self.statusBar().showMessage("Settings saved.", 3000)
+
+    # === Offline encode / decode (File menu) ===
+
+    @Slot()
+    def _on_decode_file_action(self) -> None:
+        """File → Decode Audio File…: pick a WAV/FLAC, decode off-thread.
+
+        On success the resulting image lands in the gallery via the same
+        ``_on_rx_image_complete`` path used for live RX, so the user
+        sees it appear in the thumbnail strip and can save / drag-out
+        normally.  On failure the status bar carries the explanation.
+        """
+        path, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Decode SSTV audio file",
+            self._config.images_save_dir or "",
+            "Audio (*.wav *.flac);;All files (*)",
+        )
+        if not path:
+            return
+
+        self.statusBar().showMessage(f"Decoding {Path(path).name}…")
+
+        thread = QThread(self)
+        worker = OfflineDecodeWorker()
+        worker.moveToThread(thread)
+
+        worker.image_complete.connect(self._rx_panel.show_image_complete)
+        worker.image_complete.connect(self._on_rx_image_complete)
+        worker.image_complete.connect(self._on_offline_decode_complete)
+        worker.error.connect(self._on_offline_decode_error)
+        # One-shot cleanup: worker.finished → thread.quit → both
+        # objects' deleteLater so neither leaks past this operation.
+        worker.finished.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+
+        thread.start()
+        QMetaObject.invokeMethod(
+            worker, "decode",
+            Qt.ConnectionType.QueuedConnection,
+            Q_ARG(str, path),
+        )
+
+    @Slot(object, object, int)
+    def _on_offline_decode_complete(
+        self, image: object, mode: object, vis_code: int  # noqa: ARG002
+    ) -> None:
+        """Status-bar confirmation for the offline-decode path.
+
+        ``image_complete`` is already wired to the gallery via the live-RX
+        slots; this hook only adds the user-visible status line so the
+        operation feels distinct from a passive live decode arriving in
+        the background.
+        """
+        mode_name = getattr(mode, "value", str(mode))
+        self.statusBar().showMessage(
+            f"Decoded {mode_name} from file.", 5000
+        )
+
+    @Slot(str)
+    def _on_offline_decode_error(self, message: str) -> None:
+        """Surface decode failures via the status bar (5 s timeout)."""
+        self.statusBar().showMessage(f"Decode failed: {message}", 5000)
+
+    @Slot()
+    def _on_encode_file_action(self) -> None:
+        """File → Encode Image to Audio…: pick image, mode, output, encode.
+
+        Three modal dialogs in sequence: image input → mode picker →
+        output WAV path.  Cancel at any step aborts the operation.
+        The encode runs off-thread (Pasokon P7 encode is ~500 ms even
+        on modest hardware, but a multi-second Pasokon would hitch
+        the GUI without this).
+        """
+        # Step 1: input image.
+        image_path, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Choose image to encode",
+            self._config.images_save_dir or "",
+            "Images (*.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff);;All files (*)",
+        )
+        if not image_path:
+            return
+
+        # Step 2: mode picker.  Use the current default TX mode as the
+        # initial selection; user picks from any of the 22 modes.
+        mode_names = [m.value for m in Mode]
+        try:
+            initial_idx = mode_names.index(self._config.default_tx_mode)
+        except ValueError:
+            initial_idx = 0
+        mode_value, ok = QInputDialog.getItem(
+            self,
+            "Choose SSTV mode",
+            "Encode the image in which mode?",
+            mode_names,
+            initial_idx,
+            editable=False,
+        )
+        if not ok or not mode_value:
+            return
+        mode = Mode(mode_value)
+
+        # Step 3: output WAV path.  Suggest a sensible default filename
+        # next to the source image with the mode appended.
+        src = Path(image_path)
+        suggested = str(
+            src.parent / f"{src.stem}_{mode.value.replace(' ', '_')}.wav"
+        )
+        output_path, _filter = QFileDialog.getSaveFileName(
+            self,
+            "Save encoded audio as",
+            suggested,
+            "WAV audio (*.wav);;All files (*)",
+        )
+        if not output_path:
+            return
+        # Ensure .wav suffix even if the user typed something else; the
+        # wave module silently writes whatever path we give it.
+        if not output_path.lower().endswith(".wav"):
+            output_path = output_path + ".wav"
+
+        self.statusBar().showMessage(
+            f"Encoding {src.name} as {mode.value}…"
+        )
+
+        thread = QThread(self)
+        worker = OfflineEncodeWorker()
+        worker.moveToThread(thread)
+
+        worker.encode_complete.connect(self._on_offline_encode_complete)
+        worker.error.connect(self._on_offline_encode_error)
+        worker.finished.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+
+        thread.start()
+        QMetaObject.invokeMethod(
+            worker, "encode",
+            Qt.ConnectionType.QueuedConnection,
+            Q_ARG(str, image_path),
+            Q_ARG(object, mode),
+            Q_ARG(int, self._config.sample_rate),
+            Q_ARG(str, output_path),
+        )
+
+    @Slot(str, float, object)
+    def _on_offline_encode_complete(
+        self, output_path: str, duration_s: float, mode: object
+    ) -> None:
+        """Status-bar confirmation for the offline-encode path."""
+        mode_name = getattr(mode, "value", str(mode))
+        self.statusBar().showMessage(
+            f"Wrote {Path(output_path).name} — {mode_name}, {duration_s:.1f} s",
+            5000,
+        )
+
+    @Slot(str)
+    def _on_offline_encode_error(self, message: str) -> None:
+        """Surface encode failures via a QMessageBox (more visible than status bar
+        because encode failures usually mean the user picked an unloadable
+        image or hit a permission error on the output path)."""
+        self.statusBar().showMessage(f"Encode failed: {message}", 5000)
+        QMessageBox.warning(self, "Encode failed", message)
 
     def _apply_config(self) -> None:
         """Push the current ``_config`` into all live workers and UI elements.

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import sys
+
 import pytest
 
 from open_sstv.radio.serial_rig import IcomCIVRig
@@ -630,6 +632,15 @@ class TestOSErrorWrapping:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "termios is a Unix-only stdlib module; on Windows the import inside "
+        "each test raises ModuleNotFoundError before the test body runs.  "
+        "pyserial uses a different exception type on Windows (SerialException) "
+        "which the OSError-wrapping suite above already covers."
+    ),
+)
 class TestTermiosErrorWrapping:
     """Regression: raw termios.error from tcflush/reset_input_buffer must be
     caught and translated, not propagate as an unhandled exception.

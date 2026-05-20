@@ -11,6 +11,68 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.9] — 2026-05-20
+
+Brings the CLI encode / decode capabilities into the GUI as menu
+actions and skips a Windows-incompatible test that was producing
+spurious failures for non-Mac contributors.
+
+### Added
+
+- **File → Encode Image to Audio…** — opens a file dialog for an
+  image, lets the user pick from the 22 SSTV modes (initial selection
+  = current default TX mode), then opens a second dialog for the
+  output WAV path.  Encodes off the GUI thread on a one-shot
+  ``OfflineEncodeWorker`` so a Pasokon P7 encode doesn't hitch the
+  UI.  Status bar reports the duration and mode of the written
+  file; errors surface via a QMessageBox.  Same job as
+  ``open-sstv-encode`` but accessible without dropping to a shell.
+- **File → Decode Audio File…** — opens a file dialog for a
+  ``.wav`` or ``.flac`` audio file, decodes off-thread on a
+  ``OfflineDecodeWorker``, and routes the resulting image into the
+  gallery via the same ``_on_rx_image_complete`` path used for live
+  RX.  Status bar confirms the mode + VIS code on success; errors
+  ("No SSTV header found", "unsupported format", etc.) appear in the
+  status bar.  Closes the saved-WAV → re-decode loop that the RX
+  audio recording feature (v0.3.6) opened up.
+
+### Changed
+
+- **WAV/FLAC loading consolidated.**  The ``_read_wav`` helper that
+  used to live inside ``cli/decode.py`` is now ``load_audio_file``
+  in a new ``audio/file_io.py`` module, shared between the CLI and
+  the new GUI offline-decode worker.  FLAC support is included via
+  the optional ``soundfile`` dep (the same ``[flac]`` extra that
+  backs RX audio recording); WAV continues to work without any
+  optional deps.  ``_read_wav`` is preserved as a thin shim so any
+  external callers don't break.
+
+### Testing
+
+- **Windows ``termios`` tests now skipif-guarded.**  The
+  ``TestTermiosErrorWrapping`` class in ``tests/radio/test_serial_rig.py``
+  imports ``termios`` inside each test body — a Unix-only stdlib
+  module — which raised ``ModuleNotFoundError`` on Windows runs and
+  showed up as a failure.  Wrapped the class with
+  ``@pytest.mark.skipif(sys.platform == "win32")`` so it's skipped
+  cleanly on Windows; pyserial uses ``SerialException`` there which
+  the parallel ``TestOSErrorWrapping`` class already covers.  The
+  ``OSError``-wrapping paths around ``termios.error`` still get
+  exercised on macOS / Linux where the import succeeds.
+- **17 new tests** covering the offline workers and the new
+  ``load_audio_file`` shared helper:
+  - 8 tests for ``audio/file_io.py`` — missing file, unsupported
+    extension, 8/16-bit / unsupported WAV sample widths, stereo
+    downmix length-check, FLAC round-trip (gated on ``soundfile``),
+    FLAC ``ImportError`` when soundfile is unavailable.
+  - 9 tests for ``ui/offline_workers.py`` — valid WAV decode round
+    trip, missing-file / unsupported-extension / no-VIS / empty-WAV
+    error paths, encode produces correct WAV format (channels /
+    width / sample-rate), missing / invalid image error paths,
+    encode creates parent directories.
+
+---
+
 ## [0.3.8] — 2026-05-20
 
 Weak-signal RX improvements: configurable QSB watchdog, better VIS

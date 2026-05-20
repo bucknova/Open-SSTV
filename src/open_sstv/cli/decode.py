@@ -77,33 +77,13 @@ def _build_parser() -> argparse.ArgumentParser:
 def _read_wav(path: Path) -> tuple[np.ndarray, int]:
     """Load a WAV file as a mono float64 buffer plus its sample rate.
 
-    Uses stdlib ``wave`` for reading and decodes the raw bytes via NumPy
-    so we can stay scipy-free at the CLI layer.
+    Thin wrapper around ``open_sstv.audio.file_io.load_audio_file`` kept
+    for backwards compatibility with any external callers that imported
+    this private helper.  New code should use ``load_audio_file``
+    directly — it also handles FLAC.
     """
-    with wave.open(str(path), "rb") as wav:
-        n_channels = wav.getnchannels()
-        sample_width = wav.getsampwidth()
-        fs = wav.getframerate()
-        n_frames = wav.getnframes()
-        raw = wav.readframes(n_frames)
-
-    # Decode raw bytes by sample width. WAV is always little-endian PCM.
-    if sample_width == 1:
-        # 8-bit WAV is unsigned per the spec; convert to signed centered.
-        samples = np.frombuffer(raw, dtype=np.uint8).astype(np.int16) - 128
-    elif sample_width == 2:
-        samples = np.frombuffer(raw, dtype="<i2")
-    elif sample_width == 4:
-        samples = np.frombuffer(raw, dtype="<i4")
-    else:
-        msg = f"Unsupported WAV sample width: {sample_width} bytes"
-        raise ValueError(msg)
-
-    if n_channels > 1:
-        samples = samples.reshape(-1, n_channels)
-
-    mono = to_mono_float32(samples).astype(np.float64)
-    return mono, fs
+    from open_sstv.audio.file_io import load_audio_file  # noqa: PLC0415
+    return load_audio_file(path)
 
 
 def main(argv: list[str] | None = None) -> int:
