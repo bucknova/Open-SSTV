@@ -252,5 +252,18 @@ class AppConfig:
             rx_fmt = "wav"
         self.rx_audio_format = rx_fmt
 
+        # v0.3.7: clamp rx_watchdog_timeout_s to the spinbox range [5, 300]
+        # so a hand-edited TOML can't set an absurd value (0, negative, or
+        # thousands of seconds).
+        clamped_wdt = max(5, min(300, self.rx_watchdog_timeout_s))
+        if clamped_wdt != self.rx_watchdog_timeout_s:
+            _log.info(
+                "AppConfig: rx_watchdog_timeout_s %d out of range [5, 300]"
+                " — clamped to %d",
+                self.rx_watchdog_timeout_s,
+                clamped_wdt,
+            )
+        self.rx_watchdog_timeout_s = clamped_wdt
+
 
 __all__ = ["AppConfig"]
