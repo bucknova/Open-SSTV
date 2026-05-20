@@ -549,6 +549,16 @@ class IncrementalDecoderBase:
         inst = instantaneous_frequency(filtered, self._fs)
         n = inst.size
 
+        # Short uniform smooth to reduce per-sample IF noise before pixel
+        # extraction.  3 samples is ≤25 % of the narrowest pixel span
+        # (Robot 36 luma at 44.1 kHz ≈ 12 samples/px) so horizontal detail
+        # is unaffected on strong signals, while weak-signal colour noise is
+        # reduced by ~√3 ≈ 1.7×.  The convolution output matches the input
+        # length (mode="same") so ``n`` and all window offsets stay valid.
+        if n > 3:
+            _k = np.ones(3, dtype=np.float64) / 3.0
+            inst = np.convolve(inst, _k, mode="same")
+
         sync_in_win = sync_in_buf - win_start
 
         new_rows = self._decode_window(
