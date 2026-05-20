@@ -9,19 +9,234 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed
+---
 
-- **Band-plan tuning no longer clobbers data-variant rig modes.**
-  Picking a band-plan entry while in IC-7300 `USB-D`, Yaesu `USB-DATA`,
-  Kenwood / Hamlib `PKTUSB`, or any other data variant of a sideband
-  family used to drop the rig back to the literal `USB` / `LSB` mode
-  stored in `SSTV_BAND_PLAN`, which broke SSTV TX immediately — loss
-  of USB-Audio Data-IN routing and the speech processor re-enabled.
-  The tune slot now classifies the current and target modes into a
-  sideband family (USB / LSB / FM) and only calls `set_mode` when
-  the family actually changes — so 20 m USB-D → 14.230 MHz USB
-  preserves USB-D, but 20 m USB-D → 40 m LSB still flips sideband
-  correctly.
+## [0.3.7] — 2026-05-20
+
+A May 2026 codebase audit identified 47 issues across critical, high,
+moderate, and low severity tiers.  This release closes all of them.
+Detailed per-finding rationale lives in commits `c79f33f`, `8fa3843`,
+`e7ec275`, `14e229a`, and `68a7582`; the audit and tier breakdown is
+preserved in the commit bodies.  No user-facing API changed; this is a
+pure correctness / hardening release.
+
+### Rig control
+
+- **Band-plan tuning preserves data-variant modes** for IC-7300
+  `USB-D`, Yaesu `USB-DATA`, Kenwood / Hamlib `PKTUSB`, plus Elecraft
+  K3 `DATA-A` / `DATA-B`, `PSK-U` / `PSK-L`, and `FT8-U` / `FT8-L`.
+  Previously every band-plan pick dropped the rig to the literal
+  `USB` / `LSB` stored in the entry, which broke SSTV TX immediately
+  on data-routed setups (USB-Audio Data-IN replaced by mic; speech
+  processor re-enabled).  Sideband-family check now only re-issues
+  `set_mode` when the family actually changes.  (Originally
+  `c79f33f`; extended classifier in M6.)
+- **TCI WebSocket socket timeout** (5 s) so a wedged `send_binary()`
+  on a stalled network can't keep the rig keyed indefinitely.  Recv
+  loop tolerates idle `socket.timeout` and continues; only true
+  connection loss terminates it.  (CRIT-2)
+- **TCI sample-rate mismatch refused with a clear error** rather than
+  silently played at the server's rate (off-pitch / slanted SSTV at
+  the receiver).  (H5)
+- **TCI server-side RX subscription** no longer leaks on TX-only
+  flows.  Connection tracks `is_rx_audio_subscribed()`; `_play_via_tci`
+  only sends `audio_start:0;` if the RX path didn't already, and
+  pairs it with `audio_stop:0;` after TX in a try / finally.  (H6)
+- **Serial rig diagnostic commands** (`get_freq` / `get_mode` /
+  `get_strength` / `get_ptt`) use a 200 ms deadline instead of 1 s
+  for Icom CI-V, Kenwood, and Yaesu backends.  A stale read no longer
+  holds the shared serial lock long enough to delay PTT-off writes —
+  Stop / watchdog unkey now pre-empts within ~200 ms instead of up
+  to 1 s.  Set commands keep the 1 s default.  (H12)
+- **Settings → "Launch rigctld Now"** kills the previously-owned
+  rigctld process before adopting the dialog's process.  Previously
+  the assignment was unconditional and the orphan kept the serial
+  port + TCP socket open until the OS reaped it.  (H2)
+- **`_RigPollWorker.tune` failures logged at WARNING** with frequency
+  + mode context.  Persistent connection loss still surfaces via the
+  poll cycle within 3 s; transient errors are no longer invisible.
+  (M10)
+
+### TX correctness
+
+- **Stop button actually aborts the chunked-write path.**
+  `output_stream.stop()` previously called `sd.stop()` which only
+  cancels `sd.play()` streams — every `TxWorker` call uses the
+  chunked-write path, so Stop was effectively a no-op.  Now also
+  calls `stream.abort()` on the active `sd.OutputStream` (tracked
+  in a module-level slot) so a wedged `stream.write()` is
+  interrupted from any caller thread.  (CRIT-4)
+- **Stop honoured during the PTT settle delay.**  `time.sleep(ptt_delay_s)`
+  replaced with `self._stop_event.wait(...)` so a click during the
+  delay (up to 2 s) aborts within milliseconds instead of holding
+  the rig keyed for the full settle window.  (M7)
+- **Stale watchdog from a prior TX cycle** no longer races the next
+  `transmit()` call's `_stop_event.clear()` or cancels a concurrent
+  test tone via the global `sd.stop()`.  A monotonic `_tx_id`
+  captured at schedule time is compared on fire; mismatched fires
+  no-op.  (H4)
+- **Slant-correction re-decode** skipped if the worker's cancel event
+  was set before dispatch.  `decode_wav` is uncancellable and a
+  Pasokon P7 re-decode takes several seconds; running it past a
+  pending Stop made the worker thread unresponsive.  (CRIT-3)
+- **CW-ID boundary envelope ramp** — 5 ms half-cosine ramp at the
+  SSTV → silence boundary so the hard zero-cut at the end of
+  PySSTV's sync tail no longer leaks a faint key click into the RF
+  passband at high TX gain.  (M9)
+- **TCI playback watchdog budget includes the 1.5 s silent tail**
+  appended by `_play_via_tci` to drain the server-side audio
+  pipeline.  Today's 20 % margin masked the gap, but a future
+  larger tail constant would have caused false watchdog fires.  (M8)
+- **`tx_audio_chunk` gated by waterfall visibility** — the waterfall
+  hook fires ~10× per second during TX; without this gate a
+  multi-minute Pasokon P7 transmission with the waterfall hidden
+  emitted ~3000 wasted cross-thread events.  (part of H11 cleanup)
+- **Encode-stage watchdog removed.**  PySSTV's `encode()` doesn't
+  honour `_stop_event` and the stage-1 timer firing couldn't
+  actually unblock anything.  Encoding is fast (~100 ms even for
+  Pasokon P7); only the keyed-playback watchdog remains.  (H11)
+
+### RX correctness
+
+- **PortAudio reset refuses to run while a TX OutputStream is alive.**
+  `_pa_reset()` calls process-wide `sd._terminate()` + `sd._initialize()`;
+  if the user clicked RX Start mid-PTT-delay or mid-playback the
+  PortAudio host was ripped out from under the live TX stream and
+  the next callback crashed the process.  Now guarded by
+  `is_tx_active()` and logged when skipped.  (CRIT-1)
+- **RxWorker decoder state reset on audio worker swap** so the first
+  decode after a TCI hot-swap doesn't continue from PortAudio
+  samples in a different clock domain.  (H1)
+- **`_start_once` closure de-duplication** on rapid Start / Stop /
+  Start.  Previously each click connected a new closure to
+  `reset_done`; the disconnect inside each closure only removed
+  itself, leaving stale closures attached.  Now tracked in
+  `self._start_once_closure` and disconnected by reference.  (H7)
+- **`TciInputStreamWorker.stop()` drops queued chunks silently**
+  instead of emitting them to a downstream RxWorker that the swap
+  has already reset.  Stale audio < 100 ms old is not worth
+  reseeding a fresh decoder with.  (M14)
+- **Decoder `_feed_idle` keeps a 200 ms preamble window** before
+  `vis_end` on an unknown VIS so a real VIS arriving within ~100 ms
+  of a noise-induced false detect is still discoverable on the
+  next feed.  (M15)
+- **`find_input_device_by_name` skipped on the common-case Start.**
+  M16 gates the call on `_input_device_needs_relookup` (set by
+  `_on_audio_device_lost`).  Avoids the 50–500 ms macOS Core Audio
+  GUI-thread freeze on every capture start in the no-replug case.
+
+### Lifecycle and threading
+
+- **`_swap_audio_worker` bounded wait (2 s).**  The
+  `BlockingQueuedConnection` invocation of the old worker's `stop()`
+  could freeze the GUI forever if PortAudio's `stream.stop()` /
+  `close()` hung (known macOS Core Audio behaviour after USB device
+  removal).  Now uses a queued invocation + `QEventLoop` + `QTimer`
+  hard cap; on timeout the swap proceeds with a warning rather than
+  hanging.  (H8)
+- **`closeEvent` uses the same bounded-wait pattern** for the audio
+  worker stop so TCI `audio_stop:0;` reaches the server before
+  `rig.close()` runs.  (M2)
+- **TCI audio callback teardown guard** — `getattr(self, '_queue',
+  None)` mirrors the PortAudio callback so a recv-thread callback
+  after `deleteLater` doesn't raise AttributeError into the
+  swallow-all dispatch loop.  (H9)
+- **`_on_watchdog_timeout` dispatches stop via `QTimer.singleShot(0)`**
+  so a wedged Core Audio close doesn't block the worker event loop.
+  (M12)
+- **Emergency PTT-unkey thread join** bumped 1.5 s → 3 s for slow
+  USB-CAT chains.  Daemon stays daemon; this is "give the unkey a
+  real chance to complete before the interpreter exits."  (L8)
+- **View → Waterfall toggle persists** across app restart.
+  `_set_waterfall_config` now calls `save_config()` instead of
+  only updating in-memory state.  (H3)
+
+### Thread safety
+
+- **TciConnection callback register / unregister + dispatch
+  snapshot** lock-guarded.  Closes the register-between-snapshot-
+  and-call gap (silent dropped deliveries) and unregister-during-
+  dispatch race (callback fired on torn-down queue).  (H13)
+- **`_dropped_chunks` counter** lock-guarded against the worker
+  thread's reset / read.  Plain RMW from the RT thread vs. worker
+  was lossy under CPython and unsafe under free-threaded Python.
+  (H10)
+- **RX audio buffer copied before `rx_audio_ready` emit** so the
+  GUI-thread disk-write path and the worker-thread slant-correction
+  re-decode don't share an ndarray reference.  Today both consumers
+  only read; an explicit copy makes the no-sharing contract
+  obvious.  (M13)
+
+### Diagnostics / logging
+
+Silent exception-swallowing across the codebase was a systemic
+issue identified by the audit's cross-cutting concerns list.  Ten
+sites now log at WARNING (user-relevant) or DEBUG (developer):
+
+- `update_checker` catches `http.client.HTTPException` and guards
+  `isinstance(data, dict)` so a malformed GitHub response doesn't
+  crash the worker silently.  (M1)
+- `AppConfig.__post_init__` logs at WARNING when coercing unknown
+  `autosave_file_format` or `rx_audio_format` values.  (M3)
+- Settings combo `findText` / `findData` silent-fallback patterns
+  log when a stored value isn't found.  (M4, L4)
+- First-launch Skip path no longer asymmetrically saves the
+  update-checker checkbox while discarding the typed callsign.
+  (M5)
+- `_RigPollWorker.tune` failures, `TciConnection.disconnect`
+  ws.close() errors, and `_dispatch_audio` / `_dispatch_text`
+  callback exceptions all log at DEBUG or WARNING.
+  (M10, L11, L14)
+
+### Performance
+
+- **`_all_devices()` has a 500 ms TTL cache.**  `sd.query_devices()`
+  is slow on macOS Core Audio (50–500 ms after USB events) and was
+  invoked 4–6 times back-to-back during Settings open and app init.
+  Multiple calls inside the same UI operation now share the cache;
+  user-initiated re-opens after the TTL cross the window.  New
+  `invalidate_device_cache()` helper for explicit refresh.  (L1)
+
+### Documentation
+
+Several misleading or absent comments replaced with accurate ones:
+
+- `templates/tokens.py` `TYPE_CHECKING` block (load-bearing for
+  type-checkers, not "dead code" as the original comment implied).
+  (L3)
+- `config/store.py` `None`-stripping semantics and the sentinel-
+  string workaround for future schema fields.  (L5)
+- `templates/filename.py` `_resolve_collision` `Path.exists()` cost
+  on slow network shares.  (L7)
+- `serial_rig.py` CI-V broadcast-frame filter behaviour (was
+  already safe; safety is now documented inline).  (L9)
+- `core/cw.py` 0.01 % per-dit timing skew at non-standard sample
+  rates (inaudible; documented so future readers don't try to
+  "fix" the rounding).  (L10)
+
+### Correctness polish
+
+- **`_parse_version`** handles PEP-440-ish pre-release tags
+  (`"v1.0.0rc1"` → `(1, 0, 0)` instead of all rc/a/b sorting equal).
+  (L6)
+- **`ImageProgress.lines_decoded`** explicitly clamped to
+  `image_height`.  walk_sync_grid caps by contract; this makes the
+  invariant local.  (L2)
+- **`rigctld._read_until_rprt`** anchors `RPRT ` on line start
+  instead of `rfind` so a get-response value containing the literal
+  text "RPRT " can't end the read prematurely.  (L12)
+- **TX watchdog `threading.Timer` instances are `daemon=True`** so
+  an in-flight timer caught mid-shutdown can't block interpreter
+  exit.  (L13)
+
+### Internal tests
+
+Approximately 30 new tests added across the four batches (15
+for Critical, 6 for High, 8 for Moderate, plus a few autouse
+fixtures).  Three existing tests adapted for the new semantics
+(M7, M12, M16 changed behaviour the tests previously asserted).
+**862 passed, 4 skipped, 0 warnings** on the audio / radio /
+config / templates / touched-UI suites.
 
 ---
 
