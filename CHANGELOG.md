@@ -11,6 +11,34 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.11] — 2026-05-20
+
+Patch on top of v0.3.10 to drain the offline encode/decode worker
+threads on window close.  Without the drain Qt aborts the process
+with ``QThread: Destroyed while thread is still running`` when
+MainWindow's destructor (or ``PySide::destroyQCoreApplication`` at
+Python shutdown) walks its child QObjects and finds a still-running
+``OfflineEncodeWorker`` / ``OfflineDecodeWorker`` thread.
+
+### Fixed
+
+- **closeEvent QThread shutdown race** (regression introduced in
+  v0.3.10, reported via macOS crash report on
+  ``PySide::destroyQCoreApplication`` → ``QObjectPrivate::deleteChildren``
+  → ``QThread::~QThread()`` → ``qFatal``): the new offline encode and
+  decode worker threads are parented to MainWindow
+  (``QThread(self)``), and if either is still running when the
+  window's destructor walks its child list, Qt aborts the process.
+  Fix: new ``_abort_offline_workers()`` helper called from
+  ``closeEvent`` right after ``_abort_connect()`` (mirroring the
+  ``_RigConnectWorker`` shutdown drain).  Three-stage drain:
+  ``thread.quit()`` → ``thread.wait(10_000)`` → as a last resort,
+  ``thread.terminate() + wait(1000)``.  10 s covers every mode
+  except a mid-encode Pasokon P7; in that edge case terminate kicks
+  in so we get a slightly ugly process exit instead of ``qFatal``.
+
+---
+
 ## [0.3.10] — 2026-05-20
 
 Fixes the silent-failure offline encode bug introduced in v0.3.9, moves

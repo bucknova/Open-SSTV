@@ -2554,11 +2554,73 @@ class MainWindow(QMainWindow):
 
     # === lifecycle ===
 
+    def _abort_offline_workers(self) -> None:
+        """Drain any in-flight offline encode/decode threads before shutdown.
+
+        Both offline worker QThreads are parented to MainWindow
+        (``QThread(self)``), so if either is still running when the
+        window's destructor walks its child list,
+        ``QObjectPrivate::deleteChildren`` invokes ``~QThread()`` on a
+        live thread and Qt aborts the process with
+        ``QThread: Destroyed while thread is still running``.  The
+        same can happen at Python interpreter shutdown via
+        ``PySide::destroyQCoreApplication`` if any deferred-delete
+        events for a recently-finished thread haven't been processed
+        yet.
+
+        Three-stage drain:
+
+        1. ``thread.quit()`` to ask the worker thread's event loop to
+           exit at the next opportunity.  No-op if the worker is
+           mid-``encode()`` because the event loop is blocked on
+           ``run()`` returning.
+        2. ``thread.wait(timeout)`` — block the GUI thread for up to
+           10 s to let an in-flight encode complete.  Covers Robot
+           36 / PD / Wraase / Scottie / Martin / Pasokon P3-P5.  A
+           Pasokon P7 mid-encode may exceed this; we fall through.
+        3. ``thread.terminate() + wait(1000)`` as a last resort.  Qt
+           docs warn that ``terminate`` can leave the worker in a
+           half-deinit state, but a half-deinit worker on a process
+           about to ``exit()`` anyway is preferable to ``qFatal``.
+
+        Same shape as the ``_abort_connect`` shutdown drain for the
+        ``_RigConnectWorker``.  Safe to call when no worker is in
+        flight (refs are already ``None``).
+        """
+        for attr_thread, attr_worker in (
+            ("_offline_encode_thread", "_offline_encode_worker"),
+            ("_offline_decode_thread", "_offline_decode_worker"),
+        ):
+            thread = getattr(self, attr_thread, None)
+            if thread is None:
+                continue
+            try:
+                thread.quit()
+                if not thread.wait(10_000):
+                    # Stage 3: force-terminate.  We prefer a slightly
+                    # ugly process exit over a qFatal abort.
+                    _log.warning(
+                        "%s did not exit cleanly in 10 s; terminating",
+                        attr_thread,
+                    )
+                    thread.terminate()
+                    thread.wait(1000)
+            except RuntimeError:
+                # Thread C++ object already destroyed (e.g. closeEvent
+                # firing twice via aboutToQuit + the X button).
+                pass
+            setattr(self, attr_thread, None)
+            setattr(self, attr_worker, None)
+
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 — Qt API
         # Abort any in-flight rig connect first — the QThread is a child of
         # this window and Qt calls fatal() if it is still running when the
         # parent is destroyed (OP2-02 regression fix).
         self._abort_connect()
+        # Same reason for the offline encode/decode worker threads — they're
+        # parented to MainWindow too, so a window-close mid-encode would
+        # fatal() on ~QThread().  (v0.3.10 regression.)
+        self._abort_offline_workers()
 
         # Stop rig polling first to avoid timer fires during teardown.
         self._rig_poll_timer.stop()
