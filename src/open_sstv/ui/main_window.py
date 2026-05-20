@@ -70,8 +70,11 @@ import datetime
 import logging
 import subprocess
 import threading
+import wave
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+import numpy as np
 
 _log = logging.getLogger(__name__)
 
@@ -380,6 +383,10 @@ class MainWindow(QMainWindow):
         #: cannot accidentally re-save the previous real transmission.
         self._last_tx_image: PILImage | None = None
         self._last_tx_mode: Mode | str | None = None
+        #: Raw RX audio buffer set by ``_on_rx_audio_ready`` and consumed by
+        #: ``_on_rx_image_complete``.  Both fire from the same worker ``_dispatch``
+        #: call, so the audio is always available when the image handler runs.
+        self._pending_rx_audio: tuple | None = None  # (audio_f64, sample_rate)
         #: OP-47: remembers whether the 1 Hz rig-poll timer was running when
         #: TX started, so ``_unlock_rig_controls`` can resume it only if the
         #: rig is still connected. The poll is *suspended* for the duration
@@ -599,6 +606,7 @@ class MainWindow(QMainWindow):
         # RX worker -> UI.
         self._rx_worker.image_started.connect(self._rx_panel.show_image_started)
         self._rx_worker.image_progress.connect(self._rx_panel.show_image_progress)
+        self._rx_worker.rx_audio_ready.connect(self._on_rx_audio_ready)
         self._rx_worker.image_complete.connect(self._rx_panel.show_image_complete)
         self._rx_worker.image_complete.connect(self._on_rx_image_complete)
         self._rx_worker.status_update.connect(self._on_rx_status_update)
@@ -1327,15 +1335,108 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"{status_verb} {path.name}", 3000)
         return path
 
+    @Slot(object, object, int, int)
+    def _on_rx_audio_ready(
+        self, audio: object, mode: object, vis_code: int, sample_rate: int
+    ) -> None:
+        """Buffer raw RX audio until the companion image_complete signal fires.
+
+        ``rx_audio_ready`` is emitted just before ``image_complete`` in the
+        same ``_dispatch`` call on the worker thread, so both signals arrive
+        on the GUI thread in order — the audio is always buffered by the time
+        ``_on_rx_image_complete`` runs.
+        """
+        self._pending_rx_audio = (audio, sample_rate)
+
     @Slot(object, object, int)
     def _on_rx_image_complete(
         self, image: object, mode: object, vis_code: int
     ) -> None:
-        """Auto-save a newly decoded image if the setting is enabled."""
-        if not self._config.auto_save:
+        """Auto-save a newly decoded image (and optionally its raw audio)."""
+        pending_audio = self._pending_rx_audio
+        self._pending_rx_audio = None
+
+        if not self._config.auto_save and not self._config.autosave_rx_audio:
             return
+
         pil_image: PILImage = image  # type: ignore[assignment]
-        self._autosave_image(pil_image, mode, "RX")
+        save_path: Path | None = None
+        if self._config.auto_save:
+            save_path = self._autosave_image(pil_image, mode, "RX")
+
+        if self._config.autosave_rx_audio and pending_audio is not None:
+            audio_arr, sr = pending_audio
+            fmt = self._config.rx_audio_format
+            self._save_rx_audio(audio_arr, mode, sr, fmt, alongside=save_path)
+
+    def _save_rx_audio(
+        self,
+        audio_f64: object,
+        mode: object,
+        sample_rate: int,
+        fmt: str,
+        *,
+        alongside: Path | None = None,
+    ) -> None:
+        """Write *audio_f64* (float64, [-1,1]) to an audio file.
+
+        *fmt* is ``"wav"`` (stdlib, 16-bit PCM) or ``"flac"`` (soundfile,
+        lossless compressed — ~40% smaller than WAV at no quality cost).
+        Both are lossless; lossy formats are excluded because compression
+        artefacts degrade SSTV re-decode quality.
+
+        If *alongside* is a path to an already-saved image, the audio file
+        is written next to it with the same stem. Otherwise a filename is
+        resolved from the save-directory template.
+        """
+        arr: np.ndarray = np.asarray(audio_f64, dtype=np.float64)
+        if arr.size == 0:
+            return
+
+        fmt = fmt.lower().lstrip(".")
+        if fmt not in ("wav", "flac"):
+            fmt = "wav"
+
+        if alongside is not None:
+            out_path = alongside.with_suffix(f".{fmt}")
+        else:
+            save_dir = Path(self._config.images_save_dir)
+            ctx = self._build_save_context(mode, "RX")
+            try:
+                save_dir.mkdir(parents=True, exist_ok=True)
+                out_path = build_autosave_filename(
+                    self._config.autosave_filename_pattern,
+                    save_dir,
+                    ctx,
+                    file_format=fmt,
+                )
+            except OSError as exc:
+                QMessageBox.warning(self, "Audio save failed", str(exc))
+                return
+
+        try:
+            if fmt == "wav":
+                pcm = (np.clip(arr, -1.0, 1.0) * 32767.0).astype(np.int16)
+                with wave.open(str(out_path), "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(sample_rate)
+                    wf.writeframes(pcm.tobytes())
+            else:
+                import soundfile as sf  # noqa: PLC0415 — lazy import, dep is in pyproject
+                sf.write(str(out_path), arr, sample_rate, subtype="PCM_16")
+        except OSError as exc:
+            QMessageBox.warning(self, "Audio save failed", str(exc))
+            return
+        except ImportError:
+            QMessageBox.warning(
+                self,
+                "Audio save failed",
+                "FLAC recording requires the 'soundfile' package.\n"
+                "Install it with:  pip install soundfile",
+            )
+            return
+        self.statusBar().showMessage(f"Audio saved {out_path.name}", 3000)
 
     @Slot(object, object)
     def _on_rx_image_saved(self, image: object, mode: object) -> None:

@@ -1061,6 +1061,11 @@ class RxWorker(QObject):
     image_started = Signal(object, int)  # (Mode, vis_code)
     image_progress = Signal(object, object, int, int, int)  # (PIL.Image, Mode, vis_code, lines_decoded, lines_total)
     image_complete = Signal(object, object, int)  # (PIL.Image, Mode, vis_code)
+    #: Emitted just before ``image_complete`` when a full image has decoded.
+    #: Carries the raw PCM audio (float64 ndarray at ``sample_rate``) that
+    #: produced the image so it can be saved as a WAV for re-decode.
+    #: ``None`` is never emitted — the signal fires only when a buffer exists.
+    rx_audio_ready = Signal(object, object, int, int)  # (audio_f64, Mode, vis_code, sample_rate)
     status_update = Signal(str)  # periodic progress text
     error = Signal(str)
     #: Centralized exception channel — same contract as TxWorker's
@@ -1669,6 +1674,8 @@ class RxWorker(QObject):
             # Always free the retained raw audio buffer (memory, regardless of
             # whether we re-decode from it).
             raw = self._decoder.consume_last_buffer()
+            if raw is not None and isinstance(raw, np.ndarray) and raw.size > 0:
+                self.rx_audio_ready.emit(raw, event.mode, event.vis_code, self._sample_rate)
             final_image = event.image
             if self._final_slant_correction:
                 # Opt-in: run a full single-pass re-decode with global
