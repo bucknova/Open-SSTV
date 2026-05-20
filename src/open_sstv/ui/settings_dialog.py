@@ -351,6 +351,19 @@ class SettingsDialog(QDialog):
         self._weak_signal_check.setChecked(self._config.rx_weak_signal_mode)
         rx_layout.addRow(self._weak_signal_check)
 
+        self._watchdog_spin = QSpinBox()
+        self._watchdog_spin.setRange(5, 300)
+        self._watchdog_spin.setSingleStep(5)
+        self._watchdog_spin.setSuffix(" s")
+        self._watchdog_spin.setValue(self._config.rx_watchdog_timeout_s)
+        self._watchdog_spin.setToolTip(
+            "How many seconds without a new decoded line before the decoder\n"
+            "gives up and saves the partial image. The overall transmission\n"
+            "timeout (mode duration × 1.5) still applies regardless.\n"
+            "Default: 5 s. Increase for slow/fading HF conditions."
+        )
+        rx_layout.addRow("No-progress timeout:", self._watchdog_spin)
+
         self._final_slant_check = QCheckBox(
             "Apply slant correction to final image (may worsen weak signals)"
         )
@@ -1490,6 +1503,7 @@ class SettingsDialog(QDialog):
             audio_output_gain=self._output_gain_slider.value() / 100.0,
             tx_output_overdrive=self._overdrive_check.isChecked(),
             rx_weak_signal_mode=self._weak_signal_check.isChecked(),
+            rx_watchdog_timeout_s=self._watchdog_spin.value(),
             apply_final_slant_correction=self._final_slant_check.isChecked(),
             incremental_decode=self._incremental_check.isChecked(),
             cw_id_enabled=self._cw_enabled.isChecked(),
