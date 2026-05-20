@@ -11,6 +11,59 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.8] — 2026-05-20
+
+Weak-signal RX improvements: configurable QSB watchdog, better VIS
+detection on fading signals, and a small DSP tweak to reduce colour
+noise on weak decodes.  All landed via PR #6 from @nreed97 on top of
+the v0.3.7 audit base.
+
+### Added
+
+- **Configurable RX no-progress watchdog timeout.**  Settings →
+  Receive → "No-progress timeout" (range 5–300 s, default 5 s).
+  The watchdog was previously hard-wired at 5 s, terminating any
+  in-progress decode that hit a QSB fade longer than that even
+  though ``walk_sync_grid`` already bridges sync gaps with predicted
+  positions and can resume when audio returns.  Wired via a queued
+  ``Signal(int)`` on ``MainWindow`` and a ``set_watchdog_timeout``
+  slot on ``RxWorker`` so the value takes effect live without a
+  restart.  Hand-edited TOML values outside ``[5, 300]`` are clamped
+  in ``AppConfig.__post_init__`` with an ``INFO`` log, matching the
+  v0.3.7 M3 pattern for ``autosave_file_format`` / ``rx_audio_format``.
+
+### Changed
+
+- **Weak-signal VIS detection** uses a separate, wider smooth for
+  the leader-fraction check.  The 2 ms IF smooth that gates bit
+  classification was previously also used for leader detection,
+  leaving too much per-sample noise in the leader estimate; the
+  40 % fraction threshold then rejected legitimate weak signals
+  that were audible and visible on the waterfall.  A new 20 ms
+  smooth (≈10× noise reduction) is used exclusively for the leader
+  presence check, leaving bit-edge timing unaffected.  Threshold
+  relaxations rolling off the noise reduction:
+  - Normal-mode leader threshold ``0.40 → 0.35``
+  - Weak-signal leader threshold ``0.25 → 0.20``
+  - Normal-mode minimum start-bit duration ``20 ms → 17 ms`` (still
+    7 ms above the 10 ms mid-leader break) to tolerate
+    noise-fragmented start bits.
+
+### Fixed
+
+- **3-sample IF pre-smooth on the incremental decoder** reduces
+  weak-signal colour noise variance by ``√3 ≈ 1.7×``, compounding
+  with the existing per-pixel central-60 % median to give visibly
+  cleaner images on signals below ~10 dB in-band SNR.  3 samples
+  is ≤25 % of the narrowest pixel span across all supported modes
+  (Robot 36 luma at 44.1 kHz ≈ 12 samples/pixel), so strong-signal
+  sharpness is unaffected.  Applied as ``np.convolve(inst, k,
+  mode="same")`` after the bandpass + Hilbert but before pixel
+  extraction, so sync detection runs on the un-smoothed track and
+  per-pixel timing is unchanged.
+
+---
+
 ## [0.3.7] — 2026-05-20
 
 A May 2026 codebase audit identified 47 issues across critical, high,
