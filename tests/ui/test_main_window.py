@@ -1248,3 +1248,187 @@ class TestRadioDisconnectedAbortsTx:
         assert len(stop_calls) == 0, (
             "request_stop() must not be called when already on ManualRig"
         )
+
+
+# ---------------------------------------------------------------------------
+# v0.3.12 — Export to Audio applies the TX banner stamp
+# ---------------------------------------------------------------------------
+#
+# v0.3.10 added Export to Audio but bypassed TxWorker, so the banner stamp at
+# workers.py:606 never ran and the resulting WAV decoded without a banner.
+# v0.3.12 mirrors the same gating in MainWindow._on_export_to_audio_requested:
+# banner only when tx_banner_enabled AND no v0.3 template composited (templates
+# carry their own text overlays).
+
+
+class TestExportToAudioBanner:
+    """Pin the banner-application logic for Export to Audio."""
+
+    @staticmethod
+    def _stub_export(
+        window: MainWindow,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> list[Image.Image]:
+        """Wire Export to Audio so it runs synchronously and captures the
+        image handed to ``OfflineEncodeWorker`` without doing a real encode."""
+        out_path = tmp_path / "out.wav"
+        monkeypatch.setattr(
+            "PySide6.QtWidgets.QFileDialog.getSaveFileName",
+            staticmethod(
+                lambda *a, **kw: (str(out_path), "WAV audio (*.wav)")
+            ),
+        )
+
+        captured: list[Image.Image] = []
+
+        class _FakeEncodeWorker:
+            """Captures the image arg; emits nothing so the test
+            doesn't have to wait on a real Robot 36 encode."""
+
+            encode_complete: object = None
+            error: object = None
+            finished: object = None
+
+            def __init__(self, image, mode, fs, out_path):  # noqa: ARG002
+                captured.append(image)
+                # Provide the same Qt-Signal-shaped attributes the production
+                # MainWindow expects to connect to — a no-op MagicMock for
+                # ``connect`` is enough since we never start the thread.
+                self.encode_complete = MagicMock()
+                self.error = MagicMock()
+                self.finished = MagicMock()
+
+            def moveToThread(self, _thread) -> None:  # noqa: N802 — Qt API
+                pass
+
+            def deleteLater(self) -> None:  # noqa: N802 — Qt API
+                pass
+
+            def run(self) -> None:
+                pass
+
+        monkeypatch.setattr(
+            "open_sstv.ui.main_window.OfflineEncodeWorker", _FakeEncodeWorker
+        )
+
+        # Suppress the real QThread so we don't actually start one.
+        class _FakeThread:
+            def __init__(self, _parent=None) -> None:
+                self.finished = MagicMock()
+                self.started = MagicMock()
+
+            def setObjectName(self, _name) -> None:  # noqa: N802
+                pass
+
+            def start(self) -> None:
+                pass
+
+            def quit(self) -> None:
+                pass
+
+            def wait(self, _timeout=0) -> bool:  # noqa: ARG002
+                return True
+
+            def deleteLater(self) -> None:  # noqa: N802
+                pass
+
+        monkeypatch.setattr("open_sstv.ui.main_window.QThread", _FakeThread)
+
+        return captured
+
+    def test_banner_applied_when_enabled_and_no_template(
+        self,
+        window: MainWindow,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        captured = self._stub_export(window, monkeypatch, tmp_path)
+        window._config.tx_banner_enabled = True
+        window._config.callsign = "W0AEZ"
+
+        # Spy on the banner-stamp call.
+        banner_calls: list[int] = []
+        from open_sstv.core import banner as _banner_mod
+        real_apply = _banner_mod.apply_tx_banner
+
+        def _spy(image, *args, **kwargs):  # noqa: ANN001
+            banner_calls.append(1)
+            return real_apply(image, *args, **kwargs)
+
+        # Patch the import target inside main_window's slot (which does
+        # ``from open_sstv.core.banner import apply_tx_banner`` at call time).
+        monkeypatch.setattr(_banner_mod, "apply_tx_banner", _spy)
+
+        from open_sstv.core.modes import Mode
+        img = Image.new("RGB", (320, 240), color=(100, 200, 50))
+        window._on_export_to_audio_requested(img, Mode.ROBOT_36)
+
+        assert len(banner_calls) == 1, "banner should have been applied once"
+        assert len(captured) == 1, "encode worker should have been constructed"
+        # The captured image should be the banner-stamped one, not the raw input.
+        # apply_tx_banner returns same-dimensions but different pixels in the
+        # top strip — so the top-left pixel should not be the source color.
+        assert captured[0].getpixel((0, 0)) != (100, 200, 50), (
+            "top-left pixel should be in the banner strip, not the source color"
+        )
+
+    def test_banner_skipped_when_disabled(
+        self,
+        window: MainWindow,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        captured = self._stub_export(window, monkeypatch, tmp_path)
+        window._config.tx_banner_enabled = False
+
+        banner_calls: list[int] = []
+        from open_sstv.core import banner as _banner_mod
+        monkeypatch.setattr(
+            _banner_mod,
+            "apply_tx_banner",
+            lambda *a, **kw: banner_calls.append(1),
+        )
+
+        from open_sstv.core.modes import Mode
+        img = Image.new("RGB", (320, 240), color=(100, 200, 50))
+        window._on_export_to_audio_requested(img, Mode.ROBOT_36)
+
+        assert banner_calls == [], "banner must not be applied when disabled"
+        assert len(captured) == 1
+        # Image should pass through unchanged.
+        assert captured[0].getpixel((0, 0)) == (100, 200, 50)
+
+    def test_banner_skipped_when_v3_template_composited(
+        self,
+        window: MainWindow,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        captured = self._stub_export(window, monkeypatch, tmp_path)
+        window._config.tx_banner_enabled = True
+
+        # Pretend a v0.3 template is selected — the panel's
+        # has_v3_template_composited() must return True, which means the
+        # banner must be skipped (the template has its own overlays).
+        monkeypatch.setattr(
+            window._tx_panel, "has_v3_template_composited", lambda: True
+        )
+
+        banner_calls: list[int] = []
+        from open_sstv.core import banner as _banner_mod
+        monkeypatch.setattr(
+            _banner_mod,
+            "apply_tx_banner",
+            lambda *a, **kw: banner_calls.append(1),
+        )
+
+        from open_sstv.core.modes import Mode
+        img = Image.new("RGB", (320, 240), color=(100, 200, 50))
+        window._on_export_to_audio_requested(img, Mode.ROBOT_36)
+
+        assert banner_calls == [], (
+            "banner must not be applied when a v0.3 template is composited"
+        )
+        assert len(captured) == 1
+        assert captured[0].getpixel((0, 0)) == (100, 200, 50)

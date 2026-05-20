@@ -413,6 +413,17 @@ class TxPanel(QWidget):
         data = self._mode_combo.currentData()
         return data if isinstance(data, Mode) else Mode(data)
 
+    def has_v3_template_composited(self) -> bool:
+        """True when the emitted image already has a v0.3 template baked in.
+
+        Used by ``MainWindow._on_export_to_audio_requested`` to decide
+        whether to apply the legacy TX banner stamp before encoding —
+        same gating rule as ``TxWorker.transmit`` (banner enabled AND
+        no v0.3 template active).  Templates handle their own text
+        overlays, so adding a banner on top would double-stamp.
+        """
+        return self._selected_template is not None and self._base_image is not None
+
     def set_templates(self, templates: list[QSOTemplate]) -> None:
         """v0.2 compat shim — no-op in v0.3."""
         self._v2_templates = templates

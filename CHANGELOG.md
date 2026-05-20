@@ -13,11 +13,16 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.3.12] — 2026-05-20
 
-Patch on top of v0.3.11 to keep TX template thumbnails in sync across
-all four QSO-role tabs (CQ / Reply / 73 / Custom) when the user loads
-a new photo.  Without the fix, only the currently-active role tab
-re-rendered with the new photo; switching to another tab still showed
-the previous image — usually the bundled ``testimage.jpg`` auto-load.
+Bundle of two independent post-v0.3.11 fixes:
+
+1. **Template gallery thumbnails stayed stale on inactive QSO-role
+   tabs after Load Image** — the gallery's role-filter optimisation
+   skipped hidden cards on re-render, so non-active tabs held onto
+   the previously-loaded image.
+2. **TX banner strip was missing from Export to Audio output** — the
+   new offline encode path (added in v0.3.10) bypassed
+   ``TxWorker.transmit`` and therefore the banner-stamp step that
+   the live-TX path applies.
 
 ### Fixed
 
@@ -34,6 +39,40 @@ the previous image — usually the bundled ``testimage.jpg`` auto-load.
   per thumb on a modern CPU — imperceptible for the typical 8-card
   starter pack.  Regression covered by
   ``test_set_photo_rerenders_role_filter_hidden_cards``.
+- **TX banner missing from Export to Audio output** (regression
+  introduced in v0.3.10, reported by Kevin/W0AEZ after a manual
+  encode-then-decode round-trip showed no banner at the top of the
+  decoded image): the new in-panel Export to Audio button bypasses
+  ``TxWorker`` entirely (it goes straight to ``OfflineEncodeWorker``)
+  so the banner stamp at ``ui/workers.py:606`` never ran.  Fix:
+  apply ``apply_tx_banner`` in
+  ``MainWindow._on_export_to_audio_requested`` before handing the
+  image to the offline worker, with the same gating rule TxWorker
+  uses — banner only when ``tx_banner_enabled`` AND no v0.3
+  template composited (templates carry their own text overlays;
+  double-stamping would clobber them).  No risk of double-stamping
+  via the live-TX path because ``TxWorker.transmit`` still does its
+  own banner application, and that path is unchanged.
+
+### Added
+
+- **New ``TxPanel.has_v3_template_composited()`` method** —
+  exposes the same template-active state TxPanel already emits via
+  ``template_composited(bool)``, so MainWindow can check it
+  synchronously without storing duplicate state.
+
+### Testing
+
+- ``test_set_photo_rerenders_role_filter_hidden_cards`` in
+  ``tests/ui/test_template_gallery.py`` — applies a "cq" role filter
+  that hides two of three cards, then asserts every card (visible
+  and hidden) is re-rendered on ``set_photo``.
+- Three new tests in
+  ``tests/ui/test_main_window.py::TestExportToAudioBanner``:
+  banner applied when enabled with no template, banner skipped when
+  disabled, banner skipped when a v0.3 template is composited.
+  Uses stub ``OfflineEncodeWorker`` and ``QThread`` so the
+  assertion logic runs without a real encode.
 
 ---
 

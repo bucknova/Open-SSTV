@@ -1133,7 +1133,12 @@ class MainWindow(QMainWindow):
         The TX panel hands us the same composited image its Transmit
         button would emit (template + photo + QSO overlays already
         applied), so the resulting WAV contains exactly what would have
-        gone over the air.
+        gone over the air — including the legacy TX banner strip when
+        the user has it enabled in Settings and no v0.3 template is
+        composited.  Banner gating mirrors ``TxWorker.transmit`` (the
+        live-TX path): banner only stamps when ``tx_banner_enabled``
+        AND no v0.3 template active, because templates carry their own
+        text overlays and double-stamping would clobber them.
         """
         if self._offline_encode_thread is not None:
             # Previous encode still in flight — ignore re-entrant click.
@@ -1141,6 +1146,43 @@ class MainWindow(QMainWindow):
                 "Encode already in progress — wait for it to finish.", 3000
             )
             return
+
+        # Banner stamp — same gating as TxWorker.transmit at workers.py:606.
+        # The live-TX path runs this inside TxWorker after the panel has
+        # emitted the image; the export-to-audio path bypasses TxWorker, so
+        # we have to apply it here or the WAV would lack the banner that
+        # live TX would have included.  v0.3.10 shipped without this.
+        if (
+            self._config.tx_banner_enabled
+            and not self._tx_panel.has_v3_template_composited()
+        ):
+            try:
+                from open_sstv.core.banner import (
+                    apply_tx_banner,
+                    scaled_banner_params,
+                )
+                _bh, _fs = scaled_banner_params(
+                    self._config.tx_banner_size, image.width
+                )
+                image = apply_tx_banner(
+                    image,
+                    __version__,
+                    self._config.callsign,
+                    self._config.tx_banner_bg_color,
+                    self._config.tx_banner_text_color,
+                    banner_height=_bh,
+                    font_size=_fs,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Same recovery as TxWorker: surface failure to the user
+                # and bail out rather than silently encoding without a banner.
+                self.statusBar().showMessage(
+                    f"TX banner failed: {exc}", 5000
+                )
+                QMessageBox.warning(
+                    self, "Export failed", f"TX banner failed: {exc}"
+                )
+                return
 
         # Suggest a sensible default filename based on callsign + mode +
         # timestamp; lands in the configured images-save dir by default.
