@@ -1423,7 +1423,7 @@ class MainWindow(QMainWindow):
                     wf.setframerate(sample_rate)
                     wf.writeframes(pcm.tobytes())
             else:
-                import soundfile as sf  # noqa: PLC0415 — lazy import, dep is in pyproject
+                import soundfile as sf  # noqa: PLC0415 — lazy optional dep
                 sf.write(str(out_path), arr, sample_rate, subtype="PCM_16")
         except OSError as exc:
             QMessageBox.warning(self, "Audio save failed", str(exc))
@@ -1433,7 +1433,7 @@ class MainWindow(QMainWindow):
                 self,
                 "Audio save failed",
                 "FLAC recording requires the 'soundfile' package.\n"
-                "Install it with:  pip install soundfile",
+                'Install it with:  pip install "open-sstv[flac]"',
             )
             return
         self.statusBar().showMessage(f"Audio saved {out_path.name}", 3000)

@@ -400,8 +400,8 @@ class SettingsDialog(QDialog):
             "in the Images save directory.\n\n"
             "Both WAV and FLAC are lossless — lossy formats (MP3, AAC, MP4)\n"
             "are excluded because compression artefacts degrade re-decode quality.\n\n"
-            "Files use the same filename stem as the image auto-save pattern\n"
-            "(configured on the Images tab) with a different extension."
+            "Files use the same filename template as image auto-save\n"
+            "(configured on the Images tab), with a different extension."
         )
         self._autosave_rx_audio_check.setChecked(self._config.autosave_rx_audio)
         rec_layout.addRow(self._autosave_rx_audio_check)
