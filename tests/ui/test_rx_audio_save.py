@@ -32,6 +32,14 @@ pytestmark = pytest.mark.gui
 
 class _FakeSelf:
     """Minimal stub for MainWindow used to call _save_rx_audio in isolation."""
+
+    def __init__(self, save_dir: Path | None = None) -> None:
+        from open_sstv.config.schema import AppConfig
+        self._config = AppConfig(
+            images_save_dir=str(save_dir) if save_dir is not None else "",
+            autosave_filename_pattern="%d_%t_%m",
+        )
+
     def statusBar(self):
         bar = MagicMock()
         bar.showMessage = MagicMock()
@@ -190,6 +198,34 @@ def test_save_rx_audio_empty_is_noop(tmp_path: Path, qapp) -> None:
     MainWindow._save_rx_audio(_FakeSelf(), np.zeros(0), Mode.ROBOT_36, 48_000, "wav", alongside=png_path)
 
     assert not (tmp_path / "test.wav").exists()
+
+
+def test_save_rx_audio_standalone_uses_filename_template(tmp_path: Path, qapp) -> None:
+    """When alongside=None, filename is resolved via build_autosave_filename.
+
+    This exercises the branch where image auto-save is off but audio
+    recording is on: the save directory is created if needed, the
+    filename template is resolved (here the default ``%d_%t_%m``), and
+    the resulting WAV lands in the configured save directory.
+    """
+    audio = np.linspace(-1.0, 1.0, 4800, dtype=np.float64)
+
+    from open_sstv.ui.main_window import MainWindow
+    MainWindow._save_rx_audio(
+        _FakeSelf(save_dir=tmp_path),
+        audio,
+        Mode.ROBOT_36,
+        48_000,
+        "wav",
+        alongside=None,
+    )
+
+    wav_files = list(tmp_path.glob("*.wav"))
+    assert len(wav_files) == 1, f"expected one WAV, got {[f.name for f in wav_files]}"
+    with wave.open(str(wav_files[0])) as wf:
+        assert wf.getnchannels() == 1
+        assert wf.getframerate() == 48_000
+        assert wf.getnframes() == len(audio)
 
 
 # ---------------------------------------------------------------------------
