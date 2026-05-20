@@ -110,6 +110,16 @@ def make_cw(
     dtype('int16')
     """
     amplitude = 10.0 ** (peak_dbfs / 20.0)  # linear ≤ 1.0
+    # L10: timing-skew note.  Dit length = ``1.2 / wpm * sample_rate``
+    # rounded to integer samples.  At 48 kHz × 20 WPM this is exactly
+    # 2880 samples (60.000 ms); at 44.1 kHz × 25 WPM it's 2116.8
+    # rounded to 2117, introducing 0.01% per-dit timing skew that
+    # accumulates linearly across the CW ID.  For a 30-character
+    # callsign that's well under 1 ms of total drift — inaudible to
+    # human copy-by-ear and well inside any reasonable decoder's
+    # tolerance.  Documented here so future readers don't try to
+    # "fix" the rounding into something more complex without
+    # cause.
     dit_n = max(1, int(round(1.2 / wpm * sample_rate)))
 
     # Pre-build silence blocks to avoid per-element allocation.

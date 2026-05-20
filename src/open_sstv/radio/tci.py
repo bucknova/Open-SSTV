@@ -189,8 +189,13 @@ class TciConnection:
         if ws is not None:
             try:
                 ws.close()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                # L11: a half-closed socket throws on close — expected
+                # and not user-visible.  Log at DEBUG so unusual errors
+                # (websocket-client internal state corruption, etc.)
+                # don't vanish without a trace when debugging a hung
+                # session via ``OPEN_SSTV_DEBUG=1``.
+                _log.debug("TCI disconnect: ws.close() raised: %s", exc)
         t = self._recv_thread
         if t is not None and t.is_alive():
             t.join(timeout=2.0)
@@ -367,8 +372,14 @@ class TciConnection:
             for cb in callbacks:
                 try:
                     cb(msg)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    # L14: same DEBUG-level visibility as the audio
+                    # path so a typo in a TciRig._on_text branch
+                    # (or any future text-callback consumer) doesn't
+                    # vanish silently.
+                    _log.debug(
+                        "TCI text callback raised on %r: %s", msg, exc, exc_info=True
+                    )
 
     def _dispatch_audio(self, data: bytes) -> None:
         """Parse a TCI v2.0 binary audio frame and invoke audio callbacks.
@@ -429,8 +440,15 @@ class TciConnection:
         for cb in callbacks:
             try:
                 cb(samples, sr)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                # L14: callback exceptions used to vanish silently —
+                # any bug in ``TciInputStreamWorker._audio_callback``
+                # (dtype mismatch, queue not yet wired, etc.) was
+                # invisible.  Log at DEBUG so the trail exists in
+                # ``OPEN_SSTV_DEBUG=1`` without spamming a normal
+                # session (recv-thread errors fire ~1× per audio
+                # frame, so WARNING would be too loud).
+                _log.debug("TCI audio callback raised: %s", exc, exc_info=True)
 
 
 # ---------------------------------------------------------------------------

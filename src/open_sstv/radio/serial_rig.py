@@ -397,7 +397,18 @@ class IcomCIVRig:
                 # Skip echo of our own command
                 if to_addr == self._addr and from_addr == _CIV_CONTROLLER:
                     continue
-                # Response from rig to us
+                # Response from rig to us.
+                #
+                # L9: this check also implicitly rejects unsolicited
+                # broadcast frames the rig sends when the operator turns
+                # a knob — those have ``to_addr = 0x00`` (transceive
+                # broadcast to all controllers) which differs from
+                # ``_CIV_CONTROLLER = 0xE0``, and from_addr must equal
+                # ``self._addr`` (the rig we're talking to specifically,
+                # not any other CI-V device on a bus topology).  So a
+                # knob-turn broadcast in flight when we issued our
+                # command cannot accidentally satisfy the predicate
+                # below and be returned as our response.
                 if to_addr == _CIV_CONTROLLER and from_addr == self._addr:
                     if payload and payload[0] == _CIV_OK:
                         return payload[1:]  # data after OK byte

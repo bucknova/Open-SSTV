@@ -716,6 +716,11 @@ class TxWorker(QObject):
             self._watchdog_fire,
             args=[playback_budget_s, this_tx_id],
         )
+        # L13: daemon=True so a still-pending watchdog from a TX cycle
+        # caught mid-shutdown doesn't keep the interpreter alive past
+        # closeEvent (the cancel below covers the normal path; this is
+        # the belt-and-braces for the rare in-flight case).
+        playback_watchdog.daemon = True
         playback_watchdog.start()
         try:
             result = self._run_tx(samples, rig)
@@ -781,6 +786,10 @@ class TxWorker(QObject):
             self._watchdog_fire,
             args=[playback_budget_s, this_tx_id],
         )
+        # L13: daemon=True so test-tone watchdogs caught mid-shutdown
+        # don't block interpreter exit.  See the matching comment on
+        # the SSTV TX path's playback_watchdog.
+        watchdog.daemon = True
         watchdog.start()
 
         try:

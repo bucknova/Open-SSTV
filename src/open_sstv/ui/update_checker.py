@@ -28,14 +28,39 @@ _TIMEOUT_S = 3
 
 
 def _parse_version(tag: str) -> tuple[int, ...]:
-    """'v0.2.15' or '0.2.15' → (0, 2, 15). Non-numeric segments become 0."""
+    """``"v0.2.15"`` or ``"0.2.15"`` → ``(0, 2, 15)``.
+
+    Pre-release suffixes (``"0rc1"`` / ``"3a2"`` / ``"5.dev1"``) are
+    stripped down to the leading digits — ``"v1.0.0rc1"`` → ``(1, 0, 0)``,
+    which sorts equal to the matching stable release (``1.0.0``).  GitHub
+    doesn't normally tag pre-releases as ``latest`` so this is a safety
+    rail for forks / typos rather than the common path.
+
+    Non-numeric segments with no leading digits (e.g. an entirely-letter
+    tag like ``"main"``) become ``0`` so the comparison remains a tuple
+    of integers.
+
+    L6: previously each segment ran straight through ``int()`` and a
+    non-numeric segment like ``"0rc1"`` raised ValueError → returned
+    ``0``, meaning ``"v0.2.0rc1"`` parsed to ``(0, 2, 0)``.  That's the
+    same as ``"v0.2.0"``, which is *correct* for the "is this a newer
+    release" comparison.  But ``"v0.2.0a1"`` and ``"v0.2.0b1"`` and
+    ``"v0.2.0rc1"`` all compare equal — fine if all three are tagged
+    consecutively, fragile if they aren't.  Tighten to "take the
+    leading digit run; if none, treat as 0".
+    """
     parts = tag.lstrip("v").split(".")
-    result = []
+    result: list[int] = []
     for p in parts:
-        try:
-            result.append(int(p))
-        except ValueError:
-            result.append(0)
+        # Take the leading run of digits.  "12rc1" → 12; "rc1" → 0;
+        # "12" → 12; "" → 0.
+        leading = ""
+        for ch in p:
+            if ch.isdigit():
+                leading += ch
+            else:
+                break
+        result.append(int(leading) if leading else 0)
     return tuple(result)
 
 

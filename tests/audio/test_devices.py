@@ -10,7 +10,20 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from open_sstv.audio import devices
+
+
+@pytest.fixture(autouse=True)
+def _clear_device_cache() -> None:
+    """L1: ``_all_devices`` caches results with a short TTL.  Each test
+    mocks a different device set; invalidate before AND after so the
+    cache state doesn't leak between tests or into the rest of the
+    suite."""
+    devices.invalidate_device_cache()
+    yield
+    devices.invalidate_device_cache()
 
 
 # Two-device fixture: one input-only mic, one output-only speaker, plus

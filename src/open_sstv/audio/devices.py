@@ -26,9 +26,33 @@ This is the only module that imports ``sounddevice`` from outside
 from __future__ import annotations
 
 import platform
+import time
 from dataclasses import dataclass
 
 import sounddevice as sd
+
+#: L1: TTL for the ``_all_devices`` cache.  ``sd.query_devices()`` is
+#: slow on macOS Core Audio (~50–500 ms after a USB event) and used to
+#: be invoked back-to-back during a single Settings-open or app-init
+#: pass (input list → output list → default-for-input → default-for-
+#: output, plus per-direction name lookups).  A short TTL means
+#: in-batch calls share the result while a deliberate refresh
+#: (user opens Settings again after plugging a device) crosses the
+#: window and re-queries.  500 ms is the sweet spot between coalescing
+#: a single UI operation and feeling stale to a user.
+_DEVICE_CACHE_TTL_S: float = 0.5
+_devices_cache: tuple[float, list["AudioDevice"]] | None = None
+
+
+def invalidate_device_cache() -> None:
+    """Force the next ``_all_devices`` / ``list_*`` call to re-query.
+
+    Call this from any code path that knows the device list has
+    changed (USB hotplug detection, PortAudio reset, etc.).  Cheap
+    no-op when the cache is already cold.
+    """
+    global _devices_cache
+    _devices_cache = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,9 +96,11 @@ def _build(raw: dict, host_api_names: list[str]) -> AudioDevice:
 def _all_devices() -> list[AudioDevice]:
     """Snapshot every device PortAudio can see, regardless of direction.
 
-    Called by both the input and output listings; cheap enough that we
-    don't bother caching across calls (the UI re-queries on every settings
-    dialog open so users see hot-plugged devices).
+    Cached with a short TTL (see ``_DEVICE_CACHE_TTL_S``) because
+    ``sd.query_devices()`` is slow on macOS Core Audio and the back-
+    to-back UI calls (input list + output list + defaults) used to
+    re-query each time.  Call ``invalidate_device_cache()`` to force
+    a refresh when device-set changes are known.
 
     On Linux, devices exposed under the JACK host API are filtered out:
     JACK is a virtual-routing daemon, and its devices show up in the
@@ -83,6 +109,14 @@ def _all_devices() -> list[AudioDevice]:
     advanced minority and can drop the filter via a future Settings
     toggle if needed.
     """
+    global _devices_cache
+    now = time.monotonic()
+    if (
+        _devices_cache is not None
+        and (now - _devices_cache[0]) < _DEVICE_CACHE_TTL_S
+    ):
+        return list(_devices_cache[1])
+
     host_apis = sd.query_hostapis()
     host_api_names = [str(h["name"]) for h in host_apis]
     # Index → True iff the host API name contains "jack" (case-insensitive).
@@ -106,6 +140,7 @@ def _all_devices() -> list[AudioDevice]:
         if 0 <= hostapi_idx < len(is_jack_hostapi) and is_jack_hostapi[hostapi_idx]:
             continue
         out.append(_build(dict(raw), host_api_names))
+    _devices_cache = (now, list(out))
     return out
 
 
@@ -193,6 +228,7 @@ __all__ = [
     "default_output_device",
     "find_input_device_by_name",
     "find_output_device_by_name",
+    "invalidate_device_cache",
     "list_input_devices",
     "list_output_devices",
 ]

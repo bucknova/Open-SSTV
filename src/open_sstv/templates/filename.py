@@ -86,6 +86,19 @@ def _resolve_collision(candidate: Path) -> Path:
     extension until an unused path is found.  The search caps at
     ``_999`` — at which point we fall back to appending a longer index
     suffix rather than silently overwriting.
+
+    L7: each trial calls ``Path.exists()`` which translates to a
+    ``stat()`` syscall.  On a local SSD that's <1 µs per check, so 999
+    trials cost ~1 ms — invisible.  On a slow network share (CIFS /
+    SMB / NFS over high-latency wifi) each stat can be 10–50 ms, so a
+    worst-case 999-collision search could block the GUI thread (this
+    function is called from the auto-save path) for tens of seconds.
+    In practice 999 collisions in the same second-resolution filename
+    bucket implies someone is auto-saving an image every ~3 ms, which
+    is faster than any real SSTV decode loop — so the pathological
+    case is mostly hypothetical.  If you do hit it on a network share,
+    consider configuring a callsign in Settings so the filename template
+    expands to something more unique per session.
     """
     if not candidate.exists():
         return candidate

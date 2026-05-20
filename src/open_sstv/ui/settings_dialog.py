@@ -1419,18 +1419,50 @@ class SettingsDialog(QDialog):
         """Build a new ``AppConfig`` from the current dialog state.
 
         Call after ``exec()`` returns ``QDialog.Accepted``.
+
+        L4: ``currentData()`` returns ``None`` only if the combo has no
+        items, which the dialog construction guarantees never happens —
+        the ``or <fallback>`` patterns below are unreachable today.
+        They're kept (and logged at WARNING when triggered) so a future
+        widget refactor that genuinely empties a combo doesn't silently
+        swap the user's selection for the fallback value.  Triggering
+        any of these in normal operation is a bug worth investigating.
         """
-        conn_mode = self._conn_mode_combo.currentData() or RigConnectionMode.MANUAL.value
+        conn_mode_data = self._conn_mode_combo.currentData()
+        if conn_mode_data is None:
+            _log.warning(
+                "Settings: conn_mode combo currentData() is None — "
+                "falling back to MANUAL"
+            )
+            conn_mode = RigConnectionMode.MANUAL.value
+        else:
+            conn_mode = conn_mode_data
 
         # Serial port and baud come from the mode-specific widgets.  String
         # equality against RigConnectionMode values (StrEnum → str) keeps
         # this branch dense and immune to typos vs. bare literals (OP-28).
         if conn_mode == RigConnectionMode.SERIAL:
             serial_port = self._serial_port_combo.currentText().strip()
-            baud_rate = self._baud_rate_combo.currentData() or 9600
+            baud_data = self._baud_rate_combo.currentData()
+            if baud_data is None:
+                _log.warning(
+                    "Settings: SERIAL baud combo currentData() is None — "
+                    "falling back to 9600"
+                )
+                baud_rate = 9600
+            else:
+                baud_rate = baud_data
         elif conn_mode == RigConnectionMode.RIGCTLD:
             serial_port = self._rigctld_serial_combo.currentText().strip()
-            baud_rate = self._rigctld_baud_combo.currentData() or 9600
+            baud_data = self._rigctld_baud_combo.currentData()
+            if baud_data is None:
+                _log.warning(
+                    "Settings: RIGCTLD baud combo currentData() is None — "
+                    "falling back to 9600"
+                )
+                baud_rate = 9600
+            else:
+                baud_rate = baud_data
         else:
             serial_port = self._config.rig_serial_port
             baud_rate = self._config.rig_baud_rate

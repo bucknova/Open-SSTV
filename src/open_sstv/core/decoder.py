@@ -1326,7 +1326,15 @@ class Decoder:
                     image=img.copy(),
                     mode=self._mode,
                     vis_code=self._vis_code,
-                    lines_decoded=max_row,
+                    # L2: defensive bound — ``max_row`` is set from
+                    # ``row_idx + 1`` and ``image_height`` is the
+                    # mode's static height.  walk_sync_grid already
+                    # caps ``row_idx < image_height``, so the upper
+                    # bound is guaranteed by contract, but pin it
+                    # explicitly here so a future per-mode helper
+                    # that loses the cap can't drive the progress
+                    # bar past 100 %.
+                    lines_decoded=min(max_row, image_height),
                     lines_total=image_height,
                 )
             )

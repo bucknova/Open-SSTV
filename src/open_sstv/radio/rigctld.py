@@ -244,9 +244,19 @@ class RigctldClient:
                     command="<unknown>",
                 )
             # We have a complete response when there is an ``RPRT `` token
-            # followed by a newline somewhere after it.
-            idx = buf.rfind(b"RPRT ")
-            if idx != -1 and buf.find(b"\n", idx) != -1:
+            # at the start of a line, followed by a newline somewhere
+            # after it.
+            #
+            # L12: anchor the match on ``\nRPRT `` (or buffer start)
+            # rather than ``rfind(b"RPRT ")`` so a get-response value
+            # that happens to contain the literal text "RPRT " (e.g. a
+            # rig label that includes it) can't end the read prematurely.
+            # Unlikely from canonical rigctld, but a possible failure
+            # mode for forks or unusual rig backends.
+            if buf.startswith(b"RPRT ") and buf.find(b"\n") != -1:
+                break
+            anchored = buf.rfind(b"\nRPRT ")
+            if anchored != -1 and buf.find(b"\n", anchored + 1) != -1:
                 break
         text = buf.decode("ascii", errors="replace")
         lines = text.split("\n")

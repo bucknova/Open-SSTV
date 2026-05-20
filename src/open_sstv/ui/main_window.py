@@ -2436,18 +2436,27 @@ class MainWindow(QMainWindow):
                 "TX worker thread did not finish within timeout — "
                 "attempting emergency PTT unkey"
             )
-            # Run emergency_unkey in a daemon thread with a short join so
-            # a dead-rig serial timeout (~1.5 s) can't freeze the GUI for
-            # the full timeout while we're trying to quit (OP-08).  The
-            # thread is daemon=True so even if the unkey itself hangs,
-            # the interpreter exits cleanly.
+            # Run emergency_unkey in a daemon thread with a join so a
+            # dead-rig serial timeout can't freeze the GUI for the full
+            # timeout while we're trying to quit (OP-08).  The thread is
+            # daemon=True so even if the unkey itself hangs, the
+            # interpreter exits cleanly.
+            #
+            # L8: bumped from 1.5 s to 3.0 s — the old budget was sized
+            # to match the serial backend's own write timeout (1.0 s)
+            # plus margin, but a USB-CAT chain can stack several layers
+            # of timeout (driver, kernel, application) and 1.5 s wasn't
+            # enough for the unkey to complete on slow USB hubs.  3 s
+            # still feels snappy at app close, gives the unkey a real
+            # chance to finish, and is well below the OS-imposed kill
+            # latency Qt enforces on the main thread.
             t = _threading.Thread(
                 target=self._tx_worker.emergency_unkey,
                 name="sstv-app-emergency-unkey",
                 daemon=True,
             )
             t.start()
-            t.join(timeout=1.5)
+            t.join(timeout=3.0)
 
         for thread in (
             self._audio_thread,

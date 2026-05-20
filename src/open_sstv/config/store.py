@@ -106,6 +106,18 @@ def save_config(cfg: AppConfig, path: Path | None = None) -> None:
     with _save_lock:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
+            # L5: ``None`` values are stripped from the dict before
+            # writing because tomli-w doesn't have a representation for
+            # them (TOML has no null).  Currently a no-op because no
+            # AppConfig field is intentionally None at save time —
+            # ``None`` only means "missing → use the dataclass default
+            # on load".  WATCH FOR: if a future schema field uses
+            # ``None`` as an "explicit reset" sentinel (vs. "field was
+            # never set"), the load path will treat the two
+            # indistinguishably and silently re-apply the default.
+            # Solution at that point will be: write a sentinel string
+            # (e.g. ``"__none__"``) for explicit-None fields and have
+            # the load path translate it back.  No action needed today.
             data = {k: v for k, v in asdict(cfg).items() if v is not None}
             with tmp.open("wb") as f:
                 tomli_w.dump(data, f)

@@ -402,9 +402,19 @@ __all__ = [
     "resolve_tokens",
 ]
 
-# Deferred imports to avoid circular dependencies at module load time.
-# QSOState, AppConfig, TXContext are only needed in function signatures
-# resolved at call time (TYPE_CHECKING or runtime annotations).
+# Deferred imports for static analysis (mypy / IDE / pyright) only.
+#
+# These imports MUST live behind ``TYPE_CHECKING`` because the
+# ``open_sstv.templates.model`` and ``open_sstv.config.schema`` modules
+# both transitively re-import token utilities from this file at module
+# load time — a direct top-level import would deadlock the importer.
+#
+# ``from __future__ import annotations`` above defers all annotation
+# evaluation to call-site reflection (which we don't do at runtime), so
+# the types are never resolved without an explicit ``get_type_hints``
+# call — meaning the runtime cost is zero.  Type-checkers still see the
+# block and resolve ``QSOState`` / ``AppConfig`` / ``TXContext`` in the
+# function signatures at lines 219, 264, 320, etc.
 from typing import TYPE_CHECKING  # noqa: E402
 
 if TYPE_CHECKING:
