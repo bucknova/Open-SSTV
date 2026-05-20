@@ -443,10 +443,27 @@ class InputStreamWorker(QObject):
         from the OS so the next stream open sees the device in its new state.
 
         Note: this is a process-wide PortAudio operation.  Any other sounddevice
-        streams (e.g. the TX output stream) are invalidated.  In this app TX and
-        RX are never active simultaneously and both use the same USB audio device,
-        so this is safe in practice.
+        streams (e.g. the TX output stream) are invalidated.  The TX/RX
+        interlock prevents calling both simultaneously, but the user can
+        still race the two paths (clicking RX Start while TX is mid-encode
+        or mid-PTT-delay) — in that window terminating PortAudio would rip
+        the host state out from under the live TX OutputStream and crash on
+        the next callback.  ``is_tx_active`` is checked here so the reset
+        is skipped (and logged) while any TX call is in flight; the caller
+        proceeds without a fresh device cache, which is the right trade-off
+        — at worst the user gets a -10851 if the device was just unplugged,
+        which is recoverable; at best (the common case) nothing changed.
         """
+        from open_sstv.audio.output_stream import is_tx_active  # noqa: PLC0415
+
+        if is_tx_active():
+            _log.warning(
+                "PortAudio reset SKIPPED — TX is currently active.  Resetting "
+                "PortAudio while an OutputStream is live can crash the process; "
+                "the device cache will be refreshed on the next RX start that "
+                "doesn't overlap a transmission."
+            )
+            return
         _log.info("PortAudio reset: terminating to clear stale device cache")
         try:
             sd._terminate()

@@ -386,6 +386,30 @@ def test_final_slant_on_mode_mismatch_falls_back_to_progressive(qapp) -> None:
     assert img is prog_image  # progressive preserved
 
 
+def test_final_slant_on_cancel_set_skips_decode_wav(qapp) -> None:
+    """CRIT-3: ``decode_wav`` doesn't honour the worker's cancel event,
+    and a Pasokon P7 re-decode takes several seconds.  When ``request_cancel``
+    has been called before dispatch (Stop button, RX reset, shutdown),
+    the slant-correction branch must skip the re-decode and use the
+    progressive image instead — otherwise the worker thread blocks past
+    the cancel and the next operation feels unresponsive."""
+    worker, log, raw_audio, prog_image = _setup_worker_for_dispatch(flag=True)
+
+    # Simulate the user clicking Stop (or RX reset) between the last
+    # decoder.feed() returning the ImageComplete event and _dispatch
+    # processing it.
+    worker._cancel_event.set()
+
+    with patch("open_sstv.ui.workers.decode_wav") as mock_dw:
+        worker.feed_chunk(np.zeros(10, dtype=np.float32))
+
+    mock_dw.assert_not_called()
+    # Progressive image is still delivered.
+    assert len(log["image_complete"]) == 1
+    img, _mode, _code = log["image_complete"][0]
+    assert img is prog_image
+
+
 def test_final_slant_on_decode_wav_exception_falls_back(qapp) -> None:
     """If decode_wav raises, the progressive image is used and no error
     signal is emitted (the exception is logged at DEBUG, not surfaced to UI).

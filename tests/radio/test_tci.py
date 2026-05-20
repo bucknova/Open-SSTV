@@ -227,3 +227,92 @@ class TestOnTextParser:
         # No exception; no state change.
         assert not rig._freq_received
         assert not rig._ptt_received
+
+
+# ---------------------------------------------------------------------------
+# CRIT-2: socket timeout on the TCI WebSocket so a wedged send_binary()
+# cannot keep the rig keyed indefinitely
+# ---------------------------------------------------------------------------
+
+
+class TestSocketTimeout:
+    """Without a socket-level timeout, ``ws.send_binary()`` blocks forever
+    if the WebSocket stalls mid-TX.  ``_stop_event`` is only polled between
+    chunks; the watchdog's unkey command also goes over the wedged socket.
+    Net effect would be: rig stays keyed for minutes (OS TCP timeout) on
+    a network drop mid-TX — a real FCC compliance risk.  The fix sets a
+    socket-wide timeout that bounds both reads and writes and tolerates
+    idle reads in the recv loop."""
+
+    def test_connect_sets_socket_timeout(self) -> None:
+        """After ``connect()`` succeeds, the underlying socket must have a
+        send/recv timeout set so a wedged operation can't hang forever."""
+        from unittest.mock import MagicMock, patch
+
+        from open_sstv.radio.tci import TciConnection, _SOCKET_TIMEOUT_S
+
+        fake_sock = MagicMock()
+        fake_ws = MagicMock()
+        fake_ws.sock = fake_sock
+        fake_ws_module = MagicMock()
+        fake_ws_module.WebSocket.return_value = fake_ws
+
+        conn = TciConnection("127.0.0.1", 40001)
+
+        # The recv loop normally sets _ready_event when "READY:" arrives;
+        # connect() clears the event at entry, so we have to set it from
+        # the patched recv loop instead of pre-seeding it.
+        def fake_recv_loop() -> None:
+            conn._ready_event.set()
+
+        with patch.dict("sys.modules", {"websocket": fake_ws_module}):
+            with patch.object(conn, "_recv_loop", side_effect=fake_recv_loop):
+                conn.connect(timeout_s=1.0)
+
+        fake_sock.settimeout.assert_called_once_with(_SOCKET_TIMEOUT_S)
+
+    def test_recv_loop_continues_on_socket_timeout(self) -> None:
+        """Setting a socket timeout makes idle reads raise
+        ``socket.timeout`` periodically.  The recv loop must treat those
+        as "no data, keep waiting" rather than a connection-lost signal —
+        otherwise enabling the timeout would *cause* spurious disconnects."""
+        import socket as _socket
+        from unittest.mock import MagicMock
+
+        from open_sstv.radio.tci import TciConnection
+
+        conn = TciConnection.__new__(TciConnection)
+        conn._host = "127.0.0.1"
+        conn._port = 40001
+        conn._closed = False
+        conn._text_callbacks = []
+        conn._audio_callbacks = []
+        conn._ready_event = __import__("threading").Event()
+        conn._sample_rate = 48_000
+
+        ready_msg = b"READY;"
+        call_count = {"n": 0}
+
+        def fake_recv_data() -> tuple[int, bytes]:
+            call_count["n"] += 1
+            if call_count["n"] == 3:
+                return (1, ready_msg)
+            if call_count["n"] >= 4:
+                conn._closed = True
+                raise _socket.timeout("stop")
+            raise _socket.timeout("idle")
+
+        fake_ws = MagicMock()
+        fake_ws.recv_data.side_effect = fake_recv_data
+        conn._ws = fake_ws
+
+        conn._recv_loop()
+
+        # If the recv loop had broken on the first socket.timeout, the
+        # READY would never be received.  Confirm both that it was, AND
+        # that we saw multiple timeouts (proving the continue path
+        # exercised more than once).
+        assert conn._ready_event.is_set(), (
+            "recv loop broke on socket.timeout instead of continuing"
+        )
+        assert call_count["n"] >= 3, "expected at least 3 recv_data calls"

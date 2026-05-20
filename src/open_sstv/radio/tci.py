@@ -42,6 +42,7 @@ commands and receives audio via a callback registered on the shared
 from __future__ import annotations
 
 import logging
+import socket
 import struct
 import threading
 from collections.abc import Callable
@@ -54,6 +55,14 @@ _log = logging.getLogger(__name__)
 
 _READY_TIMEOUT_S: float = 10.0
 _RESPONSE_TIMEOUT_S: float = 2.0
+#: Socket-level read/write timeout applied after ``connect()``.  Bounds the
+#: worst-case time a wedged ``send_binary()`` can keep the rig keyed if the
+#: WebSocket stalls mid-TX.  The recv loop tolerates the corresponding
+#: ``socket.timeout`` on idle reads and continues; only true connection loss
+#: terminates it.  5 s is long enough that healthy network jitter never
+#: triggers a false timeout but short enough that a stuck PTT recovers
+#: within a few seconds rather than minutes (OS TCP timeout).
+_SOCKET_TIMEOUT_S: float = 5.0
 
 # TCI v2.0 audio header (AetherSDR / ExpertSDR3 format): 16 × uint32 LE = 64 bytes
 # struct TciAudioHeader { receiver, sampleRate, format, codec, crc, length, type, channels, reserved[8] }
@@ -127,6 +136,14 @@ class TciConnection:
             self._ws.connect(url, timeout=timeout_s)
         except Exception as exc:  # noqa: BLE001
             raise RigConnectionError(f"TCI WebSocket connect failed: {exc}") from exc
+
+        # Apply a socket-level timeout so a wedged ``send_binary()`` can't
+        # keep the rig keyed indefinitely (the recv loop tolerates idle
+        # ``socket.timeout`` and continues).  See ``_SOCKET_TIMEOUT_S``.
+        try:
+            self._ws.sock.settimeout(_SOCKET_TIMEOUT_S)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("TCI: could not set socket timeout: %s", exc)
 
         self._closed = False
         self._ready_event.clear()
@@ -272,6 +289,13 @@ class TciConnection:
         while not self._closed and self._ws is not None:
             try:
                 opcode, data = self._ws.recv_data()
+            except socket.timeout:
+                # Expected on idle: the ``_SOCKET_TIMEOUT_S`` we set after
+                # ``connect()`` makes every read block for at most that
+                # window so a wedged ``send_binary()`` can't hang the
+                # session — but a quiet period on the wire isn't a
+                # connection loss, just keep looping.
+                continue
             except Exception:  # noqa: BLE001
                 if not self._closed:
                     _log.warning("TCI: recv error — connection lost")

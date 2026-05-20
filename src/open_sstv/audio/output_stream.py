@@ -8,9 +8,21 @@ to a buffer, then play it" — so this is a thin wrapper around
 never touches it.
 
 A module-level ``stop()`` interrupts an in-flight playback (used for the
-"Stop" button). Sounddevice stores the active stream as a global, so
-``stop()`` and the playing thread coordinate through PortAudio rather than
-through Python state we'd otherwise have to lock.
+"Stop" button).  For the legacy ``sd.play`` fast path, ``sd.stop()``
+suffices.  For the chunked-write path (any caller that passes a
+``stop_event``, ``progress_callback``, ``gain_provider``,
+``periodic_check``, or ``chunk_callback``), we open ``sd.OutputStream``
+directly and track it in a module-level slot guarded by a lock so
+``stop()`` can call ``stream.abort()`` from any thread — discarding
+buffered samples and unblocking the writer immediately.  Without this,
+``stop()`` was a no-op on the chunked path and abort relied solely on
+``stop_event`` polled between chunks (~100 ms latency), which could not
+interrupt a wedged ``stream.write()`` call (USB stall, driver hang).
+
+A second module-level guard tracks whether a TX is currently active so
+``input_stream._pa_reset`` (which globally calls ``sd._terminate()`` +
+``sd._initialize()``) can refuse to run while a TX OutputStream is live.
+Without the guard, a user starting RX during TX could crash the process.
 
 PTT timing — keying the radio, waiting a beat for the relay, *then*
 playing — lives in the TX worker, not here. This module is intentionally
@@ -20,9 +32,11 @@ no rig.
 Public API:
     play_blocking(samples, sample_rate, device=None) -> None
     stop() -> None
+    is_tx_active() -> bool
 """
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable
 
@@ -30,6 +44,32 @@ import numpy as np
 import sounddevice as sd
 
 from open_sstv.audio.devices import AudioDevice
+
+_log = logging.getLogger(__name__)
+
+# Module-level coordination for ``stop()`` and ``is_tx_active()``.
+#
+# ``_active_stream``: the live ``sd.OutputStream`` for the chunked-write path
+# (None when no TX is in flight or only the legacy ``sd.play`` path is used).
+# ``_tx_active_count``: nesting-safe counter incremented at the top of
+# ``play_blocking`` and decremented in its ``finally`` so concurrent /
+# re-entrant callers are handled correctly.  Both are guarded by
+# ``_tx_state_lock``.
+_tx_state_lock = threading.Lock()
+_active_stream: sd.OutputStream | None = None
+_tx_active_count: int = 0
+
+
+def is_tx_active() -> bool:
+    """``True`` while any ``play_blocking`` call is in flight.
+
+    Read by ``input_stream._pa_reset`` so it can refuse to terminate the
+    PortAudio host while a TX OutputStream is alive (which would otherwise
+    rip the underlying audio engine out from under the live stream and
+    crash on the next callback).
+    """
+    with _tx_state_lock:
+        return _tx_active_count > 0
 
 
 def play_blocking(
@@ -103,90 +143,128 @@ def play_blocking(
 
     device_index = device.index if isinstance(device, AudioDevice) else device
 
-    if (
-        progress_callback is None
-        and stop_event is None
-        and gain_provider is None
-        and periodic_check is None
-        and chunk_callback is None
-    ):
-        # Fast path: no progress reporting, no stop, no live gain, no
-        # health check needed.
-        sd.play(samples, samplerate=sample_rate, device=device_index, blocking=True)
-        sd.wait()
-        return
+    # Increment ``_tx_active_count`` for the whole lifetime of this call,
+    # not just the chunked write path — ``sd.play`` also opens a stream
+    # under the hood, so ``_pa_reset`` must refuse during the fast path too.
+    global _tx_active_count
+    with _tx_state_lock:
+        _tx_active_count += 1
+    try:
+        if (
+            progress_callback is None
+            and stop_event is None
+            and gain_provider is None
+            and periodic_check is None
+            and chunk_callback is None
+        ):
+            # Fast path: no progress reporting, no stop, no live gain, no
+            # health check needed.
+            sd.play(samples, samplerate=sample_rate, device=device_index, blocking=True)
+            sd.wait()
+            return
 
-    # Chunked write path: ~0.1 s chunks keep stop-button latency below
-    # 100 ms and give smooth progress updates. Also the granularity at
-    # which live gain is re-read — one chunk late at worst.
-    chunk_size = int(sample_rate * 0.1)
-    total = samples.size
+        # Chunked write path: ~0.1 s chunks keep stop-button latency below
+        # 100 ms and give smooth progress updates. Also the granularity at
+        # which live gain is re-read — one chunk late at worst.
+        chunk_size = int(sample_rate * 0.1)
+        total = samples.size
 
-    # How often to run the periodic health check (every N ~0.1 s chunks ≈ 1 s).
-    _CHECK_INTERVAL = 10
-    _check_counter = 0
+        # How often to run the periodic health check (every N ~0.1 s chunks ≈ 1 s).
+        _CHECK_INTERVAL = 10
+        _check_counter = 0
 
-    with sd.OutputStream(
-        samplerate=sample_rate,
-        channels=1,
-        dtype=samples.dtype,
-        device=device_index,
-    ) as stream:
-        written = 0
-        while written < total:
-            if stop_event is not None and stop_event.is_set():
-                break
-
-            # Periodic health check — e.g. a serial-port ping to detect
-            # USB unplug mid-TX.  The callable emits any user-visible error
-            # before raising; we just need to abort on any exception.
-            if periodic_check is not None:
-                _check_counter += 1
-                if _check_counter % _CHECK_INTERVAL == 0:
-                    try:
-                        periodic_check()
-                    except Exception:  # noqa: BLE001
-                        if stop_event is not None:
-                            stop_event.set()
+        global _active_stream
+        with sd.OutputStream(
+            samplerate=sample_rate,
+            channels=1,
+            dtype=samples.dtype,
+            device=device_index,
+        ) as stream:
+            # Publish the stream so ``stop()`` can ``abort()`` it from
+            # another thread — that's the only way to unblock a wedged
+            # ``stream.write()`` on a stalled USB driver.
+            with _tx_state_lock:
+                _active_stream = stream
+            try:
+                written = 0
+                while written < total:
+                    if stop_event is not None and stop_event.is_set():
                         break
 
-            end = min(written + chunk_size, total)
-            chunk = samples[written:end]
-            if gain_provider is not None:
-                gain = gain_provider()
-                if gain != 1.0:
-                    # Clip to the sample dtype's range so float math
-                    # doesn't wrap on int16 overflow. We mirror the
-                    # pre-scale path in workers.py for consistency.
-                    if np.issubdtype(chunk.dtype, np.integer):
-                        info = np.iinfo(chunk.dtype)
-                        chunk = np.clip(
-                            chunk.astype(np.float64) * gain,
-                            info.min,
-                            info.max,
-                        ).astype(chunk.dtype)
-                    else:
-                        chunk = np.clip(
-                            chunk.astype(np.float64) * gain,
-                            -1.0,
-                            1.0,
-                        ).astype(chunk.dtype)
-            if chunk_callback is not None:
-                chunk_callback(chunk)
-            stream.write(chunk.reshape(-1, 1))
-            written = end
-            if progress_callback is not None:
-                progress_callback(written, total)
+                    # Periodic health check — e.g. a serial-port ping to
+                    # detect USB unplug mid-TX.  The callable emits any
+                    # user-visible error before raising; we just need to
+                    # abort on any exception.
+                    if periodic_check is not None:
+                        _check_counter += 1
+                        if _check_counter % _CHECK_INTERVAL == 0:
+                            try:
+                                periodic_check()
+                            except Exception:  # noqa: BLE001
+                                if stop_event is not None:
+                                    stop_event.set()
+                                break
+
+                    end = min(written + chunk_size, total)
+                    chunk = samples[written:end]
+                    if gain_provider is not None:
+                        gain = gain_provider()
+                        if gain != 1.0:
+                            # Clip to the sample dtype's range so float
+                            # math doesn't wrap on int16 overflow. We
+                            # mirror the pre-scale path in workers.py
+                            # for consistency.
+                            if np.issubdtype(chunk.dtype, np.integer):
+                                info = np.iinfo(chunk.dtype)
+                                chunk = np.clip(
+                                    chunk.astype(np.float64) * gain,
+                                    info.min,
+                                    info.max,
+                                ).astype(chunk.dtype)
+                            else:
+                                chunk = np.clip(
+                                    chunk.astype(np.float64) * gain,
+                                    -1.0,
+                                    1.0,
+                                ).astype(chunk.dtype)
+                    if chunk_callback is not None:
+                        chunk_callback(chunk)
+                    stream.write(chunk.reshape(-1, 1))
+                    written = end
+                    if progress_callback is not None:
+                        progress_callback(written, total)
+            finally:
+                with _tx_state_lock:
+                    _active_stream = None
+    finally:
+        with _tx_state_lock:
+            _tx_active_count -= 1
 
 
 def stop() -> None:
     """Abort an in-flight playback.
 
-    Safe to call when nothing is playing — sounddevice treats it as a
-    no-op. The "Stop" button on the TX panel calls this; the TX worker
-    will then unwind out of ``play_blocking`` and drop PTT.
+    Safe to call when nothing is playing.  Handles both code paths:
+
+    * ``sd.stop()`` cancels the legacy ``sd.play`` fast path.
+    * ``_active_stream.abort()`` discards the chunked-write buffer
+      immediately, unblocking any ``stream.write()`` call that has
+      wedged on a stalled USB driver.  Without this, ``stop()`` was a
+      no-op on the chunked path (which is every TxWorker call), and
+      abort relied solely on ``stop_event`` polled between chunks —
+      fine in the common case but unable to interrupt a hung write.
+
+    The "Stop" button on the TX panel calls this; the TX worker then
+    unwinds out of ``play_blocking`` and drops PTT.
     """
     sd.stop()
+    with _tx_state_lock:
+        stream = _active_stream
+    if stream is not None:
+        try:
+            stream.abort()
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("output_stream.stop: abort failed: %s", exc)
 
 
-__all__ = ["play_blocking", "stop"]
+__all__ = ["is_tx_active", "play_blocking", "stop"]

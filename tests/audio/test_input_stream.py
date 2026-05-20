@@ -415,6 +415,64 @@ def test_stream_passes_finished_callback_to_portaudio(
     worker.stop()
 
 
+# --- CRIT-1: _pa_reset must refuse to run while TX is active ---
+
+
+def test_pa_reset_skips_when_tx_active(monkeypatch) -> None:
+    """``_pa_reset`` calls ``sd._terminate()`` + ``sd._initialize()`` which
+    is a process-wide PortAudio operation.  If a TX OutputStream is alive
+    (user clicked RX Start while TX was mid-PTT-delay or mid-playback),
+    terminating PortAudio rips the host out from under the live stream
+    and crashes on the next callback.  The guard introduced for this
+    issue must skip the reset and log a warning instead."""
+    terminate_calls: list[None] = []
+    initialize_calls: list[None] = []
+
+    monkeypatch.setattr(
+        "open_sstv.audio.input_stream.sd._terminate",
+        lambda: terminate_calls.append(None),
+    )
+    monkeypatch.setattr(
+        "open_sstv.audio.input_stream.sd._initialize",
+        lambda: initialize_calls.append(None),
+    )
+    monkeypatch.setattr(
+        "open_sstv.audio.output_stream.is_tx_active",
+        lambda: True,
+    )
+
+    worker = InputStreamWorker()
+    worker._pa_reset()
+
+    assert not terminate_calls, "_terminate must NOT run while TX is active"
+    assert not initialize_calls, "_initialize must NOT run while TX is active"
+
+
+def test_pa_reset_proceeds_when_tx_inactive(monkeypatch) -> None:
+    """Sanity check: when TX is inactive the reset runs normally."""
+    terminate_calls: list[None] = []
+    initialize_calls: list[None] = []
+
+    monkeypatch.setattr(
+        "open_sstv.audio.input_stream.sd._terminate",
+        lambda: terminate_calls.append(None),
+    )
+    monkeypatch.setattr(
+        "open_sstv.audio.input_stream.sd._initialize",
+        lambda: initialize_calls.append(None),
+    )
+    monkeypatch.setattr(
+        "open_sstv.audio.output_stream.is_tx_active",
+        lambda: False,
+    )
+
+    worker = InputStreamWorker()
+    worker._pa_reset()
+
+    assert len(terminate_calls) == 1
+    assert len(initialize_calls) == 1
+
+
 def test_pa_finished_callback_noop_during_deliberate_stop(
     qapp, fake_stream_cls: type[_FakeStream]
 ) -> None:

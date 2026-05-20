@@ -1719,6 +1719,18 @@ class RxWorker(QObject):
                         "slant-correction re-decode skipped for Robot 36 "
                         "(batch and incremental paths use different color pipelines)"
                     )
+                elif self._cancel_event.is_set():
+                    # Stop / RX-reset was requested while the worker was
+                    # mid-dispatch.  ``decode_wav`` doesn't honour the
+                    # cancel event itself, and a Pasokon P7 re-decode
+                    # takes several seconds — running it here would
+                    # block the worker thread past the cancel and make
+                    # the Stop button feel unresponsive.  Skip and use
+                    # the progressive result.
+                    _log.debug(
+                        "slant-correction re-decode skipped — "
+                        "cancel requested before dispatch"
+                    )
                 else:
                     try:
                         if raw is not None and isinstance(raw, np.ndarray) and raw.size > 0:

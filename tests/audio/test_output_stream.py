@@ -80,6 +80,125 @@ def test_stop_calls_sd_stop() -> None:
     mock_stop.assert_called_once()
 
 
+# --- Critical-tier fixes: stop() must actually abort the chunked stream,
+# and is_tx_active() must be true exactly while play_blocking is running ---
+
+
+def test_stop_aborts_active_chunked_stream() -> None:
+    """CRIT-4: ``output_stream.stop()`` was a no-op for the chunked-write
+    path because ``sd.stop()`` only cancels ``sd.play`` streams.  Now
+    ``stop()`` calls ``abort()`` on the active ``sd.OutputStream`` so a
+    wedged ``stream.write()`` can be unblocked from another thread."""
+    import threading
+
+    class _AbortableStream:
+        def __init__(self) -> None:
+            self.writes: list[np.ndarray] = []
+            self.aborted = False
+
+        def __enter__(self) -> "_AbortableStream":
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def write(self, chunk: np.ndarray) -> None:
+            self.writes.append(np.asarray(chunk).copy())
+
+        def abort(self) -> None:
+            self.aborted = True
+
+    sr = 48000
+    samples = np.zeros(sr // 10 * 5, dtype=np.int16)
+    fake_stream = _AbortableStream()
+    abort_seen = threading.Event()
+
+    # Stop() runs on a different thread (typically GUI) while play_blocking
+    # blocks the TX worker thread.  Have the periodic_check fire stop()
+    # from the worker thread to simulate the Stop button firing.
+    def fire_stop_after_one_chunk() -> None:
+        # By the second invocation we've written at least one chunk —
+        # call stop() and verify it propagates to abort().
+        if len(fake_stream.writes) >= 1 and not abort_seen.is_set():
+            output_stream.stop()
+            abort_seen.set()
+
+    with (
+        patch("open_sstv.audio.output_stream.sd.OutputStream", return_value=fake_stream),
+        patch("open_sstv.audio.output_stream.sd.stop"),
+    ):
+        stop_event = threading.Event()
+        output_stream.play_blocking(
+            samples,
+            sr,
+            progress_callback=lambda written, total: (
+                fire_stop_after_one_chunk()
+            ),
+            stop_event=stop_event,
+        )
+
+    assert fake_stream.aborted, "stop() must call stream.abort() on chunked path"
+
+
+def test_stop_handles_no_active_stream() -> None:
+    """stop() must be a clean no-op when nothing is playing."""
+    with patch("open_sstv.audio.output_stream.sd.stop") as mock_stop:
+        output_stream.stop()  # no play_blocking in flight
+    # sd.stop is always called (handles the fast-path); the chunked
+    # branch should be skipped without raising.
+    mock_stop.assert_called_once()
+
+
+def test_is_tx_active_tracks_play_blocking() -> None:
+    """CRIT-1: ``is_tx_active()`` must be True while ``play_blocking`` is
+    running so ``_pa_reset`` knows to refuse.  Idle → False; in-flight →
+    True; after return → False."""
+    assert output_stream.is_tx_active() is False
+
+    sr = 48000
+    samples = np.zeros(sr // 10 * 2, dtype=np.int16)
+    saw_active: list[bool] = []
+    fake_stream = _FakeStream()
+
+    def record_active(written: int, total: int) -> None:
+        saw_active.append(output_stream.is_tx_active())
+
+    with patch("open_sstv.audio.output_stream.sd.OutputStream", return_value=fake_stream):
+        output_stream.play_blocking(
+            samples,
+            sr,
+            progress_callback=record_active,
+        )
+
+    assert saw_active and all(saw_active), (
+        "is_tx_active() must report True while play_blocking is running"
+    )
+    assert output_stream.is_tx_active() is False, (
+        "is_tx_active() must return to False after play_blocking returns"
+    )
+
+
+def test_is_tx_active_false_after_exception() -> None:
+    """The TX-active counter must decrement even when play_blocking raises
+    (e.g. PortAudioError on stream open) — otherwise a single failed TX
+    would lock out _pa_reset forever."""
+    sr = 48000
+    samples = np.zeros(sr // 10, dtype=np.int16)
+
+    with patch(
+        "open_sstv.audio.output_stream.sd.OutputStream",
+        side_effect=RuntimeError("simulated open failure"),
+    ):
+        with pytest.raises(RuntimeError):
+            output_stream.play_blocking(
+                samples,
+                sr,
+                progress_callback=lambda *_: None,  # force chunked path
+            )
+
+    assert output_stream.is_tx_active() is False
+
+
 # --- Live gain (test-tone ALC calibration) ---
 
 class _FakeStream:
