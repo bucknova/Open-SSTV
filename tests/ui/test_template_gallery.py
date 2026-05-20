@@ -325,6 +325,56 @@ class TestUpdates:
             "the batch repaint backstop is missing"
         )
 
+    def test_set_photo_rerenders_role_filter_hidden_cards(
+        self, qtbot, gallery_with_templates: TemplateGallery
+    ) -> None:
+        """Regression: switching role filters after ``set_photo`` should show
+        the new photo on every tab, not just the tab that was active when the
+        photo was loaded.
+
+        The bug: ``_rerender_all`` skipped ``not card.isVisible()`` cards, so
+        cards hidden by the role filter were left displaying whatever photo
+        was active the last time that filter was active.  Symptom: load a
+        new image while filtered to "CQ", switch to "Reply", and Reply
+        thumbs still showed the previous photo (often the bundled
+        ``testimage.jpg`` auto-loaded on TxPanel startup).
+        """
+        g = gallery_with_templates
+        g.show()
+        qtbot.waitExposed(g)
+
+        # Apply a role filter that hides Beta (reply) and Gamma (closing) —
+        # only Alpha (cq) is visible.
+        g._active_role = "cq"
+        g._apply_role_filter()
+        visible_names = {c.template.name for c in g._cards if c.isVisible()}
+        hidden_names = {c.template.name for c in g._cards if not c.isVisible()}
+        assert "Alpha" in visible_names
+        assert hidden_names == {"Beta", "Gamma"}, (
+            "Test setup precondition: role filter must hide Beta and Gamma"
+        )
+
+        # Spy on ``_render_card`` to see which cards get re-rendered.
+        rendered: list[str] = []
+        real_render = g._render_card
+
+        def _spy(card, _real=real_render):
+            rendered.append(card.template.name)
+            return _real(card)
+
+        g._render_card = _spy  # type: ignore[method-assign]
+
+        img = Image.new("RGB", (320, 256), color=(50, 200, 80))
+        g.set_photo(img)
+
+        # Every card — visible AND hidden — must be re-rendered so switching
+        # the filter later shows the new photo on the previously-hidden tabs.
+        expected = {c.template.name for c in g._cards}
+        assert set(rendered) == expected, (
+            f"Hidden cards not re-rendered after set_photo: "
+            f"missing {expected - set(rendered)}"
+        )
+
     def test_set_qso_state_triggers_rerender(
         self, gallery_with_templates: TemplateGallery
     ) -> None:

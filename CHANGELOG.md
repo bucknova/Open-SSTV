@@ -11,6 +11,32 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.12] — 2026-05-20
+
+Patch on top of v0.3.11 to keep TX template thumbnails in sync across
+all four QSO-role tabs (CQ / Reply / 73 / Custom) when the user loads
+a new photo.  Without the fix, only the currently-active role tab
+re-rendered with the new photo; switching to another tab still showed
+the previous image — usually the bundled ``testimage.jpg`` auto-load.
+
+### Fixed
+
+- **Template gallery thumbs stale on inactive role tabs after Load
+  Image** (reported by Kevin / W0AEZ): ``TemplateGallery._rerender_all``
+  used to skip ``not card.isVisible()`` cards as a perceived
+  performance optimisation, so any card hidden by the current role
+  filter held onto whatever photo / QSO state / mode was active the
+  last time that filter was shown.  Repro: launch (default image
+  auto-loads on CQ), Load Image to swap photo on CQ, switch to Reply
+  → Reply thumbs still showed the old image.  Fix: render every card
+  on every ``set_photo`` / ``set_qso_state`` / ``set_rx_image`` /
+  ``set_mode``, regardless of role-filter visibility.  Cost is ~ms
+  per thumb on a modern CPU — imperceptible for the typical 8-card
+  starter pack.  Regression covered by
+  ``test_set_photo_rerenders_role_filter_hidden_cards``.
+
+---
+
 ## [0.3.11] — 2026-05-20
 
 Patch on top of v0.3.10 to drain the offline encode/decode worker

@@ -384,22 +384,22 @@ class TemplateGallery(QWidget):
         self._app_config = cfg
 
     def set_photo(self, photo: PILImage | None) -> None:
-        """Update the base photo; re-renders all visible thumbnails."""
+        """Update the base photo; re-renders every card's thumbnail."""
         self._photo = photo
         self._rerender_all()
 
     def set_rx_image(self, rx_image: PILImage | None) -> None:
-        """Update the user-selected RX image; re-renders all thumbnails."""
+        """Update the user-selected RX image; re-renders every card's thumbnail."""
         self._rx_image = rx_image
         self._rerender_all()
 
     def set_qso_state(self, qso_state: QSOState) -> None:
-        """Update QSO state; re-renders all visible thumbnails."""
+        """Update QSO state; re-renders every card's thumbnail."""
         self._qso_state = qso_state
         self._rerender_all()
 
     def set_mode(self, mode: Mode) -> None:
-        """Update SSTV mode (affects aspect ratio); re-renders all thumbnails."""
+        """Update SSTV mode (affects aspect ratio); re-renders every card's thumbnail."""
         self._mode = mode
         self._rerender_all()
 
@@ -554,12 +554,18 @@ class TemplateGallery(QWidget):
         return max(_MIN_THUMB_W, min(_MAX_THUMB_W, by_aspect))
 
     def _rerender_all(self) -> None:
-        """Re-render thumbnails for all currently visible cards."""
+        """Re-render thumbnails for every card, visible or role-filter-hidden.
+
+        Skipping invisible cards here used to leave their thumbs frozen at
+        whatever photo / QSO state / mode was active the last time the role
+        filter showed them: load a new image while filtered to "CQ", switch
+        to "Reply", and the Reply thumbs still show the old image until the
+        user touches each filter in turn.  Rendering every card on each
+        update keeps all four role tabs in sync at ~ms-per-thumb cost.
+        """
         if self._app_config is None:
             return
         for card in self._cards:
-            if not card.isVisible():
-                continue
             self._render_card(card)
         # Backstop the per-card ``update()`` calls in ``set_pixmap`` by
         # asking the strip-widget parent to repaint as well.  A batch
