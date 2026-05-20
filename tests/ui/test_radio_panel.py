@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pytest
 
+from open_sstv.radio.band_plan import SSTV_BAND_PLAN
 from open_sstv.ui.radio_panel import RadioPanel
 
 pytestmark = pytest.mark.gui
@@ -107,3 +108,48 @@ def test_tx_inactive_button_enabled_while_connecting(panel: RadioPanel) -> None:
     panel.set_connecting()
     panel.set_tx_active(False)
     assert panel._connect_btn.isEnabled()
+
+
+# === _build_band_menu() structure ===
+
+
+class TestBandMenuStructure:
+    """Pin the structure of the band-plan popup menu built by _build_band_menu()."""
+
+    def test_separators_land_at_region_boundaries(self, panel: RadioPanel) -> None:
+        """A separator must appear at each region transition (HF→VHF, VHF→UHF)
+        and nowhere else."""
+        menu = panel._build_band_menu()
+        actions = menu.actions()
+
+        # Reconstruct the expected separator pattern from the data layer.
+        expected_seps: list[bool] = []
+        last_region = ""
+        for entry in SSTV_BAND_PLAN:
+            if last_region and entry.region != last_region:
+                expected_seps.append(True)
+            expected_seps.append(False)
+            last_region = entry.region
+
+        assert len(actions) == len(expected_seps)
+        for i, (action, is_sep) in enumerate(zip(actions, expected_seps)):
+            assert action.isSeparator() == is_sep, (
+                f"actions[{i}]: expected {'separator' if is_sep else 'entry'}, "
+                f"got {'separator' if action.isSeparator() else 'entry'}"
+            )
+
+    def test_lambda_binds_correct_freq_per_entry(self, panel: RadioPanel) -> None:
+        """Each action must emit the (freq_hz, rig_mode, passband_hz) it was
+        built from — not the last loop value."""
+        menu = panel._build_band_menu()
+        non_sep = [a for a in menu.actions() if not a.isSeparator()]
+        assert len(non_sep) == len(SSTV_BAND_PLAN)
+
+        emitted: list[tuple[int, str, int]] = []
+        panel.tune_requested.connect(lambda f, m, p: emitted.append((f, m, p)))
+        for action, entry in zip(non_sep, SSTV_BAND_PLAN):
+            emitted.clear()
+            action.trigger()
+            assert emitted == [(entry.freq_hz, entry.rig_mode, entry.passband_hz)], (
+                f"{action.text()!r} emitted {emitted}"
+            )
