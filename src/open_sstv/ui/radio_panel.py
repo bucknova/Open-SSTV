@@ -7,21 +7,26 @@ signal strength, with a Connect/Disconnect button to manage the
 rigctld link at runtime.
 
 The panel owns no sockets or threads — it exposes signals
-(``connect_requested``, ``disconnect_requested``) that the
-``MainWindow`` translates into ``RigctldClient`` lifecycle calls, and
+(``connect_requested``, ``disconnect_requested``, ``tune_requested``)
+that ``MainWindow`` translates into rig lifecycle and CAT calls, and
 setters that the 1 Hz poll timer feeds with fresh data.
 """
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QProgressBar,
     QPushButton,
+    QToolButton,
     QWidget,
 )
+
+from open_sstv.radio.band_plan import SSTV_BAND_PLAN
 
 
 class RadioPanel(QWidget):
@@ -31,6 +36,9 @@ class RadioPanel(QWidget):
     disconnect_requested = Signal()
     cancel_requested = Signal()
     test_tone_requested = Signal()
+    #: Emitted when the user picks a band-plan entry.
+    #: Payload: (freq_hz: int, rig_mode: str, passband_hz: int).
+    tune_requested = Signal(int, str, int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -56,6 +64,19 @@ class RadioPanel(QWidget):
         self._test_tone_btn.setEnabled(False)
         self._test_tone_btn.clicked.connect(self.test_tone_requested.emit)
         layout.addWidget(self._test_tone_btn)
+
+        # Band Plan button — popup menu of SSTV calling frequencies.
+        # Disabled when no rig is connected or TX is active.
+        self._band_btn = QToolButton()
+        self._band_btn.setText("Band Plan")
+        self._band_btn.setToolTip(
+            "Tune the rig to a standard SSTV calling frequency.\n"
+            "Requires a connected rig (rigctld, serial, or TCI)."
+        )
+        self._band_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._band_btn.setEnabled(False)
+        self._band_btn.setMenu(self._build_band_menu())
+        layout.addWidget(self._band_btn)
 
         # Status indicator
         self._status_label = QLabel("Disconnected")
@@ -109,6 +130,30 @@ class RadioPanel(QWidget):
         self._callsign_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         layout.addWidget(self._callsign_label)
 
+    def _build_band_menu(self) -> QMenu:
+        """Build the SSTV band-plan popup menu from ``SSTV_BAND_PLAN``."""
+        menu = QMenu(self)
+        last_region: str = ""
+        for entry in SSTV_BAND_PLAN:
+            if last_region and entry.region != last_region:
+                menu.addSeparator()
+            last_region = entry.region
+
+            action = QAction(entry.label, self)
+            # Capture loop variable by default-arg binding.
+            action.triggered.connect(
+                lambda _checked=False,
+                f=entry.freq_hz,
+                m=entry.rig_mode,
+                p=entry.passband_hz: self.tune_requested.emit(f, m, p)
+            )
+            if entry.primary:
+                font = action.font()
+                font.setBold(True)
+                action.setFont(font)
+            menu.addAction(action)
+        return menu
+
     @staticmethod
     def _add_separator(layout: QHBoxLayout) -> None:
         sep = QFrame()
@@ -153,6 +198,7 @@ class RadioPanel(QWidget):
             self._smeter_bar.setValue(0)
         self._update_connect_btn()
         self._update_test_tone_btn()
+        self._update_band_btn()
 
     def set_connection_error(self) -> None:
         """Show a disconnected/error state and re-enable the connect button."""
@@ -171,6 +217,7 @@ class RadioPanel(QWidget):
         self._tx_active = active
         self._update_connect_btn()
         self._update_test_tone_btn()
+        self._update_band_btn()
 
     def _update_connect_btn(self) -> None:
         """Enable the connect/cancel button whenever TX is not active.
@@ -183,6 +230,10 @@ class RadioPanel(QWidget):
     def _update_test_tone_btn(self) -> None:
         """Enable the Test Tone button only when a rig is connected and idle."""
         self._test_tone_btn.setEnabled(self._connected and not self._tx_active)
+
+    def _update_band_btn(self) -> None:
+        """Enable the Band Plan button only when a rig is connected and idle."""
+        self._band_btn.setEnabled(self._connected and not self._tx_active)
 
     def set_callsign(self, callsign: str) -> None:
         self._callsign_label.setText(callsign)

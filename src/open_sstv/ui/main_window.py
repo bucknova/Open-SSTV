@@ -166,6 +166,22 @@ class _RigPollWorker(QObject):
         self._consecutive_errors = 0
         self.poll_result.emit(freq, mode_name, strength)
 
+    @Slot(int, str, int)
+    def tune(self, freq_hz: int, mode: str, passband_hz: int) -> None:
+        """Send a frequency + mode command to the rig.
+
+        Runs on the rig-poll thread (queued from ``MainWindow._request_tune``
+        signal) so it cannot race with the 1 Hz ``poll`` slot — both live on
+        the same event loop.  Errors are swallowed silently; the poll cycle
+        will surface any persistent connection problem within 3 s.
+        """
+        try:
+            self._rig.set_freq(freq_hz)
+            if mode:
+                self._rig.set_mode(mode, passband_hz)
+        except Exception:  # noqa: BLE001 — same tolerance as poll()
+            pass
+
 
 class _RigConnectWorker(QObject):
     """One-shot: runs rig.open() + rig.ping() on a background thread.
@@ -297,6 +313,11 @@ class MainWindow(QMainWindow):
     #: receiver's event loop.  Symmetry > convenience.
     _rx_final_slant_correction_changed = Signal(bool)
     _tx_sample_rate_changed = Signal(int)
+    #: Relays a band-plan tune request from the GUI thread to the rig-poll
+    #: thread.  Qt auto-promotes cross-thread connections to QueuedConnection,
+    #: so ``_RigPollWorker.tune`` executes on its own event loop — safely
+    #: serialised with the 1 Hz ``poll`` slot on the same thread.
+    _request_tune = Signal(int, str, int)  # (freq_hz, rig_mode, passband_hz)
     #: Triggers the one-shot update check on the update worker thread.
     _request_update_check = Signal()
 
@@ -409,6 +430,10 @@ class MainWindow(QMainWindow):
         self._radio_panel.connect_requested.connect(self._on_rig_connect)
         self._radio_panel.disconnect_requested.connect(self._on_rig_disconnect)
         self._radio_panel.cancel_requested.connect(self._on_connect_cancel)
+        # Band-plan tune: relay from GUI thread → rig-poll thread via queued
+        # connection so the CAT write runs on the same thread as poll(), which
+        # prevents them from racing on a shared serial port or WebSocket.
+        self._radio_panel.tune_requested.connect(self._on_tune_requested)
 
         # Run v0.2 → v0.3 template migration once at startup.  Safe to call
         # every launch — it returns immediately if templates are already
@@ -634,6 +659,9 @@ class MainWindow(QMainWindow):
         self._rig_poll_worker.poll_result.connect(self._on_poll_result)
         self._rig_poll_worker.poll_error.connect(self._radio_panel.set_connection_error)
         self._rig_poll_worker.radio_disconnected.connect(self._on_radio_disconnected)
+        # Band-plan tune relay: GUI thread emits _request_tune → rig-poll thread
+        # executes tune().  Cross-thread → auto QueuedConnection.
+        self._request_tune.connect(self._rig_poll_worker.tune)
 
         # --- Update checker on its own thread (one-shot HTTP GET at startup) ---
         self._update_thread = QThread(self)
@@ -2013,6 +2041,21 @@ class MainWindow(QMainWindow):
         to ``_radio_panel.set_connection_error``.
         """
         self._radio_panel.update_rig_status(freq, mode_name, strength)
+
+    @Slot(int, str, int)
+    def _on_tune_requested(self, freq_hz: int, mode: str, passband_hz: int) -> None:
+        """Forward a band-plan tune request to the rig-poll thread.
+
+        Shows a brief status-bar message on the GUI thread, then relays the
+        command via ``_request_tune`` (a queued cross-thread signal) so the
+        actual CAT write runs on the rig-poll thread alongside ``poll()``.
+        """
+        if freq_hz >= 1_000_000:
+            freq_str = f"{freq_hz / 1_000_000:.3f} MHz"
+        else:
+            freq_str = f"{freq_hz / 1_000:.3f} kHz"
+        self.statusBar().showMessage(f"Tuning to {freq_str} ({mode})…", 3000)
+        self._request_tune.emit(freq_hz, mode, passband_hz)
 
     # === lifecycle ===
 
