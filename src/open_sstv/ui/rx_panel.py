@@ -21,6 +21,10 @@ capture_requested(bool):
 clear_requested():
     User clicked Clear. The MainWindow resets the ``RxWorker`` so the
     decoder starts hunting for a fresh VIS.
+decode_audio_file_requested():
+    User clicked "Decode Audio".  The MainWindow handles the file
+    picker and dispatches an offline-decode worker.  The decoded
+    image lands in the gallery exactly like a live decode.
 image_saved(PIL.Image.Image, Mode):
     User double-clicked a gallery thumbnail (or invoked Save As from
     the context menu). Wired by ``MainWindow`` to a ``QFileDialog``.
@@ -59,6 +63,9 @@ class RxPanel(QWidget):
 
     capture_requested = Signal(bool)
     clear_requested = Signal()
+    #: User clicked "Decode Audio".  MainWindow runs the file picker
+    #: + offline decode worker; result lands in this panel's gallery.
+    decode_audio_file_requested = Signal()
     image_saved = Signal(object, object)  # (PIL.Image, Mode)
     rx_image_selected = Signal(object)  # PIL.Image — for template {rx_image} slot
 
@@ -99,6 +106,20 @@ class RxPanel(QWidget):
         self._save_btn.clicked.connect(self._on_save_clicked)
         button_row.addWidget(self._save_btn)
         layout.addLayout(button_row)
+
+        # --- Decode Audio button (offline decode) ---
+        # On its own row beneath Start/Stop/Save so it doesn't crowd
+        # the live-capture controls.  Always enabled — the user can
+        # decode a file even while live capture is running (results
+        # interleave in the same gallery, which is the right UX since
+        # both produce decoded images and the source is unambiguous
+        # from the gallery's per-thumb metadata).
+        self._decode_audio_btn = QPushButton("Decode Audio")
+        self._decode_audio_btn.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self._decode_audio_btn.clicked.connect(self.decode_audio_file_requested.emit)
+        layout.addWidget(self._decode_audio_btn)
 
         # --- Current / most-recent decoded image ---
         self._preview = QLabel("No image decoded yet")

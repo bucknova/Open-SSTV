@@ -30,10 +30,12 @@ Signal flow
 
 TX (unchanged from Phase 1)::
 
-    tx_panel.transmit_requested ──> tx_worker.transmit
-    tx_panel.stop_requested     ──> _on_stop_requested (direct, UI thread)
-    tx_worker.transmission_*    ──> _on_tx_*        ──> tx_panel
-    tx_worker.error             ──> _on_tx_error    ──> status bar
+    tx_panel.transmit_requested        ──> tx_worker.transmit
+    tx_panel.stop_requested            ──> _on_stop_requested (direct, UI thread)
+    tx_panel.export_to_audio_requested ──> _on_export_to_audio_requested
+        spawns OfflineEncodeWorker on its own QThread (one-shot)
+    tx_worker.transmission_*           ──> _on_tx_*        ──> tx_panel
+    tx_worker.error                    ──> _on_tx_error    ──> status bar
 
 RX::
 
@@ -46,7 +48,9 @@ RX::
     audio_worker.chunk_ready──> rx_worker.feed_chunk
     audio_worker.error      ──> _on_rx_error  ──> status bar
 
-    rx_panel.clear_requested──> rx_worker.reset + rx_panel.clear
+    rx_panel.clear_requested           ──> rx_worker.reset + rx_panel.clear
+    rx_panel.decode_audio_file_requested ──> _on_decode_audio_file_requested
+        spawns OfflineDecodeWorker on its own QThread (one-shot)
     rx_worker.image_started ──> rx_panel.show_image_started
     rx_worker.image_complete──> rx_panel.show_image_complete
     rx_worker.error         ──> _on_rx_error
@@ -92,7 +96,6 @@ from PySide6.QtCore import Q_ARG  # for invokeMethod with positional args
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFileDialog,
-    QInputDialog,
     QMainWindow,
     QMessageBox,
     QSplitter,
@@ -478,6 +481,18 @@ class MainWindow(QMainWindow):
         self._connect_timeout_timer: QTimer | None = None
         self._connect_relay: _RigConnectRelay | None = None
 
+        # In-flight offline encode/decode workers.  Stored as instance
+        # attributes (not locals) for the same reason as _connect_worker:
+        # PySide6 signal connections only hold a weak ref to the receiver,
+        # so a local-variable worker is garbage-collected the moment the
+        # slot returns — before QMetaObject.invokeMethod can dispatch the
+        # queued call.  The result is a silent failure: status bar shows
+        # "Encoding…" then nothing.  See v0.3.10 changelog.
+        self._offline_encode_thread: QThread | None = None
+        self._offline_encode_worker: OfflineEncodeWorker | None = None
+        self._offline_decode_thread: QThread | None = None
+        self._offline_decode_worker: OfflineDecodeWorker | None = None
+
         # --- Radio panel (toolbar strip above TX/RX) ---
         self._radio_panel = RadioPanel(self)
         self._radio_panel.set_callsign(self._config.callsign)
@@ -617,6 +632,10 @@ class MainWindow(QMainWindow):
         self._tx_panel.template_composited.connect(
             self._tx_worker.set_v3_template_active
         )
+        # v0.3.10: Export to Audio button → offline encode worker.
+        self._tx_panel.export_to_audio_requested.connect(
+            self._on_export_to_audio_requested
+        )
         self._radio_panel.test_tone_requested.connect(self._on_test_tone_requested)
         # Private dispatch signals → worker slots (QueuedConnection across thread)
         self._request_transmit.connect(self._tx_worker.transmit)
@@ -663,6 +682,10 @@ class MainWindow(QMainWindow):
         self._rx_panel.clear_requested.connect(self._on_rx_clear)
         self._rx_panel.image_saved.connect(self._on_rx_image_saved)
         self._rx_panel.rx_image_selected.connect(self._tx_panel.set_rx_image)
+        # v0.3.10: Decode Audio button → offline decode worker.
+        self._rx_panel.decode_audio_file_requested.connect(
+            self._on_decode_audio_file_requested
+        )
 
         # Audio worker -> RX worker (chunks flow across the thread
         # boundary via queued connection; Qt handles the marshalling).
@@ -785,21 +808,12 @@ class MainWindow(QMainWindow):
 
         file_menu.addSeparator()
 
-        # Offline encode / decode — same job as the open-sstv-encode and
-        # open-sstv-decode CLI tools but accessible from the GUI.  Each
-        # runs on its own short-lived QThread so the GUI stays responsive
-        # during a multi-second Pasokon P7 decode / encode.
-        encode_file_action = QAction("&Encode Image to Audio…", self)
-        encode_file_action.setMenuRole(QAction.MenuRole.NoRole)
-        encode_file_action.triggered.connect(self._on_encode_file_action)
-        file_menu.addAction(encode_file_action)
-
-        decode_file_action = QAction("&Decode Audio File…", self)
-        decode_file_action.setMenuRole(QAction.MenuRole.NoRole)
-        decode_file_action.triggered.connect(self._on_decode_file_action)
-        file_menu.addAction(decode_file_action)
-
-        file_menu.addSeparator()
+        # Offline encode / decode were briefly menu items in v0.3.9 but
+        # moved to in-panel buttons in v0.3.10 ("Export to Audio" on the
+        # TX panel, "Decode Audio" on the RX panel) — single discovery
+        # path, and the encode side picks up the live TX-panel composite
+        # (template + photo + QSO state) so the WAV matches what would
+        # have been transmitted.
 
         quit_action = QAction("&Quit", self)
         quit_action.triggered.connect(self.close)
@@ -1019,17 +1033,35 @@ class MainWindow(QMainWindow):
             else:
                 self.statusBar().showMessage("Settings saved.", 3000)
 
-    # === Offline encode / decode (File menu) ===
+    # === Offline encode / decode (in-panel buttons) ===
+    #
+    # Both workers live on their own one-shot QThread and are stored as
+    # instance attributes (``self._offline_{encode,decode}_{thread,worker}``)
+    # rather than locals.  This matters: PySide6 signal connections hold
+    # only a weak ref to the receiver QObject, so a local-variable worker
+    # would be garbage-collected the moment the slot returns — before
+    # ``QMetaObject.invokeMethod`` could dispatch the queued call.  Symptom
+    # in v0.3.9 was a silent failure: status bar showed "Encoding…" then
+    # nothing.  Cleanup happens in ``_on_offline_{encode,decode}_thread_finished``.
+    # Re-entrant clicks while a worker is in flight are dropped to avoid
+    # interleaving two encodes / decodes on top of each other.
 
     @Slot()
-    def _on_decode_file_action(self) -> None:
-        """File → Decode Audio File…: pick a WAV/FLAC, decode off-thread.
+    def _on_decode_audio_file_requested(self) -> None:
+        """RX panel → Decode Audio: pick a WAV/FLAC, decode off-thread.
 
         On success the resulting image lands in the gallery via the same
         ``_on_rx_image_complete`` path used for live RX, so the user
         sees it appear in the thumbnail strip and can save / drag-out
         normally.  On failure the status bar carries the explanation.
         """
+        if self._offline_decode_thread is not None:
+            # Previous decode still in flight — ignore re-entrant click.
+            self.statusBar().showMessage(
+                "Decode already in progress — wait for it to finish.", 3000
+            )
+            return
+
         path, _filter = QFileDialog.getOpenFileName(
             self,
             "Decode SSTV audio file",
@@ -1042,25 +1074,36 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Decoding {Path(path).name}…")
 
         thread = QThread(self)
-        worker = OfflineDecodeWorker()
-        worker.moveToThread(thread)
+        thread.setObjectName("offline-decode-thread")
+        # Constructor-args pattern: path lives on the worker before
+        # thread.start, so we don't need QMetaObject.invokeMethod /
+        # Q_ARG to ship it across the thread boundary.
+        worker = OfflineDecodeWorker(path)
+        # Strong refs survive past the end of this slot so the worker
+        # isn't GC'd before thread.started → worker.run fires.
+        self._offline_decode_thread = thread
+        self._offline_decode_worker = worker
 
         worker.image_complete.connect(self._rx_panel.show_image_complete)
         worker.image_complete.connect(self._on_rx_image_complete)
         worker.image_complete.connect(self._on_offline_decode_complete)
         worker.error.connect(self._on_offline_decode_error)
-        # One-shot cleanup: worker.finished → thread.quit → both
-        # objects' deleteLater so neither leaks past this operation.
+        # One-shot cleanup: worker.finished → thread.quit → instance-attr
+        # release in _on_offline_decode_thread_finished + deleteLater.
         worker.finished.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._on_offline_decode_thread_finished)
 
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
         thread.start()
-        QMetaObject.invokeMethod(
-            worker, "decode",
-            Qt.ConnectionType.QueuedConnection,
-            Q_ARG(str, path),
-        )
+
+    @Slot()
+    def _on_offline_decode_thread_finished(self) -> None:
+        """Release strong refs to the offline-decode worker + thread."""
+        self._offline_decode_thread = None
+        self._offline_decode_worker = None
 
     @Slot(object, object, int)
     def _on_offline_decode_complete(
@@ -1083,51 +1126,30 @@ class MainWindow(QMainWindow):
         """Surface decode failures via the status bar (5 s timeout)."""
         self.statusBar().showMessage(f"Decode failed: {message}", 5000)
 
-    @Slot()
-    def _on_encode_file_action(self) -> None:
-        """File → Encode Image to Audio…: pick image, mode, output, encode.
+    @Slot(object, object)
+    def _on_export_to_audio_requested(self, image: PILImage, mode: Mode) -> None:
+        """TX panel → Export to Audio: ask for a path, encode off-thread.
 
-        Three modal dialogs in sequence: image input → mode picker →
-        output WAV path.  Cancel at any step aborts the operation.
-        The encode runs off-thread (Pasokon P7 encode is ~500 ms even
-        on modest hardware, but a multi-second Pasokon would hitch
-        the GUI without this).
+        The TX panel hands us the same composited image its Transmit
+        button would emit (template + photo + QSO overlays already
+        applied), so the resulting WAV contains exactly what would have
+        gone over the air.
         """
-        # Step 1: input image.
-        image_path, _filter = QFileDialog.getOpenFileName(
-            self,
-            "Choose image to encode",
-            self._config.images_save_dir or "",
-            "Images (*.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff);;All files (*)",
-        )
-        if not image_path:
+        if self._offline_encode_thread is not None:
+            # Previous encode still in flight — ignore re-entrant click.
+            self.statusBar().showMessage(
+                "Encode already in progress — wait for it to finish.", 3000
+            )
             return
 
-        # Step 2: mode picker.  Use the current default TX mode as the
-        # initial selection; user picks from any of the 22 modes.
-        mode_names = [m.value for m in Mode]
-        try:
-            initial_idx = mode_names.index(self._config.default_tx_mode)
-        except ValueError:
-            initial_idx = 0
-        mode_value, ok = QInputDialog.getItem(
-            self,
-            "Choose SSTV mode",
-            "Encode the image in which mode?",
-            mode_names,
-            initial_idx,
-            editable=False,
-        )
-        if not ok or not mode_value:
-            return
-        mode = Mode(mode_value)
+        # Suggest a sensible default filename based on callsign + mode +
+        # timestamp; lands in the configured images-save dir by default.
+        save_dir = self._config.images_save_dir or str(Path.home())
+        callsign = self._config.callsign or "open-sstv"
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        mode_slug = mode.value.replace(" ", "_")
+        suggested = str(Path(save_dir) / f"{callsign}_{mode_slug}_{timestamp}.wav")
 
-        # Step 3: output WAV path.  Suggest a sensible default filename
-        # next to the source image with the mode appended.
-        src = Path(image_path)
-        suggested = str(
-            src.parent / f"{src.stem}_{mode.value.replace(' ', '_')}.wav"
-        )
         output_path, _filter = QFileDialog.getSaveFileName(
             self,
             "Save encoded audio as",
@@ -1142,28 +1164,40 @@ class MainWindow(QMainWindow):
             output_path = output_path + ".wav"
 
         self.statusBar().showMessage(
-            f"Encoding {src.name} as {mode.value}…"
+            f"Encoding as {mode.value}…"
         )
 
         thread = QThread(self)
-        worker = OfflineEncodeWorker()
-        worker.moveToThread(thread)
+        thread.setObjectName("offline-encode-thread")
+        # Constructor-args pattern: image + mode + path live on the
+        # worker before thread.start, so we don't need
+        # QMetaObject.invokeMethod / Q_ARG to ship them across — and
+        # in fact PySide6 6.11's Q_ARG cannot marshal PIL.Image or
+        # the Mode StrEnum across a queued invocation.
+        worker = OfflineEncodeWorker(
+            image, mode, self._config.sample_rate, output_path
+        )
+        # Strong refs survive past the end of this slot so the worker
+        # isn't GC'd before thread.started → worker.run fires.
+        self._offline_encode_thread = thread
+        self._offline_encode_worker = worker
 
         worker.encode_complete.connect(self._on_offline_encode_complete)
         worker.error.connect(self._on_offline_encode_error)
         worker.finished.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._on_offline_encode_thread_finished)
 
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
         thread.start()
-        QMetaObject.invokeMethod(
-            worker, "encode",
-            Qt.ConnectionType.QueuedConnection,
-            Q_ARG(str, image_path),
-            Q_ARG(object, mode),
-            Q_ARG(int, self._config.sample_rate),
-            Q_ARG(str, output_path),
-        )
+
+    @Slot()
+    def _on_offline_encode_thread_finished(self) -> None:
+        """Release strong refs to the offline-encode worker + thread."""
+        self._offline_encode_thread = None
+        self._offline_encode_worker = None
 
     @Slot(str, float, object)
     def _on_offline_encode_complete(

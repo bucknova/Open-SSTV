@@ -11,6 +11,103 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.10] — 2026-05-20
+
+Fixes the silent-failure offline encode bug introduced in v0.3.9, moves
+the encode / decode surfaces out of the File menu and onto in-panel
+buttons, and reuses the live TX-panel composite so exported WAVs match
+exactly what would have been transmitted (template + photo + QSO
+overlays, not a separately-picked image).
+
+### Added
+
+- **TX panel "Export to Audio" button** — sits directly below the
+  Transmit button.  Uses the same composited image Transmit would
+  emit, so the WAV contains exactly what would have gone over the
+  air (template + photo + QSO state).  Single mode picker (the
+  panel's existing one), single image picker (the panel's existing
+  one) — no parallel mode/image dialogs from v0.3.9's File-menu
+  flow.  Mirrors Transmit's enable state: disabled while live TX is
+  in flight so a mid-TX click can't race the live encoder.
+- **RX panel "Decode Audio" button** — sits on a row below
+  Start/Stop/Save.  Opens a WAV/FLAC file picker; decoded image
+  lands in the gallery exactly like a live decode.  Always
+  enabled, including during live capture (results interleave in
+  the same gallery and are unambiguous from the per-thumb
+  metadata).
+- **Regression test** ``tests/ui/test_offline_worker_threaded.py``
+  — exercises the queued-invoke + cross-thread path that broke in
+  v0.3.9.  Reproduces the production launch shape (worker held as
+  an instance attribute, ``QMetaObject.invokeMethod`` with
+  ``QueuedConnection``) and asserts ``encode_complete`` /
+  ``image_complete`` actually fires.  A regression where the
+  worker is GC'd before its slot runs causes this test to time out.
+
+### Fixed
+
+- **Offline encode/decode worker GC race** (regression introduced
+  in v0.3.9, user-reported by Kevin/W0AEZ): the File-menu encode
+  action showed "Encoding…" in the status bar and then silently
+  did nothing — no WAV file, no error message, no signal emission.
+  Root cause: ``OfflineEncodeWorker()`` / ``OfflineDecodeWorker()``
+  were constructed as *local* variables inside the slot
+  function.  PySide6 signal connections hold only a *weak*
+  reference to the receiver QObject, so as soon as the slot
+  returned, Python dropped the only strong reference and the
+  worker was garbage-collected — before Qt could dispatch the
+  queued ``encode()`` invocation.  Fix: store both worker and
+  thread as instance attributes
+  (``self._offline_encode_thread`` /
+  ``self._offline_encode_worker`` and the matching pair for
+  decode), following the existing ``_RigConnectWorker`` pattern.
+  Cleanup happens on ``thread.finished`` via dedicated handler
+  slots that null the attributes once the operation completes.
+  Re-entrant clicks while an encode/decode is in flight are now
+  dropped with a status-bar message instead of stacking workers
+  on top of each other.
+
+### Changed
+
+- **Offline encode/decode moved from File menu to in-panel buttons.**
+  The v0.3.9 ``File → Encode Image to Audio…`` and
+  ``File → Decode Audio File…`` menu items are gone; the new
+  buttons on the TX and RX panels take their place.  Single
+  discovery path through the panels, no parallel menu surface to
+  keep in sync.
+- **OfflineEncodeWorker now takes a ``PIL.Image`` directly** via a
+  new ``encode_from_image(image, mode, sample_rate, output_path)``
+  slot.  The v0.3.9 ``encode(image_path, …)`` slot is removed —
+  the GUI never needs a path-based encode now that the TX panel
+  always has the composited image on hand.  Side effect: removes
+  the "did the user pick the right image / mode / template combo?"
+  question entirely, because the WAV is now built from the same
+  preview pixels the user already sees in the TX panel.
+- **TX panel ``_compose_for_emit()`` helper** factored out of
+  ``_on_transmit_clicked`` so the new ``_on_export_clicked``
+  reuses identical composite logic.  Keeps the two click handlers
+  from drifting apart.
+
+### Testing
+
+- Added ``tests/ui/test_offline_worker_threaded.py`` (2 tests):
+  the regression check described above for both encode and decode
+  workers under the actual queued-invocation + cross-thread launch
+  path.
+- Added ``tests/ui/test_rx_panel.py`` (4 tests): Start, Clear, and
+  Decode Audio button → signal wiring; verifies Decode Audio
+  stays enabled across capture state transitions.
+- Updated ``tests/ui/test_offline_workers.py`` to call
+  ``encode_from_image(pil_image, …)`` instead of the removed
+  ``encode(path, …)`` slot.  Three encode tests now (removed two
+  path-coupled ones that no longer apply; added one OSError-write
+  case to cover the WAV-write error branch we kept).
+- Added two tests to ``tests/ui/test_tx_panel.py`` covering the
+  new Export to Audio button: signal emission on click, and
+  enable-state mirroring with the Transmit button across
+  ``set_transmitting(True/False)``.
+
+---
+
 ## [0.3.9] — 2026-05-20
 
 Brings the CLI encode / decode capabilities into the GUI as menu

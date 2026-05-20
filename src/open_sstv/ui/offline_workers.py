@@ -1,17 +1,33 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""One-shot workers for offline encode / decode via the File menu.
+"""One-shot workers for offline encode / decode via in-panel buttons.
 
 These do the same job as the CLI tools (``open-sstv-encode`` /
 ``open-sstv-decode``) but run on a background ``QThread`` and emit
 Qt signals so the GUI can wire the result into the existing image
 gallery and status-bar machinery.
 
-Each worker is single-use: the caller constructs it, moves it to a
-fresh ``QThread``, connects its ``finished`` signal to the thread's
-``quit`` and to ``deleteLater`` for both objects, then calls the
-operation slot via ``QMetaObject.invokeMethod`` (queued).  When the
-operation finishes (success or failure) the worker emits
-``finished``; the thread quits; everything is garbage-collected.
+Each worker is single-use: the caller constructs it with the operation
+args, moves it to a fresh ``QThread``, connects ``thread.started``
+to ``worker.run``, then starts the thread.  When ``run`` returns
+(success or failure) the worker emits ``finished``; the thread quits;
+the caller releases its strong refs in ``thread.finished``.
+
+Why constructor args instead of ``QMetaObject.invokeMethod`` + ``Q_ARG``?
+PySide6 6.11's ``Q_ARG`` cannot marshal arbitrary Python objects
+(``PIL.Image``, the ``Mode`` StrEnum) across a queued invocation —
+the resulting C++ type ``PyObjectWrapper`` doesn't match the slot's
+declared ``PyObject`` parameter, and ``Q_ARG(object, ...)`` fails
+to look up the meta-type entirely.  Stashing args in ``__init__``
+sidesteps the marshalling layer: by the time ``run`` is invoked
+(via direct ``thread.started`` signal, no value marshalling) the
+args are already attributes on the worker living in its own thread.
+This is the same pattern ``_RigConnectWorker`` uses.
+
+The encode worker takes a pre-rendered ``PIL.Image`` rather than a
+file path: the TX panel already composites template + photo + QSO
+state into a single image for live transmit, so the "Export to
+Audio" button reuses that exact composite — no second image picker,
+no second mode picker, no separate template wiring.
 
 Worker emit semantics
 ---------------------
@@ -29,8 +45,7 @@ Worker emit semantics
     * ``encode_complete(output_path, duration_s, mode)`` — written
       successfully; the GUI shows a status-bar confirmation with the
       filename + duration.
-    * ``error(message)`` — image open failure, encode failure, or
-      WAV write failure.
+    * ``error(message)`` — encode failure or WAV write failure.
     * ``finished()`` — always fires last, exactly once.
 """
 from __future__ import annotations
@@ -38,9 +53,9 @@ from __future__ import annotations
 import logging
 import wave
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
-from PIL import Image
 from PySide6.QtCore import QObject, Signal, Slot
 
 from open_sstv.audio.file_io import load_audio_file
@@ -48,15 +63,19 @@ from open_sstv.core.decoder import decode_wav
 from open_sstv.core.encoder import encode
 from open_sstv.core.modes import Mode
 
+if TYPE_CHECKING:
+    from PIL.Image import Image as PILImage
+
 _log = logging.getLogger(__name__)
 
 
 class OfflineDecodeWorker(QObject):
     """Decode a WAV / FLAC file into an SSTV image off the GUI thread.
 
-    Designed so its ``image_complete`` signal can be connected directly
-    to ``MainWindow._on_rx_image_complete`` — the resulting image lands
-    in the gallery exactly as if it had been decoded live.
+    Single-use.  Path is passed to ``__init__``; call ``run`` (via
+    ``thread.started`` signal) to perform the decode.  Result is
+    delivered through ``image_complete`` or ``error`` and is always
+    followed by ``finished``.
     """
 
     #: Matches ``RxWorker.image_complete``: (PIL.Image, Mode, vis_code).
@@ -67,9 +86,24 @@ class OfflineDecodeWorker(QObject):
     #: this to its ``quit`` slot for one-shot cleanup.
     finished = Signal()
 
+    def __init__(self, path: str = "") -> None:
+        """*path* may be empty for unit tests that drive ``decode`` directly."""
+        super().__init__()
+        self._path = path
+
+    @Slot()
+    def run(self) -> None:
+        """Decode the file passed at construction time."""
+        self.decode(self._path)
+
     @Slot(str)
     def decode(self, path: str) -> None:
-        """Load the audio file and run ``decode_wav`` on its samples."""
+        """Load the audio file and run ``decode_wav`` on its samples.
+
+        Public so unit tests can drive the worker synchronously without
+        going through ``thread.started``.  Production callers should
+        use the ``__init__(path)`` + ``thread.started → run`` pattern.
+        """
         try:
             samples, fs = load_audio_file(Path(path))
         except FileNotFoundError as exc:
@@ -111,11 +145,17 @@ class OfflineDecodeWorker(QObject):
 
 
 class OfflineEncodeWorker(QObject):
-    """Encode an image to a WAV file off the GUI thread.
+    """Encode a pre-rendered image to a WAV file off the GUI thread.
 
-    Writes 16-bit PCM mono at the caller-supplied sample rate, matching
-    the format ``open-sstv-encode`` produces.  PySSTV's ``encode``
-    returns int16 samples directly, so no extra conversion is needed.
+    Single-use.  Args (image, mode, sample rate, output path) are
+    passed to ``__init__``; ``run`` does the work.  Writes 16-bit PCM
+    mono at the caller-supplied sample rate, matching the format
+    ``open-sstv-encode`` produces.
+
+    The caller passes a fully composited ``PIL.Image`` — typically the
+    output of ``TxPanel._compose_for_emit()`` (template + photo + QSO
+    overlays) — so the exported WAV contains exactly what live TX
+    would have transmitted.
     """
 
     #: ``(output_path, duration_s, mode)`` on a successful write.
@@ -125,25 +165,49 @@ class OfflineEncodeWorker(QObject):
     #: Always fired last, exactly once.
     finished = Signal()
 
-    @Slot(str, object, int, str)
-    def encode(
+    def __init__(
         self,
-        image_path: str,
+        image: PILImage | None = None,
+        mode: Mode | None = None,
+        sample_rate: int = 0,
+        output_path: str = "",
+    ) -> None:
+        """All args optional so unit tests can drive ``encode_from_image`` directly."""
+        super().__init__()
+        self._image = image
+        self._mode = mode
+        self._sample_rate = sample_rate
+        self._output_path = output_path
+
+    @Slot()
+    def run(self) -> None:
+        """Encode the image passed at construction time."""
+        if self._image is None or self._mode is None:
+            self.error.emit("Encode worker started with no image or mode.")
+            self.finished.emit()
+            return
+        self.encode_from_image(
+            self._image, self._mode, self._sample_rate, self._output_path
+        )
+
+    @Slot(object, object, int, str)
+    def encode_from_image(
+        self,
+        image: PILImage,
         mode: Mode,
         sample_rate: int,
         output_path: str,
     ) -> None:
-        """Open *image_path*, encode it in *mode*, write to *output_path*."""
-        try:
-            img = Image.open(image_path)
-            img.load()  # force decoder to read the file now, before we close
-        except (FileNotFoundError, OSError, Image.UnidentifiedImageError) as exc:
-            self.error.emit(f"Could not open image: {exc}")
-            self.finished.emit()
-            return
+        """Encode *image* in *mode* and write to *output_path*.
 
+        Public so unit tests can drive the worker synchronously without
+        going through ``thread.started``.  Production callers should
+        use the ``__init__(image, mode, …)`` + ``thread.started → run``
+        pattern, because PySide6 6.11's ``Q_ARG`` cannot marshal PIL
+        images or StrEnum modes across a queued ``invokeMethod`` call.
+        """
         try:
-            samples = encode(img, mode, sample_rate=sample_rate)
+            samples = encode(image, mode, sample_rate=sample_rate)
         except (ValueError, OSError) as exc:
             self.error.emit(f"Encode failed: {exc}")
             self.finished.emit()

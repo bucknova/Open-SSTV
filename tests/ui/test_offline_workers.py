@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Tests for the File → Encode/Decode Audio offline workers."""
+"""Tests for the offline Encode/Decode Audio workers (in-panel buttons)."""
 from __future__ import annotations
 
 import wave
@@ -135,16 +135,17 @@ def test_decode_empty_wav_emits_error(qapp, tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_encode_writes_correct_wav_format(qapp, tmp_path: Path) -> None:
+def test_encode_from_image_writes_correct_wav_format(
+    qapp, tmp_path: Path
+) -> None:
     """Encoded WAV has the right channels / width / sample rate."""
-    img_path = tmp_path / "src.png"
-    Image.new("RGB", (320, 240), color=(100, 150, 200)).save(img_path)
+    img = Image.new("RGB", (320, 240), color=(100, 150, 200))
     out_path = tmp_path / "out.wav"
 
     worker = OfflineEncodeWorker()
     log = _collect(worker, "encode_complete", "error", "finished")
 
-    worker.encode(str(img_path), Mode.ROBOT_36, 48_000, str(out_path))
+    worker.encode_from_image(img, Mode.ROBOT_36, 48_000, str(out_path))
 
     assert len(log["error"]) == 0
     assert len(log["encode_complete"]) == 1
@@ -162,48 +163,38 @@ def test_encode_writes_correct_wav_format(qapp, tmp_path: Path) -> None:
         assert w.getnframes() > 0
 
 
-def test_encode_missing_image_emits_error(qapp, tmp_path: Path) -> None:
-    """A non-existent image path surfaces via error, no WAV written."""
-    out_path = tmp_path / "out.wav"
-    worker = OfflineEncodeWorker()
-    log = _collect(worker, "encode_complete", "error", "finished")
-
-    worker.encode(
-        str(tmp_path / "ghost.png"), Mode.ROBOT_36, 48_000, str(out_path)
-    )
-
-    assert not out_path.exists()
-    assert len(log["encode_complete"]) == 0
-    assert len(log["error"]) == 1
-    assert "Could not open image" in log["error"][0][0]
-
-
-def test_encode_invalid_image_emits_error(qapp, tmp_path: Path) -> None:
-    """Garbage bytes claiming to be an image surface via error."""
-    fake = tmp_path / "fake.png"
-    fake.write_bytes(b"not a real image")
-    out_path = tmp_path / "out.wav"
-
-    worker = OfflineEncodeWorker()
-    log = _collect(worker, "encode_complete", "error", "finished")
-
-    worker.encode(str(fake), Mode.ROBOT_36, 48_000, str(out_path))
-
-    assert not out_path.exists()
-    assert len(log["error"]) == 1
-    assert "Could not open image" in log["error"][0][0]
-
-
-def test_encode_creates_parent_dir(qapp, tmp_path: Path) -> None:
+def test_encode_from_image_creates_parent_dir(qapp, tmp_path: Path) -> None:
     """Output path's parent is created if missing."""
-    img_path = tmp_path / "src.png"
-    Image.new("RGB", (320, 240)).save(img_path)
+    img = Image.new("RGB", (320, 240))
     out_path = tmp_path / "subdir" / "deeper" / "out.wav"
 
     worker = OfflineEncodeWorker()
     log = _collect(worker, "encode_complete", "error", "finished")
 
-    worker.encode(str(img_path), Mode.ROBOT_36, 48_000, str(out_path))
+    worker.encode_from_image(img, Mode.ROBOT_36, 48_000, str(out_path))
 
     assert out_path.exists()
     assert len(log["error"]) == 0
+
+
+def test_encode_from_image_unwritable_path_emits_error(
+    qapp, tmp_path: Path
+) -> None:
+    """A path inside a regular file (not a dir) surfaces an OSError via
+    the error signal — exercises the file-write error path."""
+    img = Image.new("RGB", (320, 240))
+    # Create a file, then try to write *inside* it (i.e. treat the file
+    # as a parent directory).  ``mkdir(parents=True, exist_ok=True)``
+    # raises NotADirectoryError, which falls through to OSError.
+    blocker = tmp_path / "blocker.txt"
+    blocker.write_text("not a directory")
+    out_path = blocker / "out.wav"
+
+    worker = OfflineEncodeWorker()
+    log = _collect(worker, "encode_complete", "error", "finished")
+
+    worker.encode_from_image(img, Mode.ROBOT_36, 48_000, str(out_path))
+
+    assert len(log["encode_complete"]) == 0
+    assert len(log["error"]) == 1
+    assert "Could not write WAV" in log["error"][0][0]

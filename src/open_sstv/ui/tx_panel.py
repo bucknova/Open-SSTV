@@ -15,6 +15,12 @@ transmit_requested(PIL.Image.Image, Mode):
     unchanged — TxWorker's banner system applies in that case.
 stop_requested():
     User clicked Stop.
+export_to_audio_requested(PIL.Image.Image, Mode):
+    User clicked "Export to Audio".  Emits the same composited image
+    that ``transmit_requested`` would for the current state — the
+    MainWindow pops a Save As dialog, then hands the image off to
+    the offline encode worker.  Reuses the live-TX composite so the
+    exported WAV contains exactly what would have gone over the air.
 template_composited(bool):
     Emitted when the selected-template state changes.  True = a v0.3
     template has been composited into the TX image, so TxWorker should
@@ -127,6 +133,9 @@ class TxPanel(QWidget):
 
     transmit_requested = Signal(object, object)  # (PIL.Image.Image, Mode)
     stop_requested = Signal()
+    #: User clicked "Export to Audio". Same payload as transmit_requested —
+    #: MainWindow handles the Save As dialog and offline encode.
+    export_to_audio_requested = Signal(object, object)  # (PIL.Image.Image, Mode)
     #: True when the emitted TX image already has a v0.3 template composited
     #: in so TxWorker can skip its own banner stamp.
     template_composited = Signal(bool)
@@ -266,6 +275,20 @@ class TxPanel(QWidget):
         button_row.addWidget(self._stop_btn)
         layout.addLayout(button_row)
 
+        # --- Export to Audio button (offline encode) ---
+        # Sits directly below the Transmit/Stop row.  Uses the same
+        # composite the Transmit button would emit — so whatever the
+        # user sees in the preview is what lands in the WAV.  Disabled
+        # while transmitting (mirrors Transmit's enable state) so a
+        # mid-TX click can't race the live encoder.
+        self._export_btn = QPushButton("Export to Audio")
+        self._export_btn.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self._export_btn.setEnabled(False)
+        self._export_btn.clicked.connect(self._on_export_clicked)
+        layout.addWidget(self._export_btn)
+
         # --- TX progress bar ---
         self._progress_bar = QProgressBar()
         self._progress_bar.setRange(0, 100)
@@ -329,6 +352,7 @@ class TxPanel(QWidget):
             self._update_preview_pixmap()
             self._preview.setText("")
         self._transmit_btn.setEnabled(True)
+        self._export_btn.setEnabled(True)
         self._edit_btn.setEnabled(True)
         self._status.setText(f"Loaded: {path.name}  ({img.width}×{img.height})")
 
@@ -347,6 +371,9 @@ class TxPanel(QWidget):
         self._stop_btn.setEnabled(transmitting)
         self._load_btn.setEnabled(not transmitting)
         self._edit_btn.setEnabled(not transmitting and has_image)
+        # Export to Audio mirrors Transmit's enable state — same input
+        # (composited image), same shouldn't-race-live-TX rule.
+        self._export_btn.setEnabled(not transmitting and has_image)
         self._mode_combo.setEnabled(not transmitting)
         if transmitting:
             self._progress_bar.setValue(0)
@@ -571,14 +598,38 @@ class TxPanel(QWidget):
         if self._current_image is None:
             return
         mode = self.selected_mode()
+        composed = self._compose_for_emit()
+        self.transmit_requested.emit(composed, mode)
+
+    @Slot()
+    def _on_export_clicked(self) -> None:
+        """Build the composited TX image and emit ``export_to_audio_requested``.
+
+        Same composite logic as Transmit — template + photo + QSO state
+        when a template is selected, raw photo otherwise.  Keeping the
+        two click handlers symmetric means whatever the user sees in
+        the preview is what lands in the WAV.
+        """
+        if self._current_image is None:
+            return
+        mode = self.selected_mode()
+        composed = self._compose_for_emit()
+        self.export_to_audio_requested.emit(composed, mode)
+
+    def _compose_for_emit(self) -> PILImage:
+        """Return the image that Transmit / Export should emit.
+
+        Shared by both click handlers so they can never drift.  If a
+        v0.3 template is selected and a base photo is loaded, this
+        returns the rendered composite; otherwise it returns the raw
+        current image and TxWorker's banner system applies.
+        """
         if self._selected_template is not None and self._base_image is not None:
-            # v0.3: render template composite and emit that.
             composed = self._compose_template()
             if composed is not None:
-                self.transmit_requested.emit(composed, mode)
-                return
-        # Fallback: emit the current image (TxWorker banner will apply if enabled).
-        self.transmit_requested.emit(self._current_image, mode)
+                return composed
+        # Fallback: caller gets the current image; TxWorker's banner applies.
+        return self._current_image  # type: ignore[return-value]
 
     # === Preview helpers ===
 

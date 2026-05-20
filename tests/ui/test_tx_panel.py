@@ -73,6 +73,26 @@ def test_stop_click_emits_signal(qtbot, panel: TxPanel) -> None:
         panel._stop_btn.click()
 
 
+def test_export_to_audio_click_emits_signal(
+    qtbot, panel: TxPanel, gradient_path: Path
+) -> None:
+    """Clicking Export to Audio emits the composited image + selected mode.
+
+    v0.3.10 added this in-panel button to replace the v0.3.9 File-menu
+    Encode Image to Audio item.  The signal payload mirrors
+    transmit_requested so MainWindow can hand the same composite to the
+    offline encode worker.
+    """
+    panel.load_image(gradient_path)
+    with qtbot.waitSignal(
+        panel.export_to_audio_requested, timeout=1000
+    ) as blocker:
+        panel._export_btn.click()
+    image, mode = blocker.args
+    assert image.size == (100, 100)
+    assert mode in Mode
+
+
 def test_set_transmitting_toggles_button_state(
     panel: TxPanel, gradient_path: Path
 ) -> None:
@@ -83,12 +103,15 @@ def test_set_transmitting_toggles_button_state(
     assert panel._stop_btn.isEnabled()
     assert not panel._load_btn.isEnabled()
     assert not panel._mode_combo.isEnabled()
+    # Export mirrors Transmit's enable state — disabled while TX is live.
+    assert not panel._export_btn.isEnabled()
 
     panel.set_transmitting(False)
     assert panel._transmit_btn.isEnabled()
     assert not panel._stop_btn.isEnabled()
     assert panel._load_btn.isEnabled()
     assert panel._mode_combo.isEnabled()
+    assert panel._export_btn.isEnabled()
 
 
 def test_mode_combo_lists_all_modes(panel: TxPanel) -> None:
