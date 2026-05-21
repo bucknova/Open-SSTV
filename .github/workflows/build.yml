@@ -38,6 +38,21 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # Pinned appimagetool — the audit flagged the previous "continuous"
+  # channel pull as a hidden dependency on the AppImage org's CI staying
+  # green at the exact moment we cut a tag.  Bump deliberately and
+  # re-capture the sha256 sums below when you do.
+  APPIMAGETOOL_VERSION: "1.9.1"
+  APPIMAGETOOL_SHA256_X86_64: "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
+  APPIMAGETOOL_SHA256_AARCH64: "f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158"
+
+# Tag-driven release builds are cheap to start but slow to finish, so
+# coalesce in-flight runs whenever a fresh tag (or manual dispatch)
+# supersedes the previous one.  Distinct from test.yml's group so we
+# never block release on test-cycle cancellation or vice versa.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false   # never cancel a release mid-upload
 
 # Needed so softprops/action-gh-release@v2 can create the release and
 # upload the built zips / AppImage as release assets on tag push.  Without
@@ -47,7 +62,16 @@ permissions:
   contents: write
 
 jobs:
+  # Gate the release path on a green test matrix.  ``test.yml`` is a
+  # reusable workflow (workflow_call trigger) that runs the non-gui,
+  # non-integration pytest suite across the 3.11/3.12/3.13 × Linux/
+  # Windows/macOS matrix.  Any cell failing here blocks the build job
+  # below, so a broken commit can't ship via a tag push.
+  test:
+    uses: ./.github/workflows/test.yml
+
   build:
+    needs: test
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -224,9 +248,23 @@ jobs:
           "
           fi
 
-          # Download appimagetool for this architecture
+          # Download a *pinned* appimagetool release and verify its
+          # sha256 before running it.  See env block at the top of this
+          # workflow for the version and per-arch sums.
           TOOL="appimagetool-${ARCH}.AppImage"
-          wget -q "https://github.com/AppImage/appimagetool/releases/download/continuous/${TOOL}"
+          wget -q "https://github.com/AppImage/appimagetool/releases/download/${APPIMAGETOOL_VERSION}/${TOOL}"
+          case "${ARCH}" in
+            x86_64)  EXPECTED="${APPIMAGETOOL_SHA256_X86_64}" ;;
+            aarch64) EXPECTED="${APPIMAGETOOL_SHA256_AARCH64}" ;;
+            *) echo "Unknown arch ${ARCH} — no sha256 pinned"; exit 1 ;;
+          esac
+          ACTUAL=$(sha256sum "${TOOL}" | awk '{print $1}')
+          if [ "${ACTUAL}" != "${EXPECTED}" ]; then
+            echo "appimagetool sha256 mismatch for ${ARCH}:"
+            echo "  expected ${EXPECTED}"
+            echo "  actual   ${ACTUAL}"
+            exit 1
+          fi
           chmod +x "${TOOL}"
 
           # Build the AppImage

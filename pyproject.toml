@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "open-sstv"
-version = "0.3.13"
+version = "0.3.14"
 description = "Open-source cross-platform SSTV transceiver for amateur radio."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -20,9 +20,11 @@ classifiers = [
     "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS :: MacOS X",
+    "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Communications :: Ham Radio",
     "Topic :: Multimedia :: Sound/Audio",
 ]
