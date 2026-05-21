@@ -54,15 +54,30 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      # sounddevice's wheel bundles PortAudio on macOS and Windows; on
-      # Linux the wheel is a thin ctypes shim that dlopen's the system
-      # libportaudio.  libsndfile backs the [flac] extra the same way.
-      # Without these the audio tests raise OSError at collection.
-      - name: Install PortAudio + libsndfile (Linux)
+      # Linux system deps:
+      #   * libportaudio2 / libsndfile1 — sounddevice and soundfile ship
+      #     thin ctypes shims on Linux and dlopen the system libraries.
+      #   * libegl1 / libxkbcommon0 / libdbus-1-3 / libfontconfig1 —
+      #     pytest-qt's pytest_configure imports PySide6.QtGui at session
+      #     start (even with all GUI tests deselected), and the PySide6
+      #     wheel dlopens these system libs at import time.  Without them
+      #     pytest aborts with "libEGL.so.1: cannot open shared object
+      #     file" before any test collection.  macOS and Windows wheels
+      #     carry the Qt runtime bundled so the same step is unnecessary
+      #     there.  The set installed here is the import-time minimum;
+      #     adding Xvfb-backed GUI tests will need more (libxcb-cursor0,
+      #     libxkbcommon-x11-0, etc.) and is tracked as a follow-up.
+      - name: Install audio + Qt runtime libs (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libportaudio2 libsndfile1
+          sudo apt-get install -y \
+            libportaudio2 \
+            libsndfile1 \
+            libegl1 \
+            libxkbcommon0 \
+            libdbus-1-3 \
+            libfontconfig1
 
       - name: Install project + dev/flac extras
         run: |
