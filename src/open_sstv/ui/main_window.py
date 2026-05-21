@@ -624,14 +624,12 @@ class MainWindow(QMainWindow):
         # panel → flag-setter on GUI thread, then dispatch via queued signal
         self._tx_panel.transmit_requested.connect(self._on_transmit_requested)
         self._tx_panel.stop_requested.connect(self._on_stop_requested)
-        # v0.3: when a template is composited, suppress TxWorker's legacy
-        # banner so the template's own text layers aren't double-stamped.
-        # Direct method call is GIL-safe for a plain bool write; no queued
-        # signal needed because set_v3_template_active has no Qt event-loop
-        # dependency and the worker hasn't started TX yet when this fires.
-        self._tx_panel.template_composited.connect(
-            self._tx_worker.set_v3_template_active
-        )
+        # v0.3.13: removed the ``template_composited → set_v3_template_active``
+        # wire.  The banner stamp no longer cares whether a v0.3 template is
+        # active — if it's enabled in Settings, it always stamps.  The
+        # ``template_composited`` signal still fires on selection change in
+        # case future code wants to listen, it's just no longer plumbed to
+        # the worker's banner gating.
         # v0.3.10: Export to Audio button → offline encode worker.
         self._tx_panel.export_to_audio_requested.connect(
             self._on_export_to_audio_requested
@@ -1134,11 +1132,12 @@ class MainWindow(QMainWindow):
         button would emit (template + photo + QSO overlays already
         applied), so the resulting WAV contains exactly what would have
         gone over the air — including the legacy TX banner strip when
-        the user has it enabled in Settings and no v0.3 template is
-        composited.  Banner gating mirrors ``TxWorker.transmit`` (the
-        live-TX path): banner only stamps when ``tx_banner_enabled``
-        AND no v0.3 template active, because templates carry their own
-        text overlays and double-stamping would clobber them.
+        the user has it enabled in Settings.  Banner gating mirrors
+        ``TxWorker.transmit`` (the live-TX path): banner stamps whenever
+        ``tx_banner_enabled`` is True.  v0.3.13 removed the previous
+        "skip banner when v0.3 template active" gate — per user
+        feedback, banner-on means banner-always-on regardless of
+        template.
         """
         if self._offline_encode_thread is not None:
             # Previous encode still in flight — ignore re-entrant click.
@@ -1147,15 +1146,13 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # Banner stamp — same gating as TxWorker.transmit at workers.py:606.
-        # The live-TX path runs this inside TxWorker after the panel has
-        # emitted the image; the export-to-audio path bypasses TxWorker, so
-        # we have to apply it here or the WAV would lack the banner that
-        # live TX would have included.  v0.3.10 shipped without this.
-        if (
-            self._config.tx_banner_enabled
-            and not self._tx_panel.has_v3_template_composited()
-        ):
+        # Banner stamp — same gating as TxWorker.transmit.  The live-TX path
+        # runs this inside TxWorker after the panel has emitted the image;
+        # the export-to-audio path bypasses TxWorker, so we have to apply
+        # it here or the WAV would lack the banner that live TX includes.
+        # v0.3.10 shipped without this; v0.3.12 added the gated form;
+        # v0.3.13 removed the template-active gate.
+        if self._config.tx_banner_enabled:
             try:
                 from open_sstv.core.banner import (
                     apply_tx_banner,

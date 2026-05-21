@@ -11,6 +11,55 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.13] — 2026-05-20
+
+Policy change: the TX banner stamp is now always applied when
+``tx_banner_enabled`` is True in Settings, regardless of whether a
+v0.3 template is selected.  Previously the banner was skipped on
+templated transmissions to avoid double-stamping over the template's
+own header text — per user feedback (Kevin/W0AEZ): banner-on means
+banner-always-on, with the operator responsible for choosing between
+banner and template by toggling the Settings checkbox.
+
+Applies to both the live-TX path (``TxWorker.transmit``) and the
+offline Export to Audio path
+(``MainWindow._on_export_to_audio_requested``) so the two stay
+symmetric.
+
+### Changed
+
+- **Banner gating now obeys only ``tx_banner_enabled``.**  Removed
+  the previously-coupled ``not v3_template_active`` check from both
+  the live-TX path and the Export to Audio path.  Operators who
+  want template-only output (no banner strip) disable the banner in
+  Settings → TX.
+- **TxWorker no longer tracks template-active state.**  Removed the
+  ``_v3_template_active`` field and the ``set_v3_template_active``
+  slot from ``TxWorker``.  The corresponding
+  ``MainWindow`` → ``TxWorker`` connection on
+  ``TxPanel.template_composited`` is gone too.  The signal itself
+  remains on ``TxPanel`` in case future code wants to listen to
+  template selection changes.
+- **Removed v0.3.12's ``TxPanel.has_v3_template_composited()`` helper**
+  — added one version ago to support the now-removed gating, it has
+  no remaining caller.
+
+### Testing
+
+- ``tests/ui/test_v3_tx_integration.py::TestTxWorkerV3Flag``
+  removed (4 tests) and replaced with
+  ``TestTxWorkerBannerPolicy`` (2 tests): banner stamps when
+  enabled regardless of template state, and the ``_v3_template_active``
+  field / ``set_v3_template_active`` slot are confirmed absent from
+  the worker so a regression that re-introduces template-aware
+  gating fails this test.
+- ``tests/ui/test_main_window.py::TestExportToAudioBanner``: the
+  v0.3.12 ``test_banner_skipped_when_v3_template_composited`` is
+  replaced with ``test_banner_applied_regardless_of_template_state``,
+  pinning the new policy.
+
+---
+
 ## [0.3.12] — 2026-05-20
 
 Bundle of two independent post-v0.3.11 fixes:

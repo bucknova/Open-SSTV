@@ -1399,36 +1399,45 @@ class TestExportToAudioBanner:
         # Image should pass through unchanged.
         assert captured[0].getpixel((0, 0)) == (100, 200, 50)
 
-    def test_banner_skipped_when_v3_template_composited(
+    def test_banner_applied_regardless_of_template_state(
         self,
         window: MainWindow,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
+        """v0.3.13 policy pin: when banner is enabled in Settings, it
+        stamps even if a v0.3 template is selected.  Previously (v0.3.12)
+        the template-active state suppressed the banner; that gate was
+        removed per user feedback — banner-on means banner-always-on.
+        """
         captured = self._stub_export(window, monkeypatch, tmp_path)
         window._config.tx_banner_enabled = True
+        window._config.callsign = "W0AEZ"
 
-        # Pretend a v0.3 template is selected — the panel's
-        # has_v3_template_composited() must return True, which means the
-        # banner must be skipped (the template has its own overlays).
-        monkeypatch.setattr(
-            window._tx_panel, "has_v3_template_composited", lambda: True
+        # Place a fake template into the panel to simulate "template selected".
+        # The new policy ignores this — banner should still stamp.
+        from open_sstv.templates.model import Template
+        window._tx_panel._selected_template = Template(
+            name="Fake", role="cq", layers=[]
         )
 
         banner_calls: list[int] = []
         from open_sstv.core import banner as _banner_mod
-        monkeypatch.setattr(
-            _banner_mod,
-            "apply_tx_banner",
-            lambda *a, **kw: banner_calls.append(1),
-        )
+        real_apply = _banner_mod.apply_tx_banner
+
+        def _spy(image, *args, **kwargs):  # noqa: ANN001
+            banner_calls.append(1)
+            return real_apply(image, *args, **kwargs)
+
+        monkeypatch.setattr(_banner_mod, "apply_tx_banner", _spy)
 
         from open_sstv.core.modes import Mode
         img = Image.new("RGB", (320, 240), color=(100, 200, 50))
         window._on_export_to_audio_requested(img, Mode.ROBOT_36)
 
-        assert banner_calls == [], (
-            "banner must not be applied when a v0.3 template is composited"
+        assert len(banner_calls) == 1, (
+            "banner must stamp even with a template selected (v0.3.13)"
         )
         assert len(captured) == 1
-        assert captured[0].getpixel((0, 0)) == (100, 200, 50)
+        # Banner overwrites the top strip — top-left pixel is now banner bg.
+        assert captured[0].getpixel((0, 0)) != (100, 200, 50)

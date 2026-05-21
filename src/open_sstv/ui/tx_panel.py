@@ -23,8 +23,11 @@ export_to_audio_requested(PIL.Image.Image, Mode):
     exported WAV contains exactly what would have gone over the air.
 template_composited(bool):
     Emitted when the selected-template state changes.  True = a v0.3
-    template has been composited into the TX image, so TxWorker should
-    skip its own banner stamp.  False = fall back to existing banner.
+    template is selected; False = no template selected.  v0.3.13:
+    previously this was consumed by TxWorker to skip the banner stamp,
+    but the banner is now always-on-when-enabled regardless of template
+    state.  Signal retained for any future listener that wants to know
+    when the user toggles template selection.
 """
 from __future__ import annotations
 
@@ -136,8 +139,10 @@ class TxPanel(QWidget):
     #: User clicked "Export to Audio". Same payload as transmit_requested —
     #: MainWindow handles the Save As dialog and offline encode.
     export_to_audio_requested = Signal(object, object)  # (PIL.Image.Image, Mode)
-    #: True when the emitted TX image already has a v0.3 template composited
-    #: in so TxWorker can skip its own banner stamp.
+    #: Emitted when the v0.3 template selection changes.  True when a
+    #: template is now selected, False when deselected.  v0.3.13: no longer
+    #: wired to the banner-gating in TxWorker — banner is now
+    #: always-on-when-enabled regardless of template state.
     template_composited = Signal(bool)
 
     def __init__(
@@ -412,17 +417,6 @@ class TxPanel(QWidget):
     def selected_mode(self) -> Mode:
         data = self._mode_combo.currentData()
         return data if isinstance(data, Mode) else Mode(data)
-
-    def has_v3_template_composited(self) -> bool:
-        """True when the emitted image already has a v0.3 template baked in.
-
-        Used by ``MainWindow._on_export_to_audio_requested`` to decide
-        whether to apply the legacy TX banner stamp before encoding —
-        same gating rule as ``TxWorker.transmit`` (banner enabled AND
-        no v0.3 template active).  Templates handle their own text
-        overlays, so adding a banner on top would double-stamp.
-        """
-        return self._selected_template is not None and self._base_image is not None
 
     def set_templates(self, templates: list[QSOTemplate]) -> None:
         """v0.2 compat shim — no-op in v0.3."""

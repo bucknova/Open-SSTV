@@ -212,36 +212,28 @@ class TestQSOStateIntegration:
 
 
 # ---------------------------------------------------------------------------
-# TxWorker.set_v3_template_active
+# TxWorker banner policy (v0.3.13: always-on-when-enabled)
 # ---------------------------------------------------------------------------
+#
+# v0.3.13 removed ``_v3_template_active`` and ``set_v3_template_active``.
+# The banner stamp now obeys only ``_tx_banner_enabled``, regardless of
+# whether a v0.3 template has been composited into the image.  Per user
+# (Kevin/W0AEZ) feedback: banner-on means banner-always-on.
 
 
-class TestTxWorkerV3Flag:
-    def test_default_v3_flag_is_false(self) -> None:
-        worker = TxWorker()
-        assert worker._v3_template_active is False
+class TestTxWorkerBannerPolicy:
+    def test_banner_enabled_stamps_regardless_of_template(
+        self, tmp_path: Path  # noqa: ARG002
+    ) -> None:
+        """Banner is applied whenever ``_tx_banner_enabled`` is True.
 
-    def test_set_v3_template_active_true(self) -> None:
-        worker = TxWorker()
-        worker.set_v3_template_active(True)
-        assert worker._v3_template_active is True
-
-    def test_set_v3_template_active_false(self) -> None:
-        worker = TxWorker()
-        worker.set_v3_template_active(True)
-        worker.set_v3_template_active(False)
-        assert worker._v3_template_active is False
-
-    def test_banner_skipped_when_v3_active(self, tmp_path: Path) -> None:
-        """When _v3_template_active is True, apply_tx_banner is NOT called.
-
-        We verify this by encoding a tiny 1×1 image (which would raise
-        ValueError from apply_tx_banner's content_height check) and
-        confirming no error is emitted from the worker.
-        """
+        Previously gated on a separate ``_v3_template_active`` flag; v0.3.13
+        removed that gating.  Verify by enabling the banner and confirming
+        the banner code path runs (the apply_tx_banner call itself runs
+        because no ``TX banner failed`` error is emitted on a normally-sized
+        image)."""
         errors: list[str] = []
         worker = TxWorker()
-        worker.set_v3_template_active(True)
         worker._tx_banner_enabled = True
         worker._tx_banner_callsign = "W0AEZ"
         worker.error.connect(errors.append)
@@ -253,10 +245,21 @@ class TestTxWorkerV3Flag:
 
         worker.transmit(img, Mode.MARTIN_M1)
         done.wait(timeout=5)
-        # With v3 active, banner code is skipped so no ValueError from
-        # a tiny image — any errors should be audio-related (no device),
-        # not banner-related.
         banner_errors = [e for e in errors if "banner" in e.lower()]
         assert banner_errors == [], (
-            f"Banner error emitted even with v3 template active: {banner_errors}"
+            f"Unexpected banner error: {banner_errors}"
+        )
+
+    def test_v3_template_active_attr_removed(self) -> None:
+        """v0.3.13 contract: the ``_v3_template_active`` field and the
+        ``set_v3_template_active`` slot are gone.  Pins the policy
+        change so a regression that re-introduces template-aware
+        banner gating fails this test."""
+        worker = TxWorker()
+        assert not hasattr(worker, "_v3_template_active"), (
+            "v0.3.13 removed _v3_template_active — banner is now "
+            "always-on-when-enabled regardless of template state"
+        )
+        assert not hasattr(worker, "set_v3_template_active"), (
+            "v0.3.13 removed set_v3_template_active slot"
         )

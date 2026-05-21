@@ -368,10 +368,13 @@ class TxWorker(QObject):
         self._tx_banner_bg_color: str = "#202020"
         self._tx_banner_text_color: str = "#FFFFFF"
         self._tx_banner_size: str = "small"
-        # When True, a v0.3 template has already been composited into the
-        # image that arrives at transmit(); skip the legacy banner stamp so
-        # the template's own callsign/text layers don't get a strip on top.
-        self._v3_template_active: bool = False
+        # v0.3.13: removed the ``_v3_template_active`` gating field.
+        # Previously, when a v0.3 template was composited into the image,
+        # the banner stamp was skipped to avoid double-stamping over the
+        # template's own text layers.  User feedback (Kevin/W0AEZ): banner
+        # enabled in Settings should always stamp, regardless of template
+        # — single source of truth for "do I want a banner".  Operators
+        # who want template-only output can disable the banner in Settings.
         self._stop_event = threading.Event()
         self._watchdog_triggered: bool = False
         #: Monotonically-increasing transmission id, incremented at the
@@ -426,17 +429,6 @@ class TxWorker(QObject):
     def set_output_gain(self, gain: float) -> None:
         """Set the software output gain (1.0 = unity). Thread-safe."""
         self._output_gain = gain
-
-    def set_v3_template_active(self, active: bool) -> None:
-        """Notify the worker whether the incoming TX image has a v0.3 template
-        already composited in.
-
-        When ``True``, the legacy ``tx_banner`` stamp is skipped so the
-        template's own text layers are not obscured by a second strip.
-        Called from the GUI thread via a queued signal before emitting
-        ``transmit_requested`` — GIL-safe for a plain bool write.
-        """
-        self._v3_template_active = bool(active)
 
     def set_ptt_delay(self, delay_s: float) -> None:
         """Update the PTT-to-audio delay at runtime (e.g. after settings save)."""
@@ -597,13 +589,16 @@ class TxWorker(QObject):
 
         # === Encode + CW + gain (no watchdog; see docstring H11) ===
         try:
-            # --- Apply TX banner (if enabled and no v0.3 template active) ---
+            # --- Apply TX banner (if enabled) ---
             # OP2-01: catch ValueError (content_height <= 0) so a too-small
             # image never silently escapes transmit() without emitting error.
-            # Skip the banner when a v0.3 template has already been composited
-            # in by TxPanel so the template's own text layers aren't covered.
+            # v0.3.13: banner is no longer gated on v0.3 template state — if
+            # the user enabled the banner in Settings, it stamps regardless
+            # of what the TxPanel composited.  Templates with their own
+            # header text may visually clash; operators choose between
+            # banner and template by toggling the Settings checkbox.
             try:
-                if self._tx_banner_enabled and not self._v3_template_active:
+                if self._tx_banner_enabled:
                     from open_sstv import __version__
                     from open_sstv.core.banner import apply_tx_banner, scaled_banner_params
                     _bh, _fs = scaled_banner_params(self._tx_banner_size, image.width)
