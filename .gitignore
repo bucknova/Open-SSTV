@@ -47,3 +47,10 @@ out/
 *.wav.tmp
 # Decoded SSTV images saved to the repo root (user decode output)
 sstv_*.png
+# Stale v0.2.0 snapshot sometimes left behind by tooling — never commit
+Open-SSTV/
+# Scratch test image at repo root (the bundled asset under src/ is unaffected
+# because this pattern is anchored to the gitignore directory)
+/testimage.jpg
+# Design reference screenshots (working files, not part of the docs site)
+docs/design/*.png
