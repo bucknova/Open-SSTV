@@ -11,6 +11,77 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.14] — 2026-05-21
+
+CI / release-pipeline hardening release.  No functional code changes.
+
+Driven by a full-repo stability audit that flagged two Critical issues
+with the existing CI:
+
+1. The release workflow only ran ``pyinstaller`` and never invoked
+   ``pytest`` — a tagged binary could ship a regression with nothing
+   blocking it.
+2. CI exercised Python 3.11 only, while ``pyproject.toml`` advertises
+   ``>=3.11`` and classifies 3.12 (and now 3.13).  3.12/3.13 regressions
+   reached users before being caught.
+
+This release closes both findings and bundles a handful of nearby
+hygiene fixes.
+
+### Added
+
+- **``tests`` workflow.**  New ``.github/workflows/test.yml`` is a
+  reusable workflow that runs ``pytest -m "not gui and not
+  integration"`` across the full supported matrix — Python 3.11 / 3.12
+  / 3.13 × Ubuntu 22.04 / Windows / macOS 14.  Triggers on push,
+  pull_request, manual dispatch, and ``workflow_call`` so the release
+  pipeline reuses it.  Linux runners install ``libportaudio2`` +
+  ``libsndfile1`` because the sounddevice and soundfile wheels there
+  are thin ctypes shims.
+- **Release builds now gate on a green matrix.**  ``build.yml`` invokes
+  ``test.yml`` via ``workflow_call`` as a leading ``test`` job and the
+  existing ``build`` job has ``needs: test`` — a tag push can no longer
+  produce binaries if any matrix cell is red.
+- **Pinned ``appimagetool``.**  The AppImage step previously pulled from
+  the ``continuous`` channel, making every release vulnerable to an
+  upstream regression at the exact moment we cut a tag.  Now pinned to
+  ``1.9.1`` with per-arch sha256 verification.
+- **Concurrency groups** on both workflows.  Branch pushes coalesce
+  in-flight test runs to save CI minutes; tag refs never cancel an
+  in-progress release upload.
+- **Tests status badge** in the README byline.
+- **Classifiers** for Python 3.13 and Microsoft Windows in
+  ``pyproject.toml`` — both already shipping, just unannounced in the
+  metadata.
+
+### Changed
+
+- **``.gitignore``.**  Added ``Open-SSTV/`` (a stale v0.2.0 snapshot
+  sometimes left behind by tooling — a future ``git add -A`` could
+  have accidentally committed gigabytes), ``/testimage.jpg`` (scratch
+  file at repo root; the bundled
+  ``src/open_sstv/assets/testimage.jpg`` is unaffected because the
+  pattern is anchored to the repo root), and ``docs/design/*.png``
+  (working mmsstv reference screenshots that are not part of the
+  published docs site).
+
+### Audit follow-ups not in this release
+
+Still open from the audit and tracked for subsequent PRs:
+
+- ``ruff check`` reports 266 issues (114 auto-fixable) across the tree;
+  gating CI on lint would dominate the diff and is its own cleanup.
+- ``mypy`` aborts on a parser issue at ``src/open_sstv/radio/tci.py:296``
+  before it can check anything; needs investigation before gating.
+- GUI-marker tests need Xvfb on Linux to run in CI; ``integration``
+  marker needs a fake-rigctld fixture in CI.
+- Lower-severity audit items (PortAudio reset wrapping, rigctld
+  ``SO_KEEPALIVE``, Windows wide-char WAV paths, font-load fallback,
+  filename-collision random suffix, Universal2 macOS build) are
+  individually tracked.
+
+---
+
 ## [0.3.13] — 2026-05-20
 
 Policy change: the TX banner stamp is now always applied when
