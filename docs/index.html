@@ -769,7 +769,7 @@
         <div class="feature-icon">🗂</div>
         <span class="feature-tag">v0.3 · Templates</span>
         <h3>Layered Template Compositor</h3>
-        <p>Live template gallery filtered by role (CQ / Reply / 73 / Custom). Three-panel form editor with seven layer types — photo, text, rect, gradient, pattern, station image, and an <code>rx_image</code> slot that pins one click of a received thumbnail straight into the next reply. MMSSTV-style <code>%c</code> and named <code>{callsign}</code> tokens, slashed-zero callsigns, stacked vertical text, three shipped fonts, and shareable TOML files.</p>
+        <p>Live template gallery filtered by role (CQ / Reply / 73 / Custom). Three-panel form editor with seven layer types — photo, text, rect, gradient, pattern, station image, and an <code>rx_image</code> slot that pins one click of a received thumbnail straight into the next reply. MMSSTV-style <code>%c</code> and named <code>{callsign}</code> tokens, slashed-zero callsigns, stacked vertical text, eight shipped fonts, and shareable TOML files.</p>
       </div>
 
       <div class="feature-card">
@@ -798,6 +798,13 @@
         <span class="feature-tag">v0.3.6 · Recovery</span>
         <h3>RX Audio Recording</h3>
         <p>Opt-in lossless capture of the raw received audio alongside each decoded image — WAV (stdlib) or FLAC (~40 % smaller, optional <code>[flac]</code> extra). Re-decode marginal signals later through the CLI or a different decoder. Lossy formats are deliberately excluded because compression artefacts degrade re-decode quality.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon">🎚</div>
+        <span class="feature-tag">v0.3.10 · Offline</span>
+        <h3>Export &amp; Decode Audio</h3>
+        <p>One-click <strong>Export to Audio</strong> on the TX panel writes a WAV of the exact composite Transmit would emit — template, photo, QSO overlays, and TX banner — without keying the radio. <strong>Decode Audio</strong> on the RX panel reverses the trip: pick a <code>.wav</code> or <code>.flac</code> and the result lands in the gallery alongside live decodes. The GUI counterpart to <code>open-sstv-encode</code> / <code>open-sstv-decode</code>.</p>
       </div>
 
       <div class="feature-card">

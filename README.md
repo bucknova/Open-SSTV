@@ -23,8 +23,9 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
 ## Goals
 
 - **Open source end-to-end**, GPL-3.0-or-later.
-- **Cross-platform**: Linux x86_64, macOS, and Windows (experimental — prebuilt
-  binaries available, real-hardware validation ongoing). Raspberry Pi / ARM planned.
+- **Cross-platform**: Linux x86_64 and arm64, macOS (Apple Silicon), and Windows
+  (experimental — prebuilt binaries available, real-hardware validation ongoing).
+  Raspberry Pi 4/5 on-hardware testing planned.
 - **Modern, intuitive UI** built on Qt 6 (PySide6).
 - **Lightweight** enough to run on modest hardware. Pure Python + a small set of
   well-maintained scientific dependencies.
@@ -112,6 +113,12 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
   duration of a transmission so a mid-TX backend change cannot corrupt PTT state.
 - **TX progress bar** with elapsed/total time (at the active sample rate) and percentage.
 - **Stop button** -- abort mid-transmission; PTT is always de-keyed cleanly.
+- **Export to Audio (v0.3.10)** -- write a WAV file of the current TX panel
+  composite (template + photo + QSO overlays + TX banner) without keying the
+  radio. Uses exactly the same composited image Transmit would emit, so the
+  WAV matches what would have gone over the air. Encode runs off the GUI
+  thread; same job as `open-sstv-encode` but accessible without dropping to
+  a shell. Disabled while live TX is in flight to prevent a mid-TX race.
 
 ### Receive (RX)
 - **Live decode** -- start capturing from any audio input, and decoded images appear
@@ -132,7 +139,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
   is explicitly skipped (different color pipeline between the incremental and
   batch paths).
 - **Weak-signal mode** -- optional relaxation of the VIS detection thresholds
-  (leader presence 40 % → 25 %, start-bit minimum 20 ms → 15 ms) for signals
+  (leader presence 35 % → 20 %, start-bit minimum 17 ms → 15 ms) for signals
   audible in the noise that aren't triggering decode. False-positive VIS
   detections are handled gracefully (silent IDLE reset, no user-visible error).
 - **Weak-signal robustness** -- bandpass prefilter, median-filter click rejection,
@@ -165,6 +172,11 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
   re-decode marginal signals later via `open-sstv-decode` or a different
   decoder. Lossy formats are deliberately excluded because compression
   artefacts degrade re-decode quality.
+- **Decode Audio (v0.3.10)** -- offline-decode a `.wav` or `.flac` file
+  from the RX panel; the result lands in the gallery exactly like a live
+  decode. Pairs naturally with v0.3.6 RX audio recording for re-running
+  marginal signals through the current decoder. Always enabled, including
+  during live capture (results interleave in the same gallery).
 
 ### Radio Control
 - **rigctld (Hamlib)** -- TCP client for `rigctld`, supporting PTT, frequency,
@@ -205,6 +217,12 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
 - **Resilient config loading** -- malformed or missing config and template files
   fall back to built-in defaults instead of crashing. Legacy key names
   (e.g. pre-v0.1.24 `experimental_incremental_decode`) are migrated automatically.
+- **RX no-progress watchdog timeout (v0.3.8)** -- configurable via Settings →
+  Receive (5–300 s, default 5 s). Bounds how long a decode can sit without
+  emitting new lines before being aborted; higher values are useful for long
+  QSB fades on weak signals, where `walk_sync_grid`'s sync-bridge can resume
+  once audio returns. Out-of-range values in hand-edited TOML are clamped on
+  load.
 - **Callsign** -- saved in settings, pre-populated in the image editor's text
   overlay tool for quick QSO card creation, and used by both CW station ID and
   the TX banner.
@@ -276,7 +294,8 @@ PySSTV ──► encoder facade ──┐
        audio input ────────►├─► Decoder (FM demod -> VIS -> sync -> per-mode decode -> slant)
                             │       (pure NumPy/SciPy, no UI/IO deps)
        rigctld TCP ────────►│
-       direct serial ──────►┘
+       direct serial ──────►┤
+       TCI WebSocket ──────►┘
 ```
 
 The DSP `core/` is a pure-Python package with no UI, audio, or socket
@@ -438,15 +457,14 @@ with what you tried and what happened.
 ### Post-beta / v0.3
 - **Remaining SSTV modes** -- Robot 8/12/24/72 (4 modes needing custom YCbCr 4:2:2
   encoders not yet in PySSTV).
-- **Raspberry Pi / ARM support** -- tested on Pi 4/5.
-- **Windows support** -- full validation on real hardware (experimental binaries ship in v0.2.x).
+- **Raspberry Pi 4/5 validation** -- Linux arm64 binaries already ship; on-hardware testing still pending.
+- **Windows support** -- full validation on real hardware (experimental binaries shipping since v0.2.x).
 - **Digital VOX** -- auto-detect incoming SSTV and start decoding without manual
   capture start.
 - **Drag-and-drop** image loading in the TX panel.
 
 ### Future
 - **Expanded template library** -- a full set of premade QSO templates inspired by MMSSTV and other popular SSTV clients (signal reports, contest exchanges, ragchew layouts).
-- **Received-image exchange** -- one-click workflow to auto-insert the last decoded image into the outgoing TX frame before sending.
 - **Expanded font support** -- more typeface options for text overlays, including styles common in amateur radio use.
 - **Advanced text layout** -- multi-column overlays, alignment controls, and background fill options for finer control over callsign and caption placement.
 - FSKID transmission (CW ID already shipping — see Features → Transmit).
