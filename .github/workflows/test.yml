@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Run pytest across every supported Python × OS combination.
+#
+# Triggers:
+#   push                — every commit on any branch
+#   pull_request        — every PR (catches branch-internal breakage)
+#   workflow_dispatch   — manual "Run workflow" button in the Actions tab
+#   workflow_call       — invoked from build.yml so tag-driven releases
+#                          gate on a green matrix before building artifacts
+#
+# Markers excluded for now:
+#   gui          — needs a Qt display.  Adding Xvfb on Linux is a follow-up.
+#   integration  — needs external services (a live rigctld).  Nightly-only
+#                   in a later pass.
+
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: ${{ matrix.os }} · py${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest, macos-14]
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      # sounddevice's wheel bundles PortAudio on macOS and Windows; on
+      # Linux the wheel is a thin ctypes shim that dlopen's the system
+      # libportaudio.  libsndfile backs the [flac] extra the same way.
+      # Without these the audio tests raise OSError at collection.
+      - name: Install PortAudio + libsndfile (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libportaudio2 libsndfile1
+
+      - name: Install project + dev/flac extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,flac]"
+
+      - name: Run tests
+        run: pytest -m "not gui and not integration" --maxfail=5 -q

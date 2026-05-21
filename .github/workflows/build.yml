@@ -47,7 +47,16 @@ permissions:
   contents: write
 
 jobs:
+  # Gate the release path on a green test matrix.  ``test.yml`` is a
+  # reusable workflow (workflow_call trigger) that runs the non-gui,
+  # non-integration pytest suite across the 3.11/3.12/3.13 × Linux/
+  # Windows/macOS matrix.  Any cell failing here blocks the build job
+  # below, so a broken commit can't ship via a tag push.
+  test:
+    uses: ./.github/workflows/test.yml
+
   build:
+    needs: test
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
     strategy:
