@@ -25,6 +25,14 @@ on:
 permissions:
   contents: read
 
+# Cancel any in-flight test run for the same ref when a fresh commit
+# lands; saves CI minutes during fast iteration.  Tag pushes use a
+# distinct group key so the release path can't be cancelled by a
+# follow-up push.
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
 jobs:
   pytest:
     name: ${{ matrix.os }} · py${{ matrix.python-version }}
