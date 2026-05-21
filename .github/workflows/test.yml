@@ -85,4 +85,17 @@ jobs:
           pip install -e ".[dev,flac]"
 
       - name: Run tests
+        # QT_QPA_PLATFORM=offscreen tells Qt to use its software framebuffer
+        # platform instead of trying to open an X11/Wayland display.  At
+        # least one non-gui-marked test transitively requests pytest-qt's
+        # ``qapp`` fixture (likely via ``qtbot``), which instantiates a
+        # QApplication during setup.  On macOS Cocoa allows that headless;
+        # on Linux X11/Wayland it SIGABRTs (exit 134) at fixture setup
+        # without a display.  ``offscreen`` is built into Qt itself, needs
+        # no extra apt package, and works identically on Linux, macOS,
+        # and Windows so we set it globally for the matrix rather than
+        # per-OS.  Removing the env var is part of the GUI-marker follow-up
+        # PR when we wire up real Xvfb on Linux.
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: pytest -m "not gui and not integration" --maxfail=5 -q
