@@ -70,8 +70,6 @@ class SerialPttRig:
     radio has its own PTT-sense input).
     """
 
-    name: str = "Serial PTT"
-
     def __init__(
         self,
         port: str,
@@ -83,6 +81,19 @@ class SerialPttRig:
         self._ptt_line = ptt_line.upper()
         self._ser: serial.Serial | None = None
         self._lock = threading.Lock()
+
+    @property
+    def name(self) -> str:
+        """Friendly per-instance label (L-3).
+
+        Previously a class attribute, so two ``SerialPttRig`` instances
+        bound to different ports rendered as the same UI label and any
+        error message lost the port context.  Including the port string
+        here (e.g. ``"Serial PTT (/dev/cu.usbserial-1410)"`` or
+        ``"Serial PTT (COM3)"``) makes multi-rig log lines and toasts
+        unambiguous without any caller changes.
+        """
+        return f"Serial PTT ({self._port})"
 
     def open(self) -> None:
         with self._lock:
@@ -206,8 +217,6 @@ ICOM_ADDRESSES: dict[str, int] = {
 class IcomCIVRig:
     """Direct CAT control for Icom radios via CI-V protocol."""
 
-    name: str = "Icom CI-V"
-
     def __init__(
         self,
         port: str,
@@ -219,6 +228,11 @@ class IcomCIVRig:
         self._addr = ci_v_address
         self._ser: serial.Serial | None = None
         self._lock = threading.Lock()
+
+    @property
+    def name(self) -> str:
+        """Per-instance label including port (L-3)."""
+        return f"Icom CI-V ({self._port})"
 
     def open(self) -> None:
         with self._lock:
@@ -506,8 +520,6 @@ class KenwoodRig:
         never arrive.
     """
 
-    name: str = "Kenwood/Elecraft"
-
     def __init__(
         self,
         port: str,
@@ -517,6 +529,11 @@ class KenwoodRig:
         self._baud_rate = baud_rate
         self._ser: serial.Serial | None = None
         self._lock = threading.Lock()
+
+    @property
+    def name(self) -> str:
+        """Per-instance label including port (L-3)."""
+        return f"Kenwood/Elecraft ({self._port})"
 
     def open(self) -> None:
         with self._lock:
@@ -718,8 +735,6 @@ class YaesuRig:
         1-second timeout waiting for a response that will never arrive.
     """
 
-    name: str = "Yaesu CAT"
-
     def __init__(
         self,
         port: str,
@@ -729,6 +744,11 @@ class YaesuRig:
         self._baud_rate = baud_rate
         self._ser: serial.Serial | None = None
         self._lock = threading.Lock()
+
+    @property
+    def name(self) -> str:
+        """Per-instance label including port (L-3)."""
+        return f"Yaesu CAT ({self._port})"
 
     def open(self) -> None:
         with self._lock:
