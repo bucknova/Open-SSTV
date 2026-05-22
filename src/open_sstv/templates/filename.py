@@ -18,6 +18,7 @@ on top.
 from __future__ import annotations
 
 import re
+import secrets
 from pathlib import Path
 
 from open_sstv.templates.tokens import TokenContext, resolve_tokens
@@ -78,27 +79,44 @@ def sanitize_filename_component(raw: str) -> str:
     return cleaned
 
 
+#: H-8: how many sequential ``_NNN`` trials to attempt before switching
+#: to random hex suffixes.  10 keeps the common case (a handful of saves
+#: in the same second-resolution filename bucket) producing tidy
+#: ``_001``..``_010`` filenames, while capping the worst-case ``stat()``
+#: syscall count for the path that matters: a GUI-thread auto-save
+#: pointed at a slow network share.  Earlier implementation walked up
+#: to 999 trials × 10–50 ms per stat on CIFS / SMB / NFS = tens of
+#: seconds of GUI freeze in the pathological case.
+_MAX_SEQUENTIAL_COLLISION_TRIALS: int = 10
+
+#: Number of hex characters in the random suffix used after the
+#: sequential trials are exhausted.  6 hex chars = 24 bits = 16.7 M
+#: distinct suffixes per stem, making a collision astronomically
+#: unlikely even with thousands of files in the same bucket.
+_RANDOM_SUFFIX_HEX_CHARS: int = 6
+
+
 def _resolve_collision(candidate: Path) -> Path:
     """Return a path that does not collide with an existing file.
 
-    If *candidate* does not exist, return it unchanged.  Otherwise,
-    append ``_001``, ``_002``, … (zero-padded to 3 digits) before the
-    extension until an unused path is found.  The search caps at
-    ``_999`` — at which point we fall back to appending a longer index
-    suffix rather than silently overwriting.
+    Strategy (H-8, audit 4.7/v0.2.9):
 
-    L7: each trial calls ``Path.exists()`` which translates to a
-    ``stat()`` syscall.  On a local SSD that's <1 µs per check, so 999
-    trials cost ~1 ms — invisible.  On a slow network share (CIFS /
-    SMB / NFS over high-latency wifi) each stat can be 10–50 ms, so a
-    worst-case 999-collision search could block the GUI thread (this
-    function is called from the auto-save path) for tens of seconds.
-    In practice 999 collisions in the same second-resolution filename
-    bucket implies someone is auto-saving an image every ~3 ms, which
-    is faster than any real SSTV decode loop — so the pathological
-    case is mostly hypothetical.  If you do hit it on a network share,
-    consider configuring a callsign in Settings so the filename template
-    expands to something more unique per session.
+    1. If *candidate* does not exist, return it unchanged (zero stat
+       calls in the happy path).
+    2. Otherwise, try ``_001``, ``_002``, …, up to
+       ``_010`` — sequential, zero-padded, predictable filenames for
+       the common "a handful of saves in the same filename bucket" case.
+    3. If those are all taken, switch to a random 6-hex-character
+       suffix (``_a3f29c``, etc.).  16.7 M possible suffixes per stem
+       so collisions are astronomically unlikely; we still re-check
+       in a bounded loop (50 trials) and ultimately fall back to a
+       monotonic counter just in case.
+
+    Earlier implementation walked up to 999 sequential trials, which
+    on a slow network share (10–50 ms per stat) could block the GUI
+    thread for tens of seconds — the function is called from the
+    auto-save GUI path so any blocking is user-visible.  The new
+    strategy caps at 60 stat calls in the absolute worst case.
     """
     if not candidate.exists():
         return candidate
@@ -106,13 +124,24 @@ def _resolve_collision(candidate: Path) -> Path:
     stem = candidate.stem
     suffix = candidate.suffix
     parent = candidate.parent
-    for n in range(1, 1000):
+
+    # Phase 1: predictable sequential trials for the common case.
+    for n in range(1, _MAX_SEQUENTIAL_COLLISION_TRIALS + 1):
         trial = parent / f"{stem}_{n:03d}{suffix}"
         if not trial.exists():
             return trial
-    # 999 collisions in the same filename bucket is absurd but we still
-    # mustn't overwrite.  Fall through to 4-digit, 5-digit, etc.
-    n = 1000
+
+    # Phase 2: random hex suffix, bounded by another 50 trials.
+    for _ in range(50):
+        rand = secrets.token_hex(_RANDOM_SUFFIX_HEX_CHARS // 2)
+        trial = parent / f"{stem}_{rand}{suffix}"
+        if not trial.exists():
+            return trial
+
+    # Phase 3 (effectively unreachable): a counter starting past the
+    # sequential range, just so a pathologically unlikely sequence of
+    # 50 random-suffix collisions can't loop forever or overwrite.
+    n = _MAX_SEQUENTIAL_COLLISION_TRIALS + 1000
     while True:
         trial = parent / f"{stem}_{n}{suffix}"
         if not trial.exists():
