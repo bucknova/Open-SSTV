@@ -11,6 +11,85 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.16] — 2026-05-22
+
+Second audit follow-up release.  Closes seven of the eight unresolved
+Medium-severity findings from the v0.2.9 stability audit (M-4 is left
+as a known cost per the audit's own framing; M-13 mypy CI gating
+still needs the strict-mode error cleanup).
+
+### Fixed
+
+- **M-1 — `SO_KEEPALIVE` on rigctld TCP socket.**  Half-open
+  connections (laptop sleep/resume, daemon crash, network partition)
+  now get detected via OS-level keepalive instead of waiting for the
+  next command's recv timeout.  Normalises behaviour between Windows
+  (which tears down half-open sockets faster by default) and Linux/
+  macOS.  Graceful degradation when SO_KEEPALIVE isn't available
+  (containers without CAP_NET_ADMIN, exotic socket implementations).
+- **M-2 — CI-V `_read_response` busy-poll replaced.**  Previously the
+  Icom CAT response reader polled `in_waiting` every 10 ms via
+  `time.sleep(0.01)` while holding the serial lock.  Now uses a
+  short-timeout blocking `read` so the OS schedules the wait — same
+  worst-case responsiveness, no Python wake-up cost, GIL released
+  during the blocking syscall.  User-configured `ser.timeout`
+  snapshot+restored via try/finally so the function has no side
+  effect on the next caller.
+- **M-3 — Waterfall slots warn on cross-thread invocation.**  Adds a
+  `_check_gui_thread()` guard at the top of `add_rx_column` /
+  `add_tx_column` that logs a `WARNING` if the slot fires off the
+  GUI thread.  Codifies the invisible "queued-signal-only" contract
+  protecting `_buf` / `_cursor` / `_overlap` without an explicit lock.
+- **M-6 — Stale template `.tmp` sweep.**  Extends the v0.3.15 H-5
+  config-tmp cleanup pattern to the templates directory.  `list_templates`
+  now opportunistically removes `*.toml.tmp` orphans left by a
+  SIGKILL between `tomli_w.dump` and `os.replace`.
+- **M-7 — TOML serializer helper for future Path/Enum config fields.**
+  `_serialize_for_toml(value)` in `config/store.py` recursively
+  converts `pathlib.Path → str`, `enum.Enum → value`, and
+  `list/tuple/dict` containers in place.  No-op on the current
+  AppConfig (all primitives); prevents a future `images_save_dir:
+  Path` or `default_tx_mode: Mode` refactor from crashing
+  `save_config` with `TypeError`.
+- **M-8 — `update_checker` 6-hour backoff against rate-limited
+  corporate NATs.**  Sidecar timestamp file at
+  `platformdirs.user_cache_dir("open_sstv") / "last_update_check"`
+  caches the last *successful* check.  Subsequent launches within
+  the window skip the network round-trip.  Persisted on
+  structurally-valid GitHub responses (including rate-limit JSON,
+  intentionally — hammering won't help) but *not* on transport
+  errors (so a user retrying at a wifi boundary still gets a fresh
+  attempt).  No new AppConfig field — transient runtime cache.
+- **M-9 — CLI decode `-o` is now optional.**  `open-sstv-decode foo.wav`
+  used to exit 2 from argparse, forcing the user to add `-o out.png`
+  which then landed in the current working directory (the source of
+  the `.gitignore` `sstv_*.png` rule).  Default is now
+  `<platformdirs.user_pictures_dir()>/Open-SSTV/sstv_<mode>_<utc-ts>.png`
+  — mirrors the GUI auto-save policy.  Directory is created on demand.
+
+### Audit M-class items not in this release
+
+- **M-4** (per-frame `ndarray.copy()` in audio callback) — graded by
+  the audit as a known cost, not a regression.  Revisit only if
+  real-world measurements show the drop rate on long PD modes is
+  unacceptable.  Avoiding the copy needs a pre-allocated ring buffer
+  with non-trivial sync against queue consumption.
+- **M-5** — already closed in v0.3.14 (pinned appimagetool).
+- **M-10 / M-11 / M-12** — already closed in PR #7 (gitignore +
+  repo hygiene).
+- **M-13** — mypy strict-mode CI gating.  Waits on the 196 errors
+  the v0.3.15 parser fix exposed.  Separate PR.
+
+### Audit follow-ups still open
+
+- mypy strict-mode cleanup → CI gate
+- ruff E-class / B-class / SIM-class cleanup (~151 manual fixes) →
+  widen CI selection from `--select=I,F,UP,W`
+- GUI marker via Xvfb on Linux
+- Integration marker against fake rigctld
+
+---
+
 ## [0.3.15] — 2026-05-22
 
 Audit follow-up release closing every High-severity finding from the
