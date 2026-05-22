@@ -15,22 +15,19 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from PIL import Image
-
-from PIL import ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont
 
 from open_sstv.core.banner import (
-    BANNER_HEIGHT,
-    SIZE_TABLE,
     _DEFAULT_FONT_SIZE,
     _SCALED_CLAMP,
     _SCALED_PERCENT,
+    BANNER_HEIGHT,
+    SIZE_TABLE,
     apply_tx_banner,
     banner_size_params,
     resolve_right_side_text,
     scaled_banner_params,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -340,7 +337,7 @@ def test_resolve_drops_version_when_full_overflows(_default_font, _scratch_draw)
     # Measure "Open-SSTV" and "Open-SSTV v0.2.8" to pick a budget that lies
     # between them.  This makes the test robust against font-metric drift.
     brand = "Open-SSTV"
-    full = f"Open-SSTV v0.2.8"
+    full = "Open-SSTV v0.2.8"
     brand_w = _scratch_draw.textbbox((0, 0), brand, font=_default_font)[2]
     full_w = _scratch_draw.textbbox((0, 0), full, font=_default_font)[2]
     # Budget just above brand width but below full width.

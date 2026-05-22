@@ -14,7 +14,6 @@ from scipy.signal import sosfiltfilt
 
 from open_sstv.core.dsp_utils import bandpass_sos, resample_to, to_mono_float32
 
-
 # === to_mono_float32 ===
 
 
@@ -22,7 +21,7 @@ def test_to_mono_float32_int16_scales_to_unit_range() -> None:
     samples = np.array([0, 16384, -16384, 32767, -32768], dtype=np.int16)
     out = to_mono_float32(samples)
     assert out.dtype == np.float32
-    assert -1.0 <= float(out.min())
+    assert float(out.min()) >= -1.0
     assert float(out.max()) <= 1.0
     # Mid-scale int16 should land near ±0.5.
     np.testing.assert_allclose(out[1], 0.5, atol=1e-4)

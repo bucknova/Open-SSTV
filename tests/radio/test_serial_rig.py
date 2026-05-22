@@ -8,9 +8,8 @@ byte, and the accessors must strip it before parsing.
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
-
 import sys
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -280,9 +279,10 @@ class TestSerialExceptionWrapping:
 # ---------------------------------------------------------------------------
 
 
-def _make_yaesu_rig() -> "YaesuRig":
-    from open_sstv.radio.serial_rig import YaesuRig
+def _make_yaesu_rig() -> YaesuRig:
     import threading
+
+    from open_sstv.radio.serial_rig import YaesuRig
 
     r = YaesuRig.__new__(YaesuRig)
     r._port = "/dev/null"
@@ -329,7 +329,6 @@ class TestYaesuQuestionMarkError:
 
     def test_question_mark_via_read_command_raises(self) -> None:
         from open_sstv.radio.exceptions import RigCommandError
-        from open_sstv.radio.serial_rig import YaesuRig
 
         r = _make_yaesu_rig()
         mock_ser = MagicMock()
@@ -343,7 +342,6 @@ class TestYaesuQuestionMarkError:
 
     def test_question_mark_error_carries_command_context(self) -> None:
         from open_sstv.radio.exceptions import RigCommandError
-        from open_sstv.radio.serial_rig import YaesuRig
 
         r = _make_yaesu_rig()
         mock_ser = MagicMock()
@@ -360,9 +358,10 @@ class TestYaesuQuestionMarkError:
 # ---------------------------------------------------------------------------
 
 
-def _make_kenwood_rig() -> "KenwoodRig":
-    from open_sstv.radio.serial_rig import KenwoodRig
+def _make_kenwood_rig() -> KenwoodRig:
     import threading
+
+    from open_sstv.radio.serial_rig import KenwoodRig
 
     r = KenwoodRig.__new__(KenwoodRig)
     r._port = "/dev/null"
@@ -408,7 +407,6 @@ class TestKenwoodQuestionMarkError:
 
     def test_question_mark_via_read_command_raises(self) -> None:
         from open_sstv.radio.exceptions import RigCommandError
-        from open_sstv.radio.serial_rig import KenwoodRig
 
         r = _make_kenwood_rig()
         mock_ser = MagicMock()
@@ -421,7 +419,6 @@ class TestKenwoodQuestionMarkError:
 
     def test_question_mark_error_carries_command_context(self) -> None:
         from open_sstv.radio.exceptions import RigCommandError
-        from open_sstv.radio.serial_rig import KenwoodRig
 
         r = _make_kenwood_rig()
         mock_ser = MagicMock()
@@ -521,10 +518,10 @@ class TestOSErrorWrapping:
         r._ser = MagicMock()
         return r
 
-    def _kenwood_rig(self) -> "KenwoodRig":
+    def _kenwood_rig(self) -> KenwoodRig:
         return _make_kenwood_rig()
 
-    def _yaesu_rig(self) -> "YaesuRig":
+    def _yaesu_rig(self) -> YaesuRig:
         return _make_yaesu_rig()
 
     def test_icom_command_wraps_oserror(self) -> None:
@@ -550,7 +547,6 @@ class TestOSErrorWrapping:
     def test_kenwood_command_wraps_oserror(self) -> None:
         """KenwoodRig._command: OSError from reset_input_buffer → RigConnectionError."""
         from open_sstv.radio.exceptions import RigConnectionError
-        from open_sstv.radio.serial_rig import KenwoodRig
 
         r = _make_kenwood_rig()
         r._ser = MagicMock()
@@ -562,7 +558,6 @@ class TestOSErrorWrapping:
     def test_kenwood_write_command_wraps_oserror(self) -> None:
         """KenwoodRig._write_command: OSError → RigConnectionError."""
         from open_sstv.radio.exceptions import RigConnectionError
-        from open_sstv.radio.serial_rig import KenwoodRig
 
         r = _make_kenwood_rig()
         r._ser = MagicMock()
@@ -574,7 +569,6 @@ class TestOSErrorWrapping:
     def test_yaesu_command_wraps_oserror(self) -> None:
         """YaesuRig._command: OSError from reset_input_buffer → RigConnectionError."""
         from open_sstv.radio.exceptions import RigConnectionError
-        from open_sstv.radio.serial_rig import YaesuRig
 
         r = _make_yaesu_rig()
         r._ser = MagicMock()
@@ -586,7 +580,6 @@ class TestOSErrorWrapping:
     def test_yaesu_write_command_wraps_oserror(self) -> None:
         """YaesuRig._write_command: OSError → RigConnectionError."""
         from open_sstv.radio.exceptions import RigConnectionError
-        from open_sstv.radio.serial_rig import YaesuRig
 
         r = _make_yaesu_rig()
         r._ser = MagicMock()
@@ -598,6 +591,7 @@ class TestOSErrorWrapping:
     def test_serial_ptt_set_ptt_wraps_oserror(self) -> None:
         """SerialPttRig.set_ptt: OSError from DTR write → RigConnectionError."""
         import threading
+
         from open_sstv.radio.exceptions import RigConnectionError
         from open_sstv.radio.serial_rig import SerialPttRig
 
@@ -650,6 +644,7 @@ class TestTermiosErrorWrapping:
         """IcomCIVRig._command: termios.error → RigConnectionError."""
         import termios
         import threading
+
         from open_sstv.radio.exceptions import RigConnectionError
 
         r = IcomCIVRig.__new__(IcomCIVRig)
@@ -666,8 +661,8 @@ class TestTermiosErrorWrapping:
     def test_kenwood_command_wraps_termios_error(self) -> None:
         """KenwoodRig._command: termios.error → RigConnectionError."""
         import termios
+
         from open_sstv.radio.exceptions import RigConnectionError
-        from open_sstv.radio.serial_rig import KenwoodRig
 
         r = _make_kenwood_rig()
         r._ser = MagicMock()
@@ -679,8 +674,8 @@ class TestTermiosErrorWrapping:
     def test_kenwood_write_command_wraps_termios_error(self) -> None:
         """KenwoodRig._write_command: termios.error → RigConnectionError."""
         import termios
+
         from open_sstv.radio.exceptions import RigConnectionError
-        from open_sstv.radio.serial_rig import KenwoodRig
 
         r = _make_kenwood_rig()
         r._ser = MagicMock()
@@ -692,8 +687,8 @@ class TestTermiosErrorWrapping:
     def test_yaesu_command_wraps_termios_error(self) -> None:
         """YaesuRig._command: termios.error → RigConnectionError."""
         import termios
+
         from open_sstv.radio.exceptions import RigConnectionError
-        from open_sstv.radio.serial_rig import YaesuRig
 
         r = _make_yaesu_rig()
         r._ser = MagicMock()
@@ -705,8 +700,8 @@ class TestTermiosErrorWrapping:
     def test_yaesu_write_command_wraps_termios_error(self) -> None:
         """YaesuRig._write_command: termios.error → RigConnectionError."""
         import termios
+
         from open_sstv.radio.exceptions import RigConnectionError
-        from open_sstv.radio.serial_rig import YaesuRig
 
         r = _make_yaesu_rig()
         r._ser = MagicMock()

@@ -41,7 +41,7 @@ import sounddevice as sd
 #: window and re-queries.  500 ms is the sweet spot between coalescing
 #: a single UI operation and feeling stale to a user.
 _DEVICE_CACHE_TTL_S: float = 0.5
-_devices_cache: tuple[float, list["AudioDevice"]] | None = None
+_devices_cache: tuple[float, list[AudioDevice]] | None = None
 
 
 def invalidate_device_cache() -> None:

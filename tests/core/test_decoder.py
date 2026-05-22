@@ -641,8 +641,9 @@ def test_decode_robot36_dispatch_apply_slant_correct_false_calls_walk() -> None:
     ):
         # decode_wav passes apply_slant_correct=False for Robot 36, so
         # running a full Robot 36 decode exercises the no-slant path.
-        from open_sstv.core.encoder import encode
         import numpy as np
+
+        from open_sstv.core.encoder import encode
         img = _make_gradient(320, 240)
         samples = encode(img, Mode.ROBOT_36, sample_rate=48_000)
         audio = samples.astype(np.float64) / 32768.0
@@ -661,7 +662,9 @@ def test_decode_wav_robot36_uses_walk_not_slant() -> None:
     Robot 36 — it passes apply_slant_correct=False to match the GUI path
     which deliberately skips the polyfit on noisy signals (OP2-15)."""
     from unittest.mock import patch
+
     import numpy as np
+
     from open_sstv.core.encoder import encode
 
     fs = 48_000

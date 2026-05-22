@@ -20,7 +20,7 @@ from open_sstv import __version__
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the ``open-sstv`` console script and ``python -m open_sstv``."""
     import logging  # noqa: PLC0415
-    import os       # noqa: PLC0415
+    import os  # noqa: PLC0415
     log_level = logging.DEBUG if os.environ.get("OPEN_SSTV_DEBUG") else logging.INFO
     logging.basicConfig(
         level=log_level,

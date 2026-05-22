@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import pytest
 from PIL import Image
-from PySide6.QtCore import QPoint
 
 from open_sstv.core.modes import Mode
 from open_sstv.ui.image_gallery import ImageGalleryWidget
@@ -206,7 +205,6 @@ def test_gallery_temp_files_have_unique_names(qapp, qtbot) -> None:
     if gallery._tmpdir is None:
         pytest.skip("temp directory not available in this environment")
 
-    from pathlib import Path
     from open_sstv.ui.image_gallery import _IMAGE_PATH_ROLE
 
     paths = []

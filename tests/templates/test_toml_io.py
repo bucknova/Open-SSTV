@@ -25,13 +25,11 @@ from open_sstv.templates.model import (
     GradientLayer,
     PatternLayer,
     PhotoLayer,
-    QSOState,
     RectLayer,
     RxImageLayer,
     ShadowSpec,
     StationImageLayer,
     StrokeSpec,
-    TXContext,
     Template,
     TextLayer,
 )

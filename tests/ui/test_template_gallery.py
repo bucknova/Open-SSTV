@@ -15,7 +15,7 @@ from open_sstv.core.modes import Mode
 from open_sstv.templates.manager import install_starter_pack
 from open_sstv.templates.model import PhotoLayer, QSOState, Template, TextLayer
 from open_sstv.templates.toml_io import save_template
-from open_sstv.ui.template_gallery import TemplateGallery, _ThumbnailCard
+from open_sstv.ui.template_gallery import TemplateGallery
 
 pytestmark = pytest.mark.gui
 

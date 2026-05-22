@@ -37,7 +37,6 @@ from pathlib import Path
 import numpy as np
 
 from open_sstv.core.decoder import decode_wav
-from open_sstv.core.dsp_utils import to_mono_float32
 
 
 def _build_parser() -> argparse.ArgumentParser:

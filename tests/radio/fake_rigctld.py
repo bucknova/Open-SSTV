@@ -78,7 +78,7 @@ class FakeRigctld:
             self._thread.join(timeout=2.0)
             self._thread = None
 
-    def __enter__(self) -> "FakeRigctld":
+    def __enter__(self) -> FakeRigctld:
         self.start()
         return self
 

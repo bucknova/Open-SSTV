@@ -11,15 +11,11 @@ Covers:
 """
 from __future__ import annotations
 
-import tomllib
 from pathlib import Path
 
-import pytest
-
-from open_sstv.templates.manager import STARTER_TEMPLATE_FILENAMES, starter_pack_installed
+from open_sstv.templates.manager import STARTER_TEMPLATE_FILENAMES
 from open_sstv.templates.migration import _V2_DEFAULT_TEXTS, run_migration
 from open_sstv.templates.toml_io import load_template
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -36,10 +32,10 @@ def _write_v2_templates(config_dir: Path, entries: list[dict]) -> Path:
     lines = []
     for entry in entries:
         name = entry.get("name", "unnamed")
-        lines.append(f'[[template]]')
+        lines.append('[[template]]')
         lines.append(f'name = {name!r}')
         for ov in entry.get("overlays", []):
-            lines.append(f'[[template.overlay]]')
+            lines.append('[[template.overlay]]')
             lines.append(f'text = {ov["text"]!r}')
     path = config_dir / "templates.toml"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")

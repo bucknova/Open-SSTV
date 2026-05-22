@@ -2,14 +2,12 @@
 """Tests for ``open_sstv.ui.update_checker``."""
 from __future__ import annotations
 
-import io
 import json
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from open_sstv.ui.update_checker import UpdateCheckerWorker, _parse_version
-
 
 # === _parse_version ===
 
@@ -168,9 +166,8 @@ def test_unrelated_exception_propagates(qtbot) -> None:
     """
     worker = UpdateCheckerWorker()
     with patch("open_sstv.ui.update_checker.urllib.request.urlopen",
-               side_effect=TypeError("argument of wrong type")):
-        with pytest.raises(TypeError):
-            worker.check()
+               side_effect=TypeError("argument of wrong type")), pytest.raises(TypeError):
+        worker.check()
 
 
 def test_caught_exception_logged_at_debug(qtbot, caplog) -> None:

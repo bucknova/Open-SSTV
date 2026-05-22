@@ -34,7 +34,6 @@ from open_sstv.core.encoder import encode
 from open_sstv.core.incremental_decoder import ScottieS1IncrementalDecoder
 from open_sstv.core.modes import MODE_TABLE, Mode, ModeSpec
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -956,12 +955,12 @@ def test_robot36_detection_is_incremental() -> None:
     sizes, and asserting it is less than 2 × total_pending_size.  A regression
     to the O(N²) path would send the sum well above that bound for N ≥ 4.
     """
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import patch
 
     from open_sstv.core.incremental_decoder import (
+        _MIN_BP_SAMPLES,
         Robot36IncrementalDecoder,
         _bp_window,
-        _MIN_BP_SAMPLES,
     )
 
     spec = MODE_TABLE[Mode.ROBOT_36]

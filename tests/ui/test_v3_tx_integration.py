@@ -18,7 +18,6 @@ from PIL import Image
 
 from open_sstv.config.schema import AppConfig
 from open_sstv.core.modes import Mode
-from open_sstv.templates.manager import install_starter_pack
 from open_sstv.templates.model import (
     PhotoLayer,
     QSOState,

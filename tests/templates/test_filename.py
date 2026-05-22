@@ -38,7 +38,7 @@ def _ctx(
         mode=mode,
         direction=direction,  # type: ignore[arg-type]
         now_utc=datetime.datetime(
-            2026, 4, 17, 21, 35, 12, tzinfo=datetime.timezone.utc
+            2026, 4, 17, 21, 35, 12, tzinfo=datetime.UTC
         ),
     )
 

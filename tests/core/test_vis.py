@@ -31,7 +31,6 @@ from open_sstv.core.vis import (
     detect_vis,
 )
 
-
 # === helpers ===
 
 
