@@ -9,12 +9,14 @@ The config file lives at ``platformdirs.user_config_dir("open_sstv") / "config.t
 """
 from __future__ import annotations
 
+import enum
 import logging
 import os
 import threading
 import tomllib
 from dataclasses import asdict, fields
 from pathlib import Path
+from typing import Any
 
 _log = logging.getLogger(__name__)
 
@@ -41,6 +43,46 @@ _save_lock = threading.Lock()
 def config_path() -> Path:
     """Absolute path to the TOML config file (may not exist yet)."""
     return Path(platformdirs.user_config_dir(_APP_NAME)) / _CONFIG_FILENAME
+
+
+def _serialize_for_toml(value: Any) -> Any:
+    """Recursively coerce *value* into a TOML-writable shape (M-7).
+
+    ``tomli_w.dump`` accepts only TOML's native scalar set (str, int,
+    float, bool, datetime, list, dict) — anything else raises
+    ``TypeError`` at write time.  ``AppConfig`` today is all primitive
+    scalars and strings, but a future field with type ``pathlib.Path``
+    (very common refactor — e.g. ``images_save_dir`` as ``Path`` instead
+    of ``str``) or ``enum.Enum`` (e.g. ``default_tx_mode`` as ``Mode``
+    instead of ``str``) would crash save_config the first time a user
+    saved their Settings.
+
+    This helper makes the conversion explicit and centralised:
+
+      * ``pathlib.Path`` / ``PurePath`` → ``str(value)``
+      * ``enum.Enum`` → ``value.value`` (the underlying primitive)
+      * ``list`` / ``tuple`` → list with each element recursively
+        serialised (preserves element-position ordering)
+      * ``dict`` → dict with each value recursively serialised
+        (keys are passed through; TOML requires string keys, so a
+        non-string key would still raise at write time, but that's
+        a schema bug)
+      * everything else passed through unchanged
+
+    Idempotent — calling it on a value that's already TOML-native
+    returns the same object.  Audit reference: M-7 (audit 4.7/v0.2.9).
+    """
+    if isinstance(value, enum.Enum):
+        return value.value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, list):
+        return [_serialize_for_toml(v) for v in value]
+    if isinstance(value, tuple):
+        return [_serialize_for_toml(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _serialize_for_toml(v) for k, v in value.items()}
+    return value
 
 
 def _cleanup_stale_tmp(path: Path) -> None:
@@ -155,7 +197,11 @@ def save_config(cfg: AppConfig, path: Path | None = None) -> None:
             # Solution at that point will be: write a sentinel string
             # (e.g. ``"__none__"``) for explicit-None fields and have
             # the load path translate it back.  No action needed today.
-            data = {k: v for k, v in asdict(cfg).items() if v is not None}
+            data = {
+                k: _serialize_for_toml(v)
+                for k, v in asdict(cfg).items()
+                if v is not None
+            }
             with tmp.open("wb") as f:
                 tomli_w.dump(data, f)
             os.replace(tmp, path)
