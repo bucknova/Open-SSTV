@@ -115,10 +115,27 @@ def test_cli_rejects_silence_wav(tmp_path: Path) -> None:
     assert not out.exists()
 
 
-def test_cli_requires_output(robot36_wav: Path) -> None:
-    with pytest.raises(SystemExit) as excinfo:
-        decode_main([str(robot36_wav)])
-    assert excinfo.value.code == 2
+def test_cli_default_output_path(
+    robot36_wav: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """M-9: omitting -o writes to <user_pictures_dir>/Open-SSTV/sstv_<mode>_<ts>.png.
+
+    Previously the CLI required ``-o`` and exited 2 when omitted; now it
+    builds a sensible default mirror of the GUI auto-save behaviour.
+    Patch ``platformdirs.user_pictures_dir`` to a tmp dir so the test
+    doesn't write to the real ~/Pictures.
+    """
+    monkeypatch.setattr(
+        "open_sstv.cli.decode.platformdirs.user_pictures_dir",
+        lambda: str(tmp_path),
+    )
+    rc = decode_main([str(robot36_wav)])
+    assert rc == 0, "decode without -o should succeed using the default path"
+    saved = list((tmp_path / "Open-SSTV").glob("sstv_*.png"))
+    assert len(saved) == 1, f"expected one default-path file, got {saved}"
+    assert saved[0].name.startswith("sstv_robot_36_")
 
 
 def test_cli_decodes_stereo_wav(
