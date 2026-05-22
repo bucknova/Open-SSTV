@@ -34,10 +34,14 @@ the widget decides how to render them.
 """
 from __future__ import annotations
 
+import logging
+
 import numpy as np
-from PySide6.QtCore import Qt, QTimer, Signal, Slot
+from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QMainWindow, QWidget
+from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
+
+_log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # FFT constants
@@ -168,14 +172,43 @@ class WaterfallWidget(QWidget):
         """Update sample rate so frequency markers scale correctly."""
         self._sample_rate = max(1, rate)
 
+    def _check_gui_thread(self, slot_name: str) -> None:
+        """Warn if a mutating slot fires off the GUI thread (M-3 contract).
+
+        M-3 (audit 4.7/v0.2.9): ``_buf``/``_cursor``/``_overlap`` are
+        protected by single-writer semantics, with all mutation funnelled
+        through Qt queued signals onto the GUI thread.  No explicit lock
+        is taken because the contract holds.  This guard makes the
+        contract visible: if a future refactor accidentally calls
+        ``add_rx_column`` / ``add_tx_column`` from a worker thread
+        directly (skipping the queued connection), the log message
+        names the violating slot so the regression is easy to spot.
+
+        Logs at WARNING rather than ``assert`` so a misuse doesn't
+        crash the waterfall and tank a live RX session — observability
+        over availability for a non-safety-critical widget.
+        """
+        app = QApplication.instance()
+        if app is None:
+            return  # headless context, e.g. some unit tests — skip.
+        if QThread.currentThread() is not app.thread():
+            _log.warning(
+                "WaterfallWidget.%s called off the GUI thread; the widget "
+                "assumes single-writer semantics for _buf/_cursor.  Connect "
+                "the producer via Qt.QueuedConnection.",
+                slot_name,
+            )
+
     @Slot(object)
     def add_rx_column(self, chunk: object) -> None:
         """Append one RX audio chunk to the waterfall (cool palette)."""
+        self._check_gui_thread("add_rx_column")
         self._add_column(np.asarray(chunk, dtype=np.float64).ravel(), warm=False)
 
     @Slot(object)
     def add_tx_column(self, chunk: object) -> None:
         """Append one TX audio chunk to the waterfall (warm palette)."""
+        self._check_gui_thread("add_tx_column")
         arr = np.asarray(chunk, dtype=np.float64).ravel()
         # TX samples arrive as int16 PCM in [-32768, 32767] — normalise.
         if arr.size > 0 and np.max(np.abs(arr)) > 1.5:
