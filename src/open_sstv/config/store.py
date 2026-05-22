@@ -43,6 +43,32 @@ def config_path() -> Path:
     return Path(platformdirs.user_config_dir(_APP_NAME)) / _CONFIG_FILENAME
 
 
+def _cleanup_stale_tmp(path: Path) -> None:
+    """Delete ``<path>.tmp`` if it exists.
+
+    Called by ``load_config`` to opportunistically clean up the tmp file
+    left behind when a previous ``save_config`` was killed between
+    ``tomli_w.dump`` and ``os.replace`` (SIGKILL, power loss, OOM).
+    The tmp may be a complete config that just didn't get renamed, OR
+    a partial write — we don't try to recover it either way because:
+
+      * if it's complete, the next save will overwrite it anyway,
+      * if it's partial, it's worse than the default config we'd fall
+        back to.
+
+    Any error from ``unlink`` is logged at debug and swallowed — a
+    stale tmp blocking nothing is acceptable; the load must proceed.
+    """
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    if not tmp.exists():
+        return
+    try:
+        tmp.unlink()
+        _log.info("Removed stale config tmp file: %s", tmp)
+    except OSError as exc:
+        _log.debug("Could not remove stale config tmp %s: %s", tmp, exc)
+
+
 def load_config(path: Path | None = None) -> AppConfig:
     """Load config from *path* (default: ``config_path()``).
 
@@ -53,9 +79,20 @@ def load_config(path: Path | None = None) -> AppConfig:
     OP2-06: OSError (permission denied, directory instead of file) propagates
     rather than being silently swallowed — only TOML decode errors fall back
     to defaults, since a corrupt file is genuinely unrecoverable.
+
+    H-5 (audit 4.7/v0.2.9): opportunistically delete any
+    ``<config>.toml.tmp`` sibling left behind by a SIGKILL between
+    ``tomli_w.dump`` and ``os.replace`` in a prior ``save_config()``
+    call.  ``save_config`` only unlinks its own tmp on caught
+    ``OSError`` — a hard kill leaves the tmp orphaned forever, and
+    over a long-running install they accumulate.  Cleanup here is a
+    no-op when nothing is stale and runs once per app start (the
+    common load_config caller).  Failure to unlink is logged but does
+    not block the load — the load path is what users care about.
     """
     if path is None:
         path = config_path()
+    _cleanup_stale_tmp(path)
     if not path.is_file():
         return AppConfig()
 
