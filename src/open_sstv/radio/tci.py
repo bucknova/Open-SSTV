@@ -293,7 +293,9 @@ class TciConnection:
             0,              # codec: uncompressed
             0,              # crc: unused
             n,              # length: total sample count
-            2,              # type: TX_AUDIO
+            2,              # msg_type: TX_AUDIO  (renamed from "type:" so
+                            # mypy doesn't parse this as a PEP 484 type
+                            # comment annotation and fail to read the file)
             1,              # channels: mono
             0, 0, 0, 0, 0, 0, 0, 0,  # reserved[8]
         )
