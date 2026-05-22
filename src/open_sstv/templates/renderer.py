@@ -249,8 +249,35 @@ def _make_gradient(
 def _load_font(
     font_family: str, font_size_px: int, user_fonts_dir: Path | None = None
 ) -> PIL.ImageFont.FreeTypeFont:
+    """Load *font_family* at *font_size_px*, falling back on bad files.
+
+    H-6 (audit 4.7/v0.2.9): ``resolve_font_path`` only checks that the
+    user-imported font *exists* on disk, not that it's a valid TTF/OTF.
+    A user who drops a corrupted file (truncated download, accidentally
+    named ``.ttf``) into ``{user_config_dir}/open_sstv/fonts/`` would
+    previously crash the entire render path with an unhandled ``OSError``
+    from ``PIL.ImageFont.truetype``.  Wrap the load and fall back to the
+    bundled DejaVu Sans Bold when that happens; the user gets a warning
+    in the log but the transmission still renders (with the wrong font,
+    which is recoverable, rather than no image, which is not).
+    """
     path = resolve_font_path(font_family, user_fonts_dir=user_fonts_dir)
-    font = PIL.ImageFont.truetype(str(path), font_size_px)
+    try:
+        font = PIL.ImageFont.truetype(str(path), font_size_px)
+    except OSError as exc:
+        # Corrupted user font or, very rarely, a Pillow build that can't
+        # read the bundled TTF on this platform.  Fall back to DejaVu
+        # Sans Bold — always present in the shipped assets/fonts dir —
+        # by resolving the well-known fallback family name (which
+        # bypasses the user-fonts search).
+        _log.warning(
+            "Font load failed for %r at %s: %s — falling back to DejaVu Sans Bold",
+            font_family, path, exc,
+        )
+        fallback_path = resolve_font_path(
+            "DejaVu Sans Bold", user_fonts_dir=user_fonts_dir
+        )
+        font = PIL.ImageFont.truetype(str(fallback_path), font_size_px)
     # Variable fonts (e.g. shipped Orbitron[wght].ttf) load at their default
     # axis position — Regular for every Tier-1 we ship.  When the family
     # name carries Bold intent, snap to the Bold named instance.  No-ops on
