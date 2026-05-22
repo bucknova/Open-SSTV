@@ -35,10 +35,13 @@ it as a non-modal status bar message.
 """
 from __future__ import annotations
 
+import logging
 import socket
 import threading
 
 from open_sstv.radio.exceptions import RigCommandError, RigConnectionError
+
+_log = logging.getLogger(__name__)
 
 
 class RigctldClient:
@@ -141,6 +144,24 @@ class RigctldClient:
                 f"could not connect to {self.name}: {exc}"
             ) from exc
         sock.settimeout(self._timeout_s)
+        # M-1 (audit 4.7/v0.2.9): turn on TCP keepalive so the OS detects
+        # a half-open connection (laptop sleep/resume, daemon crash on the
+        # other end, network partition) faster than waiting for the next
+        # command's recv timeout to fire.  Windows tears down half-open
+        # sockets faster than Linux/macOS by default, so without this
+        # we'd see "command timed out" on the same code path that worked
+        # cleanly elsewhere — turning on keepalive normalises behaviour
+        # across the matrix.  No per-OS keepalive-interval tuning: the
+        # OS defaults (Linux ~2 hr, macOS/Windows similar) are good
+        # enough to catch a wedged daemon within a single SSTV QSO.
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        except OSError as exc:
+            # Some constrained environments (containers without
+            # CAP_NET_ADMIN, exotic socket implementations) reject
+            # SO_KEEPALIVE.  Log and continue — the timeout-based
+            # detection still works, it's just slower.
+            _log.debug("SO_KEEPALIVE not available on this socket: %s", exc)
         self._sock = sock
 
     def _close_locked(self) -> None:
