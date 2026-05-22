@@ -198,6 +198,19 @@ class TciConnection:
         t = self._recv_thread
         if t is not None and t.is_alive():
             t.join(timeout=2.0)
+            # L-4 (audit 4.7/v0.2.9): the recv thread is ``daemon=True``
+            # so a wedged ``websocket-client`` recv that doesn't unblock
+            # within 2 s won't keep the interpreter alive — but the
+            # silent leak makes "TCI disconnect succeeded" misleading.
+            # Log at WARNING when the thread refuses to die so a future
+            # bug in upstream (or our recv loop) is visible without
+            # the operator needing to attach a debugger.
+            if t.is_alive():
+                _log.warning(
+                    "TCI disconnect: recv thread did not exit within 2 s "
+                    "— leaving as a leaked daemon thread (it will die "
+                    "with the process).  Investigate if this fires often."
+                )
 
     def send(self, command: str) -> None:
         """Send a TCI text command. Thread-safe."""
