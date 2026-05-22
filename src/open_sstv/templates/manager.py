@@ -81,6 +81,32 @@ def _bundled_templates_dir() -> Path:
 # ---------------------------------------------------------------------------
 
 
+def _cleanup_stale_tmp_files(tdir: Path) -> None:
+    """Remove any ``*.toml.tmp`` files left behind in *tdir* (M-6).
+
+    ``save_template`` writes via a sibling ``.tmp`` + ``os.replace``;
+    on the ``OSError`` branch it unlinks its own tmp, but a hard kill
+    (SIGKILL, power loss, OOM) between ``tomli_w.dump`` and
+    ``os.replace`` leaves the tmp orphaned forever.  Over a long-running
+    install they accumulate (especially relevant once template editing
+    is a common GUI flow).  Sweep them opportunistically at every
+    ``list_templates`` call — the gallery refresh runs at app startup
+    and on demand, so stale tmps never live long.  Mirror H-5's
+    ``config/store.py`` cleanup pattern; failures are logged at debug
+    and never block the listing.
+    """
+    try:
+        for tmp in tdir.glob("*.toml.tmp"):
+            try:
+                tmp.unlink()
+                _log.info("Removed stale template tmp file: %s", tmp)
+            except OSError as exc:
+                _log.debug("Could not remove stale template tmp %s: %s", tmp, exc)
+    except OSError as exc:
+        # tdir.glob itself can fail if the directory disappeared mid-call.
+        _log.debug("Stale-tmp sweep failed for %s: %s", tdir, exc)
+
+
 def list_templates(
     templates_dir: Path | None = None,
 ) -> list[tuple[str, str, Path]]:
@@ -89,10 +115,17 @@ def list_templates(
     Templates that fail to load (corrupt TOML, future schema version) are
     logged and skipped — the list always contains only valid entries.
     Sorted by filename for a stable gallery order.
+
+    Side effect (M-6): opportunistically removes any ``*.toml.tmp``
+    files left behind by a SIGKILL-during-save.  Mirrors the H-5 config
+    cleanup pattern; failures are logged at debug and never block the
+    listing.
     """
     tdir = templates_dir if templates_dir is not None else default_templates_dir()
     if not tdir.is_dir():
         return []
+
+    _cleanup_stale_tmp_files(tdir)
 
     results: list[tuple[str, str, Path]] = []
     for path in sorted(tdir.glob("*.toml")):
