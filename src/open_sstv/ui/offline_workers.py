@@ -221,7 +221,11 @@ class OfflineEncodeWorker(QObject):
         try:
             out = Path(output_path)
             out.parent.mkdir(parents=True, exist_ok=True)
-            with wave.open(str(out), "wb") as wav:
+            # H-4: pathlib.Path.open routes through Windows wide-char API,
+            # so non-ASCII characters in *out* (emoji, accented chars,
+            # CJK) survive even on non-UTF-8 locales.  See the matching
+            # comment in MainWindow._on_export_to_audio_requested.
+            with out.open("wb") as raw, wave.open(raw, "wb") as wav:
                 wav.setnchannels(1)
                 wav.setsampwidth(2)  # 16-bit PCM
                 wav.setframerate(sample_rate)
