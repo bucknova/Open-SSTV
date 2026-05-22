@@ -166,6 +166,15 @@ class InputStreamWorker(QObject):
         # return -10851 (Invalid Property Value) on the next stream-open
         # unless Pa_Terminate()+Pa_Initialize() have been called.
         self._device_lost: bool = False
+        # H-2 (audit 4.7/v0.2.9): both the wall-clock watchdog and the
+        # PortAudio finished_callback can detect the same unplug and try
+        # to emit ``stream_error`` + schedule ``stop()``.  The ``stop()``
+        # second-call is a no-op (self._stream is None) but the duplicate
+        # ``stream_error`` toast in the UI is user-visible and confusing.
+        # This flag is set by whichever path fires first and short-circuits
+        # the other.  Cleared at ``start()`` time so each new session is
+        # ready to detect a fresh device-loss event.
+        self._device_loss_emitted: bool = False
 
     @property
     def is_running(self) -> bool:
@@ -202,6 +211,9 @@ class InputStreamWorker(QObject):
         with self._drop_lock:
             self._dropped_chunks = 0
         self._stopping = False
+        # H-2: reset the dedupe flag so the next unplug emits exactly one
+        # ``stream_error`` regardless of which detection path fires first.
+        self._device_loss_emitted = False
 
         # Drain any stale chunks from a previous session before the
         # callback starts pushing new ones. Queue lives on the worker
@@ -438,11 +450,17 @@ class InputStreamWorker(QObject):
         immediately and the actual stop runs on the next loop tick
         (still on this same worker thread, so QTimer affinity is
         preserved).
+
+        H-2: gate ``stream_error`` on ``_device_loss_emitted`` so the
+        PortAudio finished_callback path (which can race with this
+        timeout on the same unplug) cannot also fire the toast.
         """
         self._device_lost = True
-        self.stream_error.emit(
-            "Audio device disconnected — replug and click Start to recover"
-        )
+        if not self._device_loss_emitted:
+            self._device_loss_emitted = True
+            self.stream_error.emit(
+                "Audio device disconnected — replug and click Start to recover"
+            )
         QTimer.singleShot(0, self.stop)
 
     def _on_pa_stream_finished(self) -> None:
@@ -464,9 +482,17 @@ class InputStreamWorker(QObject):
         if self._stopping:
             return
         self._device_lost = True
-        self.stream_error.emit(
-            "Audio device disconnected — replug and click Start to recover"
-        )
+        # H-2: gate ``stream_error`` on ``_device_loss_emitted`` so if the
+        # watchdog already fired on the same unplug, we don't show a
+        # second toast.  The watchdog's QTimer cleanup in ``stop()`` is
+        # not synchronous with this PortAudio thread, so a race window
+        # exists where both paths see the same unplug; this flag closes
+        # it.
+        if not self._device_loss_emitted:
+            self._device_loss_emitted = True
+            self.stream_error.emit(
+                "Audio device disconnected — replug and click Start to recover"
+            )
         from PySide6.QtCore import QMetaObject, Qt
         QMetaObject.invokeMethod(self, "stop", Qt.ConnectionType.QueuedConnection)
 
