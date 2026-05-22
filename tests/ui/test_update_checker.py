@@ -9,6 +9,33 @@ import pytest
 
 from open_sstv.ui.update_checker import UpdateCheckerWorker, _parse_version
 
+
+@pytest.fixture(autouse=True)
+def _bypass_update_check_cache(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """Neutralise the M-8 6-hour backoff for every test in this file.
+
+    Two layers of isolation:
+
+    * ``_read_last_check_ts`` always returns 0.0 so every test starts
+      as if no prior check has happened — the network call is made.
+    * ``_cache_path`` redirected to a per-test tmp dir so the write
+      side of the cache can't leak between tests (e.g. a test that
+      successfully patches urlopen would otherwise persist the
+      "successful check" timestamp into the real user_cache_dir).
+
+    Without this fixture, tests that run later in the suite hit the
+    backoff cache poisoned by earlier tests and silently skip their
+    network call — making them pass by coincidence on the first run
+    and fail on the second.
+    """
+    monkeypatch.setattr(
+        "open_sstv.ui.update_checker._read_last_check_ts", lambda: 0.0
+    )
+    monkeypatch.setattr(
+        "open_sstv.ui.update_checker._cache_path",
+        lambda: tmp_path / "last_update_check",
+    )
+
 # === _parse_version ===
 
 
