@@ -42,7 +42,6 @@ commands and receives audio via a callback registered on the shared
 from __future__ import annotations
 
 import logging
-import socket
 import struct
 import threading
 from collections.abc import Callable
@@ -339,7 +338,7 @@ class TciConnection:
         while not self._closed and self._ws is not None:
             try:
                 opcode, data = self._ws.recv_data()
-            except socket.timeout:
+            except TimeoutError:
                 # Expected on idle: the ``_SOCKET_TIMEOUT_S`` we set after
                 # ``connect()`` makes every read block for at most that
                 # window so a wedged ``send_binary()`` can't hang the

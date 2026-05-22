@@ -18,7 +18,6 @@ from open_sstv.templates.fonts import (
 )
 from open_sstv.templates.renderer import _load_font
 
-
 # ---------------------------------------------------------------------------
 # Registry: every Tier-1 family the v0.3.x bundle ships must resolve
 # ---------------------------------------------------------------------------

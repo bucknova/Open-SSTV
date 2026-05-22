@@ -29,28 +29,26 @@ from open_sstv.templates.model import (
     ShadowSpec,
     StationImageLayer,
     StrokeSpec,
-    TXContext,
     Template,
     TextLayer,
+    TXContext,
 )
 from open_sstv.templates.renderer import (
     _anchor_top_left,
     _fit_image,
     _fit_text,
-    _wrap_text,
-    render_template,
-)
-from open_sstv.templates.renderer import (
     _load_font,
     _resolve_station_image_path,
     _text_bbox,
+    _wrap_text,
+    render_template,
 )
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-_FIXED_NOW = datetime.datetime(2026, 4, 24, 15, 0, 0, tzinfo=datetime.timezone.utc)
+_FIXED_NOW = datetime.datetime(2026, 4, 24, 15, 0, 0, tzinfo=datetime.UTC)
 _FRAME = (320, 256)
 
 
@@ -952,7 +950,7 @@ class TestModeAwareSize:
 # ---------------------------------------------------------------------------
 
 
-def _font(size: int = 20) -> "PIL.ImageFont.FreeTypeFont":
+def _font(size: int = 20) -> PIL.ImageFont.FreeTypeFont:
     return _load_font("DejaVu Sans Bold", size)
 
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from open_sstv.core.cw import _MORSE_TABLE, make_cw
 

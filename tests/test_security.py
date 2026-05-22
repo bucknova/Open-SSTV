@@ -80,7 +80,10 @@ def test_renderer_swallows_decompression_bomb(tmp_path: Path) -> None:
     """
     from open_sstv.config.schema import AppConfig
     from open_sstv.templates.model import (
-        QSOState, StationImageLayer, TXContext, Template,
+        QSOState,
+        StationImageLayer,
+        Template,
+        TXContext,
     )
     from open_sstv.templates.renderer import render_template
 

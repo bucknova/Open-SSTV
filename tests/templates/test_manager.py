@@ -16,9 +16,8 @@ from open_sstv.templates.manager import (
     save,
     starter_pack_installed,
 )
-from open_sstv.templates.model import PhotoLayer, RectLayer, Template, TextLayer
+from open_sstv.templates.model import PhotoLayer, Template, TextLayer
 from open_sstv.templates.toml_io import load_template, save_template
-
 
 # ---------------------------------------------------------------------------
 # Helpers

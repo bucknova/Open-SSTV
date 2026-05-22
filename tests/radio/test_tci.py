@@ -14,10 +14,8 @@ from __future__ import annotations
 import struct
 
 import numpy as np
-import pytest
 
 from open_sstv.radio.tci import TciConnection, TciRig
-
 
 # ---------------------------------------------------------------------------
 # send_tx_audio_chunk — silence dither
@@ -249,7 +247,7 @@ class TestSocketTimeout:
         send/recv timeout set so a wedged operation can't hang forever."""
         from unittest.mock import MagicMock, patch
 
-        from open_sstv.radio.tci import TciConnection, _SOCKET_TIMEOUT_S
+        from open_sstv.radio.tci import _SOCKET_TIMEOUT_S, TciConnection
 
         fake_sock = MagicMock()
         fake_ws = MagicMock()
@@ -276,7 +274,6 @@ class TestSocketTimeout:
         ``socket.timeout`` periodically.  The recv loop must treat those
         as "no data, keep waiting" rather than a connection-lost signal —
         otherwise enabling the timeout would *cause* spurious disconnects."""
-        import socket as _socket
         from unittest.mock import MagicMock
 
         from open_sstv.radio.tci import TciConnection
@@ -303,8 +300,8 @@ class TestSocketTimeout:
                 return (1, ready_msg)
             if call_count["n"] >= 4:
                 conn._closed = True
-                raise _socket.timeout("stop")
-            raise _socket.timeout("idle")
+                raise TimeoutError("stop")
+            raise TimeoutError("idle")
 
         fake_ws = MagicMock()
         fake_ws.recv_data.side_effect = fake_recv_data

@@ -92,7 +92,6 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtCore import Q_ARG  # for invokeMethod with positional args
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -125,13 +124,13 @@ from open_sstv.radio.rigctld import RigctldClient, is_safe_rigctld_arg
 from open_sstv.radio.serial_rig import create_serial_rig
 from open_sstv.templates import TokenContext, build_autosave_filename, run_migration
 from open_sstv.ui.first_launch_dialog import FirstLaunchDialog
+from open_sstv.ui.offline_workers import OfflineDecodeWorker, OfflineEncodeWorker
 from open_sstv.ui.radio_panel import RadioPanel
 from open_sstv.ui.rx_panel import RxPanel
 from open_sstv.ui.settings_dialog import SettingsDialog
 from open_sstv.ui.tx_panel import TxPanel
 from open_sstv.ui.update_checker import UpdateCheckerWorker
 from open_sstv.ui.waterfall_widget import WaterfallWindow
-from open_sstv.ui.offline_workers import OfflineDecodeWorker, OfflineEncodeWorker
 from open_sstv.ui.workers import RxWorker, TxWorker
 
 if TYPE_CHECKING:

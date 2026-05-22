@@ -15,7 +15,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import PIL.Image
 import pytest
 from PIL import Image
 
@@ -29,7 +28,6 @@ from open_sstv.templates.model import (
 )
 from open_sstv.templates.toml_io import save_template
 from open_sstv.ui.tx_panel import TxPanel, _center_crop_to_size
-
 
 # ---------------------------------------------------------------------------
 # Pure helper — no Qt

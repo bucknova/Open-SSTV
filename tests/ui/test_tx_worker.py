@@ -22,7 +22,7 @@ from PIL import Image
 from open_sstv.core.modes import Mode
 from open_sstv.radio.base import ManualRig
 from open_sstv.radio.exceptions import RigConnectionError
-from open_sstv.ui.workers import TxWorker, _CW_GAP_S, _make_two_tone, _TEST_TONE_DURATION_S
+from open_sstv.ui.workers import _CW_GAP_S, TxWorker, _make_two_tone
 
 pytestmark = pytest.mark.gui
 
@@ -808,7 +808,7 @@ class TestUnkeyResilience:
     def test_non_rig_error_from_unkey_still_emits_error(
         self,
         qapp,
-        gradient_image: "Image.Image",
+        gradient_image: Image.Image,
     ) -> None:
         """A raw OSError from set_ptt(False) must be caught and emitted as
         an error signal — it must not escape _run_tx."""
@@ -833,7 +833,7 @@ class TestUnkeyResilience:
     def test_non_rig_error_from_unkey_still_emits_complete(
         self,
         qapp,
-        gradient_image: "Image.Image",
+        gradient_image: Image.Image,
     ) -> None:
         """After a successful playback, an OSError on unkey must still result
         in transmission_complete being emitted so the GUI unfreezes."""
@@ -858,8 +858,8 @@ class TestUnkeyResilience:
     def test_playback_error_emits_aborted_not_complete(
         self,
         qapp,
-        gradient_image: "Image.Image",
-        patch_encode_and_playback: "dict[str, MagicMock]",
+        gradient_image: Image.Image,
+        patch_encode_and_playback: dict[str, MagicMock],
     ) -> None:
         """A PortAudioError during playback must emit error + transmission_aborted
         so the GUI resets to idle.  Before the fix, the else branch emitted
@@ -879,8 +879,8 @@ class TestUnkeyResilience:
     def test_generic_playback_error_emits_aborted(
         self,
         qapp,
-        gradient_image: "Image.Image",
-        patch_encode_and_playback: "dict[str, MagicMock]",
+        gradient_image: Image.Image,
+        patch_encode_and_playback: dict[str, MagicMock],
     ) -> None:
         """Any non-PortAudio playback exception must also emit transmission_aborted."""
         patch_encode_and_playback["play"].side_effect = RuntimeError("audio device gone")
@@ -896,7 +896,7 @@ class TestUnkeyResilience:
     def test_test_tone_playback_error_emits_aborted(
         self,
         qapp,
-        patch_encode_and_playback: "dict[str, MagicMock]",
+        patch_encode_and_playback: dict[str, MagicMock],
     ) -> None:
         """transmit_test_tone must also emit transmission_aborted on playback error."""
         patch_encode_and_playback["play"].side_effect = RuntimeError("no audio")

@@ -26,7 +26,7 @@ from open_sstv.templates.tokens import _hz_to_band, resolve_text
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
 
-_FIXED_NOW = datetime.datetime(2026, 4, 24, 15, 30, 0, tzinfo=datetime.timezone.utc)
+_FIXED_NOW = datetime.datetime(2026, 4, 24, 15, 30, 0, tzinfo=datetime.UTC)
 
 
 def _cfg(**kw: object) -> AppConfig:

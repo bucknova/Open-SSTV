@@ -9,12 +9,11 @@ from __future__ import annotations
 import pytest
 
 from open_sstv.radio.band_plan import (
-    BandEntry,
     SSTV_BAND_PLAN,
+    BandEntry,
     mode_family,
     primary_entry,
 )
-
 
 # ---------------------------------------------------------------------------
 # Data integrity

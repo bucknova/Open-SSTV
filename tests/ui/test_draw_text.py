@@ -24,13 +24,11 @@ from PIL import Image, ImageDraw
 
 from open_sstv.ui.draw_text import (
     _MARGIN,
-    _MIN_FONT_SIZE,
     _SHADOW_PAD,
     clamp_xy_to_image,
     draw_text_overlay,
     position_to_xy,
 )
-
 
 # ---------------------------------------------------------------------------
 # clamp_xy_to_image

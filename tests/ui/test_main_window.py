@@ -311,6 +311,7 @@ def test_on_connect_cancel_resets_panel_to_disconnected(
 def test_rig_connect_worker_cancel_suppresses_succeeded(qapp) -> None:
     """_RigConnectWorker must not emit succeeded when cancel is pre-set."""
     import threading as _threading
+
     from open_sstv.radio.base import ManualRig
     from open_sstv.ui.main_window import _RigConnectWorker
 
@@ -334,6 +335,7 @@ def test_rig_connect_worker_cancel_suppresses_failed(qapp, monkeypatch) -> None:
     returns — covers the case where open() raises and cancel is already set."""
     import threading as _threading
     from unittest.mock import MagicMock
+
     from open_sstv.ui.main_window import _RigConnectWorker
 
     cancel = _threading.Event()
@@ -439,6 +441,7 @@ def test_relay_on_succeeded_calls_on_success(qapp) -> None:
     """_RigConnectRelay.on_succeeded must invoke on_success with the rig."""
     import threading as _threading
     from unittest.mock import MagicMock
+
     from open_sstv.ui.main_window import _RigConnectRelay
 
     cancel = _threading.Event()
@@ -459,6 +462,7 @@ def test_relay_on_failed_calls_on_error(qapp) -> None:
     """_RigConnectRelay.on_failed must invoke on_error with the message."""
     import threading as _threading
     from unittest.mock import MagicMock
+
     from open_sstv.ui.main_window import _RigConnectRelay
 
     cancel = _threading.Event()
@@ -478,6 +482,7 @@ def test_relay_cancel_suppresses_on_succeeded(qapp) -> None:
     """Relay must not call on_success if cancel is already set (e.g. timeout won)."""
     import threading as _threading
     from unittest.mock import MagicMock
+
     from open_sstv.ui.main_window import _RigConnectRelay
 
     cancel = _threading.Event()
@@ -497,6 +502,7 @@ def test_relay_cancel_suppresses_on_failed(qapp) -> None:
     """Relay must not call on_error if cancel is already set."""
     import threading as _threading
     from unittest.mock import MagicMock
+
     from open_sstv.ui.main_window import _RigConnectRelay
 
     cancel = _threading.Event()
@@ -516,6 +522,7 @@ def test_relay_on_succeeded_sets_cancel_to_block_timeout(qapp) -> None:
     """on_succeeded must mark cancel so a racing timeout callback is a no-op."""
     import threading as _threading
     from unittest.mock import MagicMock
+
     from open_sstv.ui.main_window import _RigConnectRelay
 
     cancel = _threading.Event()
@@ -595,7 +602,7 @@ class TestRigPollWorkerErrorCounter:
     qtbot.waitUntil.
     """
 
-    def _make_worker(self) -> "_RigPollWorker":
+    def _make_worker(self) -> _RigPollWorker:
         from open_sstv.ui.main_window import _RigPollWorker  # type: ignore[attr-defined]
         return _RigPollWorker()
 
@@ -685,6 +692,7 @@ class TestRigPollWorkerErrorCounter:
     def test_termios_error_triggers_disconnect(self, qapp) -> None:
         """termios.error from get_freq increments counter and fires the signal."""
         import termios
+
         from open_sstv.ui.main_window import _RigPollWorker  # type: ignore[attr-defined]
 
         worker = self._make_worker()
@@ -1220,7 +1228,6 @@ class TestRadioDisconnectedAbortsTx:
         monkeypatch.setattr(window._tx_worker, "request_stop", lambda: stop_calls.append(1))
 
         # Simulate a non-ManualRig being connected so the guard doesn't return early.
-        from open_sstv.radio.base import ManualRig
         from unittest.mock import MagicMock
         fake_rig = MagicMock()
         fake_rig.close.return_value = None

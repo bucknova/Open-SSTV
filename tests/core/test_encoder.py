@@ -11,10 +11,9 @@ the leader, so a strict equality check would fail.
 """
 from __future__ import annotations
 
+import numpy as np
 import pytest
 from PIL import Image
-
-import numpy as np
 
 from open_sstv.core.encoder import DEFAULT_SAMPLE_RATE, encode
 from open_sstv.core.modes import MODE_TABLE, Mode

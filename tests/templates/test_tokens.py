@@ -24,7 +24,7 @@ def _ctx(**overrides: object) -> TokenContext:
         "mode": "Scottie-S1",
         "direction": "RX",
         "now_utc": datetime.datetime(
-            2026, 4, 17, 21, 35, 12, tzinfo=datetime.timezone.utc
+            2026, 4, 17, 21, 35, 12, tzinfo=datetime.UTC
         ),
     }
     defaults.update(overrides)
@@ -53,7 +53,7 @@ def test_percent_time_defaults_to_no_colons() -> None:
 def test_percent_timestamp_is_unix_epoch() -> None:
     # Epoch for 2026-04-17 21:35:12 UTC
     expected = int(
-        datetime.datetime(2026, 4, 17, 21, 35, 12, tzinfo=datetime.timezone.utc).timestamp()
+        datetime.datetime(2026, 4, 17, 21, 35, 12, tzinfo=datetime.UTC).timestamp()
     )
     assert resolve_tokens("%ts", _ctx()) == str(expected)
 
@@ -95,7 +95,7 @@ def test_named_time() -> None:
 
 def test_named_timestamp() -> None:
     expected = int(
-        datetime.datetime(2026, 4, 17, 21, 35, 12, tzinfo=datetime.timezone.utc).timestamp()
+        datetime.datetime(2026, 4, 17, 21, 35, 12, tzinfo=datetime.UTC).timestamp()
     )
     assert resolve_tokens("{timestamp}", _ctx()) == str(expected)
 
