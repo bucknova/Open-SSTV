@@ -1805,7 +1805,13 @@ class MainWindow(QMainWindow):
         try:
             if fmt == "wav":
                 pcm = (np.clip(arr, -1.0, 1.0) * 32767.0).astype(np.int16)
-                with wave.open(str(out_path), "wb") as wf:
+                # H-4 (audit 4.7/v0.2.9): open via pathlib.Path.open so
+                # non-ASCII characters in *out_path* on Windows go through
+                # the wide-char OS API.  Passing ``str(out_path)`` directly
+                # to wave.open would encode through the active ANSI code
+                # page and mangle paths containing emoji or non-ANSI
+                # characters under non-UTF-8 locales.
+                with out_path.open("wb") as raw, wave.open(raw, "wb") as wf:
                     wf.setnchannels(1)
                     wf.setsampwidth(2)
                     wf.setframerate(sample_rate)

@@ -71,8 +71,12 @@ def load_audio_file(path: Path) -> tuple[NDArray[np.float64], int]:
 
 
 def _load_wav(path: Path) -> tuple[NDArray[np.float64], int]:
-    """Load a WAV via stdlib ``wave`` (no scipy dependency)."""
-    with wave.open(str(path), "rb") as wav:
+    """Load a WAV via stdlib ``wave`` (no scipy dependency).
+
+    H-4: open via pathlib so non-ASCII characters in *path* on Windows
+    go through the wide-char OS API rather than the ANSI code page.
+    """
+    with path.open("rb") as fh, wave.open(fh, "rb") as wav:
         n_channels = wav.getnchannels()
         sample_width = wav.getsampwidth()
         fs = wav.getframerate()

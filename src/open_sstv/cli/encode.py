@@ -89,8 +89,12 @@ def main(argv: list[str] | None = None) -> int:
 
     # ``wave`` expects bytes; int16 little-endian is the SSTV-standard format
     # and matches what PySSTV's gen_samples quantizes to.
+    #
+    # H-4 (audit 4.7/v0.2.9): open via pathlib so non-ASCII output paths
+    # on Windows go through the wide-char API rather than being encoded
+    # through the active ANSI code page.
     try:
-        with wave.open(str(args.output), "wb") as wav:
+        with args.output.open("wb") as raw, wave.open(raw, "wb") as wav:
             wav.setnchannels(1)
             wav.setsampwidth(2)  # 16-bit
             wav.setframerate(args.sample_rate)
