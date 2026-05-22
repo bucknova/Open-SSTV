@@ -15,11 +15,9 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from typing import Any
-from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
-import sounddevice as sd
 
 from open_sstv.audio.devices import AudioDevice
 from open_sstv.audio.input_stream import (
@@ -49,7 +47,7 @@ class _FakeStream:
     PortAudio frame delivery) without spinning up a real audio thread.
     """
 
-    last_instance: "_FakeStream | None" = None
+    last_instance: _FakeStream | None = None
 
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs

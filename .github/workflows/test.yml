@@ -84,6 +84,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev,flac]"
 
+      - name: Lint (ruff, curated selection)
+        # Gates on the categories already clean across the tree:
+        #   I    — isort import ordering
+        #   F    — pyflakes (unused imports, undefined names, unused vars)
+        #   UP   — pyupgrade (modern typing, walrus, etc.)
+        #   W    — pycodestyle warnings
+        # Other categories (E, B, SIM) still have hand-fix outstanding from
+        # the v0.3.15 audit follow-ups; widening the selection is its own
+        # PR once the manual cleanup lands.  Running on src AND tests
+        # because the gate is meaningful even where there's no shipping
+        # code surface.
+        run: ruff check src tests --select=I,F,UP,W
+
       - name: Run tests
         # QT_QPA_PLATFORM=offscreen tells Qt to use its software framebuffer
         # platform instead of trying to open an X11/Wayland display.  At

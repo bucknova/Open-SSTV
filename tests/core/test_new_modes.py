@@ -152,8 +152,8 @@ def _make_test_image(width: int, height: int) -> Image.Image:
 
 def _round_trip(mode: Mode) -> Image.Image | None:
     fs = 48_000
-    spec = MODE_TABLE[mode]
-    # Use the PySSTV class's own dimensions (PD stores half-height in spec)
+    # Use the PySSTV class's own dimensions (PD stores half-height in spec).
+    # We read the mode spec implicitly via the encoder; no local binding needed.
     cls = _PYSSTV_CLASSES[mode]
     img = _make_test_image(cls.WIDTH, cls.HEIGHT)
     samples = encode(img, mode, sample_rate=fs).astype(np.float64) / 32768.0

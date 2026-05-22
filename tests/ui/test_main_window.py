@@ -602,7 +602,11 @@ class TestRigPollWorkerErrorCounter:
     qtbot.waitUntil.
     """
 
-    def _make_worker(self) -> _RigPollWorker:
+    def _make_worker(self):  # type: ignore[no-untyped-def]
+        # _RigPollWorker is intentionally private; import lazily so the
+        # test file doesn't claim public access.  Return type elided
+        # because the forward reference can't be resolved without
+        # exposing the private name at module level.
         from open_sstv.ui.main_window import _RigPollWorker  # type: ignore[attr-defined]
         return _RigPollWorker()
 
@@ -857,7 +861,6 @@ class TestAudioDeviceReplug:
 
         # Capture what device index reaches audio_worker.start().
         received_device: list[object] = []
-        original_start = window._audio_worker.start
 
         def _capture_start(device, *args, **kwargs):
             received_device.append(device)

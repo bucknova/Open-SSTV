@@ -171,11 +171,11 @@ def test_rx_image_selected_signal_is_object_typed() -> None:
     emitted to clear.  We pin the loose typing so a refactor can't
     silently regress the clear path.
     """
-    sig = RxPanel.rx_image_selected
-    # PySide6 stores the parameter spec on the unbound signal descriptor.
-    # It's enough to verify we can connect, emit a PIL image, and emit
-    # None without TypeError — exact metadata layout differs across
-    # PySide versions.
+    # PySide6 stores the parameter spec on the unbound signal descriptor
+    # ``RxPanel.rx_image_selected``.  It's enough to verify we can connect,
+    # emit a PIL image, and emit None without TypeError — exact metadata
+    # layout differs across PySide versions, so we don't pin the
+    # descriptor itself, just exercise the connect/emit/clear path.
     p = RxPanel()
     received: list = []
     p.rx_image_selected.connect(lambda v: received.append(v))

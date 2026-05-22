@@ -1016,7 +1016,9 @@ def test_robot36_fallback_threshold_scales_with_sample_rate() -> None:
 
     spec = MODE_TABLE[Mode.ROBOT_36]
     fs_44k = 44_100
-    wrapper = Robot36IncrementalDecoder(spec, fs=fs_44k, vis_end_abs=0, start_abs=0)
+    # Construct the decoder to exercise the __init__ path; we read the
+    # class constant directly below rather than via the instance.
+    Robot36IncrementalDecoder(spec, fs=fs_44k, vis_end_abs=0, start_abs=0)
 
     expected = int(fs_44k * Robot36IncrementalDecoder._DETECT_FALLBACK_S)
     # The fallback threshold is computed inside _try_detect; approximate it

@@ -96,7 +96,7 @@ def test_stop_aborts_active_chunked_stream() -> None:
             self.writes: list[np.ndarray] = []
             self.aborted = False
 
-        def __enter__(self) -> "_AbortableStream":
+        def __enter__(self) -> _AbortableStream:
             return self
 
         def __exit__(self, *_exc: object) -> None:
@@ -188,13 +188,12 @@ def test_is_tx_active_false_after_exception() -> None:
     with patch(
         "open_sstv.audio.output_stream.sd.OutputStream",
         side_effect=RuntimeError("simulated open failure"),
-    ):
-        with pytest.raises(RuntimeError):
-            output_stream.play_blocking(
-                samples,
-                sr,
-                progress_callback=lambda *_: None,  # force chunked path
-            )
+    ), pytest.raises(RuntimeError):
+        output_stream.play_blocking(
+            samples,
+            sr,
+            progress_callback=lambda *_: None,  # force chunked path
+        )
 
     assert output_stream.is_tx_active() is False
 
@@ -210,7 +209,7 @@ class _FakeStream:
     def __init__(self) -> None:
         self.writes: list[np.ndarray] = []
 
-    def __enter__(self) -> "_FakeStream":
+    def __enter__(self) -> _FakeStream:
         return self
 
     def __exit__(self, *_exc: object) -> None:

@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from open_sstv.radio.serial_rig import IcomCIVRig
+from open_sstv.radio.serial_rig import IcomCIVRig, KenwoodRig, YaesuRig
 
 
 @pytest.fixture

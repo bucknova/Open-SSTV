@@ -204,11 +204,7 @@ def test_save_config_is_atomic(tmp_path: Path) -> None:
 
 def test_save_config_no_tmp_on_ioerror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """If os.replace fails, the .tmp file must be cleaned up (OP2-07)."""
-    import os
-
     import open_sstv.config.store as store_module
-
-    original_replace = os.replace
 
     def _fail_replace(src: str, dst: str) -> None:
         raise OSError("simulated disk full")
