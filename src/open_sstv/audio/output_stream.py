@@ -256,6 +256,25 @@ def stop() -> None:
 
     The "Stop" button on the TX panel calls this; the TX worker then
     unwinds out of ``play_blocking`` and drops PTT.
+
+    H-3 (cross-thread safety, audit 4.7/v0.2.9): ``stop()`` is invoked
+    from the GUI thread while ``stream.write()`` is running on the TX
+    worker thread — i.e. ``stream.abort()`` is called cross-thread.
+    PortAudio's documentation does *not* portably guarantee that
+    ``Pa_AbortStream`` is safe to invoke from a thread other than the
+    one that opened the stream.  Real-world behaviour:
+        macOS Core Audio   — safe; abort interrupts the callback cleanly.
+        Linux ALSA / Pulse — safe in practice across pyaudio/sounddevice.
+        Windows WASAPI     — safe in practice.
+        Windows MME / WDM-KS — historically reported sharp edges; the
+            output-device filter at ``audio/devices.py`` excludes WDM-KS
+            from the picker so the worst case is avoided.
+    If a future bug surfaces as "Stop button does nothing on Windows
+    MME", inspect this call first.  Long-term fix is to post a stop
+    signal to the TX worker thread and have *it* call ``abort()`` from
+    the stream-owning thread, but that adds a 0.1 s latency (one chunk
+    boundary) for the cross-thread case, which the audit graded as a
+    worse trade-off than the current direct call.
     """
     sd.stop()
     with _tx_state_lock:

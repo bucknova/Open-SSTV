@@ -481,17 +481,42 @@ class InputStreamWorker(QObject):
         ``Pa_Terminate()`` + ``Pa_Initialize()`` forces a full re-enumeration
         from the OS so the next stream open sees the device in its new state.
 
-        Note: this is a process-wide PortAudio operation.  Any other sounddevice
-        streams (e.g. the TX output stream) are invalidated.  The TX/RX
-        interlock prevents calling both simultaneously, but the user can
-        still race the two paths (clicking RX Start while TX is mid-encode
-        or mid-PTT-delay) — in that window terminating PortAudio would rip
-        the host state out from under the live TX OutputStream and crash on
-        the next callback.  ``is_tx_active`` is checked here so the reset
-        is skipped (and logged) while any TX call is in flight; the caller
-        proceeds without a fresh device cache, which is the right trade-off
-        — at worst the user gets a -10851 if the device was just unplugged,
-        which is recoverable; at best (the common case) nothing changed.
+        Intra-process scope (H-7, audit 4.7/v0.2.9): this is a *process-wide*
+        PortAudio operation.  Any other sounddevice streams in the same
+        process (e.g. the TX output stream) are invalidated.  Open-SSTV's
+        own TX/RX interlock prevents calling both simultaneously, but the
+        user can still race the two paths (clicking RX Start while TX is
+        mid-encode or mid-PTT-delay) — in that window terminating
+        PortAudio would rip the host state out from under the live TX
+        OutputStream and crash on the next callback.  ``is_tx_active`` is
+        checked here so the reset is skipped (and logged) while any TX
+        call is in flight; the caller proceeds without a fresh device
+        cache, which is the right trade-off — at worst the user gets a
+        -10851 if the device was just unplugged, which is recoverable; at
+        best (the common case) nothing changed.
+
+        Embedded-use caveat: if another component in the same Python
+        process holds its own ``sd.OutputStream`` / ``sd.InputStream``
+        (a co-resident ham-radio tool, a notebook, an IDE plugin), the
+        ``is_tx_active`` interlock does *not* see it — only Open-SSTV's
+        own TX activity.  A device-loss-recovery here can therefore kill
+        an unrelated sibling stream.  This is a limitation of PortAudio's
+        global host state, not of this code.  Open-SSTV ships as a
+        standalone app, so the embedded case is mostly theoretical; the
+        warning is here for anyone who later imports the package.
+
+        Sounddevice-private-API defense (H-1, audit 4.7/v0.2.9):
+        ``sd._terminate`` and ``sd._initialize`` are not part of the
+        documented public sounddevice API (note the leading underscore).
+        They have been stable through every release in our pinned range
+        (``sounddevice>=0.4.6,<1``) but could disappear or be renamed in
+        a future minor version.  The broad ``except Exception`` below is
+        deliberately defensive: if the attributes are removed entirely,
+        the attribute lookup itself raises ``AttributeError`` (a subclass
+        of ``Exception``) and we degrade gracefully — the user gets a
+        logged warning and a slightly stale device cache rather than a
+        crash.  Do *not* tighten the except clause without verifying
+        upstream's commitment to keeping the symbols around.
         """
         from open_sstv.audio.output_stream import is_tx_active  # noqa: PLC0415
 
@@ -506,11 +531,25 @@ class InputStreamWorker(QObject):
         _log.info("PortAudio reset: terminating to clear stale device cache")
         try:
             sd._terminate()
+        except AttributeError as exc:
+            _log.warning(
+                "PortAudio _terminate() removed from sounddevice (%s) — "
+                "device-loss recovery will rely on a stream re-open rather "
+                "than a full host re-init.  Upgrade or pin sounddevice.",
+                exc,
+            )
         except Exception as exc:  # noqa: BLE001
             _log.warning("PortAudio _terminate() failed: %s", exc)
         _log.info("PortAudio reset: re-initializing")
         try:
             sd._initialize()
+        except AttributeError as exc:
+            _log.warning(
+                "PortAudio _initialize() removed from sounddevice (%s) — "
+                "subsequent stream opens will use whatever host state "
+                "remains.  Upgrade or pin sounddevice.",
+                exc,
+            )
         except Exception as exc:  # noqa: BLE001
             _log.warning("PortAudio _initialize() failed: %s", exc)
 
