@@ -30,11 +30,13 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import sys
 import wave
 from pathlib import Path
 
 import numpy as np
+import platformdirs
 
 from open_sstv.core.decoder import decode_wav
 
@@ -61,8 +63,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "-o",
         "--output",
         type=Path,
-        required=True,
-        help="Output image file path. Format is inferred from the extension.",
+        default=None,
+        help=(
+            "Output image file path. Format is inferred from the extension. "
+            "If omitted, writes to "
+            "<platform pictures dir>/Open-SSTV/sstv_<mode>_<UTC timestamp>.png "
+            "(mirrors the GUI auto-save behaviour and the .gitignore "
+            "convention for the project's own sstv_*.png pattern; "
+            "M-9 audit follow-up)."
+        ),
     )
     parser.add_argument(
         "-q",
@@ -106,6 +115,18 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+
+    # M-9 (audit 4.7/v0.2.9): if the user didn't pass ``-o``, build a
+    # platform-appropriate default path now that we know the mode.  This
+    # mirrors the GUI auto-save behaviour and stops the CLI's old
+    # required-``-o`` requirement from being a footgun on the obvious
+    # "open-sstv-decode foo.wav" invocation.  No collision protection
+    # because the timestamp is per-second; on the rare second-bucket
+    # collision the user can pass ``-o`` explicitly.
+    if args.output is None:
+        out_dir = Path(platformdirs.user_pictures_dir()) / "Open-SSTV"
+        timestamp = _dt.datetime.now(tz=_dt.UTC).strftime("%Y%m%d_%H%M%S")
+        args.output = out_dir / f"sstv_{result.mode.value}_{timestamp}.png"
 
     try:
         args.output.parent.mkdir(parents=True, exist_ok=True)
