@@ -11,6 +11,81 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.17] — 2026-05-22
+
+Third audit follow-up release.  Closes the actionable Low-severity items
+and the one outstanding Minimal item from the v0.2.9 stability audit.
+One user-visible TX-side feature (per-instance test-tone frequencies);
+everything else is polish, docs, or metadata.
+
+### Added
+
+- **L-2 — Settings entry for two-tone test frequencies.**  The SSB
+  linearity test signal was hard-coded to the ARRL twin-tone standard
+  (700 + 1900 Hz).  Two new spinboxes on the Audio tab beneath the
+  Test Tone button let operators choose values inside any reasonable
+  SSB passband.  Range [300, 3000] Hz, validated and re-ordered in
+  `AppConfig.__post_init__`, applied to the running `TxWorker` without
+  a restart.  Defaults unchanged — ARRL standard for everyone who
+  hasn't touched the new fields.
+
+### Fixed
+
+- **L-3 — Per-instance rig name labels.**  `SerialPttRig` /
+  `IcomCIVRig` / `KenwoodRig` / `YaesuRig` used a class-attribute
+  `name`, so two instances on different ports rendered as the same
+  label in error messages and the (future) rig picker.  Promoted to
+  a `@property` that interpolates the serial port:
+  `"Icom CI-V (COM3)"`, `"Yaesu CAT (/dev/cu.usbserial-1410)"`, etc.
+  `RigctldClient` and `TciRig` already followed this pattern.
+- **L-4 — TCI recv-thread leak now visible.**  `TciConnection.disconnect()`
+  joins the recv thread with a 2 s timeout to avoid hanging the GUI on
+  a wedged WebSocket; the thread is daemon=True so a leak doesn't keep
+  the interpreter alive.  Previously a leak was *silent*; now it
+  produces a WARNING log so a hung session via `OPEN_SSTV_DEBUG=1` is
+  immediately diagnostic.
+
+### Documented
+
+- **N-1 — PIL import side-effect in `open_sstv/__init__.py`.**  Added a
+  paragraph explaining that `apply_pil_security_limits()` is called at
+  package import on purpose and that removing it would disarm every
+  entry point (GUI, CLI encoder/decoder, tests), not just the GUI.
+
+### Metadata
+
+- **L-7 — Author email in pyproject.toml.**  Replaced empty string
+  (which made PyPI emit an upload warning) with
+  `bucknova@users.noreply.github.com` — GitHub's noreply alias is
+  package-page-visible without exposing a personal address.
+
+### Audit Low items not in this release
+
+- **L-1** — verified clean (`.claude/` files were never tracked).
+- **L-5** — non-issue per the audit (`ModuleNotFoundError` is a subclass
+  of `ImportError`; the existing fallback works as intended).
+- **L-6 / L-8** — already validated by the three successful release
+  pipelines since PR #7.
+
+### Minimal items not in this release
+
+- **N-2** — already closed in v0.3.14.
+- **N-3** — PyPI lowercases automatically; no action.
+- **N-4** — `CODEOWNERS` / `SECURITY.md` deferred until promotion
+  beyond beta.
+
+### Audit follow-ups still open after v0.3.17
+
+- mypy strict-mode cleanup (~196 errors) → CI gate
+- ruff E/B/SIM cleanup (~151 manual fixes) → widen CI ruff selection
+- GUI marker via Xvfb on Linux
+- Integration marker against fake rigctld
+- M-4 (per-frame `ndarray.copy()`) — graded as known cost; revisit if
+  drop-rate measurements demand it
+- M-13 (mypy CI gate) — waits on the strict-mode cleanup above
+
+---
+
 ## [0.3.16] — 2026-05-22
 
 Second audit follow-up release.  Closes seven of the eight unresolved
