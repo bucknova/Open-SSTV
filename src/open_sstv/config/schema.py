@@ -43,6 +43,15 @@ class AppConfig:
 
     # --- TX ---
     default_tx_mode: str = "martin_m1"
+    # v0.3.17 (audit L-2): two-tone test signal frequencies, Hz.  Defaults
+    # are the ARRL twin-tone standard (700 / 1900) used for sideband
+    # linearity testing.  Settings → Audio exposes these as spinboxes so
+    # operators on narrower passbands (CW filters, BPSK-tuned IFs, etc.)
+    # can move them inside the audible band without code changes.
+    # ``__post_init__`` clamps to [300, 3000] Hz to keep them within any
+    # reasonable SSB passband.
+    test_tone_freq_lo: float = 700.0
+    test_tone_freq_hi: float = 1900.0
 
     # --- Radio ---
     # Connection mode: one of ``RigConnectionMode.MANUAL`` / ``.SERIAL`` /
@@ -264,6 +273,31 @@ class AppConfig:
                 clamped_wdt,
             )
         self.rx_watchdog_timeout_s = clamped_wdt
+
+        # L-2 (audit 4.7/v0.2.9): clamp two-tone test frequencies to
+        # [300, 3000] Hz so a hand-edited TOML can't set values outside
+        # any reasonable SSB passband.  Also re-order if the user
+        # accidentally sets lo > hi so downstream code never has to
+        # worry about it.
+        for attr, lo, hi in (
+            ("test_tone_freq_lo", 300.0, 3000.0),
+            ("test_tone_freq_hi", 300.0, 3000.0),
+        ):
+            v = float(getattr(self, attr))
+            clamped = max(lo, min(hi, v))
+            if clamped != v:
+                _log.info(
+                    "AppConfig: %s %.1f out of range [%.0f, %.0f] — clamped to %.1f",
+                    attr, v, lo, hi, clamped,
+                )
+            setattr(self, attr, clamped)
+        if self.test_tone_freq_lo > self.test_tone_freq_hi:
+            self.test_tone_freq_lo, self.test_tone_freq_hi = (
+                self.test_tone_freq_hi, self.test_tone_freq_lo
+            )
+            _log.info(
+                "AppConfig: test_tone_freq_lo > test_tone_freq_hi — swapped"
+            )
 
 
 __all__ = ["AppConfig"]
