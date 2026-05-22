@@ -11,6 +11,103 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.15] — 2026-05-22
+
+Audit follow-up release closing every High-severity finding from the
+v0.2.9 stability audit plus the CI gate-debt items flagged alongside.
+No user-visible behaviour changes on the happy path — everything in
+this release is defence-in-depth, documentation, or CI infrastructure.
+
+### Fixed
+
+- **H-1 — defensive ``sd._terminate`` / ``sd._initialize`` calls.**
+  Split the broad ``except Exception`` around the sounddevice private
+  re-init API into an explicit ``AttributeError`` branch with an
+  upgrade-or-pin log message, so a future sounddevice version that
+  drops the underscored symbols degrades to a logged warning rather
+  than a silent failure mode buried in the broader catch.
+- **H-2 — RX device-loss ``stream_error`` dedupe.**  The watchdog
+  timer and the PortAudio finished_callback could both fire on the
+  same USB unplug, producing duplicate "Audio device disconnected"
+  toasts.  Added ``_device_loss_emitted`` flag set by whichever path
+  fires first; the other short-circuits.
+- **H-4 — Windows wide-char WAV paths.**  Four ``wave.open(str(path))``
+  call sites (Export to Audio writer, offline TX worker writer, CLI
+  encoder writer, WAV file loader) now use ``path.open(mode)`` +
+  ``wave.open(f, mode)`` so non-ASCII characters in save paths survive
+  the Windows ANSI code page on non-UTF-8 locales.
+- **H-5 — config tmp-file cleanup.**  ``load_config`` now removes any
+  ``<config>.toml.tmp`` left behind by a SIGKILL between
+  ``tomli_w.dump`` and ``os.replace`` in a prior save.  Failure to
+  unlink is logged at debug; the load proceeds regardless.
+- **H-6 — font-load fallback.**  ``renderer._load_font`` now wraps
+  ``PIL.ImageFont.truetype`` in a try/except OSError and falls back to
+  the bundled DejaVu Sans Bold on failure.  A corrupted file in the
+  user fonts directory no longer crashes the entire TX render path.
+- **H-8 — bounded filename-collision search.**  ``_resolve_collision``
+  previously walked up to 999 sequential ``stat()`` calls — fine on
+  SSD, painful on a slow network share (tens of seconds of GUI freeze).
+  Cap at 10 sequential trials, then switch to a 6-hex-char random
+  suffix from ``secrets.token_hex``.  16.7 M unique suffixes per stem.
+  Absolute worst case is now 60 stat calls (vs. 999 before).
+
+### Documented
+
+- **H-3 — ``output_stream.stop()`` cross-thread semantics.**  ``stop()``
+  is called from the GUI thread while ``stream.write()`` runs on the
+  TX worker thread; PortAudio's ``Pa_AbortStream`` is not portably
+  documented as cross-thread safe.  Recorded the empirical behaviour
+  per OS (macOS / Linux / Windows WASAPI safe in practice; the WDM-KS
+  output-device filter at ``audio/devices.py`` mitigates the historic
+  Windows sharp edge) and the audit's trade-off rationale.
+- **H-7 — process-global ``_pa_reset`` warning.**  ``sd._terminate``
+  + ``sd._initialize`` is a process-wide PortAudio operation and the
+  Open-SSTV TX/RX interlock only sees Open-SSTV's own activity.
+  Embedders who import the package alongside other PortAudio users
+  may see their unrelated streams invalidated by a device-loss
+  recovery here.  Warning added so the package's behaviour is clear
+  outside the standalone-app case.
+- **H-9 — macOS Intel install guidance.**  Universal2 isn't viable
+  because PySide6 ships per-arch wheels (no fat upstream wheel to
+  merge against), and GitHub retired the ``macos-13`` Intel runner
+  pool — so neither option-(a) nor option-(b) from the audit is
+  available.  README now points Intel Mac users at ``pipx install
+  open-sstv`` and the cross-platform bullet documents the limitation.
+
+### CI / repo
+
+- **mypy parser blocker resolved.**  ``src/open_sstv/radio/tci.py:296``
+  contained a ``# type: TX_AUDIO`` comment that mypy parsed as a PEP
+  484 type-comment annotation, aborting the strict run.  Renamed to
+  ``# msg_type:`` so the file parses cleanly.  Full mypy strict mode
+  still reports 196 errors across 33 files (mostly unused
+  ``type: ignore`` comments and None-narrowing); adding mypy to CI
+  waits for a follow-up.
+- **ruff applied: 116 safe auto-fixes across 37 files.**  Pure
+  mechanical: import sort, unused-import removal, pyupgrade typing,
+  trivial SIM/B fixes.  No logic changes.  Remaining 151 manual
+  fixes (E402, E501, SIM105, etc.) deferred to a follow-up.
+- **ruff added to CI as a hard gate.**  ``test.yml`` now runs
+  ``ruff check src tests --select=I,F,UP,W`` before the test job.
+  The curated selection is the subset that's fully clean today.
+  Widening to E / B / SIM is a separate PR once the manual cleanup
+  lands.
+- **F-class cleanup in tests.**  Six ``F821`` / ``F841`` reports were
+  legitimate forward-annotation bugs (``Callable`` in
+  ``ui/workers.py``; ``KenwoodRig`` / ``YaesuRig`` in
+  ``test_serial_rig.py``) and dead intermediate bindings in five
+  test files.  All fixed inline so the new ruff gate passes.
+
+### Audit follow-ups not in this release
+
+- mypy CI gating (waits on the 196 strict-mode errors being addressed)
+- ruff E-class / B-class / SIM-class cleanup (151 manual fixes)
+- GUI marker via Xvfb on Linux for the test workflow
+- Integration marker against fake rigctld
+- Medium-severity audit items (next PR)
+
+---
+
 ## [0.3.14] — 2026-05-21
 
 CI / release-pipeline hardening release.  No functional code changes.
