@@ -23,7 +23,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
 ## Goals
 
 - **Open source end-to-end**, GPL-3.0-or-later.
-- **Cross-platform**: Linux x86_64 and arm64, macOS (Apple Silicon), and Windows
+- **Cross-platform**: Linux x86_64 and arm64, macOS (Apple Silicon; Intel via `pipx`), and Windows
   (experimental — prebuilt binaries available, real-hardware validation ongoing).
   Raspberry Pi 4/5 on-hardware testing planned.
 - **Modern, intuitive UI** built on Qt 6 (PySide6).
@@ -331,6 +331,28 @@ triggers the check.
 
 Notarized builds are on the roadmap; when that lands, double-clicking the
 unzipped `open-sstv` in Finder will Just Work with no Terminal step.
+
+### macOS (Intel) — no prebuilt binary
+
+GitHub Actions retired the `macos-13` (Intel) runner pool, which is the
+last x86_64 macOS image they hosted; Apple-Silicon-only is now the only
+practical CI option for macOS releases. Universal2 is not viable for us
+either: PySide6 ships per-architecture wheels rather than a Universal2
+fat binary, so a `target_arch="universal2"` PyInstaller build fails at
+collect time.
+
+If you're on an Intel Mac, install from source instead:
+
+```bash
+python3 -m pip install --user pipx
+pipx install open-sstv          # or: pipx install "open-sstv[flac]"
+open-sstv
+```
+
+`pipx` puts Open-SSTV in an isolated venv on PATH and pulls the
+appropriate x86_64 wheels from PyPI for every native dependency. This is
+the same install path the development setup below uses, just without the
+clone.
 
 ### Linux (x86_64 or arm64)
 
