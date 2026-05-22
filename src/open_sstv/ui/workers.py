@@ -262,33 +262,50 @@ def _compute_playback_watchdog_s(
 #: Default duration for the ALC/linearity test tone, in seconds.
 _TEST_TONE_DURATION_S: float = 5.0
 
-#: Two-tone test frequencies (Hz).  700 + 1900 Hz is the ARRL standard
-#: for SSB ALC / intermodulation testing.
+#: Two-tone test frequency *defaults* (Hz).  700 + 1900 Hz is the ARRL
+#: standard for SSB ALC / intermodulation testing — what every operator
+#: expects unless they explicitly want something else.  ``AppConfig.
+#: test_tone_freq_lo`` / ``test_tone_freq_hi`` override these at runtime
+#: (audit L-2); when neither is configured, ``_make_two_tone`` falls
+#: back to these constants so the legacy callers and tests keep working.
 _TEST_TONE_FREQ_LO: float = 700.0
 _TEST_TONE_FREQ_HI: float = 1900.0
 
 
-def _make_two_tone(sample_rate: int, duration_s: float) -> NDArray[np.int16]:
-    """Generate a two-tone test signal (700 Hz + 1900 Hz) as int16 PCM.
+def _make_two_tone(
+    sample_rate: int,
+    duration_s: float,
+    *,
+    freq_lo: float = _TEST_TONE_FREQ_LO,
+    freq_hi: float = _TEST_TONE_FREQ_HI,
+) -> NDArray[np.int16]:
+    """Generate a two-tone test signal as int16 PCM.
 
-    The two equal-amplitude sine waves are summed and the result is scaled
-    so the *peak* of the sum sits at −1 dBFS.  Each component therefore
-    has an amplitude of ``0.5 × 10^(−1/20) ≈ 0.446`` of full scale.
+    Frequencies default to the ARRL twin-tone standard (700 + 1900 Hz)
+    used for SSB linearity testing.  Callers (TxWorker) override from
+    ``AppConfig.test_tone_freq_lo`` / ``test_tone_freq_hi`` so operators
+    on narrower passbands can pick frequencies inside their audio band
+    without code changes (audit L-2).
 
-    This is a calibration signal, not a linearity-critical SSTV image, so
-    we want maximum drive into the radio.  At −1 dBFS peak the two-tone
-    average power is −7 dBFS, which is enough to light ALC on the IC-7300
-    and similar radios even with a conservatively set USB MOD Level.  The
-    user's TX output-gain slider provides additional headroom control if
-    needed.
+    The two equal-amplitude sine waves are summed and the result is
+    scaled so the *peak* of the sum sits at −1 dBFS.  Each component
+    therefore has an amplitude of ``0.5 × 10^(−1/20) ≈ 0.446`` of full
+    scale.
+
+    This is a calibration signal, not a linearity-critical SSTV image,
+    so we want maximum drive into the radio.  At −1 dBFS peak the
+    two-tone average power is −7 dBFS, which is enough to light ALC on
+    the IC-7300 and similar radios even with a conservatively set USB
+    MOD Level.  The user's TX output-gain slider provides additional
+    headroom control if needed.
     """
     n = int(sample_rate * duration_s)
     t = np.arange(n, dtype=np.float64) / sample_rate
     # Peak of two equal-amplitude sines can reach 2.0, so each is scaled
     # to half the −1 dBFS ceiling.
     amplitude = 0.5 * (10 ** (-1.0 / 20.0))  # ≈ 0.4467
-    sig = np.sin(2.0 * np.pi * _TEST_TONE_FREQ_LO * t)
-    sig += np.sin(2.0 * np.pi * _TEST_TONE_FREQ_HI * t)
+    sig = np.sin(2.0 * np.pi * freq_lo * t)
+    sig += np.sin(2.0 * np.pi * freq_hi * t)
     sig *= amplitude
     return (sig * 32767.0).astype(np.int16)
 
@@ -400,6 +417,22 @@ class TxWorker(QObject):
         # emitted, avoiding a cross-thread signal per chunk (~10 Hz) during
         # a multi-minute TX when the waterfall window is hidden.
         self._waterfall_active: bool = False
+        # L-2: two-tone test-signal frequencies.  Defaults match the
+        # ARRL twin-tone standard; MainWindow updates these from
+        # AppConfig when the Settings dialog saves.
+        self._test_tone_freq_lo: float = _TEST_TONE_FREQ_LO
+        self._test_tone_freq_hi: float = _TEST_TONE_FREQ_HI
+
+    def set_test_tone_freqs(self, lo_hz: float, hi_hz: float) -> None:
+        """Update the two-tone test frequencies (L-2).
+
+        Called by MainWindow when the Settings dialog saves.  Range
+        clamping is done in ``AppConfig.__post_init__`` so the values
+        reaching this slot are already in [300, 3000] Hz and ordered
+        ``lo < hi``.
+        """
+        self._test_tone_freq_lo = float(lo_hz)
+        self._test_tone_freq_hi = float(hi_hz)
 
     def set_tci_connection(self, conn: object | None) -> None:
         """Set (or clear) the TCI connection used for TX audio output.
@@ -772,7 +805,12 @@ class TxWorker(QObject):
         # promise in the README and the Settings tooltip.  Regular SSTV
         # TX keeps the pre-scale path (stable envelope for the whole
         # image — see transmit()).
-        samples = _make_two_tone(self._sample_rate, _TEST_TONE_DURATION_S)
+        samples = _make_two_tone(
+            self._sample_rate,
+            _TEST_TONE_DURATION_S,
+            freq_lo=self._test_tone_freq_lo,
+            freq_hi=self._test_tone_freq_hi,
+        )
 
         playback_budget_s = _compute_playback_watchdog_s(
             samples.size, self._sample_rate, self._ptt_delay_s

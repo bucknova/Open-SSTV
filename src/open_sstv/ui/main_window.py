@@ -580,6 +580,11 @@ class MainWindow(QMainWindow):
             self._config.tx_banner_text_color,
             self._config.tx_banner_size,
         )
+        # L-2: two-tone test frequencies from Settings (defaults 700/1900 Hz).
+        self._tx_worker.set_test_tone_freqs(
+            self._config.test_tone_freq_lo,
+            self._config.test_tone_freq_hi,
+        )
         self._tx_worker.moveToThread(self._tx_thread)
         # Standard Qt cleanup pattern: when the thread finishes, schedule
         # the worker for deletion. Without this the worker is left as an
@@ -1296,6 +1301,11 @@ class MainWindow(QMainWindow):
             self._config.callsign,
             self._config.cw_id_wpm,
             self._config.cw_id_tone_hz,
+        )
+        # L-2: refresh test-tone frequencies from the just-saved config.
+        self._tx_worker.set_test_tone_freqs(
+            self._config.test_tone_freq_lo,
+            self._config.test_tone_freq_hi,
         )
         # Propagate sample rate to both workers (takes effect on the next
         # encode/capture start).  Both go via queued signals so the

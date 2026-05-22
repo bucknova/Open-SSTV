@@ -327,13 +327,43 @@ class SettingsDialog(QDialog):
         # _tx_active flags kept in sync with TxWorker TX lifecycle signals).
         self._test_tone_btn = QPushButton("Test Tone")
         self._test_tone_btn.setToolTip(
-            "Transmit a 700 Hz + 1900 Hz two-tone signal for 5 s.\n"
+            "Transmit the configured two-tone signal for 5 s.\n"
             "Adjust TX output gain above until ALC just barely lights on peaks.\n"
             "The gain slider remains live while the tone plays."
         )
         self._test_tone_btn.clicked.connect(self._on_test_tone_clicked)
         gain_layout.addRow("", self._test_tone_btn)
         self._update_test_tone_btn()
+
+        # L-2: per-tone frequency spinboxes for operators who need to move
+        # the test signal outside the ARRL twin-tone 700/1900 Hz default
+        # (narrower passbands, mode-specific testing, etc.).  Clamped to
+        # [300, 3000] Hz to stay inside any reasonable SSB filter; the
+        # AppConfig __post_init__ re-clamps and swaps if hand-edited TOML
+        # puts lo > hi.
+        self._test_tone_lo_spin = QDoubleSpinBox()
+        self._test_tone_lo_spin.setRange(300.0, 3000.0)
+        self._test_tone_lo_spin.setDecimals(0)
+        self._test_tone_lo_spin.setSingleStep(50.0)
+        self._test_tone_lo_spin.setSuffix(" Hz")
+        self._test_tone_lo_spin.setValue(self._config.test_tone_freq_lo)
+        self._test_tone_lo_spin.setToolTip(
+            "Lower of the two test-tone frequencies (default: 700 Hz, "
+            "ARRL twin-tone standard for SSB linearity)."
+        )
+        gain_layout.addRow("Test tone low:", self._test_tone_lo_spin)
+
+        self._test_tone_hi_spin = QDoubleSpinBox()
+        self._test_tone_hi_spin.setRange(300.0, 3000.0)
+        self._test_tone_hi_spin.setDecimals(0)
+        self._test_tone_hi_spin.setSingleStep(50.0)
+        self._test_tone_hi_spin.setSuffix(" Hz")
+        self._test_tone_hi_spin.setValue(self._config.test_tone_freq_hi)
+        self._test_tone_hi_spin.setToolTip(
+            "Higher of the two test-tone frequencies (default: 1900 Hz, "
+            "ARRL twin-tone standard for SSB linearity)."
+        )
+        gain_layout.addRow("Test tone high:", self._test_tone_hi_spin)
 
         form.addRow(gain_group)
 
@@ -1502,6 +1532,8 @@ class SettingsDialog(QDialog):
             audio_input_gain=self._input_gain_slider.value() / 100.0,
             audio_output_gain=self._output_gain_slider.value() / 100.0,
             tx_output_overdrive=self._overdrive_check.isChecked(),
+            test_tone_freq_lo=self._test_tone_lo_spin.value(),
+            test_tone_freq_hi=self._test_tone_hi_spin.value(),
             rx_weak_signal_mode=self._weak_signal_check.isChecked(),
             rx_watchdog_timeout_s=self._watchdog_spin.value(),
             apply_final_slant_correction=self._final_slant_check.isChecked(),
