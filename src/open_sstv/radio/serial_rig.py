@@ -367,58 +367,86 @@ class IcomCIVRig:
         cable unplugged mid-read) propagates out; ``_command`` catches it
         and re-raises as ``RigConnectionError`` so the ``Rig`` surface is
         consistent.
+
+        M-2 (audit 4.7/v0.2.9): the previous implementation polled
+        ``in_waiting`` every 10 ms via ``time.sleep(0.01)`` — burning 100
+        wake-ups per second while holding ``self._lock``.  Switch to a
+        short-timeout blocking ``read`` so the OS schedules the wait
+        instead.  Each iteration either returns bytes immediately when
+        the rig replies (latency unchanged) or blocks up to 50 ms before
+        looping to re-check the deadline.  Net: same worst-case
+        responsiveness, no busy-loop CPU cost, and the lock release
+        cadence improves because the GIL isn't held during the blocking
+        ``read`` syscall.
         """
         if self._ser is None:
             raise RigConnectionError("Serial port not open")
         buf = bytearray()
         deadline = time.monotonic() + deadline_s
-        while time.monotonic() < deadline:
-            avail = self._ser.in_waiting
-            if avail:
-                buf.extend(self._ser.read(avail))
-            else:
-                time.sleep(0.01)
-            # Look for a complete response frame addressed to us
-            while True:
-                start = buf.find(_CIV_PREAMBLE)
-                if start == -1:
-                    break
-                end = buf.find(_CIV_EOM, start + 2)
-                if end == -1:
-                    break
-                frame = buf[start + 2 : end]  # skip preamble
-                # Remove this frame from buffer
-                buf = buf[end + 1 :]
-                if len(frame) < 2:
-                    continue
-                to_addr = frame[0]
-                from_addr = frame[1]
-                payload = frame[2:]
-                # Skip echo of our own command
-                if to_addr == self._addr and from_addr == _CIV_CONTROLLER:
-                    continue
-                # Response from rig to us.
-                #
-                # L9: this check also implicitly rejects unsolicited
-                # broadcast frames the rig sends when the operator turns
-                # a knob — those have ``to_addr = 0x00`` (transceive
-                # broadcast to all controllers) which differs from
-                # ``_CIV_CONTROLLER = 0xE0``, and from_addr must equal
-                # ``self._addr`` (the rig we're talking to specifically,
-                # not any other CI-V device on a bus topology).  So a
-                # knob-turn broadcast in flight when we issued our
-                # command cannot accidentally satisfy the predicate
-                # below and be returned as our response.
-                if to_addr == _CIV_CONTROLLER and from_addr == self._addr:
-                    if payload and payload[0] == _CIV_OK:
-                        return payload[1:]  # data after OK byte
-                    if payload and payload[0] == _CIV_NG:
-                        raise RigCommandError(
-                            "CI-V command rejected (NG)",
-                            command=payload.hex(),
-                        )
-                    # Data response (e.g. frequency read) — command echo + data
-                    return payload
+        # Snapshot and restore the user-configured timeout so this
+        # function doesn't have a side effect on the next caller's
+        # blocking-read semantics elsewhere.
+        original_timeout = self._ser.timeout
+        try:
+            self._ser.timeout = 0.05
+            while time.monotonic() < deadline:
+                # Read whatever's buffered first (cheap, no wait), then
+                # block briefly waiting for the next byte.  ``read(1)``
+                # returns ``b""`` on timeout — no exception — so the
+                # deadline check on the next loop iteration handles
+                # end-of-time cleanly.
+                avail = self._ser.in_waiting
+                if avail:
+                    buf.extend(self._ser.read(avail))
+                else:
+                    chunk = self._ser.read(1)
+                    if chunk:
+                        buf.extend(chunk)
+                # Look for a complete response frame addressed to us
+                while True:
+                    start = buf.find(_CIV_PREAMBLE)
+                    if start == -1:
+                        break
+                    end = buf.find(_CIV_EOM, start + 2)
+                    if end == -1:
+                        break
+                    frame = buf[start + 2 : end]  # skip preamble
+                    # Remove this frame from buffer
+                    buf = buf[end + 1 :]
+                    if len(frame) < 2:
+                        continue
+                    to_addr = frame[0]
+                    from_addr = frame[1]
+                    payload = frame[2:]
+                    # Skip echo of our own command
+                    if to_addr == self._addr and from_addr == _CIV_CONTROLLER:
+                        continue
+                    # Response from rig to us.
+                    #
+                    # L9: this check also implicitly rejects unsolicited
+                    # broadcast frames the rig sends when the operator
+                    # turns a knob — those have ``to_addr = 0x00``
+                    # (transceive broadcast to all controllers) which
+                    # differs from ``_CIV_CONTROLLER = 0xE0``, and
+                    # from_addr must equal ``self._addr`` (the rig we're
+                    # talking to specifically, not any other CI-V device
+                    # on a bus topology).  So a knob-turn broadcast in
+                    # flight when we issued our command cannot
+                    # accidentally satisfy the predicate below and be
+                    # returned as our response.
+                    if to_addr == _CIV_CONTROLLER and from_addr == self._addr:
+                        if payload and payload[0] == _CIV_OK:
+                            return payload[1:]  # data after OK byte
+                        if payload and payload[0] == _CIV_NG:
+                            raise RigCommandError(
+                                "CI-V command rejected (NG)",
+                                command=payload.hex(),
+                            )
+                        # Data response (e.g. frequency read) —
+                        # command echo + data
+                        return payload
+        finally:
+            self._ser.timeout = original_timeout
         raise RigConnectionError("CI-V response timeout")
 
     @staticmethod
