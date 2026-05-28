@@ -7,14 +7,17 @@ radio. Receives and decodes SSTV images live off your radio, and encodes and
 transmits images back, with optional Hamlib, direct serial, or TCI (ExpertSDR2 /
 SunSDR2 / AetherSDR) rig control.
 
-**Status: Beta (v0.3.20) — ready for user testing and feedback.** TX and RX paths work
+**Status: Beta (v0.3.21) — ready for user testing and feedback.** TX and RX paths work
 end-to-end across all 22 supported modes. Rig control via rigctld or direct serial CAT
 is functional. Weak-signal decode is usable down to roughly 0 dB SNR on Robot 36.
 
 Open-SSTV is looking for testers — on-air reports, audio captures of problem decodes,
 and UI feedback all welcome. Please
 [file an issue](https://github.com/bucknova/Open-SSTV/issues) with your OS, Python
-version, radio / interface, and any terminal output. See
+version, radio / interface, and any terminal output. **For bug reports**, open
+Settings → Diagnostics → *Export Diagnostics…* and attach the generated zip — it
+contains the recent log file, system info, and your redacted config, which is
+usually enough for a fix without follow-up questions. See
 [Testing focus areas](#testing-focus-areas) below for the spots we'd most like eyes on.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
@@ -310,27 +313,28 @@ No Python install required — just download, unzip, and run.
 
 ### macOS (Apple Silicon)
 
-Because the release bundle is ad-hoc signed (not yet Apple-notarized — planned),
-macOS Gatekeeper will refuse to launch it until you clear the quarantine flag
-that Safari/Chrome/Finder stamps on every downloaded file. You only need to do
-this once per download.
+As of v0.3.21 the macOS release ships as a real `.app` bundle (`Open-SSTV.app`),
+not a folder of files. Because it's ad-hoc signed (not yet Apple-notarized —
+planned), macOS Gatekeeper will refuse to launch it until you clear the
+quarantine flag that Safari/Chrome/Finder stamps on every downloaded file.
+You only need to do this once per download.
 
 ```bash
 cd ~/Downloads
 unzip -o open-sstv-macos-arm64.zip
-xattr -cr open-sstv            # strip the quarantine flag recursively
-./open-sstv/open-sstv          # launch
+xattr -cr Open-SSTV.app        # strip the quarantine flag from the whole bundle
+open Open-SSTV.app             # or just double-click in Finder
 ```
 
-**Symptoms if you skip `xattr -cr`:** cascading *"'python' is damaged and can't
-be opened"* popups, or a terminal error like
-`library load disallowed by system policy`. The bundle is not actually damaged —
-that's Gatekeeper refusing to verify an ad-hoc-signed binary against the
-Apple-notarization catalog. `xattr -cr` removes the quarantine attribute that
-triggers the check.
+After the one-time `xattr -cr`, double-clicking `Open-SSTV.app` in Finder
+launches it like any other Mac app — no Terminal step needed.
 
-Notarized builds are on the roadmap; when that lands, double-clicking the
-unzipped `open-sstv` in Finder will Just Work with no Terminal step.
+**If the launch fails** with `library load disallowed by system policy`, the
+quarantine flag wasn't fully stripped. Re-run `xattr -cr Open-SSTV.app` (note:
+the *whole bundle* must be the target, not just a file inside it).
+
+Notarized builds are on the roadmap; when that lands, even the `xattr -cr`
+step goes away.
 
 ### macOS (Intel) — no prebuilt binary
 

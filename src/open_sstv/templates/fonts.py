@@ -20,7 +20,6 @@ call ``is_font_available(family)`` before rendering.
 """
 from __future__ import annotations
 
-import importlib.resources
 import logging
 import re
 from pathlib import Path
@@ -66,12 +65,21 @@ def _normalise(family: str) -> str:
 
 
 def _shipped_fonts_dir() -> Path:
-    """Return the absolute path to the bundled assets/fonts directory."""
-    # importlib.resources traversal for the installed package.
-    anchor = importlib.resources.files("open_sstv") / "assets" / "fonts"
-    # Materialise as a filesystem path (works for both editable and wheel installs).
-    with importlib.resources.as_file(anchor) as p:
-        return Path(p)
+    """Return the absolute path to the bundled assets/fonts directory.
+
+    v0.3.21: switched from ``importlib.resources.files(...) /
+    "assets" / "fonts"`` + ``as_file()`` to the ``__file__``-anchored
+    pattern — see ``templates/manager.py::_bundled_templates_dir`` for
+    the full explanation.  Fonts happened to load correctly under
+    PyInstaller with the old pattern (consumed via direct
+    ``ImageFont.truetype(str(path))`` reads, which doesn't go through
+    ``Path.exists()``) while templates didn't (consumed via
+    ``Path.exists()`` + copy-out).  The pattern is wrong for
+    directories regardless of how callers use the returned path; this
+    aligns both helpers on the robust pattern.
+    """
+    import open_sstv  # noqa: PLC0415 — lazy to avoid import cycle
+    return Path(open_sstv.__file__).parent / "assets" / "fonts"
 
 
 def _user_fonts_dir() -> Path | None:

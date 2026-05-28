@@ -132,7 +132,14 @@ jobs:
       - name: Verify build (Unix)
         if: runner.os != 'Windows'
         run: |
-          exe="dist/open-sstv/open-sstv"
+          # v0.3.21: macOS now ships as a .app bundle; the launcher
+          # lives under Contents/MacOS/.  Linux still uses the onedir
+          # folder layout.
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            exe="dist/Open-SSTV.app/Contents/MacOS/open-sstv"
+          else
+            exe="dist/open-sstv/open-sstv"
+          fi
           [ -f "$exe" ] || { echo "ERROR: $exe not found"; exit 1; }
           echo "OK: $exe ($(du -sh "$exe" | cut -f1))"
 
@@ -176,31 +183,53 @@ jobs:
       - name: Re-sign bundle ad-hoc (macOS)
         if: runner.os == 'macOS'
         run: |
-          cd dist/open-sstv
-          # Strip old signatures from every Mach-O, then re-apply a fresh
-          # plain ad-hoc signature.  --remove-signature also drops any
-          # stale runtime / entitlement flags that would block reload.
-          find . -type f \( -name "*.dylib" -o -name "*.so" -o -name "Python" \) \
+          # v0.3.21: target the new ``.app`` bundle instead of the
+          # onedir folder.  The dylib re-sign sweep still runs first to
+          # clear stale signatures inside the bundle (PyInstaller's
+          # intermediate steps can leave dylibs in a state AMFI won't
+          # accept), then a single bundle-level codesign --deep applies
+          # the hardened-runtime + library-validation-disabled
+          # entitlements to the whole tree at once.  --deep is what
+          # lets one codesign call cover the launcher in
+          # Contents/MacOS/ plus every Mach-O under Contents/
+          # Frameworks/, instead of having to enumerate each path
+          # explicitly.
+          cd dist
+          BUNDLE="Open-SSTV.app"
+          # Strip old signatures from every Mach-O inside the bundle.
+          find "$BUNDLE" -type f \( -name "*.dylib" -o -name "*.so" -o -name "Python" \) \
             -exec codesign --remove-signature {} \; 2>/dev/null || true
-          find . -type f \( -name "*.dylib" -o -name "*.so" -o -name "Python" \) \
+          find "$BUNDLE" -type f \( -name "*.dylib" -o -name "*.so" -o -name "Python" \) \
             -exec codesign --force --sign - {} \;
-          # Launcher gets hardened runtime + entitlements that disable
-          # library validation so it can dlopen its own ad-hoc children.
-          codesign --remove-signature open-sstv 2>/dev/null || true
-          codesign --force --sign - \
-            --options=runtime \
+          # Bundle-level re-sign with --deep covers the launcher AND
+          # re-applies entitlements so AMFI accepts the ad-hoc-signed
+          # children at dlopen time.
+          codesign --remove-signature "$BUNDLE" 2>/dev/null || true
+          codesign --force --sign - --options=runtime --deep \
             --entitlements "$GITHUB_WORKSPACE/packaging/macos-entitlements.plist" \
-            open-sstv
-          echo "Ad-hoc signed: $(find . -type f \( -name '*.dylib' -o -name '*.so' \) | wc -l) dylibs/so + Python + launcher (entitlements applied)"
-          echo "--- launcher signature verification ---"
-          codesign -dv --entitlements - open-sstv 2>&1 | head -20
+            "$BUNDLE"
+          echo "Ad-hoc signed: $(find "$BUNDLE" -type f \( -name '*.dylib' -o -name '*.so' \) | wc -l) dylibs/so + Python + launcher (bundle entitlements applied)"
+          echo "--- bundle signature verification ---"
+          codesign -dv --entitlements - "$BUNDLE" 2>&1 | head -20
 
-      # ── 6b. Package: macOS / Linux zip ─────────────────────────────────────
-      - name: Zip (Unix)
-        if: runner.os != 'Windows'
+      # ── 6b. Package: Linux zip (still onedir folder) ───────────────────────
+      - name: Zip (Linux)
+        if: runner.os == 'Linux'
         run: |
           cd dist
           zip -r ${{ matrix.artifact }}.zip open-sstv/
+          echo "Archive: $(du -sh ${{ matrix.artifact }}.zip | cut -f1)"
+
+      # ── 6b'. Package: macOS zip (.app bundle, v0.3.21+) ────────────────────
+      - name: Zip (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cd dist
+          # -y preserves symlinks inside the bundle (PySide6's
+          # Qt frameworks have symlinks under Versions/Current).
+          # Without -y zip would dereference them and bloat the
+          # archive while breaking framework load semantics.
+          zip -ry ${{ matrix.artifact }}.zip Open-SSTV.app
           echo "Archive: $(du -sh ${{ matrix.artifact }}.zip | cut -f1)"
 
       # ── 6c. Package: Linux AppImage ────────────────────────────────────────

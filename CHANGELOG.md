@@ -11,6 +11,90 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.21] — 2026-05-28
+
+Three connected fixes plus a diagnostics-export button.  User testing
+of the v0.3.20 Windows binary surfaced two bugs (templates not loading,
+no way to see logs from a console-less GUI build) alongside the
+already-known macOS Dock label issue.  v0.3.21 closes all three with a
+single coordinated PR.
+
+### Fixed
+
+- **Bundled starter templates now actually install on first launch
+  in PyInstaller bundles.**  The bug was latent since v0.3.0 ship.
+  `_bundled_templates_dir()` used `importlib.resources.files(...) /
+  "assets" / "templates"` wrapped in `as_file()` and returned the path
+  from inside the `with` block — a pattern that's documented for
+  *file* resources but is implementation-defined for *directories*.
+  In the PyInstaller onedir bundle the returned path didn't satisfy
+  `Path.exists()` checks, so `install_starter_pack` logged
+  "Bundled starter template missing" for every file and copied zero
+  templates.  Wheel / pipx installs happened to work by coincidence.
+  Fix: switch both `_bundled_templates_dir()` and `_shipped_fonts_dir()`
+  to `Path(open_sstv.__file__).parent / "assets" / "<sub>"` — works
+  identically in every install layout (editable, wheel, PyInstaller
+  onedir, PyInstaller `.app` BUNDLE).
+
+- **macOS Dock label now reads "Open-SSTV".**  Three prior attempts
+  (`setApplicationName` reorder in v0.3.19, `NSProcessInfo.setProcessName`
+  via ctypes in v0.3.19 + v0.3.20) all failed to move the Dock label.
+  User testing confirmed the actual cause: the Dock pulls from the
+  launcher binary's basename for non-`.app` launches, and runtime
+  process-name changes don't propagate.  The bullet-proof fix is a
+  proper `.app` wrap with `CFBundleName = "Open-SSTV"` in `Info.plist`.
+  Implemented via a new `BUNDLE(...)` target in `open_sstv.spec` that
+  produces `dist/Open-SSTV.app/` on macOS only.  Both `CFBundleName`
+  and `CFBundleDisplayName` set to "Open-SSTV".  `CFBundleVersion` /
+  `CFBundleShortVersionString` read straight from `pyproject.toml`
+  at spec-evaluation time so the bundle version always matches the
+  release version with no second place to forget to bump.
+
+### Added
+
+- **Settings → Diagnostics → Export Diagnostics…** button.  Bundles
+  the user's recent log file + a system-info report + their config
+  (sensitive fields redacted) into a single zip via `QFileDialog`.
+  Designed to make bug reports one-click instead of asking users to
+  navigate to platformdirs paths or scrape terminal output.  Tested
+  end-to-end on macOS; smoke output looks clean.
+- **Rotating log file** at `<platformdirs.user_log_dir>/open-sstv.log`
+  always activates at startup now (capped at ~6 MB via
+  `RotatingFileHandler` with `backupCount=2`).  Previously logs only
+  went to stderr, which is a dead handle in the Windows GUI build
+  (PyInstaller `console=False`) and inconvenient to scrape on macOS
+  / Linux.  The diagnostics button (above) bundles this file into the
+  export zip.
+
+### Changed
+
+- **macOS release artifact layout.**  `open-sstv-macos-arm64.zip` now
+  contains `Open-SSTV.app` (single bundle, Finder-aware) instead of
+  `open-sstv/` (folder of files).  Artifact filename is unchanged so
+  README links continue to work.  Codesign step in `build.yml`
+  updated: bundle-level `codesign --force --sign - --options=runtime
+  --deep --entitlements packaging/macos-entitlements.plist
+  dist/Open-SSTV.app` after the existing dylib re-sign sweep.
+
+- **README macOS install section.**  Replaces the ambiguous
+  `xattr -cr open-sstv` instruction (which routinely got applied to
+  the launcher binary instead of the folder, leaving `_internal/Python`
+  quarantined and triggering "library load disallowed by system policy")
+  with `xattr -cr Open-SSTV.app` (the bundle is a single
+  unambiguous Finder object).  Adds note that Finder double-click
+  works after the one-time quarantine clear.
+
+### Not in this release (deferred)
+
+- macOS Developer-ID notarization (removes the `xattr -cr` step
+  entirely).  Requires Apple Developer enrollment + a separate
+  workflow using `notarytool`.
+- Linux source-install dock-label fix — there's no `.app` equivalent
+  for source/pipx launches on Linux; the dock will continue to show
+  "python" in those cases.  Not a regression.
+
+---
+
 ## [0.3.20] — 2026-05-28
 
 **Critical packaging fix** plus a follow-up macOS process-name attempt.

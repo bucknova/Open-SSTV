@@ -18,7 +18,6 @@ the real user config.
 """
 from __future__ import annotations
 
-import importlib.resources
 import logging
 from pathlib import Path
 
@@ -70,10 +69,30 @@ def default_station_assets_dir() -> Path:
 
 
 def _bundled_templates_dir() -> Path:
-    """Return the path to the shipped assets/templates directory."""
-    anchor = importlib.resources.files("open_sstv") / "assets" / "templates"
-    with importlib.resources.as_file(anchor) as p:
-        return Path(p)
+    """Return the path to the shipped assets/templates directory.
+
+    v0.3.21 fix: previously this used
+    ``importlib.resources.files(...) / "assets" / "templates"`` followed
+    by an ``as_file()`` context manager and returned the path from
+    inside the ``with`` block.  ``as_file()`` is documented for
+    *file* resources; behaviour on a *directory* traversable is
+    implementation-defined.  In the PyInstaller onedir bundle this
+    returned a path that ``Path.exists()`` rejected, so
+    ``install_starter_pack`` silently logged "Bundled starter template
+    missing" for every file and copied zero templates to the user's
+    config dir on first launch.  Wheel / pip-install layouts happened
+    to work by coincidence because ``importlib.resources`` resolved to
+    the actual on-disk path directly.
+
+    The replacement anchors on ``open_sstv.__file__`` which is the
+    package's ``__init__.py`` in every install layout we ship —
+    editable ``pip install -e .``, wheel, PyInstaller onedir, and
+    PyInstaller ``.app`` BUNDLE.  ``.parent`` is the package root and
+    the subpath is just file-system arithmetic.  No fragile
+    ``importlib.resources`` semantics involved.
+    """
+    import open_sstv  # noqa: PLC0415 — lazy to avoid import cycle
+    return Path(open_sstv.__file__).parent / "assets" / "templates"
 
 
 # ---------------------------------------------------------------------------

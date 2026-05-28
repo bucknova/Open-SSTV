@@ -229,8 +229,81 @@ class SettingsDialog(QDialog):
         updates_form.addRow(self._check_updates_setting)
 
         layout.addWidget(updates_group)
+
+        # ── Diagnostics (v0.3.21) ────────────────────────────────────────
+        # User-friendly diagnostics export.  Without this, the only way
+        # to capture log output from a Windows GUI build (where the
+        # ``.exe`` is built with ``console=False`` and stderr goes to a
+        # dead handle) was to find ``%LOCALAPPDATA%\open_sstv\open_sstv
+        # \Logs\open-sstv.log`` manually.  Now there's a button.
+        diag_group = QGroupBox("Diagnostics")
+        diag_layout = QVBoxLayout(diag_group)
+        diag_help = QLabel(
+            "Export a zip containing the recent log file, system info, "
+            "and your config (sensitive fields stripped) for sharing in "
+            "bug reports."
+        )
+        diag_help.setWordWrap(True)
+        diag_help.setStyleSheet("color: gray; font-size: 10px;")
+        diag_layout.addWidget(diag_help)
+        self._diag_export_btn = QPushButton("Export Diagnostics…")
+        self._diag_export_btn.clicked.connect(self._on_export_diagnostics)
+        diag_layout.addWidget(self._diag_export_btn)
+        layout.addWidget(diag_group)
+
         layout.addStretch(1)
         return tab
+
+    @Slot()
+    def _on_export_diagnostics(self) -> None:
+        """Save a diagnostics zip via QFileDialog and notify the user.
+
+        Lives on the Settings dialog so it's discoverable without a
+        menu bar (Open-SSTV's main window doesn't have one today on
+        every platform).  The actual zip-building happens in
+        ``open_sstv.ui.diagnostics.export_diagnostics`` — this slot is
+        just the file-dialog + error-toast UI glue.
+        """
+        from datetime import datetime  # noqa: PLC0415
+        from pathlib import Path  # noqa: PLC0415
+
+        import platformdirs  # noqa: PLC0415
+
+        from open_sstv.ui.diagnostics import export_diagnostics  # noqa: PLC0415
+
+        # Default filename includes UTC timestamp so a user can run
+        # this multiple times without overwriting earlier exports.
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        default_dir = Path(platformdirs.user_downloads_dir())
+        default_name = str(default_dir / f"open-sstv-diagnostics-{ts}.zip")
+
+        path_str, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Open-SSTV Diagnostics",
+            default_name,
+            "Zip archives (*.zip)",
+        )
+        if not path_str:
+            return  # user cancelled
+
+        try:
+            out_path = export_diagnostics(Path(path_str))
+        except OSError as exc:
+            QMessageBox.warning(
+                self,
+                "Diagnostics export failed",
+                f"Could not write the diagnostics zip:\n\n{exc}",
+            )
+            return
+
+        QMessageBox.information(
+            self,
+            "Diagnostics exported",
+            (
+                f"Diagnostics written to:\n\n{out_path}\n\n"
+                "Attach this file when filing an issue on GitHub."
+            ),
+        )
 
     def _build_audio_tab(self) -> QWidget:
         tab = QWidget()
