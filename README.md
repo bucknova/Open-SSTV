@@ -367,7 +367,7 @@ Two formats are published per architecture:
 
 ### Windows
 
-Download `open-sstv-windows-x86_64.zip`, unzip, and double-click `open-sstv.exe`.
+Download `open-sstv-windows.zip`, unzip, and double-click `open-sstv.exe`.
 Windows SmartScreen may show a "Windows protected your PC" dialog on first launch
 because the binary is unsigned; click **More info → Run anyway**.
 
