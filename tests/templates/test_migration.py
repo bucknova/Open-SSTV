@@ -48,10 +48,21 @@ def _write_v2_templates(config_dir: Path, entries: list[dict]) -> Path:
 
 
 class TestAlreadyPopulated:
+    """v0.3.22: ``starter_pack_installed`` now only treats the dir as
+    populated when at least one *real* v0.3 starter filename is present.
+    The pre-v0.3.22 tests wrote arbitrary names like ``existing.toml`` /
+    ``only.toml`` and expected ``run_migration`` to short-circuit;
+    that's no longer the contract.  Use a real starter filename for
+    the positive cases."""
+
     def test_returns_already_populated(self, tmp_path: Path) -> None:
+        from open_sstv.templates.manager import STARTER_TEMPLATE_FILENAMES
         tdir = tmp_path / "templates"
         tdir.mkdir()
-        (tdir / "existing.toml").write_text("[template]\nname='x'\n")
+        # Use a real starter name so the v0.3.22 gate fires correctly.
+        (tdir / STARTER_TEMPLATE_FILENAMES[0]).write_text(
+            "[template]\nname='cqsstv'\n"
+        )
         result = run_migration(templates_dir=tdir, user_config_dir=tmp_path)
         assert result == "already_populated"
 
@@ -62,14 +73,45 @@ class TestAlreadyPopulated:
         p = tdir / "existing.toml"
         p.write_bytes(sentinel)
         run_migration(templates_dir=tdir, user_config_dir=tmp_path)
+        # Non-starter file content must be preserved across migration even
+        # when the starter pack ends up being installed alongside it.
         assert p.read_bytes() == sentinel
 
     def test_does_not_add_files(self, tmp_path: Path) -> None:
+        """When a real v0.3 starter is already present, no extra files."""
+        from open_sstv.templates.manager import STARTER_TEMPLATE_FILENAMES
         tdir = tmp_path / "templates"
         tdir.mkdir()
-        (tdir / "only.toml").write_text("[template]\nname='x'\n")
+        present = STARTER_TEMPLATE_FILENAMES[0]
+        (tdir / present).write_text("[template]\nname='cqsstv'\n")
         run_migration(templates_dir=tdir, user_config_dir=tmp_path)
-        assert list(tdir.glob("*.toml")) == [tdir / "only.toml"]
+        # Only the one file we put there should still be present (migration
+        # treats the dir as already-populated and skips install).
+        assert sorted(p.name for p in tdir.glob("*.toml")) == [present]
+
+    def test_stale_non_starter_toml_triggers_install(self, tmp_path: Path) -> None:
+        """v0.3.22 regression test: stale cq.toml from a v0.2.x install.
+
+        The pre-v0.3.22 ``starter_pack_installed`` saw the non-starter
+        ``.toml`` and skipped the install entirely, so a real user
+        upgrading from v0.2.x ended up with zero v0.3 starters in their
+        gallery despite the bundled templates shipping correctly.
+        Diagnostics zip from 2026-05-28 caught the exact state.
+        """
+        from open_sstv.templates.manager import STARTER_TEMPLATE_FILENAMES
+        tdir = tmp_path / "templates"
+        tdir.mkdir()
+        # Simulate the user's reported state: a single non-starter .toml.
+        (tdir / "cq.toml").write_text("[template]\nname='stale from v0.2'\n")
+
+        result = run_migration(templates_dir=tdir, user_config_dir=tmp_path)
+        # Should NOT be "already_populated" — install must run.
+        assert result == "starter_pack_installed"
+        # All 8 starters now present.
+        for fn in STARTER_TEMPLATE_FILENAMES:
+            assert (tdir / fn).exists(), f"missing starter: {fn}"
+        # And the user's stale cq.toml was left untouched.
+        assert (tdir / "cq.toml").exists()
 
 
 # ---------------------------------------------------------------------------

@@ -57,11 +57,36 @@ class TestStarterPackInstalled:
         tdir.mkdir()
         assert starter_pack_installed(tdir) is False
 
-    def test_true_when_toml_present(self, tmp_path: Path) -> None:
+    def test_true_when_starter_filename_present(self, tmp_path: Path) -> None:
+        """v0.3.22: a single v0.3 starter file is enough to call it installed.
+
+        Tightened from the pre-v0.3.22 "any .toml" check.
+        """
+        from open_sstv.templates.manager import STARTER_TEMPLATE_FILENAMES
         tdir = tmp_path / "templates"
         tdir.mkdir()
-        (tdir / "foo.toml").write_text("[template]\nname='x'\n")
+        # Use the first starter filename (cqsstv.toml) for the positive case.
+        (tdir / STARTER_TEMPLATE_FILENAMES[0]).write_text(
+            "[template]\nname='cqsstv'\n"
+        )
         assert starter_pack_installed(tdir) is True
+
+    def test_false_when_only_non_starter_toml_present(self, tmp_path: Path) -> None:
+        """v0.3.22 regression test for the cq.toml-only Windows install case.
+
+        A user upgrading from a much older Open-SSTV (v0.2.x had different
+        starter filenames like ``cq.toml``) had a stale ``cq.toml`` in the
+        user templates dir.  The pre-v0.3.22 check returned True (any toml
+        present), so ``install_starter_pack`` was skipped and the 8 v0.3
+        starters never landed.  Diagnostics zip from 2026-05-28 caught it.
+        """
+        tdir = tmp_path / "templates"
+        tdir.mkdir()
+        (tdir / "cq.toml").write_text("[template]\nname='stale v0.2'\n")
+        (tdir / "foo.toml").write_text("[template]\nname='also custom'\n")
+        # Neither cq.toml nor foo.toml is in STARTER_TEMPLATE_FILENAMES,
+        # so the gate must say "not installed" and let the install proceed.
+        assert starter_pack_installed(tdir) is False
 
     def test_ignores_non_toml_files(self, tmp_path: Path) -> None:
         tdir = tmp_path / "templates"

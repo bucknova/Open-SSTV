@@ -11,6 +11,46 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.22] — 2026-05-28
+
+Surgical follow-up to v0.3.21.  User testing of the v0.3.21 Windows
+binary revealed that the starter-template install was still being
+skipped on machines with a stale ``cq.toml`` (or any other non-v0.3
+``.toml``) leftover from a much older Open-SSTV install.  The
+diagnostics export button shipped in v0.3.21 was used to pinpoint the
+root cause within minutes — exactly what the feature was added for.
+
+### Fixed
+
+- **`starter_pack_installed()` now checks specifically for our 8 v0.3
+  starter filenames** instead of any ``.toml`` in the user dir.  The
+  pre-v0.3.22 check returned True if a user upgrading from v0.2.x
+  still had stale files like ``cq.toml`` in
+  ``%LOCALAPPDATA%\\open_sstv\\open_sstv\\templates\\``, which caused
+  ``run_migration()`` to skip ``install_starter_pack()`` and the 8
+  v0.3 starters never landed.  After v0.3.22:
+
+    - Fresh install (empty templates dir) → install runs, all 8 ship.
+    - Upgrade from v0.2.x with old ``cq.toml`` only → install runs,
+      8 starters land alongside the existing ``cq.toml`` (left
+      untouched).
+    - User who deleted a starter intentionally → still treated as
+      "installed", deletion is respected.
+    - Normal post-v0.3 user → True, no-op.
+
+  ``install_starter_pack()`` itself was already idempotent
+  (``overwrite=False`` default), so the only thing that needed
+  tightening was the gate.
+
+### Tests
+
+- New ``test_false_when_only_non_starter_toml_present`` regression
+  test for the exact diagnostic scenario (single non-starter ``.toml``
+  in user dir → gate must say "not installed").  Reworded the existing
+  positive test to use a real starter filename.
+
+---
+
 ## [0.3.21] — 2026-05-28
 
 Three connected fixes plus a diagnostics-export button.  User testing

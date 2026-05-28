@@ -278,11 +278,42 @@ def duplicate_template(path: Path) -> Path:
 
 
 def starter_pack_installed(templates_dir: Path | None = None) -> bool:
-    """Return True if the templates directory is non-empty."""
+    """Return True if at least one v0.3 starter template is in *templates_dir*.
+
+    v0.3.22 fix: the previous check returned True if *any* ``*.toml``
+    existed in the user templates dir.  That misdiagnosed two real
+    upgrade paths as "installed":
+
+      1. A user upgrading from v0.2.x (which shipped different
+         starter filenames like ``cq.toml``) had those old files
+         hanging around.  The check saw them, returned True,
+         ``install_starter_pack`` was skipped, and the v0.3 starter
+         pack — the eight files this version actually ships — never
+         landed.  Caught 2026-05-28 via diagnostics zip from a user
+         whose Windows install showed exactly this state.
+
+      2. A hypothetical user who created one custom template before
+         their first launch would hit the same misdiagnosis.
+
+    The tightened check looks specifically for any one of the v0.3
+    starter filenames (``STARTER_TEMPLATE_FILENAMES``).  Semantics:
+
+      * Fresh install / dir doesn't exist        → False → install.
+      * v0.2.x upgrade with old cq.toml only     → False → install.
+      * Post-v0.3 user who deleted one template  → True  → respect it.
+      * Truly populated v0.3 user                → True  → no-op.
+
+    The "respect a deletion" property matters because
+    ``install_starter_pack`` doesn't overwrite existing files
+    (``overwrite=False`` is the default), so calling it every launch
+    would *not* clobber user edits — but it would noisily re-install
+    a template the user deliberately deleted.  Returning True the
+    moment any starter is present preserves that intent.
+    """
     tdir = templates_dir if templates_dir is not None else default_templates_dir()
     if not tdir.is_dir():
         return False
-    return any(tdir.glob("*.toml"))
+    return any((tdir / filename).exists() for filename in STARTER_TEMPLATE_FILENAMES)
 
 
 def install_starter_pack(
