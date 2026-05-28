@@ -44,10 +44,34 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
 
+    # Windows taskbar grouping: by default a Python-launched binary
+    # inherits whatever AppUserModelID Windows derives from the .exe
+    # path, which is usually the Python interpreter's — so multiple
+    # Python apps stack under one icon and the taskbar tooltip says
+    # "python.exe".  Setting an explicit AppUserModelID *before*
+    # constructing QApplication makes Windows treat Open-SSTV as its
+    # own first-class taskbar entry with the icon we ship.  No-op on
+    # other platforms.  See:
+    #   https://learn.microsoft.com/en-us/windows/win32/shell/appids
+    if sys.platform == "win32":
+        try:
+            import ctypes  # noqa: PLC0415
+            # Reverse-DNS form is conventional; matches our org / repo.
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "github.bucknova.OpenSSTV"
+            )
+        except (AttributeError, OSError, ImportError):
+            # SetCurrentProcessExplicitAppUserModelID is shell32 ≥ Win7;
+            # any failure here just means the taskbar grouping falls
+            # back to the Python default.  Cosmetic only — never block
+            # the GUI launch.
+            pass
+
     # Qt is imported lazily so the encode/decode CLIs (which never
     # construct a QApplication) don't pay the import cost just because
     # they share a package with the GUI.
     try:
+        from PySide6.QtGui import QIcon  # noqa: PLC0415
         from PySide6.QtWidgets import QApplication  # noqa: PLC0415
     except ImportError:
         print(
@@ -75,6 +99,22 @@ def main(argv: list[str] | None = None) -> int:
     app.setApplicationVersion(__version__)
     app.setOrganizationName("bucknova")
     app.setOrganizationDomain("github.com/bucknova")
+
+    # App icon — picked up by every window's title bar, the Linux
+    # window-manager hint, and the Windows taskbar (in addition to the
+    # .ico embedded in the .exe by PyInstaller).  The PNG ships inside
+    # the wheel under ``open_sstv/assets/icons/`` so this works for
+    # pipx installs, source checkouts, and the PyInstaller bundle
+    # alike — ``importlib.resources`` is the right abstraction for
+    # all three.  Failure is non-fatal: a missing icon shouldn't
+    # block the GUI from starting.
+    try:
+        import importlib.resources as _res  # noqa: PLC0415
+        _icon_ref = _res.files("open_sstv") / "assets" / "icons" / "Open-SSTV.png"
+        with _res.as_file(_icon_ref) as _icon_path:
+            app.setWindowIcon(QIcon(str(_icon_path)))
+    except (FileNotFoundError, OSError, ModuleNotFoundError):
+        pass
 
     # Start with ManualRig (no-op). The user clicks "Connect Rig" in
     # the radio panel to establish a live rigctld link at runtime.
