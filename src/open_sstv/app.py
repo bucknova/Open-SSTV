@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import signal
 import sys
+from pathlib import Path
 
 from open_sstv import __version__
 
@@ -113,16 +114,91 @@ def _verify_bundled_assets() -> list[str]:
     return missing
 
 
+def _user_log_dir() -> Path | None:
+    """Return ``platformdirs.user_log_dir("open_sstv")`` as a Path, or None.
+
+    Wrapped in try/except because a misconfigured environment (no HOME,
+    locked-down container) could fault on the platformdirs call.  Logging
+    setup must never block the GUI from starting; if this returns None
+    the FileHandler is skipped silently and only stderr logging applies.
+    """
+    try:
+        import platformdirs  # noqa: PLC0415
+        return Path(platformdirs.user_log_dir("open_sstv"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _setup_logging(log_level: int) -> Path | None:
+    """Configure root logger with stderr AND a rotating file handler.
+
+    v0.3.21: the Windows ``.exe`` is built with ``console=False`` so
+    ``sys.stderr`` is attached to a null sink — every log message
+    vanishes and the user has no way to share diagnostics.  And even
+    when the user *does* run from a terminal (the macOS / Linux
+    case), telling them to scroll back through stderr to file an
+    issue is a bad UX.
+
+    Always activate a ``RotatingFileHandler`` writing to
+    ``platformdirs.user_log_dir("open_sstv")/open-sstv.log`` so the
+    new Settings → Diagnostics export button has something to bundle
+    regardless of launch method.  The stderr handler is kept as well,
+    so terminal users continue to see live output.
+
+    Bounded by ``RotatingFileHandler``'s default ``maxBytes=2 MB``
+    and ``backupCount=2`` — total disk usage capped at ~6 MB across
+    the rotated set.  Skip silently if the log dir can't be created
+    (locked-down container, read-only filesystem) — logging must
+    never block the GUI from starting.
+
+    Returns the log file path that was activated, or ``None`` if no
+    file handler was wired up.  The caller logs the path so the very
+    first line of every session has a "logs are at X" breadcrumb.
+    """
+    import logging  # noqa: PLC0415
+    import logging.handlers as _lh  # noqa: PLC0415
+
+    fmt = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    datefmt = "%H:%M:%S"
+    logging.basicConfig(level=log_level, format=fmt, datefmt=datefmt)
+
+    log_dir = _user_log_dir()
+    if log_dir is None:
+        return None
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        path = log_dir / "open-sstv.log"
+        handler = _lh.RotatingFileHandler(
+            path,
+            maxBytes=2 * 1024 * 1024,   # 2 MB per file
+            backupCount=2,              # keep 2 rotated + 1 current = 3 max
+            encoding="utf-8",
+        )
+        handler.setLevel(log_level)
+        handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s %(levelname)s %(name)s: %(message)s",
+                datefmt="%Y-%m-%dT%H:%M:%S",
+            )
+        )
+        logging.getLogger().addHandler(handler)
+        return path
+    except OSError:
+        # Locked-down or read-only user dir; degrade silently to
+        # stderr-only logging.
+        return None
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the ``open-sstv`` console script and ``python -m open_sstv``."""
     import logging  # noqa: PLC0415
     import os  # noqa: PLC0415
     log_level = logging.DEBUG if os.environ.get("OPEN_SSTV_DEBUG") else logging.INFO
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    _log_file_path = _setup_logging(log_level)
+    if _log_file_path is not None:
+        logging.getLogger("open_sstv").info(
+            "Logging to %s (stderr handler unchanged)", _log_file_path
+        )
 
     # v0.1.34: log the runtime version and the module path immediately
     # so a stale install vs current source mismatch is obvious.  If the

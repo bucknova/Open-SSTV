@@ -14,7 +14,17 @@
 #   Linux   : open-sstv  (or package via appimagetool — see build.yml)
 
 import sys
+import tomllib
+from pathlib import Path
+
 from PyInstaller.utils.hooks import collect_submodules, collect_data_files
+
+# Read the version straight from pyproject.toml so the macOS .app
+# Info.plist (CFBundleVersion / CFBundleShortVersionString) stays in sync
+# with whatever the release-prep step bumped pyproject to.  No second
+# place to forget to update.
+with Path("pyproject.toml").open("rb") as _f:
+    __version__ = tomllib.load(_f)["project"]["version"]
 
 # scipy uses lazy/conditional imports internally; collect everything so
 # signal.hilbert, butter, sosfiltfilt, and resample_poly all work at runtime.
@@ -89,19 +99,24 @@ UPX_OK = sys.platform != "darwin"
 # App icon path per PyInstaller's per-platform expectations:
 #   * Windows — embedded into the .exe via the rsrc section; needs .ico
 #     (auto-converts only sometimes; we ship a multi-resolution one).
-#   * macOS  — set in the bundle's Info.plist (CFBundleIconFile); needs
-#     .icns.  We don't ship one yet — the runtime ``setWindowIcon`` in
-#     ``app.py`` covers the Qt window title bar, and the dock icon for
-#     a non-.app onedir bundle stays generic until we wrap as BUNDLE
-#     (tracked as a follow-up).
+#   * macOS  — set on the BUNDLE() target's Info.plist via
+#     CFBundleIconFile.  EXE()'s icon= parameter on macOS quietly does
+#     nothing useful in onedir mode (the launcher binary isn't where
+#     macOS looks for an app icon), so we set it on the bundle below.
 #   * Linux  — PyInstaller ignores ``icon=``; the .desktop file in the
 #     AppImage step references ``assets/icon.png`` for shell integration.
-# Skipping the icon (None) on macOS / Linux is the safe default — passing
-# a .ico to a non-Windows EXE() either no-ops or warns.
+# Skipping the icon (None) on EXE() for macOS / Linux is the safe
+# default — passing a .ico to a non-Windows EXE() either no-ops or warns.
 if sys.platform == "win32":
     APP_ICON = "src/open_sstv/assets/icons/Open-SSTV.ico"
 else:
     APP_ICON = None
+
+# Separate macOS .icns path — used by the BUNDLE() target below, not the
+# EXE() launcher.  Generated from the same source PNG as the .ico via
+# Pillow's ICNS encoder; ships at this stable location in the wheel so
+# both source builds and PyInstaller see it.
+MACOS_ICNS = "src/open_sstv/assets/icons/Open-SSTV.icns"
 
 a = Analysis(
     # Entry-point: the same function pyproject.toml's console_script calls.
@@ -159,3 +174,43 @@ coll = COLLECT(
     upx_exclude=[],
     name="open-sstv",        # dist/open-sstv/  <-- the folder to zip
 )
+
+# v0.3.21: wrap the macOS onedir output as a proper ``.app`` bundle.
+#
+# Why: prior to v0.3.21 the macOS release shipped as an onedir folder
+# (``dist/open-sstv/`` with a Mach-O launcher inside).  Three papercuts
+# came out of that:
+#
+#   1. Dock label reads "open-sstv" (the binary basename) instead of
+#      "Open-SSTV" — the Dock doesn't honour runtime
+#      NSProcessInfo.setProcessName calls for non-``.app`` launches.
+#   2. ``xattr -cr`` instructions are ambiguous (folder vs. binary
+#      path); users hit it routinely.
+#   3. No proper home for ``CFBundleVersion``, ``CFBundleIconFile``,
+#      or future ``LSMinimumSystemVersion`` declarations.
+#
+# The BUNDLE() target produces ``dist/Open-SSTV.app/`` containing the
+# usual ``Contents/MacOS/open-sstv`` launcher, ``Contents/Frameworks/``,
+# ``Contents/Resources/``, and our Info.plist.  build.yml zips this
+# instead of the onedir folder (the artifact filename stays
+# ``open-sstv-macos-arm64.zip`` so existing README links work).
+#
+# CFBundleName is what the Dock reads.  CFBundleDisplayName is what
+# Finder shows.  Both set to "Open-SSTV" so every macOS surface gets
+# the right label.
+if sys.platform == "darwin":
+    app = BUNDLE(
+        coll,
+        name="Open-SSTV.app",
+        icon=MACOS_ICNS,
+        bundle_identifier="com.bucknova.OpenSSTV",
+        info_plist={
+            "CFBundleDisplayName": "Open-SSTV",
+            "CFBundleName": "Open-SSTV",
+            "CFBundleShortVersionString": __version__,
+            "CFBundleVersion": __version__,
+            "NSPrincipalClass": "NSApplication",
+            "NSHighResolutionCapable": True,
+            "LSMinimumSystemVersion": "11.0",
+        },
+    )
