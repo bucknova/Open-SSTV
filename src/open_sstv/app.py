@@ -17,6 +17,102 @@ import sys
 from open_sstv import __version__
 
 
+def _set_macos_process_name(name: str) -> None:
+    """Set ``-[NSProcessInfo processName]`` via libobjc ctypes (macOS only).
+
+    No-op on non-macOS platforms.  Wrapped in a broad try/except so a
+    libobjc lookup failure (PyInstaller bundle without the cdll
+    search path, exotic distro) or a future Objective-C ABI change
+    never blocks GUI launch — losing the friendly name is cosmetic.
+
+    Called twice from ``main()`` — once before ``QApplication()`` is
+    constructed (so the very first Dock-icon render gets the right
+    name) and once immediately after (because Qt's NSApplication init
+    resets the name back to whatever macOS derives from the embedded
+    Python.framework's ``CFBundleName``, which is ``"Python"``).  The
+    post-QApplication call is what actually sticks for the Dock; the
+    pre-QApplication call is defence against any other code path that
+    queries the name during Qt initialization.
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        import ctypes  # noqa: PLC0415
+        import ctypes.util  # noqa: PLC0415
+
+        objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+        # objc_msgSend is variadic; declare per-call arg signatures.
+        objc.objc_msgSend.restype = ctypes.c_void_p
+
+        def send(receiver: int, selector: bytes, *args: object) -> int:
+            objc.objc_msgSend.argtypes = (
+                [ctypes.c_void_p, ctypes.c_void_p] + [ctypes.c_void_p] * len(args)
+            )
+            return int(
+                objc.objc_msgSend(
+                    receiver,
+                    objc.sel_registerName(selector),
+                    *args,
+                )
+                or 0
+            )
+
+        ns_process_info = objc.objc_getClass(b"NSProcessInfo")
+        ns_string = objc.objc_getClass(b"NSString")
+        process_info = send(ns_process_info, b"processInfo")
+        # +[NSString stringWithUTF8String:] returns an autoreleased NSString.
+        name_ns = send(ns_string, b"stringWithUTF8String:", name.encode("utf-8"))
+        send(process_info, b"setProcessName:", name_ns)
+    except (OSError, AttributeError, ImportError):
+        pass
+
+
+def _verify_bundled_assets() -> list[str]:
+    """Return a list of missing critical bundled assets.
+
+    The PyInstaller spec used to bundle only scipy data (open_sstv
+    assets silently shipped empty between v0.3.0 and v0.3.19).  The
+    v0.3.20 spec adds ``collect_data_files("open_sstv")`` to fix
+    this, but the failure mode (template renders crash, taskbar icon
+    is generic) is invisible enough that a regression could go
+    unnoticed for releases.
+
+    This check runs at app startup, walks the import-resources tree,
+    and returns the human-readable names of any expected bundled
+    assets that are missing.  Empty list means everything's where it
+    should be.  Caller logs and surfaces to the UI; never blocks the
+    GUI from starting because partial assets are still better than no
+    app.
+    """
+    missing: list[str] = []
+    try:
+        import importlib.resources as _res  # noqa: PLC0415
+
+        checks = [
+            ("DejaVu Sans Bold font", ("assets", "fonts", "DejaVuSans-Bold.ttf")),
+            ("App icon PNG", ("assets", "icons", "Open-SSTV.png")),
+            ("TX default image", ("assets", "testimage.jpg")),
+        ]
+        root = _res.files("open_sstv")
+        for label, parts in checks:
+            ref = root
+            for part in parts:
+                ref = ref / part
+            try:
+                with _res.as_file(ref) as p:
+                    if not p.exists():
+                        missing.append(label)
+            except (FileNotFoundError, OSError):
+                missing.append(label)
+    except ModuleNotFoundError:
+        missing.append("open_sstv package itself")
+    return missing
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the ``open-sstv`` console script and ``python -m open_sstv``."""
     import logging  # noqa: PLC0415
@@ -78,50 +174,18 @@ def main(argv: list[str] | None = None) -> int:
             pass
 
     # (3) macOS: the Dock tooltip reads from ``-[NSProcessInfo
-    # processInfo] processName]``.  Qt's QCoreApplication.setApplicationName
-    # (called below) doesn't propagate to NSProcessInfo, so the source-
-    # install Dock entry stays labelled "python" until we set it directly.
-    # We use libobjc via ctypes rather than depending on pyobjc — libobjc
-    # is always present on macOS, and the call sequence is small enough
-    # to inline.  Wrapped in a broad try/except so a future Objective-C
-    # ABI change can't break the GUI launch.
-    if sys.platform == "darwin":
-        try:
-            import ctypes  # noqa: PLC0415
-            import ctypes.util  # noqa: PLC0415
-
-            _objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
-            _objc.objc_getClass.restype = ctypes.c_void_p
-            _objc.objc_getClass.argtypes = [ctypes.c_char_p]
-            _objc.sel_registerName.restype = ctypes.c_void_p
-            _objc.sel_registerName.argtypes = [ctypes.c_char_p]
-            # objc_msgSend is variadic; declare per-call arg signatures.
-            _objc.objc_msgSend.restype = ctypes.c_void_p
-
-            def _send(receiver: int, selector: bytes, *args: object) -> int:
-                _objc.objc_msgSend.argtypes = (
-                    [ctypes.c_void_p, ctypes.c_void_p] + [ctypes.c_void_p] * len(args)
-                )
-                return int(
-                    _objc.objc_msgSend(
-                        receiver,
-                        _objc.sel_registerName(selector),
-                        *args,
-                    )
-                    or 0
-                )
-
-            _NSProcessInfo = _objc.objc_getClass(b"NSProcessInfo")
-            _NSString = _objc.objc_getClass(b"NSString")
-            _process_info = _send(_NSProcessInfo, b"processInfo")
-            # +[NSString stringWithUTF8String:] returns an autoreleased NSString.
-            _name_ns = _send(_NSString, b"stringWithUTF8String:", b"Open-SSTV")
-            _send(_process_info, b"setProcessName:", _name_ns)
-        except (OSError, AttributeError, ImportError):
-            # ctypes / find_library failure, or a future ABI change.
-            # Falling through leaves the Dock label unchanged — cosmetic
-            # only, never blocks the GUI.
-            pass
+    # processInfo] processName]``.  In v0.3.19 the call below was
+    # invoked only once, before QApplication construction.  User
+    # testing against the v0.3.19 PyInstaller binary showed the Dock
+    # still read "Python" — turns out Qt's NSApplication init during
+    # QApplication() construction resets the name back to whatever
+    # macOS derives from the embedded Python.framework's Info.plist
+    # (``CFBundleName = "Python"``).  v0.3.20 calls the helper both
+    # BEFORE QApplication (so the very first Dock-icon render is
+    # right) AND AFTER (so the post-QApplication name sticks).
+    # Belt-and-braces.  See the matching call further down after
+    # ``app = QApplication(...)``.
+    _set_macos_process_name("Open-SSTV")
 
     # Qt is imported lazily so the encode/decode CLIs (which never
     # construct a QApplication) don't pay the import cost just because
@@ -165,6 +229,14 @@ def main(argv: list[str] | None = None) -> int:
     # to come after construction.  This is the *user-visible* string
     # (window-bar suffix on Linux, fallback for the WM hint, etc.).
     app.setApplicationDisplayName("Open-SSTV")
+    # v0.3.20: re-apply NSProcessInfo.setProcessName *after* QApplication
+    # is constructed.  Qt's NSApplication init during QApplication()
+    # resets the process name back to whatever macOS derives from the
+    # embedded ``Python.framework``'s ``CFBundleName`` (which is
+    # ``"Python"``), so the v0.3.19 pre-QApplication call was silently
+    # overwritten in the PyInstaller bundle.  Calling it again post-
+    # QApplication is what actually sticks for the Dock.
+    _set_macos_process_name("Open-SSTV")
     # (5) Linux Wayland: ``setDesktopFileName`` tells the compositor
     # which ``.desktop`` entry owns this top-level — the compositor
     # then uses that file's ``Name=`` / ``Icon=`` for the taskbar
@@ -188,9 +260,38 @@ def main(argv: list[str] | None = None) -> int:
     except (FileNotFoundError, OSError, ModuleNotFoundError):
         pass
 
+    # v0.3.20: verify the bundled assets actually shipped.  Between
+    # v0.3.0 and v0.3.19 the PyInstaller spec silently failed to bundle
+    # ``src/open_sstv/assets/`` — fonts, templates, icons, and the
+    # default TX photo all went missing from every binary release.
+    # The user-visible symptoms were generic icons, garbled template
+    # renders, and the H-6 "Fallback font not found" error.  We now
+    # bundle them (see open_sstv.spec datas), and this startup check
+    # gives a clear log + status-bar warning if a future regression
+    # ships an incomplete bundle again.  Non-blocking: a partial
+    # install is still better than refusing to launch.
+    _missing_assets = _verify_bundled_assets()
+    if _missing_assets:
+        _msg = (
+            "Open-SSTV installation appears incomplete — missing bundled "
+            "assets: " + ", ".join(_missing_assets) + ".  Templates may "
+            "fail to render and the app icon may be generic.  Re-download "
+            "from https://github.com/bucknova/Open-SSTV/releases/latest."
+        )
+        logging.getLogger("open_sstv").warning(_msg)
+
     # Start with ManualRig (no-op). The user clicks "Connect Rig" in
     # the radio panel to establish a live rigctld link at runtime.
     window = MainWindow()
+    if _missing_assets:
+        # Surface the warning to the user via the status bar too —
+        # log-only is invisible to GUI users.
+        try:
+            window.statusBar().showMessage(
+                "Installation incomplete — see terminal for details", 0
+            )
+        except AttributeError:
+            pass
     window.show()
 
     # Belt-and-braces cleanup: even if the event loop quits via something

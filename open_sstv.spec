@@ -51,6 +51,28 @@ else:
 # scipy ships .pyd/.dll data alongside its Python modules; include them.
 datas = collect_data_files("scipy")
 
+# v0.3.20: pull in everything under src/open_sstv/ that isn't a .py file.
+# This silently went missing from v0.3.0 onward because the spec only
+# bundled scipy's data — meaning every PyInstaller release between
+# v0.3.0 and v0.3.19 shipped without the bundled fonts, starter
+# templates, app icon PNG, or testimage.jpg.  Templates rendered with
+# garbled text (or crashed with OSError until the v0.3.15 H-6 fallback
+# turned it into a user-visible "Fallback font not found" error).
+# This call grabs every non-Python file under the package:
+#
+#   src/open_sstv/assets/fonts/*.ttf       (8 bundled Tier-1 fonts)
+#   src/open_sstv/assets/templates/*.toml  (starter-pack templates)
+#   src/open_sstv/assets/icons/Open-SSTV.png    (runtime QIcon source)
+#   src/open_sstv/assets/icons/Open-SSTV.ico    (also embedded into the
+#                                                .exe separately; safe to
+#                                                ship twice)
+#   src/open_sstv/assets/testimage.jpg     (TX panel default photo)
+#
+# Wheel installs (pipx / pip install) already have these via the hatch
+# ``packages = ["src/open_sstv"]`` directive — the bug was PyInstaller-
+# only.  Now both paths are covered.
+datas += collect_data_files("open_sstv")
+
 # UPX compresses Mach-O / ELF / PE binaries to shrink bundle size.  On
 # macOS (especially Apple Silicon) this is actively harmful: UPX rewrites
 # binaries *after* PyInstaller's ad-hoc codesign pass, which invalidates
