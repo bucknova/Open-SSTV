@@ -7,7 +7,7 @@ radio. Receives and decodes SSTV images live off your radio, and encodes and
 transmits images back, with optional Hamlib, direct serial, or TCI (ExpertSDR2 /
 SunSDR2 / AetherSDR) rig control.
 
-**Status: Beta (v0.3.13) — ready for user testing and feedback.** TX and RX paths work
+**Status: Beta (v0.3.19) — ready for user testing and feedback.** TX and RX paths work
 end-to-end across all 22 supported modes. Rig control via rigctld or direct serial CAT
 is functional. Weak-signal decode is usable down to roughly 0 dB SNR on Robot 36.
 

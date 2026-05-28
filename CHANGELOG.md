@@ -11,6 +11,54 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.19] — 2026-05-27
+
+App-name fix across all operating systems.  Open-SSTV used to render as
+"python" / "python.exe" in dock tooltips, taskbar hovers, and process
+lists when launched via the `open-sstv` console script (source / pipx
+installs) — the actual executable is the venv's Python interpreter,
+and Qt's `setApplicationName` was being called too late for the
+platform window systems to pick it up.
+
+### Fixed
+
+- **Cross-OS process-name fix** in `src/open_sstv/app.py`:
+  - **All OSes**: `sys.argv[0]` overridden to `"Open-SSTV"` very early
+    in `main()`; some platforms (notably Linux X11 `WM_CLASS`) sniff
+    `argv[0]` for the application name.
+  - **All OSes**: `QCoreApplication.setApplicationName()` /
+    `setApplicationVersion()` / `setOrganizationName()` /
+    `setOrganizationDomain()` moved to *before* `QApplication()` is
+    constructed.  Qt's docs are explicit that calling these after
+    construction "may not propagate properly to the platform's window
+    system" — which is exactly why the dock/taskbar tooltips ignored
+    them in v0.3.18 and earlier.
+  - **Linux** (Wayland): `app.setDesktopFileName("open-sstv")` so the
+    compositor matches the running window to the AppImage's
+    `open-sstv.desktop` entry for the taskbar tooltip and icon.
+  - **macOS**: `-[NSProcessInfo setProcessName:]` via `ctypes` against
+    `libobjc.dylib` so the Dock tooltip reads "Open-SSTV" instead of
+    "Python".  Verified locally: process name flips `b'Python'` →
+    `b'Open-SSTV'` after the call.  No new dependencies (`libobjc` is
+    always present on macOS; `pyobjc` not required).
+  - **Windows**: already covered by the v0.3.18 AppUserModelID +
+    `.exe` icon embed — no change needed.
+
+### Docs
+
+- **README status banner** bumped v0.3.13 → v0.3.19 — five releases
+  of drift caught.  The matching memory recipe has been updated
+  locally so README banner verification is now part of the
+  release-prep checklist alongside pyproject + CHANGELOG.
+
+### Failure modes
+
+Every layer is wrapped in `try/except` so a missing ctypes API or an
+ABI change can't block the GUI launch — losing the friendly name is
+cosmetic, never fatal.
+
+---
+
 ## [0.3.18] — 2026-05-27
 
 App icon ships end-to-end.  No functional changes — Open-SSTV stops

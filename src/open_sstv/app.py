@@ -44,15 +44,25 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
 
-    # Windows taskbar grouping: by default a Python-launched binary
-    # inherits whatever AppUserModelID Windows derives from the .exe
-    # path, which is usually the Python interpreter's — so multiple
-    # Python apps stack under one icon and the taskbar tooltip says
-    # "python.exe".  Setting an explicit AppUserModelID *before*
-    # constructing QApplication makes Windows treat Open-SSTV as its
-    # own first-class taskbar entry with the icon we ship.  No-op on
-    # other platforms.  See:
-    #   https://learn.microsoft.com/en-us/windows/win32/shell/appids
+    # Cross-OS process-name fix.  When Open-SSTV is launched via the
+    # ``open-sstv`` console script from a venv (the canonical source /
+    # pipx install path), the actual executable is the venv's Python
+    # interpreter — so the OS dock/taskbar tooltip and process-list
+    # entry read "python" or "python3" by default.  PyInstaller bundles
+    # are exempt (the bootloader binary is named ``open-sstv``).  We
+    # apply per-OS overrides *before* constructing QApplication so the
+    # platform's window system picks them up the first time it asks.
+
+    # (1) Some platforms (Linux X11 WM_CLASS in particular) sniff
+    # ``sys.argv[0]`` to derive the application name.  Overriding it
+    # to a friendly string is cheap and harmless on every OS.
+    sys.argv[0] = "Open-SSTV"
+
+    # (2) Windows: AppUserModelID controls taskbar icon grouping AND the
+    # hover tooltip.  Without an explicit ID, Windows derives one from
+    # the .exe path — usually the Python interpreter's, so multiple
+    # Python apps stack under one taskbar icon labelled "python.exe".
+    # See https://learn.microsoft.com/en-us/windows/win32/shell/appids.
     if sys.platform == "win32":
         try:
             import ctypes  # noqa: PLC0415
@@ -67,10 +77,57 @@ def main(argv: list[str] | None = None) -> int:
             # the GUI launch.
             pass
 
+    # (3) macOS: the Dock tooltip reads from ``-[NSProcessInfo
+    # processInfo] processName]``.  Qt's QCoreApplication.setApplicationName
+    # (called below) doesn't propagate to NSProcessInfo, so the source-
+    # install Dock entry stays labelled "python" until we set it directly.
+    # We use libobjc via ctypes rather than depending on pyobjc — libobjc
+    # is always present on macOS, and the call sequence is small enough
+    # to inline.  Wrapped in a broad try/except so a future Objective-C
+    # ABI change can't break the GUI launch.
+    if sys.platform == "darwin":
+        try:
+            import ctypes  # noqa: PLC0415
+            import ctypes.util  # noqa: PLC0415
+
+            _objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
+            _objc.objc_getClass.restype = ctypes.c_void_p
+            _objc.objc_getClass.argtypes = [ctypes.c_char_p]
+            _objc.sel_registerName.restype = ctypes.c_void_p
+            _objc.sel_registerName.argtypes = [ctypes.c_char_p]
+            # objc_msgSend is variadic; declare per-call arg signatures.
+            _objc.objc_msgSend.restype = ctypes.c_void_p
+
+            def _send(receiver: int, selector: bytes, *args: object) -> int:
+                _objc.objc_msgSend.argtypes = (
+                    [ctypes.c_void_p, ctypes.c_void_p] + [ctypes.c_void_p] * len(args)
+                )
+                return int(
+                    _objc.objc_msgSend(
+                        receiver,
+                        _objc.sel_registerName(selector),
+                        *args,
+                    )
+                    or 0
+                )
+
+            _NSProcessInfo = _objc.objc_getClass(b"NSProcessInfo")
+            _NSString = _objc.objc_getClass(b"NSString")
+            _process_info = _send(_NSProcessInfo, b"processInfo")
+            # +[NSString stringWithUTF8String:] returns an autoreleased NSString.
+            _name_ns = _send(_NSString, b"stringWithUTF8String:", b"Open-SSTV")
+            _send(_process_info, b"setProcessName:", _name_ns)
+        except (OSError, AttributeError, ImportError):
+            # ctypes / find_library failure, or a future ABI change.
+            # Falling through leaves the Dock label unchanged — cosmetic
+            # only, never blocks the GUI.
+            pass
+
     # Qt is imported lazily so the encode/decode CLIs (which never
     # construct a QApplication) don't pay the import cost just because
     # they share a package with the GUI.
     try:
+        from PySide6.QtCore import QCoreApplication  # noqa: PLC0415
         from PySide6.QtGui import QIcon  # noqa: PLC0415
         from PySide6.QtWidgets import QApplication  # noqa: PLC0415
     except ImportError:
@@ -92,13 +149,28 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    # (4) Qt application metadata — set via the static QCoreApplication
+    # methods *before* QApplication() is constructed.  Qt's docs are
+    # explicit that calling these after construction "may not propagate
+    # properly to the platform's window system" — which is why the
+    # dock/taskbar tooltips ignored them in v0.3.18 and earlier.
+    QCoreApplication.setApplicationName("Open-SSTV")
+    QCoreApplication.setApplicationVersion(__version__)
+    QCoreApplication.setOrganizationName("bucknova")
+    QCoreApplication.setOrganizationDomain("github.com/bucknova")
+
     qt_argv = list(argv) if argv is not None else sys.argv
     app = QApplication(qt_argv)
-    app.setApplicationName("Open-SSTV")
+    # ``setApplicationDisplayName`` lives on QGuiApplication so it has
+    # to come after construction.  This is the *user-visible* string
+    # (window-bar suffix on Linux, fallback for the WM hint, etc.).
     app.setApplicationDisplayName("Open-SSTV")
-    app.setApplicationVersion(__version__)
-    app.setOrganizationName("bucknova")
-    app.setOrganizationDomain("github.com/bucknova")
+    # (5) Linux Wayland: ``setDesktopFileName`` tells the compositor
+    # which ``.desktop`` entry owns this top-level — the compositor
+    # then uses that file's ``Name=`` / ``Icon=`` for the taskbar
+    # tooltip and icon.  No-op outside Wayland; on X11 it's harmless.
+    # Our AppImage build emits an ``open-sstv.desktop`` file.
+    app.setDesktopFileName("open-sstv")
 
     # App icon — picked up by every window's title bar, the Linux
     # window-manager hint, and the Windows taskbar (in addition to the
