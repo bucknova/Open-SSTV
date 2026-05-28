@@ -11,6 +11,50 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.18] — 2026-05-27
+
+App icon ships end-to-end.  No functional changes — Open-SSTV stops
+appearing as a generic Python window in title bars, the Windows
+taskbar, and the Linux window-manager hint area.
+
+### Added
+
+- **Bundled app icon** at `src/open_sstv/assets/icons/Open-SSTV.png`
+  (1024×1024 RGBA).  Copied from the long-standing
+  `assets/Open-SSTV-icon.png` so it ships inside the wheel and is
+  resolvable via `importlib.resources` from pipx, source checkouts,
+  and the PyInstaller bundle alike.
+- **Multi-resolution Windows `.ico`** at
+  `src/open_sstv/assets/icons/Open-SSTV.ico` (sizes 16/32/48/64/128/
+  256).  Generated from the same source PNG via Pillow.  Embedded
+  into the `.exe` rsrc section by PyInstaller so Windows Explorer
+  shows the right icon even when Open-SSTV isn't running.
+- **Runtime `setWindowIcon`** in `app.py` immediately after
+  `QApplication` construction.  Propagates to every window via Qt's
+  default-icon mechanism.
+- **Windows `AppUserModelID`** (`github.bucknova.OpenSSTV`) set via
+  `SetCurrentProcessExplicitAppUserModelID` before `QApplication`
+  construction.  Without this the Windows taskbar groups
+  Open-SSTV under the Python interpreter's AppUserModelID and the
+  tooltip reads "python.exe".
+
+### Where the icon shows up
+
+| OS | Where it appears now |
+|---|---|
+| Windows | `.exe` icon in Explorer + taskbar + window title bar |
+| Linux (AppImage) | `.desktop` entry, taskbar, window manager (already worked; runtime icon now also applies inside the window) |
+| Linux (pipx / zip) | Window title bar + window-manager taskbar hint |
+| macOS | Qt window title bar.  **Dock icon stays generic** for the onedir bundle — fixing that requires re-spec'ing as a PyInstaller `BUNDLE` target with an `.icns` file (tracked as a follow-up). |
+
+### Not in this release
+
+- macOS `.icns` + `BUNDLE` target restructure → real dock icon on
+  macOS.  Larger change because it touches the release pipeline's
+  codesign re-pass step.
+
+---
+
 ## [0.3.17] — 2026-05-22
 
 Third audit follow-up release.  Closes the actionable Low-severity items
