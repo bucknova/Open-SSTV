@@ -64,6 +64,23 @@ datas = collect_data_files("scipy")
 # UPX on Darwin; keep it available on Linux / Windows where it's safe.
 UPX_OK = sys.platform != "darwin"
 
+# App icon path per PyInstaller's per-platform expectations:
+#   * Windows — embedded into the .exe via the rsrc section; needs .ico
+#     (auto-converts only sometimes; we ship a multi-resolution one).
+#   * macOS  — set in the bundle's Info.plist (CFBundleIconFile); needs
+#     .icns.  We don't ship one yet — the runtime ``setWindowIcon`` in
+#     ``app.py`` covers the Qt window title bar, and the dock icon for
+#     a non-.app onedir bundle stays generic until we wrap as BUNDLE
+#     (tracked as a follow-up).
+#   * Linux  — PyInstaller ignores ``icon=``; the .desktop file in the
+#     AppImage step references ``assets/icon.png`` for shell integration.
+# Skipping the icon (None) on macOS / Linux is the safe default — passing
+# a .ico to a non-Windows EXE() either no-ops or warns.
+if sys.platform == "win32":
+    APP_ICON = "src/open_sstv/assets/icons/Open-SSTV.ico"
+else:
+    APP_ICON = None
+
 a = Analysis(
     # Entry-point: the same function pyproject.toml's console_script calls.
     ["src/open_sstv/app.py"],
@@ -108,7 +125,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # icon="assets/icon.ico",  # uncomment and add an .ico when you have one
+    icon=APP_ICON,
 )
 
 coll = COLLECT(
