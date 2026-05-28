@@ -983,17 +983,19 @@
 
           <div class="platform-note">
             <span class="platform-title">🍎 macOS — clear quarantine first</span>
-            The bundle is ad-hoc signed (Apple notarization is on the roadmap), so macOS Gatekeeper
+            As of v0.3.21 the macOS release ships as a real <code>Open-SSTV.app</code> bundle.
+            Because it's ad-hoc signed (Apple notarization is on the roadmap), macOS Gatekeeper
             will refuse to launch it until you clear the quarantine flag that Safari/Chrome/Finder
-            stamps on every download. Run this once per download:
+            stamps on every download. Run this once per download, then double-click the app
+            in Finder forever after:
             <div class="code-line">
               <span class="prompt">$</span>
-              <span class="cmd" id="cmd-macos-xattr">cd ~/Downloads &amp;&amp; unzip -o open-sstv-macos-arm64.zip &amp;&amp; xattr -cr open-sstv &amp;&amp; ./open-sstv/open-sstv</span>
+              <span class="cmd" id="cmd-macos-xattr">cd ~/Downloads &amp;&amp; unzip -o open-sstv-macos-arm64.zip &amp;&amp; xattr -cr Open-SSTV.app &amp;&amp; open Open-SSTV.app</span>
               <button class="copy-btn" onclick="copyCmd('cmd-macos-xattr')" title="Copy">⎘</button>
             </div>
-            Skipping <code>xattr -cr</code> causes cascading <em>"'python' is damaged and can't be opened"</em>
-            popups or a <code>library load disallowed by system policy</code> error — the bundle is fine,
-            Gatekeeper is just refusing to verify an ad-hoc signature against Apple's notarization catalog.
+            If launch fails with <code>library load disallowed by system policy</code>, the
+            quarantine flag wasn't fully stripped. Re-run <code>xattr -cr Open-SSTV.app</code> —
+            the whole bundle must be the target, not a file inside it.
           </div>
 
           <div class="platform-note" style="background: rgba(46,160,67,0.06); border-color: rgba(46,160,67,0.25); border-left-color: var(--green);">
