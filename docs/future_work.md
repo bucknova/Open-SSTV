@@ -118,3 +118,58 @@ Implementation notes:
 
 Effort: **half a day** including wording review and a screenshot
 refresh in the User Guide.
+
+---
+
+## RX-side callsign auto-detection (FSKID / CW ID)
+
+Captured 2026-05-28 during v0.4 (logbook) planning.
+
+Considered for v0.4.0 and **deferred**.  Worth revisiting if user
+feedback shows operators frequently logging stations whose callsign
+would have been recoverable from FSKID or CW ID embedded in the
+audio.
+
+### Why deferred from v0.4
+
+- **Sender opt-in problem.**  FSKID is supported by MMSSTV, RX-SSTV,
+  QSSTV, MultiPSK, ChromaPIX, MultiScan — but a meaningful fraction
+  of operators disable it (adds 5–10 s to TX, redundant with voice
+  ID or with the callsign already baked into the image by a
+  template overlay).  Net effect: auto-population would succeed only
+  for an unpredictable fraction of contacts.
+- **CW ID needs its own DSP project.**  More universally *heard*
+  than FSKID, but machine-decoding it means writing a CW decoder —
+  a multi-day feature on its own.
+- **Manual entry is honest.**  v0.4 ships with a 3-line callsign
+  input.  No worse than every other ham logger.
+- **Image-embedded callsign already exists.**  Template system lets
+  the sender bake the callsign into the picture — the most
+  universally readable form.
+
+### What would change the calculus
+
+- User feedback citing specific FSKID-active QSOs they'd want
+  auto-logged.
+- A well-tested FSKID decoder library appearing in the Python
+  ecosystem (avoids writing from scratch).
+- Decision to ship a CW decoder for other reasons (CW practice
+  mode, beacon decoding) — then FSKID-style audio decode becomes
+  the cheaper add-on.
+
+### Related but distinct: TX-side CW ID injection
+
+Separate question: should Open-SSTV inject a CW ID at the end of TX
+for FCC §97.119 compliance?  Today operators handle this with voice
+between transmissions, or rely on the template overlay to satisfy
+the "machine-readable" interpretation.  Candidate for v0.5 or v0.6;
+not blocking logbook work in v0.4.
+
+### Rough effort estimate
+
+- RX-side FSKID decoder + auto-fill wiring: **3–5 days** including
+  corpus testing on real FSKID samples.
+- RX-side CW ID decoder: **5–7 days** (Morse decoding is its own
+  rabbit hole — variable WPM, noisy conditions).
+- TX-side CW ID injection: **1–2 days** (much simpler than decode;
+  just emit a CW tone train at end of PySSTV-generated audio).
