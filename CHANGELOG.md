@@ -11,6 +11,65 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.20] — 2026-05-28
+
+**Critical packaging fix** plus a follow-up macOS process-name attempt.
+User testing on the v0.3.19 Windows binary surfaced that templates
+were failing to render with "Fallback font not found at …\\_internal\\
+open_sstv\\assets\\fonts\\DejaVuSans-Bold.ttf" — the bundled fonts,
+starter templates, app-icon PNG, and TX-panel default photo had
+*never* been included in any PyInstaller release since v0.3.0.  The
+H-6 fallback added in v0.3.15 is what made the bug visible; the
+underlying packaging defect was older.
+
+### Fixed
+
+- **PyInstaller spec now bundles `src/open_sstv/assets/`.**  Added
+  `datas += collect_data_files("open_sstv")` in `open_sstv.spec`.
+  Definitively fixes:
+    - Template render failures on every platform (missing fonts).
+    - Generic Windows taskbar icon (the runtime
+      `setWindowIcon(QIcon(PNG))` call was silently failing because
+      the PNG wasn't in the bundle — the `.ico` embedded in the
+      `.exe` separately is unaffected and continues to show in
+      Explorer).
+    - Generic AppImage launcher icon for users who launch from the
+      `.AppImage` rather than via the `.desktop` entry.
+    - Missing default TX-panel photo (had been falling back to an
+      empty canvas).
+  Wheel / `pipx` installs were never affected — those got the assets
+  via hatch's `packages = ["src/open_sstv"]`.  This was a
+  PyInstaller-only bug.
+
+- **macOS Dock label** now re-applied *after* `QApplication()`
+  construction in addition to the v0.3.19 pre-construction call.
+  Qt's NSApplication init during `QApplication()` was silently
+  resetting the process name back to whatever macOS derives from
+  the embedded `Python.framework`'s `CFBundleName` (which is
+  `"Python"`).  The v0.3.19 pre-call was correct in isolation but
+  was being overwritten by Qt one frame later.  The post-call is
+  what actually sticks for the Dock.  If the Dock still reads
+  "Python" after v0.3.20, the next fix is the deferred `.app`
+  BUNDLE wrap (tracked as v0.3.21).
+
+### Added
+
+- **Startup asset sanity check** in `app.py` that verifies the
+  critical bundled files exist and emits a clear log warning +
+  status-bar message if any are missing.  Non-blocking — the app
+  still launches with whatever's available — but a future
+  PyInstaller-bundling regression now produces a one-line
+  diagnostic at startup instead of mysteriously-broken template
+  renders.  Catches: missing DejaVu Sans Bold font, missing app
+  icon PNG, missing TX default photo.
+
+### Docs
+
+- README status banner bumped v0.3.19 → v0.3.20 per the (now-
+  established) release-prep checklist.
+
+---
+
 ## [0.3.19] — 2026-05-27
 
 App-name fix across all operating systems.  Open-SSTV used to render as
