@@ -2807,10 +2807,13 @@ class MainWindow(QMainWindow):
 
         try:
             self._rig.close()
-        except RigError:
+        except Exception:  # noqa: BLE001
             # Closing should never throw to the user — they're already
-            # quitting.
-            pass
+            # quitting.  Catch Exception (not just RigError): a dead USB
+            # port raises raw OSError/termios.error, and an exception
+            # escaping a Qt virtual override aborts shutdown midway,
+            # leaving the app hung and the rigctld child orphaned.
+            _log.warning("closeEvent: rig.close() failed", exc_info=True)
         self._kill_rigctld()
         super().closeEvent(event)
 

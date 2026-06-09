@@ -276,9 +276,16 @@ def test_banner_value_error_emits_error_signal(
 def test_unkey_failure_is_reported_but_doesnt_block_complete(
     qapp,
     gradient_image: Image.Image,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """If the rig refuses to unkey, we report it as an error but the
-    transmission still counts as complete (the audio went out fine)."""
+    transmission still counts as complete (the audio went out fine).
+
+    The worker retries with a close()/open() reconnect between attempts
+    (stuck-PTT mitigation); a persistently-failing rig must produce one
+    set_ptt(False) per attempt and a final stuck-PTT warning.
+    """
+    monkeypatch.setattr("open_sstv.ui.workers._UNKEY_RETRY_DELAY_S", 0.0)
     calls: list[bool] = []
 
     def fake_set_ptt(on: bool) -> None:
@@ -286,16 +293,52 @@ def test_unkey_failure_is_reported_but_doesnt_block_complete(
         if not on:
             raise RigConnectionError("ptt-off rejected")
 
-    rig = MagicMock(spec=["set_ptt"])
+    rig = MagicMock(spec=["set_ptt", "open", "close"])
     rig.set_ptt.side_effect = fake_set_ptt
     worker = TxWorker(rig=rig, ptt_delay_s=0)
     log = _record_signals(worker)
 
     worker.transmit(gradient_image, Mode.ROBOT_36)
 
-    assert calls == [True, False]
+    # One PTT-on, then one PTT-off per unkey attempt (3 attempts).
+    assert calls == [True, False, False, False]
     assert log["complete"] == [True]
     assert log["error"] and "ptt-off rejected" in log["error"][0]
+    assert "TRANSMITTING" in log["error"][0]
+
+
+def test_unkey_retry_reconnects_and_succeeds_silently(
+    qapp,
+    gradient_image: Image.Image,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dead control link at unkey time is re-opened and retried.
+
+    First set_ptt(False) fails (link died mid-TX); the worker must
+    close()+open() the backend and retry. When the retry succeeds, no
+    error reaches the user — this is the USB-replug / rigctld-restart
+    recovery path.
+    """
+    monkeypatch.setattr("open_sstv.ui.workers._UNKEY_RETRY_DELAY_S", 0.0)
+    calls: list[bool] = []
+
+    def fake_set_ptt(on: bool) -> None:
+        calls.append(on)
+        # Fail only the FIRST unkey; the post-reconnect retry succeeds.
+        if not on and calls.count(False) == 1:
+            raise RigConnectionError("serial port vanished")
+
+    rig = MagicMock(spec=["set_ptt", "open", "close"])
+    rig.set_ptt.side_effect = fake_set_ptt
+    worker = TxWorker(rig=rig, ptt_delay_s=0)
+    log = _record_signals(worker)
+
+    worker.transmit(gradient_image, Mode.ROBOT_36)
+
+    assert calls == [True, False, False]
+    rig.open.assert_called_once()  # reconnect happened before the retry
+    assert log["complete"] == [True]
+    assert log["error"] == []  # recovered unkey is not an error
 
 
 # === two-tone generator ===
@@ -809,9 +852,11 @@ class TestUnkeyResilience:
         self,
         qapp,
         gradient_image: Image.Image,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A raw OSError from set_ptt(False) must be caught and emitted as
         an error signal — it must not escape _run_tx."""
+        monkeypatch.setattr("open_sstv.ui.workers._UNKEY_RETRY_DELAY_S", 0.0)
         calls: list[bool] = []
 
         def fake_set_ptt(on: bool) -> None:
@@ -834,9 +879,11 @@ class TestUnkeyResilience:
         self,
         qapp,
         gradient_image: Image.Image,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """After a successful playback, an OSError on unkey must still result
         in transmission_complete being emitted so the GUI unfreezes."""
+        monkeypatch.setattr("open_sstv.ui.workers._UNKEY_RETRY_DELAY_S", 0.0)
         calls: list[bool] = []
 
         def fake_set_ptt(on: bool) -> None:

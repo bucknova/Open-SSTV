@@ -233,6 +233,77 @@ _PLAYBACK_WATCHDOG_MARGIN: float = 1.20
 #: TX a real safety budget.
 _PLAYBACK_WATCHDOG_FLOOR_S: float = 30.0
 
+#: How many times to attempt the post-TX PTT unkey.  The first attempt
+#: uses the existing control link; each retry closes and re-opens the
+#: backend first, because the dominant failure mode (USB-serial unplug,
+#: rigctld/TCI connection drop mid-TX) kills the old socket/port and a
+#: fresh ``open()`` is the only way set_ptt(False) can ever succeed.
+#: A keyed radio with no operator at it is the worst failure mode this
+#: app has, so we spend a few seconds trying before giving up.
+_UNKEY_ATTEMPTS: int = 3
+
+#: Pause between unkey attempts.  Long enough for a replugged USB-CAT
+#: adapter to re-enumerate or a restarted rigctld to start listening;
+#: short enough that the TX worker thread frees up promptly (closeEvent
+#: only waits 3 s for this thread before falling back to
+#: ``emergency_unkey``).
+_UNKEY_RETRY_DELAY_S: float = 1.0
+
+#: How often the background rig-health monitor pings the rig during TX.
+#: Matches the ~1 s cadence the old inline periodic_check had.
+_RIG_HEALTH_INTERVAL_S: float = 1.0
+
+#: How long to wait for the health-monitor thread to finish at TX end.
+#: One blocked CAT round-trip is at most ~2 s (rigctld socket timeout),
+#: so 3 s lets a wedged ping drain before we touch the rig to unkey.
+_RIG_HEALTH_JOIN_TIMEOUT_S: float = 3.0
+
+
+class _RigHealthMonitor:
+    """Background rig pinger so the TX audio loop never blocks on CAT I/O.
+
+    H4 (v0.3 audit): the rig health check used to run *inline* in the
+    playback write loop via ``periodic_check``.  A wedged rigctld daemon
+    or stalled USB-CAT chain made ``get_ptt()`` block for its full
+    socket timeout (2 s), pausing audio output mid-chunk — an audible
+    buffer underrun in the transmitted image.  The ping now runs on its
+    own daemon thread; the write loop's ``periodic_check`` merely reads
+    the failure flag, which is instant.
+
+    The monitor stops pinging after the first failure — once the link
+    is dead there is nothing more to learn, and the unkey path needs
+    the (serial) backend lock free.
+    """
+
+    def __init__(self, rig: Rig) -> None:
+        self._rig = rig
+        self._stop = threading.Event()
+        self.failure: Exception | None = None
+        self._thread = threading.Thread(
+            target=self._run, name="sstv-rig-health", daemon=True
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Signal the monitor to exit and wait for the ping to drain."""
+        self._stop.set()
+        self._thread.join(timeout=_RIG_HEALTH_JOIN_TIMEOUT_S)
+
+    def _run(self) -> None:
+        while not self._stop.wait(_RIG_HEALTH_INTERVAL_S):
+            try:
+                self._rig.get_ptt()
+            except Exception as exc:  # noqa: BLE001
+                # Anything raised here means the link is unusable for
+                # monitoring — RigError/OSError on unplug, but also any
+                # unexpected parse error.  Catching narrowly would let
+                # an oddball exception kill this thread silently and
+                # leave TX running unmonitored.
+                self.failure = exc
+                return
+
 
 def _compute_playback_watchdog_s(
     samples_n: int, sample_rate: int, ptt_delay_s: float
@@ -1075,23 +1146,28 @@ class TxWorker(QObject):
         # --- Play the buffer ---
         playback_succeeded = False
 
-        def _rig_health_check() -> None:
-            """Ping the rig serial/TCP link once. Raises on failure.
+        # H4: the actual CAT ping runs on a background thread so a wedged
+        # daemon/USB chain can't stall the audio write loop (which used
+        # to ping inline and underrun mid-image).  ManualRig needs no
+        # monitoring — its get_ptt() is a no-op that never raises.
+        health_monitor: _RigHealthMonitor | None = None
+        if not isinstance(rig, ManualRig):
+            health_monitor = _RigHealthMonitor(rig)
+            health_monitor.start()
 
-            Called every ~1 s by play_blocking between chunk writes.
-            ManualRig.get_ptt() is a no-op that never raises; real backends
-            raise RigError (→ RigConnectionError) or OSError on USB unplug.
+        def _rig_health_check() -> None:
+            """Re-raise the monitor's failure, if any. Never blocks.
+
+            Called every ~1 s by the playback loops between chunk writes.
             We emit signals before re-raising so the GUI thread updates
             the radio panel immediately rather than waiting for TX to finish.
             """
-            if isinstance(rig, ManualRig):
+            if health_monitor is None or health_monitor.failure is None:
                 return
-            try:
-                rig.get_ptt()
-            except (RigError, OSError) as exc:
-                self.error.emit(f"Rig disconnected during transmission: {exc}")
-                self.rig_disconnected.emit()
-                raise
+            exc = health_monitor.failure
+            self.error.emit(f"Rig disconnected during transmission: {exc}")
+            self.rig_disconnected.emit()
+            raise exc
 
         try:
             # M7: use _stop_event.wait() instead of bare time.sleep so a
@@ -1156,16 +1232,86 @@ class TxWorker(QObject):
             _log.error("TX playback exception: %s", exc, exc_info=True)
             self.error.emit(f"Playback failed: {exc}")
         finally:
+            # Stop the health monitor BEFORE unkeying so its in-flight
+            # CAT ping can't interleave with set_ptt on the same
+            # serial/socket link.
+            if health_monitor is not None:
+                health_monitor.stop()
             # ALWAYS unkey, even on error or stop, so the rig never gets
-            # left in a stuck-keyed state.  Catch Exception (not just
-            # RigError) so a raw OSError/termios.error from a USB unplug
-            # mid-TX is still reported rather than escaping _run_tx.
+            # left in a stuck-keyed state.  Retries with a backend
+            # reconnect between attempts — see _unkey_with_retry.
+            self._unkey_with_retry(rig)
+
+        return playback_succeeded
+
+    def _unkey_with_retry(self, rig: Rig) -> None:
+        """Drop PTT, reconnecting the backend between failed attempts.
+
+        A USB-serial unplug or a rigctld/TCI connection drop mid-TX
+        makes a plain ``set_ptt(False)`` fail — the old socket/port is
+        dead, so no number of retries on the *existing* link can ever
+        unkey the radio.  Each retry therefore closes and re-opens the
+        backend first: a rigctld/TCI reconnect succeeds as soon as the
+        daemon/server is reachable again, and a serial open succeeds
+        once the port re-enumerates.
+
+        Catches Exception (not just RigError) so a raw OSError /
+        termios.error from the dead link is retried and reported rather
+        than escaping ``_run_tx``.  Emits a single ``error`` only after
+        all attempts fail, with an explicit stuck-PTT warning so the
+        operator knows to check the radio.
+        """
+        first_exc: Exception | None = None
+        for attempt in range(_UNKEY_ATTEMPTS):
+            if attempt:
+                try:
+                    rig.close()
+                except Exception:  # noqa: BLE001
+                    # The link is already dead — close() failing is
+                    # expected; open() below is what matters.
+                    pass
+                try:
+                    rig.open()
+                except Exception as exc:  # noqa: BLE001
+                    # Reconnect failed (port still gone, daemon still
+                    # down).  Log it but keep the ORIGINAL set_ptt
+                    # failure as the reported cause — that's the
+                    # diagnosis the operator needs.
+                    _log.warning(
+                        "PTT unkey attempt %d/%d: backend reconnect "
+                        "failed: %s",
+                        attempt + 1,
+                        _UNKEY_ATTEMPTS,
+                        exc,
+                    )
+                    time.sleep(_UNKEY_RETRY_DELAY_S)
+                    continue
             try:
                 rig.set_ptt(False)
             except Exception as exc:  # noqa: BLE001
-                self.error.emit(f"Could not unkey rig: {exc}")
-
-        return playback_succeeded
+                first_exc = first_exc or exc
+                _log.warning(
+                    "PTT unkey attempt %d/%d failed: %s",
+                    attempt + 1,
+                    _UNKEY_ATTEMPTS,
+                    exc,
+                )
+                if attempt + 1 < _UNKEY_ATTEMPTS:
+                    time.sleep(_UNKEY_RETRY_DELAY_S)
+                continue
+            if attempt:
+                _log.warning(
+                    "PTT unkey succeeded on attempt %d after backend "
+                    "reconnect",
+                    attempt + 1,
+                )
+            return
+        self.error.emit(
+            f"Could not unkey rig after {_UNKEY_ATTEMPTS} attempts: "
+            f"{first_exc} — the radio may still be TRANSMITTING. Check "
+            "the rig and unkey manually (and consider enabling your "
+            "rig's TX time-out timer as a backstop)."
+        )
 
     def request_stop(self) -> None:
         """Abort an in-flight transmission. Safe to call from any thread.
