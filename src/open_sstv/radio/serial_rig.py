@@ -57,6 +57,31 @@ except ImportError:
     _SERIAL_IO_ERRORS = (serial.SerialException, OSError)
 
 
+def _close_serial_port(ser: serial.Serial) -> None:
+    """Close *ser*, force-releasing the OS handle if ``close()`` raises.
+
+    M8 (v0.3 audit): on a physically unplugged USB adapter,
+    ``Serial.close()`` can raise (termios tcsetattr/flush runs before
+    the actual ``os.close``) and the file descriptor leaks — on
+    Linux/macOS the replugged port then re-opens as "Device or resource
+    busy" until the process exits.  Closing the raw fd directly is safe
+    after a failed close: worst case it's already gone and ``os.close``
+    raises ``OSError``, which we ignore.
+    """
+    try:
+        ser.close()
+    except _SERIAL_IO_ERRORS as exc:
+        _log.debug("Serial close raised (%s) — force-releasing fd", exc)
+        fd = getattr(ser, "fd", None)  # POSIX pyserial; None on Windows
+        if fd is not None:
+            import os  # noqa: PLC0415
+
+            try:
+                os.close(fd)
+            except OSError:
+                pass  # already released
+
+
 # ============================================================
 # PTT-only via serial control lines
 # ============================================================
@@ -119,9 +144,9 @@ class SerialPttRig:
             if self._ser is not None:
                 try:
                     self._set_ptt_line(False)
-                    self._ser.close()
                 except _SERIAL_IO_ERRORS:
-                    pass
+                    pass  # link already dead; unkey is best-effort here
+                _close_serial_port(self._ser)
                 self._ser = None
 
     def get_freq(self) -> int:
@@ -255,10 +280,7 @@ class IcomCIVRig:
     def close(self) -> None:
         with self._lock:
             if self._ser is not None:
-                try:
-                    self._ser.close()
-                except _SERIAL_IO_ERRORS:
-                    pass
+                _close_serial_port(self._ser)
                 self._ser = None
 
     def get_freq(self) -> int:
@@ -556,10 +578,7 @@ class KenwoodRig:
     def close(self) -> None:
         with self._lock:
             if self._ser is not None:
-                try:
-                    self._ser.close()
-                except _SERIAL_IO_ERRORS:
-                    pass
+                _close_serial_port(self._ser)
                 self._ser = None
 
     def get_freq(self) -> int:
@@ -771,10 +790,7 @@ class YaesuRig:
     def close(self) -> None:
         with self._lock:
             if self._ser is not None:
-                try:
-                    self._ser.close()
-                except _SERIAL_IO_ERRORS:
-                    pass
+                _close_serial_port(self._ser)
                 self._ser = None
 
     def get_freq(self) -> int:

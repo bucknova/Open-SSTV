@@ -39,6 +39,11 @@ _CONFIG_FILENAME = "config.toml"
 #: writer without forcing every caller to know about the threading model.
 _save_lock = threading.Lock()
 
+#: Set by ``load_config`` when it banishes a corrupt config file to a
+#: ``.corrupt`` backup; read by the GUI via ``last_corrupt_backup()``
+#: to show a startup warning (M2, v0.3 audit).
+_last_corrupt_backup: Path | None = None
+
 
 def config_path() -> Path:
     """Absolute path to the TOML config file (may not exist yet)."""
@@ -134,6 +139,11 @@ def load_config(path: Path | None = None) -> AppConfig:
     """
     if path is None:
         path = config_path()
+    # Each call starts clean: the corrupt-backup marker reflects only
+    # *this* load's outcome, never a stale result from a prior call
+    # (the GUI reads it once at startup right after constructing).
+    global _last_corrupt_backup
+    _last_corrupt_backup = None
     _cleanup_stale_tmp(path)
     if not path.is_file():
         return AppConfig()
@@ -159,9 +169,44 @@ def load_config(path: Path | None = None) -> AppConfig:
         known = {f.name for f in fields(AppConfig)}
         filtered = {k: v for k, v in raw.items() if k in known}
         return AppConfig(**filtered)
-    except (tomllib.TOMLDecodeError, UnicodeDecodeError):
-        _log.warning("Config file %s is corrupt — using defaults", path)
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError, TypeError, ValueError):
+        # TypeError/ValueError cover wrong-typed values that parse as
+        # TOML but blow up AppConfig construction or __post_init__
+        # validation (e.g. ``rigctld_port = "abc"``) — M1/M2, v0.3 audit.
+        #
+        # M2 (v0.3 audit): don't just reset to defaults — the corrupt
+        # file holds the user's callsign, devices, and rig setup, and
+        # most corruption is a single bad edit away from recoverable.
+        # Preserve it as a ``.corrupt`` sibling (overwriting any older
+        # backup: the newest corpse is the one worth examining) and
+        # record the event so the GUI can tell the user instead of the
+        # log file telling nobody.  (``global`` already declared at the
+        # top of this function.)
+        backup = path.with_suffix(path.suffix + ".corrupt")
+        try:
+            path.replace(backup)
+            _last_corrupt_backup = backup
+            _log.warning(
+                "Config file %s is corrupt — backed up to %s, using defaults",
+                path, backup,
+            )
+        except OSError as exc:
+            _last_corrupt_backup = None
+            _log.warning(
+                "Config file %s is corrupt (backup failed: %s) — using defaults",
+                path, exc,
+            )
         return AppConfig()
+
+
+def last_corrupt_backup() -> Path | None:
+    """Path the most recent ``load_config`` call banished a corrupt
+    config to, or ``None`` if the load was clean.
+
+    The GUI checks this once at startup to show a visible warning —
+    losing every setting with only a log-file trace was the M2 finding.
+    """
+    return _last_corrupt_backup
 
 
 def save_config(cfg: AppConfig, path: Path | None = None) -> None:

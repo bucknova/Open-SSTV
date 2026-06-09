@@ -17,6 +17,7 @@ from here.
 """
 from __future__ import annotations
 
+import logging
 import wave
 from pathlib import Path
 
@@ -24,6 +25,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 from open_sstv.core.dsp_utils import to_mono_float32
+
+_log = logging.getLogger(__name__)
 
 
 def load_audio_file(path: Path) -> tuple[NDArray[np.float64], int]:
@@ -83,6 +86,16 @@ def _load_wav(path: Path) -> tuple[NDArray[np.float64], int]:
         n_frames = wav.getnframes()
         raw = wav.readframes(n_frames)
 
+    # M7 (v0.3 audit): a file truncated mid-sample leaves a byte count
+    # that isn't a multiple of the sample width — np.frombuffer raises
+    # a bare ValueError on that.  Trim the ragged tail byte(s).
+    if sample_width > 1 and len(raw) % sample_width:
+        _log.warning(
+            "WAV %s ends mid-sample (truncated?) — dropping %d trailing byte(s)",
+            path.name, len(raw) % sample_width,
+        )
+        raw = raw[: len(raw) - (len(raw) % sample_width)]
+
     # Decode raw bytes by sample width.  WAV is always little-endian PCM.
     if sample_width == 1:
         # 8-bit WAV is unsigned per the spec; convert to signed centered
@@ -96,7 +109,26 @@ def _load_wav(path: Path) -> tuple[NDArray[np.float64], int]:
         msg = f"unsupported WAV sample width: {sample_width} bytes"
         raise ValueError(msg)
 
+    # M7 (v0.3 audit): a header that lies about the sample rate (zero
+    # or negative on a hand-corrupted file) would otherwise surface as
+    # a divide-by-zero deep in the decoder with no hint about the file.
+    if fs <= 0:
+        msg = f"invalid WAV sample rate: {fs}"
+        raise ValueError(msg)
+
     if n_channels > 1:
+        # M7: a file truncated mid-frame has a sample count that isn't
+        # a whole multiple of the channel count — reshape would raise a
+        # bare ValueError.  Trim the ragged tail (≤ one frame of audio)
+        # and decode what's there.
+        whole = (samples.size // n_channels) * n_channels
+        if whole != samples.size:
+            _log.warning(
+                "WAV %s ends mid-frame (truncated?) — dropping %d "
+                "trailing sample(s)",
+                path.name, samples.size - whole,
+            )
+            samples = samples[:whole]
         samples = samples.reshape(-1, n_channels)
 
     mono = to_mono_float32(samples).astype(np.float64)

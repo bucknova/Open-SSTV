@@ -86,10 +86,15 @@ def resample_to(
         raise ValueError(f"Sample rates must be positive (got {src_rate}, {dst_rate})")
     if src_rate == dst_rate:
         return np.asarray(samples)
+    # M7 (v0.3 audit): scipy's resample_poly chokes on zero-length input
+    # (a truncated or header-only WAV) — return empty rather than crash.
+    arr = np.asarray(samples)
+    if arr.size == 0:
+        return arr
     g = gcd(src_rate, dst_rate)
     up = dst_rate // g
     down = src_rate // g
-    return signal.resample_poly(samples, up, down)
+    return signal.resample_poly(arr, up, down)
 
 
 def bandpass_sos(

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import tomllib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -26,6 +27,10 @@ import tomli_w
 
 _APP_NAME = "open_sstv"
 _TEMPLATES_FILENAME = "templates.toml"
+
+#: M10 (v0.3 audit): serialise concurrent ``save_templates`` calls —
+#: mirrors ``store._save_lock`` and protects the shared ``.tmp`` sibling.
+_save_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +170,17 @@ def load_templates(path: Path | None = None) -> list[QSOTemplate]:
     """
     if path is None:
         path = templates_path()
+    # M10 (v0.3 audit): sweep any ``.tmp`` sibling orphaned by a SIGKILL
+    # between ``tomli_w.dump`` and ``os.replace`` in a prior
+    # ``save_templates`` call — same opportunistic cleanup
+    # ``load_config`` has done since H-5, which this file never grew.
+    stale_tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        if stale_tmp.is_file():
+            stale_tmp.unlink()
+            _log.info("Removed stale templates tmp file %s", stale_tmp)
+    except OSError as exc:
+        _log.warning("Could not remove stale tmp file %s: %s", stale_tmp, exc)
     if not path.is_file():
         return default_templates()
 
@@ -230,16 +246,20 @@ def save_templates(
 
     # OP2-07: write atomically via a sibling .tmp + os.replace so a
     # SIGKILL mid-write never leaves a truncated templates file.
+    # M10 (v0.3 audit): serialised under a module lock, mirroring
+    # ``store.save_config`` — two concurrent saves could interleave on
+    # the shared ``.tmp`` sibling and violate the atomic-write contract.
     tmp = path.with_suffix(path.suffix + ".tmp")
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with tmp.open("wb") as f:
-            tomli_w.dump(data, f)
-        os.replace(tmp, path)
-    except OSError as exc:
-        _log.error("Failed to save templates to %s: %s", path, exc)
-        tmp.unlink(missing_ok=True)
-        raise
+    with _save_lock:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with tmp.open("wb") as f:
+                tomli_w.dump(data, f)
+            os.replace(tmp, path)
+        except OSError as exc:
+            _log.error("Failed to save templates to %s: %s", path, exc)
+            tmp.unlink(missing_ok=True)
+            raise
 
 
 __all__ = [

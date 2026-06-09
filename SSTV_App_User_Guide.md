@@ -1,6 +1,6 @@
 # Open-SSTV User Guide
 
-**Version 0.3 (Beta)** | Created by Kevin (W0AEZ) | GPL-3.0-or-later
+**For the v0.3.x series (Beta)** — exact version: see Help → About | Created by Kevin (W0AEZ) | GPL-3.0-or-later
 
 ---
 

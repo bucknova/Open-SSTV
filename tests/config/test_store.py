@@ -177,6 +177,104 @@ def test_load_corrupt_toml_returns_defaults(tmp_path: Path) -> None:
     assert loaded == AppConfig()
 
 
+def test_load_corrupt_toml_backs_up_file(tmp_path: Path) -> None:
+    """M2 (v0.3 audit): the corrupt file is preserved as a ``.corrupt``
+    sibling (it holds the user's callsign/devices and is usually one
+    typo away from recoverable) and the event is queryable so the GUI
+    can warn the user."""
+    from open_sstv.config.store import last_corrupt_backup
+
+    p = tmp_path / "config.toml"
+    p.write_bytes(b"[[[ not valid toml")
+    loaded = load_config(path=p)
+
+    backup = p.with_suffix(p.suffix + ".corrupt")
+    assert loaded == AppConfig()
+    assert not p.exists()  # corpse moved aside, not left to re-trip
+    assert backup.exists()
+    assert backup.read_bytes() == b"[[[ not valid toml"
+    assert last_corrupt_backup() == backup
+
+
+def test_clean_load_clears_corrupt_marker(tmp_path: Path) -> None:
+    """The corrupt-backup marker is a process-global; a *clean* load must
+    reset it so a prior corrupt load can't leak into an unrelated later
+    one.  (Regression: the marker leaking across calls made the GUI pop
+    a stale "settings were corrupt" dialog — and hung the headless test
+    suite on the modal — after any earlier corrupt load in the session.)
+    """
+    from open_sstv.config.store import last_corrupt_backup
+
+    # First, trip the marker with a corrupt file.
+    bad = tmp_path / "bad.toml"
+    bad.write_bytes(b"[[[ not valid toml")
+    load_config(path=bad)
+    assert last_corrupt_backup() is not None
+
+    # Then a clean load (here: a non-existent path → defaults) must
+    # clear it.
+    good = tmp_path / "good.toml"
+    load_config(path=good)
+    assert last_corrupt_backup() is None
+
+
+def test_load_wrong_typed_value_backs_up_and_defaults(tmp_path: Path) -> None:
+    """M1/M2: a value that parses as TOML but blows up AppConfig
+    construction (string where int is expected) is treated like
+    corruption — defaults + backup, never a startup crash."""
+    p = tmp_path / "config.toml"
+    p.write_text('rigctld_port = "not-a-port"\n', encoding="utf-8")
+    loaded = load_config(path=p)
+    assert loaded == AppConfig()
+    assert p.with_suffix(p.suffix + ".corrupt").exists()
+
+
+def test_schema_validates_hand_edited_fields() -> None:
+    """M1 (v0.3 audit): out-of-range / unknown hand-edited values are
+    clamped or reset in ``__post_init__`` instead of failing later at
+    connect/render time with no pointer back to the config."""
+    cfg = AppConfig(
+        rigctld_port=0,
+        tci_port=99_999,
+        rig_baud_rate=12_345,
+        audio_input_gain=1000.0,
+        rig_connection_mode="tcp",
+        default_tx_mode="not_a_mode",
+        rig_serial_protocol="Morse by hand",
+        rig_ptt_line="XYZ",
+        tx_banner_size="enormous",
+    )
+    assert cfg.rigctld_port == 1
+    assert cfg.tci_port == 65535
+    assert cfg.rig_baud_rate == 9600
+    assert cfg.audio_input_gain == 2.0
+    assert cfg.rig_connection_mode == "manual"
+    assert cfg.default_tx_mode == "martin_m1"
+    assert cfg.rig_serial_protocol == "PTT Only (DTR/RTS)"
+    assert cfg.rig_ptt_line == "DTR"
+    assert cfg.tx_banner_size == "small"
+
+
+def test_schema_accepts_valid_values_unchanged() -> None:
+    """Validation must not touch in-range values."""
+    cfg = AppConfig(
+        rigctld_port=4533,
+        rig_baud_rate=38_400,
+        audio_input_gain=1.5,
+        rig_connection_mode="serial",
+        default_tx_mode="scottie_s1",
+        rig_ptt_line="rts",  # case-normalised, not rejected
+        tx_banner_size="large",
+    )
+    assert cfg.rigctld_port == 4533
+    assert cfg.rig_baud_rate == 38_400
+    assert cfg.audio_input_gain == 1.5
+    assert cfg.rig_connection_mode == "serial"
+    assert cfg.default_tx_mode == "scottie_s1"
+    assert cfg.rig_ptt_line == "RTS"
+    assert cfg.tx_banner_size == "large"
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="chmod read-only unreliable on Windows")
 def test_load_permission_error_propagates(tmp_path: Path) -> None:
     """PermissionError must NOT be swallowed — it surfaces so the operator

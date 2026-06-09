@@ -29,7 +29,11 @@ more of the strip without looking undersized.  Older configs that saved
 """
 from __future__ import annotations
 
+import logging
+
 from PIL import Image, ImageDraw, ImageFont
+
+_log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Public constants
@@ -264,6 +268,18 @@ def apply_tx_banner(
     if callsign:
         bbox_l = draw.textbbox((0, 0), callsign, font=font)
         lw = bbox_l[2] - bbox_l[0]
+        # L (v0.3 audit): the callsign is the §97.119 station ID — if it
+        # doesn't fit the strip (narrow 160 px modes + large banner size
+        # + long callsign), it clips at the image edge and an incomplete
+        # ID goes on the air with no trace.  Warn so the operator knows
+        # to pick a smaller banner size or a wider mode.
+        if padding + lw > width - padding:
+            _log.warning(
+                "TX banner: callsign %r (%d px) does not fit the %d px "
+                "image width and will clip — use a smaller banner size "
+                "(Settings → TX) or a wider mode for a complete station ID",
+                callsign, lw, width,
+            )
         draw.text((padding, _vcenter(bbox_l)), callsign, fill=text_color, font=font)
         callsign_right_x = padding + lw
 

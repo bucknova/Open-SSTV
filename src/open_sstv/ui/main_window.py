@@ -92,7 +92,7 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QAction, QCloseEvent, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import (
     QFileDialog,
     QMainWindow,
@@ -114,7 +114,7 @@ from open_sstv.audio.input_stream import (
 )
 from open_sstv.audio.tci_input_stream import TciInputStreamWorker
 from open_sstv.config.schema import AppConfig
-from open_sstv.config.store import load_config, save_config
+from open_sstv.config.store import last_corrupt_backup, load_config, save_config
 from open_sstv.config.templates import load_templates
 from open_sstv.core.modes import Mode
 from open_sstv.radio.band_plan import mode_family
@@ -379,6 +379,12 @@ class MainWindow(QMainWindow):
         # layout reflows to fit more or fewer cards per row.
         self.resize(1280, 720)
 
+        # Only consult ``last_corrupt_backup()`` (below) when we actually
+        # loaded the config from disk.  An injected config (tests,
+        # embedded use) has no corrupt-backup relationship, and reading
+        # the process-global would otherwise surface a stale result from
+        # an unrelated prior ``load_config`` call.
+        loaded_config_from_disk = config is None
         self._config = config if config is not None else load_config()
 
         # Rig starts as ManualRig (no-op). The user clicks "Connect Rig"
@@ -756,8 +762,10 @@ class MainWindow(QMainWindow):
         self._update_worker.update_available.connect(self._on_update_available)
 
         # --- Keyboard shortcuts ---
-        save_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
-        save_shortcut.activated.connect(self._on_save_shortcut)
+        # L (v0.3 audit): Ctrl+S/Cmd+S now lives on the File → Save
+        # Received Image… menu action (see _build_menu_bar) so it's
+        # discoverable; a duplicate QShortcut here would make the key
+        # ambiguous and Qt would fire neither.
 
         # v0.1.33: the TX/RX panel-level defaults (sample-rate label,
         # default TX mode) were previously only applied through
@@ -767,6 +775,26 @@ class MainWindow(QMainWindow):
         # __init__ (which caused a teardown-race segfault in tests).
         self._tx_panel.set_sample_rate(self._config.sample_rate)
         self._tx_panel.set_default_mode(self._config.default_tx_mode)
+
+        # M2 (v0.3 audit): a corrupt config used to reset every setting
+        # (callsign, devices, rig setup) with only a log-file trace.
+        # ``load_config`` now banishes the corpse to a ``.corrupt``
+        # sibling; tell the user where it went so a hand-edit typo is
+        # recoverable.  Deferred so the window paints first.
+        corrupt_backup = last_corrupt_backup() if loaded_config_from_disk else None
+        if corrupt_backup is not None:
+            QTimer.singleShot(
+                0,
+                lambda: QMessageBox.warning(
+                    self,
+                    "Settings could not be read",
+                    "Your settings file was corrupt and has been reset to "
+                    f"defaults.\n\nThe old file was saved to:\n{corrupt_backup}"
+                    "\n\nIf you recently hand-edited it, fix the syntax "
+                    "error there and copy it back. Otherwise, re-enter "
+                    "your callsign and devices in Settings.",
+                ),
+            )
 
         # OP-18: surface saved-but-missing audio devices so the user
         # knows their previously-selected device fell back to system
@@ -807,6 +835,17 @@ class MainWindow(QMainWindow):
         file_menu.addAction(settings_action)
         # Keep a reference so TX start/stop can enable/disable it.
         self._settings_action = settings_action
+
+        file_menu.addSeparator()
+
+        # L (v0.3 audit): the Ctrl+S/Cmd+S save-RX-image shortcut existed
+        # since v0.1 but appeared nowhere in the UI — a menu item is the
+        # discovery path (and shows the platform shortcut next to it).
+        save_image_action = QAction("&Save Received Image…", self)
+        save_image_action.setMenuRole(QAction.MenuRole.NoRole)
+        save_image_action.setShortcut(QKeySequence.StandardKey.Save)
+        save_image_action.triggered.connect(self._on_save_shortcut)
+        file_menu.addAction(save_image_action)
 
         file_menu.addSeparator()
 
@@ -1006,18 +1045,26 @@ class MainWindow(QMainWindow):
             try:
                 save_config(self._config)
             except OSError as exc:
-                # OP2-18: if rigctld was just adopted, surface a clear message
-                # so the user knows it's running despite the save failure.
-                if self._rigctld_proc is not None:
-                    self.statusBar().showMessage(
-                        f"Settings not saved ({exc}). "
-                        "rigctld is running — disconnect the rig to stop it.",
-                        10000,
-                    )
-                else:
-                    self.statusBar().showMessage(
-                        f"Settings applied but could not be saved to disk: {exc}", 8000
-                    )
+                # M6 (v0.3 audit): a save failure used to be a transient
+                # status-bar message that was easy to miss — the settings
+                # applied in memory, then silently reverted on the next
+                # launch, which reads as "the app forgot my settings".
+                # A modal makes the disk problem impossible to overlook.
+                # OP2-18: if rigctld was just adopted, say it's running
+                # despite the save failure.
+                rigctld_note = (
+                    "\n\nrigctld is running — disconnect the rig to stop it."
+                    if self._rigctld_proc is not None
+                    else ""
+                )
+                QMessageBox.warning(
+                    self,
+                    "Settings not saved",
+                    "Your changes are active for this session but could "
+                    f"not be written to disk:\n\n{exc}\n\nThey will be "
+                    "lost when the app closes. Check the config "
+                    f"directory's permissions and free space.{rigctld_note}",
+                )
                 return
 
             # If audio input device or sample rate changed while capture is

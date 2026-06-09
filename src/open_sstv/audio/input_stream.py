@@ -534,12 +534,16 @@ class InputStreamWorker(QObject):
         user can still race the two paths (clicking RX Start while TX is
         mid-encode or mid-PTT-delay) — in that window terminating
         PortAudio would rip the host state out from under the live TX
-        OutputStream and crash on the next callback.  ``is_tx_active`` is
-        checked here so the reset is skipped (and logged) while any TX
-        call is in flight; the caller proceeds without a fresh device
-        cache, which is the right trade-off — at worst the user gets a
-        -10851 if the device was just unplugged, which is recoverable; at
-        best (the common case) nothing changed.
+        OutputStream and crash on the next callback.  The reset runs
+        under ``run_if_tx_idle`` (M9, v0.3 audit) so the TX-idle check
+        and the terminate/initialize are one atomic section — a TX
+        starting concurrently blocks at its counter increment until the
+        reset finishes (~100 ms) instead of racing it.  While TX is
+        already active the reset is skipped (and logged); the caller
+        proceeds without a fresh device cache, which is the right
+        trade-off — at worst the user gets a -10851 if the device was
+        just unplugged, which is recoverable; at best (the common case)
+        nothing changed.
 
         Embedded-use caveat: if another component in the same Python
         process holds its own ``sd.OutputStream`` / ``sd.InputStream``
@@ -564,40 +568,41 @@ class InputStreamWorker(QObject):
         crash.  Do *not* tighten the except clause without verifying
         upstream's commitment to keeping the symbols around.
         """
-        from open_sstv.audio.output_stream import is_tx_active  # noqa: PLC0415
+        from open_sstv.audio.output_stream import run_if_tx_idle  # noqa: PLC0415
 
-        if is_tx_active():
+        def _do_reset() -> None:
+            _log.info("PortAudio reset: terminating to clear stale device cache")
+            try:
+                sd._terminate()
+            except AttributeError as exc:
+                _log.warning(
+                    "PortAudio _terminate() removed from sounddevice (%s) — "
+                    "device-loss recovery will rely on a stream re-open rather "
+                    "than a full host re-init.  Upgrade or pin sounddevice.",
+                    exc,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("PortAudio _terminate() failed: %s", exc)
+            _log.info("PortAudio reset: re-initializing")
+            try:
+                sd._initialize()
+            except AttributeError as exc:
+                _log.warning(
+                    "PortAudio _initialize() removed from sounddevice (%s) — "
+                    "subsequent stream opens will use whatever host state "
+                    "remains.  Upgrade or pin sounddevice.",
+                    exc,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("PortAudio _initialize() failed: %s", exc)
+
+        if not run_if_tx_idle(_do_reset):
             _log.warning(
                 "PortAudio reset SKIPPED — TX is currently active.  Resetting "
                 "PortAudio while an OutputStream is live can crash the process; "
                 "the device cache will be refreshed on the next RX start that "
                 "doesn't overlap a transmission."
             )
-            return
-        _log.info("PortAudio reset: terminating to clear stale device cache")
-        try:
-            sd._terminate()
-        except AttributeError as exc:
-            _log.warning(
-                "PortAudio _terminate() removed from sounddevice (%s) — "
-                "device-loss recovery will rely on a stream re-open rather "
-                "than a full host re-init.  Upgrade or pin sounddevice.",
-                exc,
-            )
-        except Exception as exc:  # noqa: BLE001
-            _log.warning("PortAudio _terminate() failed: %s", exc)
-        _log.info("PortAudio reset: re-initializing")
-        try:
-            sd._initialize()
-        except AttributeError as exc:
-            _log.warning(
-                "PortAudio _initialize() removed from sounddevice (%s) — "
-                "subsequent stream opens will use whatever host state "
-                "remains.  Upgrade or pin sounddevice.",
-                exc,
-            )
-        except Exception as exc:  # noqa: BLE001
-            _log.warning("PortAudio _initialize() failed: %s", exc)
 
 
 __all__ = [

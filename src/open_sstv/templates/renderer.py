@@ -277,7 +277,26 @@ def _load_font(
         fallback_path = resolve_font_path(
             "DejaVu Sans Bold", user_fonts_dir=user_fonts_dir
         )
-        font = PIL.ImageFont.truetype(str(fallback_path), font_size_px)
+        try:
+            font = PIL.ImageFont.truetype(str(fallback_path), font_size_px)
+        except OSError as exc2:
+            # M4 (v0.3 audit): if the bundled fallback is itself missing
+            # or unreadable (broken PyInstaller build), this used to
+            # propagate and kill the whole render — TX failed with a
+            # traceback in the log instead of an image.  Pillow's
+            # built-in bitmap default always exists; ugly text beats
+            # no transmission.
+            _log.error(
+                "Fallback font also failed (%s): %s — using Pillow's "
+                "built-in default font.  This indicates a broken install; "
+                "reinstall to restore bundled fonts.",
+                fallback_path, exc2,
+            )
+            try:
+                return PIL.ImageFont.load_default(size=font_size_px)
+            except TypeError:
+                # Pillow < 10.1 has no size parameter.
+                return PIL.ImageFont.load_default()  # type: ignore[return-value]
     # Variable fonts (e.g. shipped Orbitron[wght].ttf) load at their default
     # axis position — Regular for every Tier-1 we ship.  When the family
     # name carries Bold intent, snap to the Bold named instance.  No-ops on
@@ -947,6 +966,16 @@ def render_template(
             if layer.path and layer.path not in _station_img_cache:
                 resolved = _resolve_station_image_path(layer.path, assets_dir)
                 if resolved is None:
+                    # M4 (v0.3 audit): WARNING, not debug — a moved or
+                    # deleted station image means the transmitted picture
+                    # is silently missing its QSL graphic, and a debug
+                    # line was the only trace.  The cache keeps this to
+                    # one log entry per path per session.
+                    _log.warning(
+                        "Station image %r not found (template layer %r) — "
+                        "the layer will render blank",
+                        layer.path, layer.id,
+                    )
                     _station_img_cache[layer.path] = None
                 else:
                     try:
