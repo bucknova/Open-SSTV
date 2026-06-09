@@ -33,6 +33,10 @@ from open_sstv.templates.toml_io import (
 
 _log = logging.getLogger(__name__)
 
+#: Files the most recent ``list_templates`` call skipped (corrupt TOML,
+#: future schema) — see ``last_skipped_templates`` (M4, v0.3 audit).
+_last_skipped: list[tuple[str, str]] = []
+
 _APP_NAME = "open_sstv"
 
 # Filenames of the starter templates bundled in assets/templates/, in
@@ -140,12 +144,19 @@ def list_templates(
     cleanup pattern; failures are logged at debug and never block the
     listing.
     """
+    global _last_skipped
     tdir = templates_dir if templates_dir is not None else default_templates_dir()
     if not tdir.is_dir():
+        _last_skipped = []
         return []
 
     _cleanup_stale_tmp_files(tdir)
 
+    # M4 (v0.3 audit): record what was skipped so the gallery can show
+    # "N templates could not be read" instead of silently shrinking —
+    # a user whose gallery dropped from 10 cards to 8 had no clue two
+    # files went corrupt until they went looking for them.
+    skipped: list[tuple[str, str]] = []
     results: list[tuple[str, str, Path]] = []
     for path in sorted(tdir.glob("*.toml")):
         try:
@@ -153,9 +164,18 @@ def list_templates(
             results.append((t.name, t.role, path))
         except SchemaVersionError as exc:
             _log.warning("Skipping %s: %s", path.name, exc)
+            skipped.append((path.name, str(exc)))
         except (TemplateLoadError, Exception) as exc:  # noqa: BLE001
             _log.warning("Could not read template %s: %s", path.name, exc)
+            skipped.append((path.name, str(exc)))
+    _last_skipped = skipped
     return results
+
+
+def last_skipped_templates() -> list[tuple[str, str]]:
+    """``[(filename, reason), ...]`` skipped by the most recent
+    ``list_templates`` call.  Empty when every file loaded cleanly."""
+    return _last_skipped
 
 
 def load_by_path(path: Path) -> Template | None:

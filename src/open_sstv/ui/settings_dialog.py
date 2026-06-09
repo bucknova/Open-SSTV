@@ -50,7 +50,7 @@ from open_sstv.audio.devices import (
     list_input_devices,
     list_output_devices,
 )
-from open_sstv.config.schema import AppConfig
+from open_sstv.config.schema import VALID_BAUD_RATES, AppConfig
 from open_sstv.core.banner import apply_tx_banner, scaled_banner_params
 from open_sstv.core.modes import Mode
 from open_sstv.radio.base import RigConnectionMode
@@ -91,7 +91,9 @@ _COMMON_RIG_MODELS: list[tuple[int, str]] = [
     (3061, "Kenwood TS-2000"),
 ]
 
-_BAUD_RATES: list[int] = [4800, 9600, 19200, 38400, 57600, 115200]
+# M1 (v0.3 audit): the canonical list lives in the schema so config
+# validation and this combo can't drift.
+_BAUD_RATES: list[int] = list(VALID_BAUD_RATES)
 
 
 class SettingsDialog(QDialog):

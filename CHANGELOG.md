@@ -9,10 +9,57 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Stability fixes from the 2026-06-09 full audit (critical + high
-findings).  No feature changes.
+Stability and usability fixes from the 2026-06-09 full audit — the
+critical + high findings landed first; the medium + low findings
+followed in a second PR.  No feature changes.
 
-### Fixed
+### Fixed (medium/low audit findings)
+
+- **Hand-edited config values are validated at load (M1).**  Ports,
+  baud rate, input gain, and the string-enum fields
+  (``rig_connection_mode``, ``default_tx_mode``, ``rig_serial_protocol``,
+  ``rig_ptt_line``, ``tx_banner_size``) are clamped or reset to defaults
+  with a logged warning instead of mis-dispatching or failing later at
+  connect/render time.  Wrong-typed values (a string where an int
+  belongs) no longer crash startup.
+- **A corrupt config no longer silently wipes your settings (M2).**
+  The unreadable file is preserved as ``config.toml.corrupt`` and a
+  startup dialog says where it went — a hand-edit typo is now
+  recoverable instead of a mystery reset.
+- **Template editor confirms destructive actions (M3).**  Cancel (or
+  Esc) with unsaved edits asks before discarding; *Remove* asks before
+  deleting a template.
+- **Template system failures are visible (M4).**  Unreadable template
+  files show a warning banner in the gallery (tooltip names the files);
+  a missing station image logs a WARNING naming the layer; a broken
+  bundled font falls back to Pillow's built-in instead of killing the
+  render.
+- **v0.2 → v0.3 template migration preserves custom color and position
+  (M5)** instead of resetting every migrated overlay to white /
+  bottom-center.
+- **Settings save failures are a modal warning (M6)** instead of a
+  transient status-bar message — no more "the app forgot my settings"
+  after a read-only config directory ate the write.
+- **Truncated audio files decode instead of crashing (M7).**  WAVs cut
+  mid-frame or mid-sample are trimmed with a logged warning; a zero/
+  negative header sample rate raises a clear error; empty buffers pass
+  through resampling.
+- **Unplugged serial ports release their OS handle (M8)** — a failed
+  ``close()`` on a vanished USB adapter force-closes the file
+  descriptor so the replugged port doesn't come back "busy".
+- **PortAudio reset is atomic with the TX interlock (M9)** — closes the
+  check-then-act window where a TX starting at the wrong microsecond
+  could have its stream killed mid-open.
+- **QSO template saves are serialised and stale ``.tmp`` files swept
+  (M10)**, matching the config store's atomic-write contract.
+- **Low-priority polish:** clipped TX-banner callsigns log a §97.119
+  warning; the Ctrl+S / Cmd+S save-image shortcut is now discoverable
+  as *File → Save Received Image…*; CW/config clamp messages upgraded
+  to warnings; User Guide no longer claims a stale version number;
+  the incremental decoder rejects nonsensical sample rates at
+  construction.
+
+### Fixed (critical/high audit findings)
 
 - **Clipboard copy no longer risks a crash on exit (C1).**  *Copy to
   Clipboard* in the image gallery now places a ``QImage`` on the

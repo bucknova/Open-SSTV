@@ -170,3 +170,83 @@ class TestTemplateEditorXYSpinboxes:
         assert result[0].overlays[0].position == "Top Right"
         assert result[0].overlays[0].x is None
         assert result[0].overlays[0].y is None
+
+
+class TestDestructiveActionConfirmations:
+    """M3 (v0.3 audit): Cancel with unsaved edits and template removal
+    must prompt before discarding user work."""
+
+    def test_reject_clean_dialog_needs_no_confirmation(
+        self, qtbot, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cancel with no edits closes immediately — no nag dialog."""
+        from PySide6.QtWidgets import QMessageBox
+
+        asked: list[str] = []
+        monkeypatch.setattr(
+            QMessageBox, "question",
+            lambda *a, **k: asked.append("question") or QMessageBox.StandardButton.Cancel,
+        )
+        dlg = TemplateEditorDialog([QSOTemplate(name="A", overlays=[])])
+        qtbot.addWidget(dlg)
+        rejected: list[bool] = []
+        dlg.rejected.connect(lambda: rejected.append(True))
+        dlg.reject()
+        assert asked == []
+        assert rejected == [True]
+
+    def test_reject_with_edits_can_be_cancelled(
+        self, qtbot, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Choosing Cancel in the discard prompt keeps the dialog open."""
+        from PySide6.QtWidgets import QMessageBox
+
+        monkeypatch.setattr(
+            QMessageBox, "question",
+            lambda *a, **k: QMessageBox.StandardButton.Cancel,
+        )
+        dlg = TemplateEditorDialog([QSOTemplate(name="A", overlays=[])])
+        qtbot.addWidget(dlg)
+        rejected: list[bool] = []
+        dlg.rejected.connect(lambda: rejected.append(True))
+        dlg._add_template()  # dirty the working copy
+        dlg.reject()
+        assert rejected == []  # stayed open
+
+    def test_reject_with_edits_discards_on_confirm(
+        self, qtbot, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
+        monkeypatch.setattr(
+            QMessageBox, "question",
+            lambda *a, **k: QMessageBox.StandardButton.Discard,
+        )
+        dlg = TemplateEditorDialog([QSOTemplate(name="A", overlays=[])])
+        qtbot.addWidget(dlg)
+        rejected: list[bool] = []
+        dlg.rejected.connect(lambda: rejected.append(True))
+        dlg._add_template()
+        dlg.reject()
+        assert rejected == [True]
+
+    def test_remove_template_confirms_first(
+        self, qtbot, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Remove only deletes after a Yes; No keeps the template."""
+        from PySide6.QtWidgets import QMessageBox
+
+        answer = QMessageBox.StandardButton.No
+        monkeypatch.setattr(
+            QMessageBox, "question", lambda *a, **k: answer,
+        )
+        dlg = TemplateEditorDialog([QSOTemplate(name="Keep me", overlays=[])])
+        qtbot.addWidget(dlg)
+        dlg._tpl_list.setCurrentRow(0)
+
+        dlg._remove_template()
+        assert len(dlg.result_templates()) == 1  # No → kept
+
+        answer = QMessageBox.StandardButton.Yes
+        dlg._remove_template()
+        assert len(dlg.result_templates()) == 0  # Yes → removed

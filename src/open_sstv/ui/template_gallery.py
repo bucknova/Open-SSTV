@@ -50,7 +50,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from open_sstv.templates.manager import list_templates, load_by_path
+from open_sstv.templates.manager import (
+    last_skipped_templates,
+    list_templates,
+    load_by_path,
+)
 from open_sstv.templates.model import QSOState, Template, TXContext
 from open_sstv.templates.renderer import render_template
 from open_sstv.ui.utils import pil_to_pixmap
@@ -377,6 +381,15 @@ class TemplateGallery(QWidget):
         self._no_templates_label.setVisible(False)
         outer.addWidget(self._no_templates_label)
 
+        # M4 (v0.3 audit): corrupt template files used to vanish from
+        # the gallery with only a log-line trace.  This banner makes the
+        # shrinkage visible; the tooltip names the files and reasons.
+        self._skipped_label = QLabel()
+        self._skipped_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._skipped_label.setStyleSheet("color: #c66; font-size: 10pt;")
+        self._skipped_label.setVisible(False)
+        outer.addWidget(self._skipped_label)
+
     # === Public API ===
 
     def set_app_config(self, cfg: AppConfig) -> None:
@@ -412,6 +425,20 @@ class TemplateGallery(QWidget):
             if t is not None:
                 items.append((t, path))
         self._rebuild_strip(items)
+
+        # M4: surface unreadable template files instead of silently
+        # showing fewer cards.
+        skipped = last_skipped_templates()
+        if skipped:
+            n = len(skipped)
+            self._skipped_label.setText(
+                f"⚠ {n} template{'s' if n != 1 else ''} could not be read "
+                "(hover for details)"
+            )
+            self._skipped_label.setToolTip(
+                "\n".join(f"{fname}: {reason}" for fname, reason in skipped)
+            )
+        self._skipped_label.setVisible(bool(skipped))
 
     def selected_template(self) -> Template | None:
         return self._selected_template
