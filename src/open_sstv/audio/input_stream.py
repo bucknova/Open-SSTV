@@ -174,7 +174,15 @@ class InputStreamWorker(QObject):
         # This flag is set by whichever path fires first and short-circuits
         # the other.  Cleared at ``start()`` time so each new session is
         # ready to detect a fresh device-loss event.
+        #
+        # H5 (v0.3 audit): the two paths run on different threads (the
+        # watchdog on this worker thread, the finished callback on
+        # PortAudio's internal thread), so the check-then-set must be
+        # atomic — a bare bool let both paths win the race and emit a
+        # double toast / double stop().  All access goes through
+        # ``_claim_device_loss_emit`` under ``_device_loss_lock``.
         self._device_loss_emitted: bool = False
+        self._device_loss_lock = threading.Lock()
 
     @property
     def is_running(self) -> bool:
@@ -213,7 +221,8 @@ class InputStreamWorker(QObject):
         self._stopping = False
         # H-2: reset the dedupe flag so the next unplug emits exactly one
         # ``stream_error`` regardless of which detection path fires first.
-        self._device_loss_emitted = False
+        with self._device_loss_lock:
+            self._device_loss_emitted = False
 
         # Drain any stale chunks from a previous session before the
         # callback starts pushing new ones. Queue lives on the worker
@@ -456,8 +465,7 @@ class InputStreamWorker(QObject):
         timeout on the same unplug) cannot also fire the toast.
         """
         self._device_lost = True
-        if not self._device_loss_emitted:
-            self._device_loss_emitted = True
+        if self._claim_device_loss_emit():
             self.stream_error.emit(
                 "Audio device disconnected — replug and click Start to recover"
             )
@@ -486,15 +494,27 @@ class InputStreamWorker(QObject):
         # watchdog already fired on the same unplug, we don't show a
         # second toast.  The watchdog's QTimer cleanup in ``stop()`` is
         # not synchronous with this PortAudio thread, so a race window
-        # exists where both paths see the same unplug; this flag closes
-        # it.
-        if not self._device_loss_emitted:
-            self._device_loss_emitted = True
+        # exists where both paths see the same unplug; the atomic
+        # test-and-set in ``_claim_device_loss_emit`` closes it.
+        if self._claim_device_loss_emit():
             self.stream_error.emit(
                 "Audio device disconnected — replug and click Start to recover"
             )
         from PySide6.QtCore import QMetaObject, Qt
         QMetaObject.invokeMethod(self, "stop", Qt.ConnectionType.QueuedConnection)
+
+    def _claim_device_loss_emit(self) -> bool:
+        """Atomically claim the right to emit this session's loss toast.
+
+        Returns ``True`` for exactly one caller per ``start()``; the
+        watchdog (worker thread) and the PortAudio finished callback
+        (PortAudio internal thread) both race here on the same unplug.
+        """
+        with self._device_loss_lock:
+            if self._device_loss_emitted:
+                return False
+            self._device_loss_emitted = True
+            return True
 
     def _pa_reset(self) -> None:
         """Force a full PortAudio re-initialization to clear stale device handles.

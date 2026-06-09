@@ -218,19 +218,31 @@ class OfflineEncodeWorker(QObject):
             self.finished.emit()
             return
 
+        out = Path(output_path)
+        # Write to a sibling .tmp then atomically rename (same pattern as
+        # config/store.py).  closeEvent falls back to thread.terminate()
+        # if this worker doesn't finish in time; without the tmp+rename
+        # the kill could land mid-writeframes and leave the user's chosen
+        # path holding a truncated, unplayable WAV with no indication why.
+        # With it, the final path either doesn't exist or is complete.
+        tmp = out.with_name(out.name + ".tmp")
         try:
-            out = Path(output_path)
             out.parent.mkdir(parents=True, exist_ok=True)
             # H-4: pathlib.Path.open routes through Windows wide-char API,
             # so non-ASCII characters in *out* (emoji, accented chars,
             # CJK) survive even on non-UTF-8 locales.  See the matching
             # comment in MainWindow._on_export_to_audio_requested.
-            with out.open("wb") as raw, wave.open(raw, "wb") as wav:
+            with tmp.open("wb") as raw, wave.open(raw, "wb") as wav:
                 wav.setnchannels(1)
                 wav.setsampwidth(2)  # 16-bit PCM
                 wav.setframerate(sample_rate)
                 wav.writeframes(np.asarray(samples, dtype=np.int16).tobytes())
+            tmp.replace(out)
         except OSError as exc:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass  # best-effort cleanup; the error below is what matters
             self.error.emit(f"Could not write WAV: {exc}")
             self.finished.emit()
             return

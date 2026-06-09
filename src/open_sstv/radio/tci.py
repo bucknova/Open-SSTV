@@ -108,6 +108,9 @@ class TciConnection:
         #: and the TX worker thread (TX bracketing) so it shares the
         #: send lock (already protects all command writes).
         self._rx_audio_subscribed: bool = False
+        #: Running count of dropped malformed binary audio frames —
+        #: see ``_note_malformed_audio_frame``.
+        self._malformed_audio_frames: int = 0
         # H13: register/unregister + the iterating snapshot in _dispatch_*
         # all touch the same lists from different threads (GUI / worker /
         # recv).  ``list.append`` and ``list.remove`` are atomic under the
@@ -166,6 +169,12 @@ class TciConnection:
 
         self._closed = False
         self._ready_event.clear()
+        # H6 (v0.3 audit): a fresh connection starts unsubscribed —
+        # carry-over of a stale True from a dead session made TxWorker
+        # skip its own audio_start and TX silently produced no RX-leak
+        # bracket, leaking the server-side stream for the session.
+        with self._send_lock:
+            self._rx_audio_subscribed = False
 
         self._recv_thread = threading.Thread(
             target=self._recv_loop, name="tci-recv", daemon=True
@@ -183,6 +192,11 @@ class TciConnection:
     def disconnect(self) -> None:
         """Close the WebSocket and stop the recv thread."""
         self._closed = True
+        # H6 (v0.3 audit): a closed connection cannot be subscribed.
+        # Without this reset, a failed mark on a dead link left the flag
+        # True and the next session's TX skipped its audio_start bracket.
+        with self._send_lock:
+            self._rx_audio_subscribed = False
         ws = self._ws
         self._ws = None
         if ws is not None:
@@ -395,6 +409,26 @@ class TciConnection:
                         "TCI text callback raised on %r: %s", msg, exc, exc_info=True
                     )
 
+    def _note_malformed_audio_frame(self, reason: str) -> None:
+        """Count and (rate-limited) log a malformed binary audio frame.
+
+        H6 (v0.3 audit): malformed frames used to be dropped with no
+        trace at all — a server sending corrupted frames looked exactly
+        like "RX audio just stopped" until the input watchdog fired,
+        and the root cause was undiagnosable.  WARN on the first frame
+        and every 100th after so a corrupt stream is visible without
+        flooding the log at ~10 frames/s.
+        """
+        self._malformed_audio_frames += 1
+        n = self._malformed_audio_frames
+        if n == 1 or n % 100 == 0:
+            _log.warning(
+                "TCI: dropped malformed audio frame #%d (%s) — server-side "
+                "corruption or protocol mismatch?",
+                n,
+                reason,
+            )
+
     def _dispatch_audio(self, data: bytes) -> None:
         """Parse a TCI v2.0 binary audio frame and invoke audio callbacks.
 
@@ -412,6 +446,9 @@ class TciConnection:
         Callbacks receive float32 mono ndarray + sample rate.
         """
         if len(data) < _AUDIO_HEADER_SIZE:
+            self._note_malformed_audio_frame(
+                f"short frame ({len(data)} bytes < {_AUDIO_HEADER_SIZE})"
+            )
             return
 
         _receiver, sample_rate, fmt, _codec, _crc, length, type_, channels = \
@@ -436,7 +473,8 @@ class TciConnection:
             n = (len(payload) // 4) * 4
             samples = np.frombuffer(payload[:n], dtype="<f4").copy()
         else:
-            return  # unsupported format
+            self._note_malformed_audio_frame(f"unsupported sample format {fmt}")
+            return
 
         # Trim to declared sample count (length × channels)
         declared = int(length) * int(channels)

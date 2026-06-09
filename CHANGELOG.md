@@ -9,6 +9,53 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Stability fixes from the 2026-06-09 full audit (critical + high
+findings).  No feature changes.
+
+### Fixed
+
+- **Clipboard copy no longer risks a crash on exit (C1).**  *Copy to
+  Clipboard* in the image gallery now places a ``QImage`` on the
+  clipboard instead of a ``QPixmap``.  A ``QPixmap`` clipboard entry is
+  a macOS pasteboard *promise* that needs a living ``QGuiApplication``
+  to honour; quitting with the promise pending logged
+  "Cannot keep promise…" and could segfault during Qt teardown (the
+  intermittent CI segfault), and the copied image silently vanished
+  from the clipboard on quit.
+- **PTT unkey now retries with a backend reconnect (H1).**  If the
+  control link dies mid-TX (USB-serial unplug, rigctld/TCI drop),
+  ``set_ptt(False)`` on the dead link can never succeed.  The TX worker
+  now closes and re-opens the backend between up to 3 unkey attempts —
+  a replugged adapter or restarted daemon gets the radio unkeyed
+  automatically.  The final failure message states explicitly that the
+  radio may still be transmitting.
+- **App can no longer hang on quit when the rig backend is dead (H2).**
+  ``closeEvent`` caught only ``RigError`` around ``rig.close()``; a raw
+  ``OSError``/``termios.error`` from an unplugged port escaped the Qt
+  virtual override, aborting shutdown midway and orphaning the rigctld
+  child process.
+- **Export-to-audio writes atomically (H3).**  The offline encode
+  worker writes to a ``.tmp`` sibling and renames into place, so a
+  force-terminated worker (app closed mid-export) can no longer leave
+  a truncated, unplayable WAV at the chosen path.
+- **Rig health check no longer stalls TX audio (H4).**  The mid-TX rig
+  ping used to run inline in the playback write loop; a wedged rigctld
+  daemon blocked audio output for its full 2 s socket timeout, causing
+  an audible underrun in the transmitted image.  The ping now runs on
+  a dedicated monitor thread and the write loop only reads a flag.
+- **Device-loss detection is now race-free (H5).**  The watchdog
+  (worker thread) and the PortAudio finished callback (PortAudio
+  thread) deduplicate the "device disconnected" toast via an atomic
+  test-and-set instead of a bare bool — no more double toasts/stops on
+  an unlucky unplug.
+- **TCI: RX-subscribe state can no longer go stale (H6).**  The
+  subscription flag is reset on both connect and disconnect, so a
+  failed session can't make the next TX skip its audio start/stop
+  bracket and leak a server-side RX stream.  Malformed binary audio
+  frames are now counted and logged (first + every 100th) instead of
+  dropped silently — a corrupt stream no longer looks like "RX just
+  stopped".
+
 ---
 
 ## [0.3.22] — 2026-05-28
