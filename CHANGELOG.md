@@ -9,9 +9,11 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.23] — 2026-06-09
+
 Stability and usability fixes from the 2026-06-09 full audit — the
-critical + high findings landed first; the medium + low findings
-followed in a second PR.  No feature changes.
+critical + high findings landed first (PR #22); the medium + low
+findings followed in a second PR (#23).  No feature changes.
 
 ### Fixed (medium/low audit findings)
 
