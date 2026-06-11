@@ -247,6 +247,26 @@ class SettingsDialog(QDialog):
         )
         self._auto_log_check.setChecked(self._config.auto_log_qsos)
         logbook_form.addRow(self._auto_log_check)
+
+        # When should a finished reception offer the log dialog?  SSTV
+        # calling frequencies carry everyone's exchanges — a monitoring
+        # station mostly decodes contacts that aren't theirs.
+        self._rx_capture_combo = QComboBox()
+        self._rx_capture_combo.addItem("Ask after every reception", "always")
+        self._rx_capture_combo.addItem(
+            "Ask only while in a QSO (ToCall filled)", "in_qso"
+        )
+        self._rx_capture_combo.addItem(
+            "Never ask — log from the RX gallery", "never"
+        )
+        idx = self._rx_capture_combo.findData(self._config.rx_capture_prompt)
+        self._rx_capture_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._rx_capture_combo.setToolTip(
+            "Any decoded image can always be logged deliberately from the\n"
+            "RX gallery (right-click → Log QSO…), regardless of this choice.\n"
+            "Transmissions always offer the dialog — your own TX is yours."
+        )
+        logbook_form.addRow("RX capture:", self._rx_capture_combo)
         layout.addWidget(logbook_group)
 
         # ── Diagnostics (v0.3.21) ────────────────────────────────────────
@@ -1773,6 +1793,7 @@ class SettingsDialog(QDialog):
             # an advanced hand-edit-the-TOML override) but must be
             # carried through or a settings save would reset it.
             auto_log_qsos=self._auto_log_check.isChecked(),
+            rx_capture_prompt=self._rx_capture_combo.currentData() or "always",
             logbook_db_path=self._config.logbook_db_path,
             log_level=self._log_level_combo.currentData() or "INFO",
         )

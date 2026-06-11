@@ -498,3 +498,18 @@ class TestLogbookSettings:
         dlg = SettingsDialog(config=cfg, rig_connected=False)
         qtbot.addWidget(dlg)
         assert dlg.result_config().logbook_db_path == "/tmp/custom-logbook.db"
+
+    def test_rx_capture_prompt_round_trip(self, qtbot) -> None:
+        cfg = AppConfig(callsign="W0AEZ", rx_capture_prompt="in_qso")
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        assert dlg._rx_capture_combo.currentData() == "in_qso"
+        dlg._rx_capture_combo.setCurrentIndex(dlg._rx_capture_combo.findData("never"))
+        assert dlg.result_config().rx_capture_prompt == "never"
+
+    def test_rx_capture_prompt_unknown_falls_back_to_always(self, qtbot) -> None:
+        cfg = AppConfig(callsign="W0AEZ", rx_capture_prompt="bogus")
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        # __post_init__ already normalised it.
+        assert dlg._rx_capture_combo.currentData() == "always"

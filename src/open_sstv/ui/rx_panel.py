@@ -68,6 +68,9 @@ class RxPanel(QWidget):
     decode_audio_file_requested = Signal()
     image_saved = Signal(object, object)  # (PIL.Image, Mode)
     rx_image_selected = Signal(object)  # PIL.Image — for template {rx_image} slot
+    #: v0.4: relay of the gallery's *Log QSO…* context action.
+    #: MainWindow builds the draft and opens the capture dialog.
+    log_qso_requested = Signal(object, object)  # (PIL.Image, Mode)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -146,6 +149,7 @@ class RxPanel(QWidget):
         # user can review older decodes at full size without first
         # saving them to disk.
         self._gallery.image_preview_requested.connect(self._show_gallery_image)
+        self._gallery.log_qso_requested.connect(self.log_qso_requested)
         layout.addWidget(self._gallery)
 
     # === public API used by MainWindow ===

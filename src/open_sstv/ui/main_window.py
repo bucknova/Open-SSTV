@@ -718,6 +718,10 @@ class MainWindow(QMainWindow):
         self._rx_panel.decode_audio_file_requested.connect(
             self._on_decode_audio_file_requested
         )
+        # v0.4: gallery right-click → Log QSO… — deliberate logging for
+        # monitoring stations (most decodes on a calling frequency are
+        # other people's exchanges; this logs only the one that's yours).
+        self._rx_panel.log_qso_requested.connect(self._on_gallery_log_qso)
 
         # Audio worker -> RX worker (chunks flow across the thread
         # boundary via queued connection; Qt handles the marshalling).
@@ -920,22 +924,30 @@ class MainWindow(QMainWindow):
             self._logbook_dialog.refresh()
 
     def _capture_qso(
-        self, draft: QSO, preview_image: PILImage | None, mode: object
+        self,
+        draft: QSO,
+        preview_image: PILImage | None,
+        mode: object,
+        *,
+        draft_when_busy: bool = True,
     ) -> None:
         """Dispatch a completion draft: modal dialog, or silent insert.
 
-        Silent paths: ``auto_log_qsos`` is on, or a capture dialog is
-        already open (back-to-back RX completions must not stack
-        modals — the draft lands in the logbook for later editing
-        instead of being lost).  Logbook failures are status-bar
-        noise, never dialogs: a broken logbook must not interrupt
-        operating.
+        ``auto_log_qsos`` writes everything silently.  When a capture
+        dialog is already open, ``draft_when_busy`` decides the
+        fallback: True (you're engaged — a partner's back-to-back
+        image) → silent draft so nothing of *your* QSO is lost; False
+        (third-party traffic on a monitored frequency) → drop with a
+        status hint, because strangers' exchanges don't belong in the
+        logbook — the image stays in the RX gallery for deliberate
+        logging.  Logbook failures are status-bar noise, never
+        dialogs: a broken logbook must not interrupt operating.
         """
         dialog_busy = (
             self._capture_context is not None
             and self._capture_context[0].isVisible()
         )
-        if self._logbook_coordinator.auto_log or dialog_busy:
+        if self._logbook_coordinator.auto_log or (dialog_busy and draft_when_busy):
             try:
                 saved = self._logbook_coordinator.save_draft(draft)
             except Exception as exc:  # noqa: BLE001
@@ -948,7 +960,28 @@ class MainWindow(QMainWindow):
             )
             self._refresh_logbook_if_open()
             return
+        if dialog_busy:
+            self.statusBar().showMessage(
+                "Log dialog already open — image kept in the gallery "
+                "(right-click it to log)",
+                5000,
+            )
+            return
+        self._open_capture_dialog(draft, preview_image, mode)
 
+    def _open_capture_dialog(
+        self, draft: QSO, preview_image: PILImage | None, mode: object
+    ) -> None:
+        """Open the window-modal LogQsoDialog for *draft*."""
+        if (
+            self._capture_context is not None
+            and self._capture_context[0].isVisible()
+        ):
+            # The gallery path can't normally reach here (window
+            # modality blocks the gallery while a capture dialog is
+            # up), but guard against racing completions anyway.
+            self.statusBar().showMessage("Finish the open log dialog first", 5000)
+            return
         dlg = LogQsoDialog(draft, preview_image=preview_image, parent=self)
         self._capture_context = (dlg, preview_image, mode)
         dlg.finished.connect(self._on_capture_dialog_finished)
@@ -992,6 +1025,27 @@ class MainWindow(QMainWindow):
         who = saved.callsign or "draft"
         self.statusBar().showMessage(f"Logged {who} ({saved.mode})", 5000)
         self._refresh_logbook_if_open()
+
+    @Slot(object, object)
+    def _on_gallery_log_qso(self, image: object, mode: object) -> None:
+        """RX-gallery *Log QSO…*: deliberately log a kept decode.
+
+        Bypasses both the capture gating (an explicit click always
+        means "log this one") and the auto-log silent path (the user
+        asked for the form, not a background draft).  The frequency
+        snapshot is the *current* poll cache — right while you're
+        still on frequency, stale if you QSYed since the decode; same
+        for the timestamp, which is log-time rather than decode-time
+        because gallery thumbnails don't carry their decode clock.
+        Close enough for the log-right-after-the-QSO workflow this
+        exists for.
+        """
+        pil_image: PILImage = image  # type: ignore[assignment]
+        draft = self._logbook_coordinator.build_rx_draft(
+            mode=mode,
+            frequency_hz=self._last_rig_freq_hz,
+        )
+        self._open_capture_dialog(draft, pil_image, mode)
 
     def _trigger_update_check(self) -> None:
         """Dispatch the one-shot update check to the worker thread."""
@@ -1931,15 +1985,29 @@ class MainWindow(QMainWindow):
                 audio_arr, mode, sr, fmt, alongside=save_path
             )
 
-        # v0.4: capture the reception in the logbook.  Frequency is the
-        # rig-poll cache (≤1 s old during live RX, None when no rig).
+        # v0.4: capture the reception in the logbook — gated, because
+        # SSTV calling frequencies are party lines and most of what a
+        # monitoring station decodes is other people's exchanges.
+        # "Engaged" = the TX panel's ToCall is filled in (you're
+        # working someone).  auto_log_qsos overrides the gate and
+        # drafts everything silently.  Frequency is the rig-poll cache
+        # (≤1 s old during live RX, None when no rig).
+        engaged = bool(self._tx_panel.get_qso_state().tocall.strip())
+        prompt_mode = self._config.rx_capture_prompt
+        if not self._logbook_coordinator.auto_log and (
+            prompt_mode == "never" or (prompt_mode == "in_qso" and not engaged)
+        ):
+            self.statusBar().showMessage(
+                "Image decoded — right-click it in the gallery to log a QSO", 5000
+            )
+            return
         draft = self._logbook_coordinator.build_rx_draft(
             mode=mode,
             frequency_hz=self._last_rig_freq_hz,
             image_path=save_path,
             audio_path=audio_path,
         )
-        self._capture_qso(draft, pil_image, mode)
+        self._capture_qso(draft, pil_image, mode, draft_when_busy=engaged)
 
     def _save_rx_audio(
         self,

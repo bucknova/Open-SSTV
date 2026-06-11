@@ -24,6 +24,38 @@ Type the callsign and signal reports, then **Save**.  Press **Esc**
 (or Cancel) and nothing is written — a noise-triggered decode or a
 test costs you one keypress.
 
+### Not every decode is your QSO
+
+SSTV calling frequencies are party lines: when you monitor 14.230,
+most of what you decode is *other people's* exchanges — someone else
+answered that CQ, and their contact doesn't belong in your logbook.
+**Settings → General → Logbook → RX capture** controls when a
+finished reception offers the dialog:
+
+- **Ask after every reception** *(default)* — the classic behaviour;
+  Esc dismisses the ones that aren't yours.
+- **Ask only while in a QSO** — the dialog appears only when the TX
+  panel's **ToCall** is filled in (you're working someone).  Pure
+  monitoring never interrupts you.
+- **Never ask** — no dialog at all; you log deliberately from the
+  gallery (below).
+
+Whatever the setting, **any decoded image can be logged from the RX
+gallery**: right-click a thumbnail → **Log QSO…** opens the same
+pre-filled form.  That's the natural workflow for a monitoring
+station — decode freely all afternoon, then log only the exchange
+that was actually with you.  (Logged that way, the frequency and
+timestamp are taken at log time, so log promptly after the QSO if
+those details matter.)
+
+Back-to-back images from your partner while the dialog is already
+open are saved silently as drafts so nothing of *your* QSO is lost;
+third-party traffic in the same situation is simply left in the
+gallery.
+
+Your own **transmissions always offer the dialog** — what you put on
+the air is always yours to log.
+
 Notes for the dialog:
 
 - RSV reports use the SSTV convention (Readability / Strength /
@@ -37,10 +69,14 @@ Notes for the dialog:
 
 ### Silent logging
 
-Prefer not to be interrupted mid-pileup?  Enable **Settings →
-General → Logbook → Log QSOs silently**.  Completions are then saved
-as draft entries (no dialog), and you fill in callsigns later from
-the Logbook window.  Draft rows are shown in grey as `(draft)`.
+Prefer no dialogs at all but want everything kept?  Enable
+**Settings → General → Logbook → Log QSOs silently**.  Every
+completion — TX and RX alike — is saved as a draft entry (no
+dialog), and you fill in callsigns later from the Logbook window.
+Draft rows are shown in grey as `(draft)`.  Note this overrides the
+RX-capture setting above and *will* hoover up third-party traffic on
+a monitored frequency — it suits active operating sessions, not
+unattended monitoring.
 
 ## The Logbook window
 
