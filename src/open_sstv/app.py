@@ -189,11 +189,40 @@ def _setup_logging(log_level: int) -> Path | None:
         return None
 
 
+def _config_log_level() -> int:
+    """Resolve the configured log level (v0.4 Settings → Logging tab).
+
+    Reads ``AppConfig.log_level`` from the saved TOML.  Defensive on
+    every failure path — a corrupt or unreadable config must never
+    block startup, and the level falls back to INFO exactly as it was
+    before the field existed.  ``AppConfig.__post_init__`` has already
+    normalised the value to one of DEBUG/INFO/WARNING/ERROR.
+    """
+    import logging  # noqa: PLC0415
+
+    try:
+        from open_sstv.config.store import load_config  # noqa: PLC0415
+        name = load_config().log_level
+    except Exception:  # noqa: BLE001
+        return logging.INFO
+    return {
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+    }.get(name, logging.INFO)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the ``open-sstv`` console script and ``python -m open_sstv``."""
     import logging  # noqa: PLC0415
     import os  # noqa: PLC0415
-    log_level = logging.DEBUG if os.environ.get("OPEN_SSTV_DEBUG") else logging.INFO
+    # OPEN_SSTV_DEBUG wins over the configured level so "set this env
+    # var and re-run" stays a one-step support instruction even when
+    # the user has Settings → Logging set to WARNING/ERROR.
+    log_level = (
+        logging.DEBUG if os.environ.get("OPEN_SSTV_DEBUG") else _config_log_level()
+    )
     _log_file_path = _setup_logging(log_level)
     if _log_file_path is not None:
         logging.getLogger("open_sstv").info(

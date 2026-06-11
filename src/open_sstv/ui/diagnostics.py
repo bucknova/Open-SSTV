@@ -69,7 +69,7 @@ _SENSITIVE_NAME_PATTERNS: tuple[str, ...] = (
 _REDACTION_MARKER = "***REDACTED***"
 
 
-def export_diagnostics(zip_path: Path) -> Path:
+def export_diagnostics(zip_path: Path, *, include_logbook: bool = False) -> Path:
     """Write a diagnostics zip to *zip_path* and return the path.
 
     Raises ``OSError`` only if the destination is fundamentally unwriteable;
@@ -79,13 +79,47 @@ def export_diagnostics(zip_path: Path) -> Path:
     The output zip is overwritten if it exists — the caller's ``QFileDialog``
     typically handles the "overwrite this file?" prompt before invoking
     us, so re-writing without warning is the expected behaviour here.
+
+    ``include_logbook`` (v0.4) adds the operator's ``logbook.db`` to the
+    zip.  Default **off**: the logbook is a list of callsigns worked —
+    identifiable information that doesn't belong in a routine bug-report
+    zip.  The Settings export flow surfaces this as an explicit opt-in
+    checkbox.
     """
     zip_path = Path(zip_path)
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("open-sstv.log", _collect_logs())
         zf.writestr("system-info.txt", _collect_system_info())
         zf.writestr("config-redacted.toml", _collect_redacted_config())
+        if include_logbook:
+            _add_logbook_member(zf)
     return zip_path
+
+
+def _add_logbook_member(zf: zipfile.ZipFile) -> None:
+    """Add the logbook DB to *zf*, or a placeholder explaining its absence.
+
+    Resolves the same path the app uses (config override → platform
+    default).  Reads bytes rather than zipping the live file handle so a
+    concurrent app instance holding the SQLite connection can't wedge
+    the export.
+    """
+    try:
+        from open_sstv.config.store import load_config  # noqa: PLC0415
+        from open_sstv.logbook.store import default_db_path  # noqa: PLC0415
+
+        raw = (load_config().logbook_db_path or "").strip()
+        db_path = Path(raw).expanduser() if raw else default_db_path()
+        if db_path.is_file():
+            zf.writestr("logbook.db", db_path.read_bytes())
+        else:
+            zf.writestr(
+                "logbook-missing.txt",
+                f"(no logbook database found at {db_path} — "
+                "the operator has not logged any QSOs yet)\n",
+            )
+    except Exception as exc:  # noqa: BLE001
+        zf.writestr("logbook-missing.txt", f"(logbook export failed: {exc})\n")
 
 
 # ---------------------------------------------------------------------------

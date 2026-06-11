@@ -12,13 +12,11 @@ Package layout
 - ``store``       — ``LogbookStore`` — SQLite-backed CRUD + queries.
 - ``adif``        — ADIF 3.1.5 reader/writer.  Pure-Python, no deps.
 
-Higher layers (added in PR #2 + #3 of the v0.4 milestone):
-- ``coordinator`` — listens to RX/TX completion signals, builds drafts.
-- UI:               ``ui/logbook_dialog.py`` + ``ui/log_qso_dialog.py``.
+- ``coordinator``  — builds draft QSOs at TX/RX completion; owns the
+                     app's store instance; ADIF import dedupe.
 
-This PR (v0.4 PR #1) ships only the data layer — no user-visible
-behaviour change.  The package is import-safe but nothing in the
-running app touches it yet.
+UI lives in ``ui/logbook_dialog.py`` + ``ui/log_qso_dialog.py``; this
+package stays Qt-free so the whole data + capture layer tests headless.
 """
 from __future__ import annotations
 
@@ -26,6 +24,12 @@ from open_sstv.logbook.adif import (
     AdifParseError,
     export_adif,
     import_adif,
+)
+from open_sstv.logbook.coordinator import (
+    MODE_DISPLAY_NAMES,
+    LogbookCoordinator,
+    mode_display_name,
+    qso_dedupe_key,
 )
 from open_sstv.logbook.model import DIRECTIONS, QSO, Direction, StationInfo
 from open_sstv.logbook.store import (
@@ -36,8 +40,10 @@ from open_sstv.logbook.store import (
 
 __all__ = [
     "DIRECTIONS",
+    "MODE_DISPLAY_NAMES",
     "AdifParseError",
     "Direction",
+    "LogbookCoordinator",
     "LogbookStore",
     "QSO",
     "SchemaTooNewError",
@@ -45,4 +51,6 @@ __all__ = [
     "default_db_path",
     "export_adif",
     "import_adif",
+    "mode_display_name",
+    "qso_dedupe_key",
 ]

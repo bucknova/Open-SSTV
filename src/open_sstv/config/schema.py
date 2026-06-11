@@ -188,6 +188,25 @@ class AppConfig:
     # smaller files.  Constrained by the Settings UI to "png" or "jpg".
     autosave_file_format: str = "png"
 
+    # --- Logbook (v0.4) ---
+    # When True, draft QSOs are written silently at TX/RX completion and
+    # edited later from the Logbook window.  Default False → a modal
+    # LogQsoDialog opens at completion so the contact is captured while
+    # it's fresh (Esc dismisses without writing a row).
+    auto_log_qsos: bool = False
+    # Override for the logbook SQLite file.  Empty → the platform
+    # default, ``platformdirs.user_data_dir("open_sstv")/logbook.db``.
+    # Kept as ``str`` (not Path) for TOML round-trip, matching
+    # ``images_save_dir``.
+    logbook_db_path: str = ""
+
+    # --- Logging (v0.4) ---
+    # Root log level for both the stderr and rotating-file handlers.
+    # Applied at startup by ``app._setup_logging``; changing it in
+    # Settings takes effect on next launch.  ``OPEN_SSTV_DEBUG=1``
+    # still forces DEBUG regardless of this field.
+    log_level: str = "INFO"
+
     def __post_init__(self) -> None:
         # v0.1.12: slider ceiling reverted from 500% to 200%.
         # Clamp any stored value so users who raised it to ≤500% on v0.1.11
@@ -298,6 +317,20 @@ class AppConfig:
             _log.info(
                 "AppConfig: test_tone_freq_lo > test_tone_freq_hi — swapped"
             )
+
+        # v0.4: normalise log_level and fall back to INFO for unknown
+        # values so a hand-edited TOML can't silence logging entirely
+        # (an invalid level passed to logging would raise at startup).
+        lvl_original = self.log_level
+        lvl = (self.log_level or "").strip().upper()
+        if lvl not in ("DEBUG", "INFO", "WARNING", "ERROR"):
+            if lvl_original and lvl:
+                _log.warning(
+                    "AppConfig: unknown log_level %r — falling back to 'INFO'",
+                    lvl_original,
+                )
+            lvl = "INFO"
+        self.log_level = lvl
 
 
 __all__ = ["AppConfig"]

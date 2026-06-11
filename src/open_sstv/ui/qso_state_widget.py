@@ -96,8 +96,6 @@ class QSOStateWidget(QWidget):
         self._name.textChanged.connect(self._on_field_changed)
         row1.addWidget(self._name)
 
-        self._note = QLineEdit()  # hidden until v0.4 QSO logging
-
         row1.addStretch(1)
         self._clear_btn = QPushButton("Clear QSO")
         self._clear_btn.setMaximumWidth(90)
@@ -105,6 +103,18 @@ class QSOStateWidget(QWidget):
         row1.addWidget(self._clear_btn)
 
         layout.addLayout(row1)
+
+        # --- Row 2: free-form note (unhidden in v0.4) ---
+        # Resolves the {note} template token and pre-fills the Notes
+        # field of the v0.4 log-QSO capture dialog.
+        row2 = QHBoxLayout()
+        row2.setSpacing(6)
+        row2.addWidget(QLabel("Note:"))
+        self._note = QLineEdit()
+        self._note.setPlaceholderText("Optional — logged with the QSO")
+        self._note.textChanged.connect(self._on_field_changed)
+        row2.addWidget(self._note, stretch=1)
+        layout.addLayout(row2)
 
     # === Public API ===
 
