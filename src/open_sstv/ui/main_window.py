@@ -665,6 +665,9 @@ class MainWindow(QMainWindow):
         self._tx_panel.export_to_audio_requested.connect(
             self._on_export_to_audio_requested
         )
+        # v0.4: [Logbook…] button on the QSO bar — same destination as
+        # Tools → Logbook… (Cmd/Ctrl+L).
+        self._tx_panel.logbook_requested.connect(self._open_logbook)
         self._radio_panel.test_tone_requested.connect(self._on_test_tone_requested)
         # Private dispatch signals → worker slots (QueuedConnection across thread)
         self._request_transmit.connect(self._tx_worker.transmit)

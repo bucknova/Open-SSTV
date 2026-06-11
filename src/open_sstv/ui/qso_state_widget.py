@@ -49,9 +49,14 @@ class QSOStateWidget(QWidget):
     state_changed(QSOState):
         Emitted after a 300 ms debounce whenever any field changes.
         Consumers (live preview, thumbnail gallery) should connect here.
+    logbook_requested():
+        Emitted when the [Logbook…] button is clicked.  Relayed up
+        through TxPanel to MainWindow, which owns the logbook window —
+        this widget stays standalone-testable with no logbook import.
     """
 
     state_changed = Signal(object)  # QSOState
+    logbook_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -101,6 +106,14 @@ class QSOStateWidget(QWidget):
         self._clear_btn.setMaximumWidth(90)
         self._clear_btn.clicked.connect(self.clear)
         row1.addWidget(self._clear_btn)
+
+        # v0.4: one-click path to the logbook while working a contact —
+        # same destination as Tools → Logbook… (Cmd/Ctrl+L).
+        self._logbook_btn = QPushButton("Logbook…")
+        self._logbook_btn.setMaximumWidth(90)
+        self._logbook_btn.setToolTip("Open the logbook window (Ctrl+L / Cmd+L)")
+        self._logbook_btn.clicked.connect(self.logbook_requested)
+        row1.addWidget(self._logbook_btn)
 
         layout.addLayout(row1)
 

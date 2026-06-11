@@ -192,3 +192,14 @@ class TestTxCapture:
         window._on_tx_complete()
         assert window._capture_context is None
         assert not (tmp_path / "logbook.db").exists()
+
+
+class TestLogbookButton:
+    def test_qso_bar_button_opens_logbook_window(
+        self, qtbot, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, patched_audio
+    ) -> None:
+        window = _make_window(qtbot, monkeypatch, tmp_path)
+        assert window._logbook_dialog is None
+        window._tx_panel._qso_widget._logbook_btn.click()
+        assert window._logbook_dialog is not None
+        assert window._logbook_dialog.isVisible()

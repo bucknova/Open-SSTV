@@ -144,6 +144,10 @@ class TxPanel(QWidget):
     #: wired to the banner-gating in TxWorker — banner is now
     #: always-on-when-enabled regardless of template state.
     template_composited = Signal(bool)
+    #: v0.4: relay of the QSO bar's [Logbook…] button.  MainWindow owns
+    #: the logbook window, so the request bubbles up the same way
+    #: transmit_requested does.
+    logbook_requested = Signal()
 
     def __init__(
         self,
@@ -215,6 +219,7 @@ class TxPanel(QWidget):
         # --- QSO State widget ---
         self._qso_widget = QSOStateWidget(self)
         self._qso_widget.state_changed.connect(self._on_qso_state_changed)
+        self._qso_widget.logbook_requested.connect(self.logbook_requested)
         layout.addWidget(self._qso_widget)
 
         # --- Mode picker ---
