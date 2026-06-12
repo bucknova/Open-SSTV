@@ -434,9 +434,11 @@ def test_pa_reset_skips_when_tx_active(monkeypatch) -> None:
         "open_sstv.audio.input_stream.sd._initialize",
         lambda: initialize_calls.append(None),
     )
+    # M9: the guard is now the atomic ``run_if_tx_idle`` (which reads the
+    # TX counter under the state lock), so simulate an in-flight TX by
+    # raising the counter itself rather than stubbing ``is_tx_active``.
     monkeypatch.setattr(
-        "open_sstv.audio.output_stream.is_tx_active",
-        lambda: True,
+        "open_sstv.audio.output_stream._tx_active_count", 1,
     )
 
     worker = InputStreamWorker()

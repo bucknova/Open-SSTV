@@ -1451,3 +1451,4 @@ class TestExportToAudioBanner:
         assert len(captured) == 1
         # Banner overwrites the top strip — top-left pixel is now banner bg.
         assert captured[0].getpixel((0, 0)) != (100, 200, 50)
+

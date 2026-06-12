@@ -304,6 +304,16 @@ class IncrementalDecoderBase:
         vis_end_abs: int,
         start_abs: int = 0,
     ) -> None:
+        # L (v0.3 audit): a zero/negative rate or line time would
+        # surface as a divide-by-zero in ``_line_period_samples`` (or
+        # NaN geometry) several calls later — fail at construction with
+        # a message that points at the bad input instead.
+        if fs <= 0:
+            raise ValueError(f"Sample rate must be positive (got {fs})")
+        if spec.line_time_ms <= 0:
+            raise ValueError(
+                f"Mode line time must be positive (got {spec.line_time_ms})"
+            )
         self._spec = spec
         self._fs = fs
         self._vis_end_abs = vis_end_abs

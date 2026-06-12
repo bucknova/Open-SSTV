@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QSpinBox,
@@ -56,6 +57,11 @@ class TemplateEditorDialog(QDialog):
         self.setMinimumSize(700, 500)
 
         self._mycall = mycall
+        # M3 (v0.3 audit): keep the caller's pristine list so ``reject``
+        # can detect unsaved edits (dataclass equality recurses into the
+        # overlay lists).  The deep copy below means the source is never
+        # mutated while the dialog is open.
+        self._source_templates = templates
         # Deep copy so edits don't mutate the caller's list until Accept.
         # ``x`` / ``y`` MUST be round-tripped (OP-03): templates saved with
         # explicit pixel coordinates (via hand-edited TOML) would otherwise
@@ -246,6 +252,26 @@ class TemplateEditorDialog(QDialog):
         """Return the edited template list (call after ``Accepted``)."""
         return self._templates
 
+    def reject(self) -> None:  # type: ignore[override]
+        """Cancel — but confirm first if there are unsaved edits.
+
+        M3 (v0.3 audit): the dialog used to discard every add/remove/
+        edit on a fat-fingered Cancel (or Esc, or window-close, all of
+        which route through ``reject``) with no warning.
+        """
+        if self._templates != self._source_templates:
+            answer = QMessageBox.question(
+                self,
+                "Discard changes?",
+                "You have unsaved template changes. Discard them?",
+                QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Discard:
+                return
+        super().reject()
+
     # === template list ===
 
     def _refresh_template_list(self) -> None:
@@ -283,7 +309,20 @@ class TemplateEditorDialog(QDialog):
     @Slot()
     def _remove_template(self) -> None:
         row = self._tpl_list.currentRow()
-        if row < 0:
+        if row < 0 or row >= len(self._templates):
+            return
+        # M3 (v0.3 audit): an accidental click used to delete the
+        # template instantly with no undo — it only survived until the
+        # user hit OK, and nothing said so.
+        name = self._templates[row].name or "(untitled)"
+        answer = QMessageBox.question(
+            self,
+            "Remove template?",
+            f"Remove template “{name}”?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
             return
         self._templates.pop(row)
         self._refresh_template_list()

@@ -21,6 +21,19 @@ from open_sstv.radio.base import RigConnectionMode
 
 _log = logging.getLogger(__name__)
 
+#: Canonical serial baud rates the app supports.  The Settings dialog's
+#: baud combo imports this list so schema validation and the UI can't
+#: drift (M1, v0.3 audit).  Serial rates must match the rig exactly —
+#: clamping a bad value would still fail, so unknown rates fall back to
+#: the 9600 default instead.
+VALID_BAUD_RATES: tuple[int, ...] = (4800, 9600, 19200, 38400, 57600, 115200)
+
+#: Valid values for ``tx_banner_size`` — mirrors ``banner.SIZE_TABLE``.
+_VALID_BANNER_SIZES: tuple[str, ...] = ("small", "medium", "large")
+
+#: Valid values for ``rig_ptt_line`` (SerialPttRig control lines).
+_VALID_PTT_LINES: tuple[str, ...] = ("DTR", "RTS")
+
 
 def _default_images_dir() -> str:
     """XDG-correct pictures directory, e.g. ``~/Pictures/open_sstv``."""
@@ -241,7 +254,7 @@ class AppConfig:
         # why their value was silently overridden on next save.
         clamped_wpm = max(15, min(30, self.cw_id_wpm))
         if clamped_wpm != self.cw_id_wpm:
-            _log.info(
+            _log.warning(
                 "AppConfig: cw_id_wpm %d out of range [15, 30] — clamped to %d",
                 self.cw_id_wpm,
                 clamped_wpm,
@@ -249,7 +262,7 @@ class AppConfig:
         self.cw_id_wpm = clamped_wpm
         clamped_tone = max(400, min(1200, self.cw_id_tone_hz))
         if clamped_tone != self.cw_id_tone_hz:
-            _log.info(
+            _log.warning(
                 "AppConfig: cw_id_tone_hz %d out of range [400, 1200] — clamped to %d",
                 self.cw_id_tone_hz,
                 clamped_tone,
@@ -356,5 +369,101 @@ class AppConfig:
             lvl = "INFO"
         self.log_level = lvl
 
+        # M1 (v0.3 audit): the remaining hand-editable fields had no
+        # validation at all — a bad value loaded fine and then failed
+        # later (socket/serial errors at connect time) or silently
+        # dispatched to the wrong backend, with nothing pointing back
+        # at the config as the root cause.  Same clamp-and-log pattern
+        # as the fields above.
 
-__all__ = ["AppConfig"]
+        # TCP ports: [1, 65535].
+        for attr in ("rigctld_port", "tci_port"):
+            v = int(getattr(self, attr))
+            clamped_port = max(1, min(65535, v))
+            if clamped_port != v:
+                _log.warning(
+                    "AppConfig: %s %d out of range [1, 65535] — clamped to %d",
+                    attr, v, clamped_port,
+                )
+            setattr(self, attr, clamped_port)
+
+        # Baud rate must match the rig exactly, so unknown values fall
+        # back to the default rather than clamping to a neighbour.
+        if self.rig_baud_rate not in VALID_BAUD_RATES:
+            _log.warning(
+                "AppConfig: rig_baud_rate %d not a supported rate %s — "
+                "falling back to 9600",
+                self.rig_baud_rate, list(VALID_BAUD_RATES),
+            )
+            self.rig_baud_rate = 9600
+
+        # Input gain mirrors the Settings slider range [0%, 200%] —
+        # output gain has been clamped this way since v0.1.12 but input
+        # gain was never validated, so a hand-edited 1000.0 silently
+        # drove the DSP front-end into clipping.
+        clamped_in_gain = max(0.0, min(2.0, float(self.audio_input_gain)))
+        if clamped_in_gain != self.audio_input_gain:
+            _log.warning(
+                "AppConfig: audio_input_gain %.2f out of range [0.0, 2.0] "
+                "— clamped to %.2f",
+                self.audio_input_gain, clamped_in_gain,
+            )
+        self.audio_input_gain = clamped_in_gain
+
+        # String-enum fields: unknown values used to mis-dispatch
+        # silently (unknown rig_connection_mode fell through to the
+        # rigctld branch; unknown serial protocol fell back to PTT-only;
+        # unknown TX mode left the mode combo on its first entry).
+        # Reset to the documented default and say so.
+        valid_conn_modes = tuple(m.value for m in RigConnectionMode)
+        if self.rig_connection_mode not in valid_conn_modes:
+            _log.warning(
+                "AppConfig: unknown rig_connection_mode %r (valid: %s) — "
+                "falling back to 'manual'",
+                self.rig_connection_mode, list(valid_conn_modes),
+            )
+            self.rig_connection_mode = RigConnectionMode.MANUAL.value
+
+        # Import here, not at module top: config must stay importable
+        # without dragging in the DSP stack (numpy) for headless tools.
+        from open_sstv.core.modes import Mode  # noqa: PLC0415
+        valid_tx_modes = tuple(m.value for m in Mode)
+        if self.default_tx_mode not in valid_tx_modes:
+            _log.warning(
+                "AppConfig: unknown default_tx_mode %r — falling back to "
+                "'martin_m1'",
+                self.default_tx_mode,
+            )
+            self.default_tx_mode = "martin_m1"
+
+        from open_sstv.radio.serial_rig import SERIAL_RIG_PROTOCOLS  # noqa: PLC0415
+        if self.rig_serial_protocol not in SERIAL_RIG_PROTOCOLS:
+            _log.warning(
+                "AppConfig: unknown rig_serial_protocol %r (valid: %s) — "
+                "falling back to 'PTT Only (DTR/RTS)'",
+                self.rig_serial_protocol, list(SERIAL_RIG_PROTOCOLS),
+            )
+            self.rig_serial_protocol = "PTT Only (DTR/RTS)"
+
+        ptt_line = (self.rig_ptt_line or "").upper()
+        if ptt_line not in _VALID_PTT_LINES:
+            _log.warning(
+                "AppConfig: unknown rig_ptt_line %r (valid: DTR, RTS) — "
+                "falling back to 'DTR'",
+                self.rig_ptt_line,
+            )
+            ptt_line = "DTR"
+        self.rig_ptt_line = ptt_line
+
+        size = (self.tx_banner_size or "").lower()
+        if size not in _VALID_BANNER_SIZES:
+            _log.warning(
+                "AppConfig: unknown tx_banner_size %r (valid: %s) — "
+                "falling back to 'small'",
+                self.tx_banner_size, list(_VALID_BANNER_SIZES),
+            )
+            size = "small"
+        self.tx_banner_size = size
+
+
+__all__ = ["AppConfig", "VALID_BAUD_RATES"]

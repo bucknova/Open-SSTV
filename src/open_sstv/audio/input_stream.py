@@ -174,7 +174,15 @@ class InputStreamWorker(QObject):
         # This flag is set by whichever path fires first and short-circuits
         # the other.  Cleared at ``start()`` time so each new session is
         # ready to detect a fresh device-loss event.
+        #
+        # H5 (v0.3 audit): the two paths run on different threads (the
+        # watchdog on this worker thread, the finished callback on
+        # PortAudio's internal thread), so the check-then-set must be
+        # atomic — a bare bool let both paths win the race and emit a
+        # double toast / double stop().  All access goes through
+        # ``_claim_device_loss_emit`` under ``_device_loss_lock``.
         self._device_loss_emitted: bool = False
+        self._device_loss_lock = threading.Lock()
 
     @property
     def is_running(self) -> bool:
@@ -213,7 +221,8 @@ class InputStreamWorker(QObject):
         self._stopping = False
         # H-2: reset the dedupe flag so the next unplug emits exactly one
         # ``stream_error`` regardless of which detection path fires first.
-        self._device_loss_emitted = False
+        with self._device_loss_lock:
+            self._device_loss_emitted = False
 
         # Drain any stale chunks from a previous session before the
         # callback starts pushing new ones. Queue lives on the worker
@@ -456,8 +465,7 @@ class InputStreamWorker(QObject):
         timeout on the same unplug) cannot also fire the toast.
         """
         self._device_lost = True
-        if not self._device_loss_emitted:
-            self._device_loss_emitted = True
+        if self._claim_device_loss_emit():
             self.stream_error.emit(
                 "Audio device disconnected — replug and click Start to recover"
             )
@@ -486,15 +494,27 @@ class InputStreamWorker(QObject):
         # watchdog already fired on the same unplug, we don't show a
         # second toast.  The watchdog's QTimer cleanup in ``stop()`` is
         # not synchronous with this PortAudio thread, so a race window
-        # exists where both paths see the same unplug; this flag closes
-        # it.
-        if not self._device_loss_emitted:
-            self._device_loss_emitted = True
+        # exists where both paths see the same unplug; the atomic
+        # test-and-set in ``_claim_device_loss_emit`` closes it.
+        if self._claim_device_loss_emit():
             self.stream_error.emit(
                 "Audio device disconnected — replug and click Start to recover"
             )
         from PySide6.QtCore import QMetaObject, Qt
         QMetaObject.invokeMethod(self, "stop", Qt.ConnectionType.QueuedConnection)
+
+    def _claim_device_loss_emit(self) -> bool:
+        """Atomically claim the right to emit this session's loss toast.
+
+        Returns ``True`` for exactly one caller per ``start()``; the
+        watchdog (worker thread) and the PortAudio finished callback
+        (PortAudio internal thread) both race here on the same unplug.
+        """
+        with self._device_loss_lock:
+            if self._device_loss_emitted:
+                return False
+            self._device_loss_emitted = True
+            return True
 
     def _pa_reset(self) -> None:
         """Force a full PortAudio re-initialization to clear stale device handles.
@@ -514,12 +534,16 @@ class InputStreamWorker(QObject):
         user can still race the two paths (clicking RX Start while TX is
         mid-encode or mid-PTT-delay) — in that window terminating
         PortAudio would rip the host state out from under the live TX
-        OutputStream and crash on the next callback.  ``is_tx_active`` is
-        checked here so the reset is skipped (and logged) while any TX
-        call is in flight; the caller proceeds without a fresh device
-        cache, which is the right trade-off — at worst the user gets a
-        -10851 if the device was just unplugged, which is recoverable; at
-        best (the common case) nothing changed.
+        OutputStream and crash on the next callback.  The reset runs
+        under ``run_if_tx_idle`` (M9, v0.3 audit) so the TX-idle check
+        and the terminate/initialize are one atomic section — a TX
+        starting concurrently blocks at its counter increment until the
+        reset finishes (~100 ms) instead of racing it.  While TX is
+        already active the reset is skipped (and logged); the caller
+        proceeds without a fresh device cache, which is the right
+        trade-off — at worst the user gets a -10851 if the device was
+        just unplugged, which is recoverable; at best (the common case)
+        nothing changed.
 
         Embedded-use caveat: if another component in the same Python
         process holds its own ``sd.OutputStream`` / ``sd.InputStream``
@@ -544,40 +568,41 @@ class InputStreamWorker(QObject):
         crash.  Do *not* tighten the except clause without verifying
         upstream's commitment to keeping the symbols around.
         """
-        from open_sstv.audio.output_stream import is_tx_active  # noqa: PLC0415
+        from open_sstv.audio.output_stream import run_if_tx_idle  # noqa: PLC0415
 
-        if is_tx_active():
+        def _do_reset() -> None:
+            _log.info("PortAudio reset: terminating to clear stale device cache")
+            try:
+                sd._terminate()
+            except AttributeError as exc:
+                _log.warning(
+                    "PortAudio _terminate() removed from sounddevice (%s) — "
+                    "device-loss recovery will rely on a stream re-open rather "
+                    "than a full host re-init.  Upgrade or pin sounddevice.",
+                    exc,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("PortAudio _terminate() failed: %s", exc)
+            _log.info("PortAudio reset: re-initializing")
+            try:
+                sd._initialize()
+            except AttributeError as exc:
+                _log.warning(
+                    "PortAudio _initialize() removed from sounddevice (%s) — "
+                    "subsequent stream opens will use whatever host state "
+                    "remains.  Upgrade or pin sounddevice.",
+                    exc,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("PortAudio _initialize() failed: %s", exc)
+
+        if not run_if_tx_idle(_do_reset):
             _log.warning(
                 "PortAudio reset SKIPPED — TX is currently active.  Resetting "
                 "PortAudio while an OutputStream is live can crash the process; "
                 "the device cache will be refreshed on the next RX start that "
                 "doesn't overlap a transmission."
             )
-            return
-        _log.info("PortAudio reset: terminating to clear stale device cache")
-        try:
-            sd._terminate()
-        except AttributeError as exc:
-            _log.warning(
-                "PortAudio _terminate() removed from sounddevice (%s) — "
-                "device-loss recovery will rely on a stream re-open rather "
-                "than a full host re-init.  Upgrade or pin sounddevice.",
-                exc,
-            )
-        except Exception as exc:  # noqa: BLE001
-            _log.warning("PortAudio _terminate() failed: %s", exc)
-        _log.info("PortAudio reset: re-initializing")
-        try:
-            sd._initialize()
-        except AttributeError as exc:
-            _log.warning(
-                "PortAudio _initialize() removed from sounddevice (%s) — "
-                "subsequent stream opens will use whatever host state "
-                "remains.  Upgrade or pin sounddevice.",
-                exc,
-            )
-        except Exception as exc:  # noqa: BLE001
-            _log.warning("PortAudio _initialize() failed: %s", exc)
 
 
 __all__ = [

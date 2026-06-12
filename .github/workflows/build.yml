@@ -54,10 +54,10 @@ concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: false   # never cancel a release mid-upload
 
-# Needed so softprops/action-gh-release@v2 can create the release and
-# upload the built zips / AppImage as release assets on tag push.  Without
-# ``contents: write`` the attach step fails with HTTP 403 "Resource not
-# accessible by integration" and no release gets published.
+# Needed so the ``release`` job's gh CLI can create the Release and upload
+# the built zips / AppImages as assets on tag push.  Without ``contents:
+# write`` the upload fails with HTTP 403 "Resource not accessible by
+# integration" and no Release gets published.
 permissions:
   contents: write
 
@@ -316,17 +316,48 @@ jobs:
           path: Open-SSTV-*.AppImage
           retention-days: 30
 
-      # ── 8. Attach to GitHub Release (tag pushes only) ──────────────────────
-      - name: Attach zip to release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/${{ matrix.artifact }}.zip
-          draft: false
-          generate_release_notes: true
+      # NOTE: assets are NOT attached to the GitHub Release here.  See the
+      # dedicated ``release`` job below — a single writer attaches every
+      # platform's asset in one shot.
 
-      - name: Attach AppImage to release (Linux only)
-        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Linux'
-        uses: softprops/action-gh-release@v2
+  # ── Publish ────────────────────────────────────────────────────────────────
+  # One release job, not four.  The previous design had every matrix job call
+  # softprops/action-gh-release@v2 to attach its own asset, so all four raced
+  # to create/update the same Release concurrently.  On the Linux runners that
+  # surfaced as a spurious "Requires authentication" (anonymous read succeeded,
+  # the authenticated write did not) and left both Linux zips + both AppImages
+  # off the v0.3.23 Release while Windows/macOS attached fine.  A single job
+  # that downloads all artifacts and attaches them via the gh CLI removes the
+  # concurrency entirely and uses the GITHUB_TOKEN auth path that the matrix
+  # jobs proved works (Windows/macOS).
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      # Pulls every artifact this run produced into ./artifacts/<name>/…
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
         with:
-          files: Open-SSTV-*.AppImage
+          path: artifacts
+
+      - name: Attach all assets to the Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          # One zip per platform + the two Linux AppImages.
+          mapfile -t assets < <(find artifacts -type f \( -name '*.zip' -o -name '*.AppImage' \) | sort)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "::error::no build artifacts found to attach"; exit 1
+          fi
+          echo "Attaching ${#assets[@]} assets:"; printf '  %s\n' "${assets[@]}"
+          # Create the Release on first publish; reuse it on a re-run.
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+              --title "$tag" --generate-notes
+          fi
+          # --clobber so a re-run overwrites a partially-attached asset.
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" \
+            --clobber "${assets[@]}"

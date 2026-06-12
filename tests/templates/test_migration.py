@@ -27,7 +27,9 @@ _V2_DEFAULT_TEXT = next(iter(_V2_DEFAULT_TEXTS))  # any one default text
 def _write_v2_templates(config_dir: Path, entries: list[dict]) -> Path:
     """Write a v0.2-style templates.toml with the given overlay entries.
 
-    Each entry: {"name": str, "overlays": [{"text": str}, ...]}
+    Each entry: {"name": str, "overlays": [{"text": str,
+    "color": [r, g, b]?, "position": str?}, ...]} — color/position are
+    optional, matching what the v0.2 editor wrote (M5 tests use them).
     """
     lines = []
     for entry in entries:
@@ -37,6 +39,10 @@ def _write_v2_templates(config_dir: Path, entries: list[dict]) -> Path:
         for ov in entry.get("overlays", []):
             lines.append('[[template.overlay]]')
             lines.append(f'text = {ov["text"]!r}')
+            if "color" in ov:
+                lines.append(f'color = {list(ov["color"])!r}')
+            if "position" in ov:
+                lines.append(f'position = {ov["position"]!r}')
     path = config_dir / "templates.toml"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
@@ -320,3 +326,76 @@ class TestCorruptV2File:
         tdir = tmp_path / "templates"
         result = run_migration(templates_dir=tdir, user_config_dir=tmp_path)
         assert result == "starter_pack_installed"
+
+
+class TestV2CustomisationPreserved:
+    """M5 (v0.3 audit): the migration must carry the user's v0.2 color
+    and named position into the v0.3 TextLayer instead of hardcoding
+    white / bottom-center."""
+
+    def test_custom_color_preserved(self, tmp_path: Path) -> None:
+        _write_v2_templates(tmp_path, [
+            {
+                "name": "Red CQ",
+                "overlays": [
+                    {"text": "W0AEZ CUSTOM {mycall}", "color": [255, 32, 32]},
+                ],
+            },
+        ])
+        tdir = tmp_path / "templates"
+        run_migration(templates_dir=tdir, user_config_dir=tmp_path)
+        t = load_template(tdir / "red_cq.toml")
+        from open_sstv.templates.model import TextLayer
+        text_layers = [la for la in t.layers if isinstance(la, TextLayer)]
+        assert text_layers[0].fill == (255, 32, 32, 255)
+
+    def test_custom_position_preserved(self, tmp_path: Path) -> None:
+        _write_v2_templates(tmp_path, [
+            {
+                "name": "Top Banner",
+                "overlays": [
+                    {"text": "W0AEZ CUSTOM TOP", "position": "Top Center"},
+                ],
+            },
+        ])
+        tdir = tmp_path / "templates"
+        run_migration(templates_dir=tdir, user_config_dir=tmp_path)
+        t = load_template(tdir / "top_banner.toml")
+        from open_sstv.templates.model import RectLayer, TextLayer
+        text_layers = [la for la in t.layers if isinstance(la, TextLayer)]
+        assert text_layers[0].anchor == "TC"
+        # The dark backing strip is bottom-only; top-anchored text
+        # must not get a bottom rect behind nothing.
+        assert not any(isinstance(la, RectLayer) for la in t.layers)
+
+    def test_default_position_keeps_backing_strip(self, tmp_path: Path) -> None:
+        _write_v2_templates(tmp_path, [
+            {
+                "name": "Classic",
+                "overlays": [{"text": "W0AEZ CUSTOM CLASSIC"}],
+            },
+        ])
+        tdir = tmp_path / "templates"
+        run_migration(templates_dir=tdir, user_config_dir=tmp_path)
+        t = load_template(tdir / "classic.toml")
+        from open_sstv.templates.model import RectLayer, TextLayer
+        text_layers = [la for la in t.layers if isinstance(la, TextLayer)]
+        assert text_layers[0].anchor == "BC"
+        assert text_layers[0].fill == (255, 255, 255, 255)
+        assert any(isinstance(la, RectLayer) for la in t.layers)
+
+    def test_unknown_position_falls_back_to_bc(self, tmp_path: Path) -> None:
+        _write_v2_templates(tmp_path, [
+            {
+                "name": "Weird",
+                "overlays": [
+                    {"text": "W0AEZ CUSTOM WEIRD", "position": "Diagonal"},
+                ],
+            },
+        ])
+        tdir = tmp_path / "templates"
+        run_migration(templates_dir=tdir, user_config_dir=tmp_path)
+        t = load_template(tdir / "weird.toml")
+        from open_sstv.templates.model import TextLayer
+        text_layers = [la for la in t.layers if isinstance(la, TextLayer)]
+        assert text_layers[0].anchor == "BC"

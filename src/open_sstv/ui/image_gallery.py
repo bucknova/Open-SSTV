@@ -32,6 +32,7 @@ from PySide6.QtWidgets import QApplication, QListView, QMenu
 
 from open_sstv.core.modes import Mode
 from open_sstv.ui.utils import pil_to_pixmap as _pil_to_pixmap
+from open_sstv.ui.utils import pil_to_qimage as _pil_to_qimage
 
 if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
@@ -293,7 +294,12 @@ class ImageGalleryWidget(QListView):
         elif label.startswith("Save As"):
             self.image_activated.emit(image, mode)
         elif label == "Copy to Clipboard":
-            QApplication.clipboard().setPixmap(_pil_to_pixmap(image))
+            # setImage, NOT setPixmap: a QPixmap on the clipboard is a
+            # pasteboard promise that requires a living QGuiApplication
+            # to honour. If the app quits while the promise is pending,
+            # Qt warns ("Cannot keep promise…") and teardown can
+            # segfault. QImage data is self-contained.
+            QApplication.clipboard().setImage(_pil_to_qimage(image))
         elif label.startswith("Log QSO"):
             self.log_qso_requested.emit(image, mode)
 

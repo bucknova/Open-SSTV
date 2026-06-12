@@ -72,6 +72,26 @@ def is_tx_active() -> bool:
         return _tx_active_count > 0
 
 
+def run_if_tx_idle(fn: Callable[[], None]) -> bool:
+    """Run *fn* while holding the TX-state lock, iff no TX is in flight.
+
+    M9 (v0.3 audit): ``_pa_reset`` used to do ``is_tx_active()`` →
+    ``sd._terminate()`` as two separate steps, leaving a check-then-act
+    window where a TX starting on another thread between them would have
+    its OutputStream killed mid-open — a process crash.  Holding the
+    lock across *fn* closes the window: a concurrent ``play_blocking``
+    blocks at its counter increment until the reset completes (~100 ms),
+    rather than racing it.
+
+    Returns ``True`` if *fn* ran, ``False`` if TX was active.
+    """
+    with _tx_state_lock:
+        if _tx_active_count > 0:
+            return False
+        fn()
+        return True
+
+
 def play_blocking(
     samples: np.ndarray,
     sample_rate: int,
@@ -286,4 +306,4 @@ def stop() -> None:
             _log.warning("output_stream.stop: abort failed: %s", exc)
 
 
-__all__ = ["is_tx_active", "play_blocking", "stop"]
+__all__ = ["is_tx_active", "play_blocking", "run_if_tx_idle", "stop"]

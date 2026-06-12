@@ -9,8 +9,6 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
----
-
 ## [0.4.0] — 2026-06-12
 
 The logbook release.  Every SSTV contact you make or hear can now be
@@ -66,6 +64,104 @@ date filters interpret picked days in local time; ``%``/``_`` in
 filters match literally; failed edits can't display as saved; filter
 typing is debounced and a broken logbook DB degrades to an inline
 notice instead of modal storms.
+
+---
+
+## [0.3.23] — 2026-06-09
+
+Stability and usability fixes from the 2026-06-09 full audit — the
+critical + high findings landed first (PR #22); the medium + low
+findings followed in a second PR (#23).  No feature changes.
+
+### Fixed (medium/low audit findings)
+
+- **Hand-edited config values are validated at load (M1).**  Ports,
+  baud rate, input gain, and the string-enum fields
+  (``rig_connection_mode``, ``default_tx_mode``, ``rig_serial_protocol``,
+  ``rig_ptt_line``, ``tx_banner_size``) are clamped or reset to defaults
+  with a logged warning instead of mis-dispatching or failing later at
+  connect/render time.  Wrong-typed values (a string where an int
+  belongs) no longer crash startup.
+- **A corrupt config no longer silently wipes your settings (M2).**
+  The unreadable file is preserved as ``config.toml.corrupt`` and a
+  startup dialog says where it went — a hand-edit typo is now
+  recoverable instead of a mystery reset.
+- **Template editor confirms destructive actions (M3).**  Cancel (or
+  Esc) with unsaved edits asks before discarding; *Remove* asks before
+  deleting a template.
+- **Template system failures are visible (M4).**  Unreadable template
+  files show a warning banner in the gallery (tooltip names the files);
+  a missing station image logs a WARNING naming the layer; a broken
+  bundled font falls back to Pillow's built-in instead of killing the
+  render.
+- **v0.2 → v0.3 template migration preserves custom color and position
+  (M5)** instead of resetting every migrated overlay to white /
+  bottom-center.
+- **Settings save failures are a modal warning (M6)** instead of a
+  transient status-bar message — no more "the app forgot my settings"
+  after a read-only config directory ate the write.
+- **Truncated audio files decode instead of crashing (M7).**  WAVs cut
+  mid-frame or mid-sample are trimmed with a logged warning; a zero/
+  negative header sample rate raises a clear error; empty buffers pass
+  through resampling.
+- **Unplugged serial ports release their OS handle (M8)** — a failed
+  ``close()`` on a vanished USB adapter force-closes the file
+  descriptor so the replugged port doesn't come back "busy".
+- **PortAudio reset is atomic with the TX interlock (M9)** — closes the
+  check-then-act window where a TX starting at the wrong microsecond
+  could have its stream killed mid-open.
+- **QSO template saves are serialised and stale ``.tmp`` files swept
+  (M10)**, matching the config store's atomic-write contract.
+- **Low-priority polish:** clipped TX-banner callsigns log a §97.119
+  warning; the Ctrl+S / Cmd+S save-image shortcut is now discoverable
+  as *File → Save Received Image…*; CW/config clamp messages upgraded
+  to warnings; User Guide no longer claims a stale version number;
+  the incremental decoder rejects nonsensical sample rates at
+  construction.
+
+### Fixed (critical/high audit findings)
+
+- **Clipboard copy no longer risks a crash on exit (C1).**  *Copy to
+  Clipboard* in the image gallery now places a ``QImage`` on the
+  clipboard instead of a ``QPixmap``.  A ``QPixmap`` clipboard entry is
+  a macOS pasteboard *promise* that needs a living ``QGuiApplication``
+  to honour; quitting with the promise pending logged
+  "Cannot keep promise…" and could segfault during Qt teardown (the
+  intermittent CI segfault), and the copied image silently vanished
+  from the clipboard on quit.
+- **PTT unkey now retries with a backend reconnect (H1).**  If the
+  control link dies mid-TX (USB-serial unplug, rigctld/TCI drop),
+  ``set_ptt(False)`` on the dead link can never succeed.  The TX worker
+  now closes and re-opens the backend between up to 3 unkey attempts —
+  a replugged adapter or restarted daemon gets the radio unkeyed
+  automatically.  The final failure message states explicitly that the
+  radio may still be transmitting.
+- **App can no longer hang on quit when the rig backend is dead (H2).**
+  ``closeEvent`` caught only ``RigError`` around ``rig.close()``; a raw
+  ``OSError``/``termios.error`` from an unplugged port escaped the Qt
+  virtual override, aborting shutdown midway and orphaning the rigctld
+  child process.
+- **Export-to-audio writes atomically (H3).**  The offline encode
+  worker writes to a ``.tmp`` sibling and renames into place, so a
+  force-terminated worker (app closed mid-export) can no longer leave
+  a truncated, unplayable WAV at the chosen path.
+- **Rig health check no longer stalls TX audio (H4).**  The mid-TX rig
+  ping used to run inline in the playback write loop; a wedged rigctld
+  daemon blocked audio output for its full 2 s socket timeout, causing
+  an audible underrun in the transmitted image.  The ping now runs on
+  a dedicated monitor thread and the write loop only reads a flag.
+- **Device-loss detection is now race-free (H5).**  The watchdog
+  (worker thread) and the PortAudio finished callback (PortAudio
+  thread) deduplicate the "device disconnected" toast via an atomic
+  test-and-set instead of a bare bool — no more double toasts/stops on
+  an unlucky unplug.
+- **TCI: RX-subscribe state can no longer go stale (H6).**  The
+  subscription flag is reset on both connect and disconnect, so a
+  failed session can't make the next TX skip its audio start/stop
+  bracket and leak a server-side RX stream.  Malformed binary audio
+  frames are now counted and logged (first + every 100th) instead of
+  dropped silently — a corrupt stream no longer looks like "RX just
+  stopped".
 
 ---
 

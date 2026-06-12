@@ -62,8 +62,14 @@ def _v2_templates_path(user_config_dir: Path | None = None) -> Path:
     return base / "templates.toml"
 
 
-def _load_v2_texts(v2_path: Path) -> list[tuple[str, str]]:
-    """Return ``[(overlay_text, template_name), ...]`` from a v0.2 templates.toml.
+def _load_v2_texts(v2_path: Path) -> list[tuple[str, str, dict]]:
+    """Return ``[(overlay_text, template_name, overlay_raw), ...]`` from a
+    v0.2 templates.toml.
+
+    M5 (v0.3 audit): the raw overlay dict rides along so the migration
+    can preserve the user's custom color and position — previously only
+    the text survived and every migrated template came out white /
+    bottom-center regardless of what the user had configured.
 
     Returns an empty list if the file is absent, corrupt, or all-defaults.
     """
@@ -76,22 +82,46 @@ def _load_v2_texts(v2_path: Path) -> list[tuple[str, str]]:
         _log.warning("v0.2 templates.toml could not be read — skipping legacy migration")
         return []
 
-    results: list[tuple[str, str]] = []
+    results: list[tuple[str, str, dict]] = []
     for tpl_raw in raw.get("template", []):
         name = tpl_raw.get("name", "")
         for ov_raw in tpl_raw.get("overlay", []):
             text = ov_raw.get("text", "").strip()
             if text and text not in _V2_DEFAULT_TEXTS:
-                results.append((text, name))
+                results.append((text, name, dict(ov_raw)))
     return results
 
 
-def _make_v3_from_v2(text: str, name: str, index: int) -> Template:
+#: v0.2 named positions → v0.3 layer anchors.  The v0.2 system had no
+#: center-left/right presets, so this covers every value the old UI
+#: could write.  Unknown strings (hand-edited files) fall back to "BC".
+_V2_POSITION_TO_ANCHOR: dict[str, str] = {
+    "Top Left": "TL",
+    "Top Center": "TC",
+    "Top Right": "TR",
+    "Center": "C",
+    "Bottom Left": "BL",
+    "Bottom Center": "BC",
+    "Bottom Right": "BR",
+}
+
+
+def _make_v3_from_v2(
+    text: str, name: str, index: int, overlay_raw: dict | None = None
+) -> Template:
     """Wrap a v0.2 overlay text in a minimal v0.3 Template.
 
-    Produces a PhotoLayer + bottom-centered TextLayer with sensible defaults.
-    Tokens are translated from v0.2 style ({mycall} → %c, {theircall} → %o,
-    {rst} → %r, {date} → %d, {time} → %t).
+    Produces a PhotoLayer + TextLayer.  Tokens are translated from v0.2
+    style ({mycall} → %c, {theircall} → %o, {rst} → %r, {date} → %d,
+    {time} → %t).
+
+    M5 (v0.3 audit): when *overlay_raw* (the raw v0.2 overlay dict) is
+    given, the user's custom color and named position are preserved —
+    previously the migration hardcoded white / bottom-center and the
+    user's customisations silently vanished on upgrade.  Explicit
+    pixel ``x``/``y`` coordinates have no portable equivalent in the
+    v0.3 percent-offset anchor system, so those still migrate to the
+    nearest named anchor (logged when it happens).
     """
     from open_sstv.templates.model import PhotoLayer
 
@@ -114,32 +144,59 @@ def _make_v3_from_v2(text: str, name: str, index: int) -> Template:
     elif any(k in name_lower for k in ("exchange", "reply", "73")):
         role_hint = "reply" if "exchange" in name_lower or "reply" in name_lower else "closing"
 
-    return Template(
-        name=name if name else f"Template {index}",
-        role=role_hint,
-        description=f"Auto-migrated from v0.2 template '{name}'. Original text: {text!r}",
-        layers=[
-            PhotoLayer(id="base_photo", anchor="FILL", fit="cover"),
+    # M5: carry the v0.2 color and position forward.
+    overlay_raw = overlay_raw or {}
+    color_raw = overlay_raw.get("color", [255, 255, 255])
+    if isinstance(color_raw, list | tuple) and len(color_raw) >= 3:
+        fill = (int(color_raw[0]), int(color_raw[1]), int(color_raw[2]), 255)
+    else:
+        fill = (255, 255, 255, 255)
+    v2_position = overlay_raw.get("position", "Bottom Center")
+    anchor = _V2_POSITION_TO_ANCHOR.get(v2_position, "BC")
+    if overlay_raw.get("x") is not None or overlay_raw.get("y") is not None:
+        _log.info(
+            "Migrating v0.2 template '%s': explicit x/y coordinates have "
+            "no v0.3 equivalent — using the '%s' anchor instead",
+            name, v2_position,
+        )
+    # The dark backing strip only makes sense behind bottom-anchored
+    # text; for any other position it would sit in the wrong place.
+    bottom_anchored = anchor in ("BL", "BC", "BR")
+    # Offsets push the text inward from its anchor edge (see the
+    # model.py anchor docs); centered text needs none.
+    offset_y = 4.0 if anchor != "C" else 0.0
+
+    layers: list = [PhotoLayer(id="base_photo", anchor="FILL", fit="cover")]
+    if bottom_anchored:
+        layers.append(
             RectLayer(
                 id="text_bg",
                 anchor="BL",
                 width_pct=100.0,
                 height_pct=18.0,
                 fill=(0, 0, 0, 160),
-            ),
-            TextLayer(
-                id="main_text",
-                text_raw=translated,
-                anchor="BC",
-                offset_y_pct=4.0,
-                font_family="DejaVu Sans Bold",
-                font_size_pct=8.0,
-                fill=(255, 255, 255, 255),
-                stroke=StrokeSpec(color=(0, 0, 0, 200), width_px=1),
-                align="center",
-                slashed_zero=True,
-            ),
-        ],
+            )
+        )
+    layers.append(
+        TextLayer(
+            id="main_text",
+            text_raw=translated,
+            anchor=anchor,  # type: ignore[arg-type]
+            offset_y_pct=offset_y,
+            font_family="DejaVu Sans Bold",
+            font_size_pct=8.0,
+            fill=fill,
+            stroke=StrokeSpec(color=(0, 0, 0, 200), width_px=1),
+            align="center",
+            slashed_zero=True,
+        )
+    )
+
+    return Template(
+        name=name if name else f"Template {index}",
+        role=role_hint,
+        description=f"Auto-migrated from v0.2 template '{name}'. Original text: {text!r}",
+        layers=layers,
     )
 
 
@@ -177,8 +234,8 @@ def run_migration(
     if legacy_texts:
         tdir.mkdir(parents=True, exist_ok=True)
         count = 0
-        for i, (text, name) in enumerate(legacy_texts, start=1):
-            t = _make_v3_from_v2(text, name, i)
+        for i, (text, name, overlay_raw) in enumerate(legacy_texts, start=1):
+            t = _make_v3_from_v2(text, name, i, overlay_raw)
             safe = t.name.replace(" ", "_").replace("(", "").replace(")", "").lower()
             safe = "".join(c for c in safe if c.isalnum() or c in "_-")
             path = tdir / f"{safe}.toml"
