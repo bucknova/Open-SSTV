@@ -64,7 +64,8 @@
     - [open-sstv-decode](#152-open-sstv-decode)
 16. [Configuration Files](#16-configuration-files)
 17. [Troubleshooting](#17-troubleshooting)
-18. [Glossary](#18-glossary)
+18. [The Logbook (v0.4)](#18-the-logbook-v04)
+19. [Glossary](#19-glossary)
 
 ---
 
@@ -229,6 +230,8 @@ At the bottom is the **image gallery** — a horizontal strip of thumbnails show
 ### 6.4 Menu Bar
 
 The **File** menu contains **Settings** (opens the configuration dialog) and **Quit**.
+
+The **Tools** menu (v0.4) contains **Logbook…** (keyboard shortcut **Ctrl+L**, **Cmd+L** on macOS), which opens the QSO logbook in its own window — see [Section 18](#18-the-logbook-v04).
 
 The **Help** menu contains **About**, which shows the application name, version, and license.
 
@@ -998,7 +1001,56 @@ If either file is missing or empty, the app creates it with default values on fi
 
 ---
 
-## 18. Glossary
+## 18. The Logbook (v0.4)
+
+Open-SSTV v0.4 adds a built-in QSO logbook so every contact you make
+or hear can be captured with its image and exchanged with the wider
+logging ecosystem as ADIF.  This section is the short tour — the full
+operator guide, including ADIF interop notes for HRD, N1MM+, LoTW,
+eQSL, Club Log, and QRZ.com, lives in
+[docs/logbook.md](docs/logbook.md).
+
+### 18.1 Capturing contacts
+
+After a transmission or reception completes, a **Log QSO** dialog
+opens pre-filled with everything the app already knows: mode, UTC
+time, the rig's dial frequency (when connected), and the image.  TX
+entries also pre-fill from the QSO bar's ToCall / RST / Name / Note
+fields.  Type the callsign and reports, **Save** — or press **Esc**
+and nothing is written.
+
+SSTV calling frequencies are party lines, and most of what a
+monitoring station decodes is *other people's* exchanges.  **Settings
+→ General → Logbook → RX capture** chooses when receptions prompt:
+after every decode (default), only while you're in a QSO (ToCall
+filled in), or never.  Whatever you pick, any decoded image can be
+logged deliberately later: right-click it in the RX gallery and
+choose **Log QSO…**.  A separate **Log QSOs silently** option saves
+draft entries with no dialog at all.
+
+### 18.2 The Logbook window
+
+**Tools → Logbook…** (Ctrl+L / Cmd+L) — or the **[Logbook…]** button
+on the QSO bar — opens the log in its own window: a newest-first
+table with callsign / mode / direction / date-range filters, an image
+preview with the full contact details, editing via the same form the
+capture flow uses, and manual entry with *Save & New* for keying in
+paper logs.  Deleting an entry never touches the image files on disk.
+
+### 18.3 ADIF import and export
+
+**Export ADIF…** writes the currently filtered rows to a ``.adi``
+file with your station identity (Settings → General) stamped into
+every record.  **Import ADIF…** reads files from other loggers and
+skips duplicates using the (callsign, time, mode) identity, so
+re-importing your own export is a no-op.  The logbook database itself
+is a single SQLite file in the platform data directory — back it up
+like any file.  It is excluded from diagnostics zips unless you
+explicitly opt in.
+
+---
+
+## 19. Glossary
 
 **CAT (Computer Aided Transceiver)**: A protocol for controlling a radio from a computer, typically over a serial or USB connection. Allows reading and setting frequency, mode, and PTT state.
 

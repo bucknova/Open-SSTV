@@ -7,9 +7,10 @@ radio. Receives and decodes SSTV images live off your radio, and encodes and
 transmits images back, with optional Hamlib, direct serial, or TCI (ExpertSDR2 /
 SunSDR2 / AetherSDR) rig control.
 
-**Status: Beta (v0.3.22) — ready for user testing and feedback.** TX and RX paths work
-end-to-end across all 22 supported modes. Rig control via rigctld or direct serial CAT
-is functional. Weak-signal decode is usable down to roughly 0 dB SNR on Robot 36.
+**Status: Beta (v0.4.0) — ready for user testing and feedback.** TX and RX paths work
+end-to-end across all 22 supported modes, and v0.4 adds a built-in QSO logbook with
+ADIF import/export. Rig control via rigctld or direct serial CAT is functional.
+Weak-signal decode is usable down to roughly 0 dB SNR on Robot 36.
 
 Open-SSTV is looking for testers — on-air reports, audio captures of problem decodes,
 and UI feedback all welcome. Please
@@ -181,6 +182,25 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
   marginal signals through the current decoder. Always enabled, including
   during live capture (results interleave in the same gallery).
 
+### Logbook & QSO Logging (v0.4)
+- **Built-in QSO logbook** -- every transmission and reception can be captured
+  with its image, mode, frequency, UTC time, callsign, RSV report, and notes.
+  Storage is a single schema-versioned SQLite file in the platform data dir;
+  rows reference your image files, never copies of them.
+- **Capture dialog** -- opens pre-filled at TX/RX completion (TX drafts pull
+  ToCall/RST/Name/Note straight from the QSO bar); Esc dismisses without
+  writing anything. A config option logs silently instead.
+- **Party-line aware** -- SSTV calling frequencies carry everyone's QSOs, so an
+  *RX capture* setting controls when receptions prompt: always, only while
+  you're in a QSO (ToCall filled), or never -- and any decoded image can be
+  logged after the fact from the gallery (right-click → Log QSO…).
+- **Logbook window** (Tools → Logbook…, Cmd/Ctrl+L) -- filterable table,
+  image preview, edit/delete, manual entry with Save & New.
+- **ADIF 3.1.5 import/export** -- interop with HRD, N1MM+, LoTW (via TQSL),
+  eQSL, Club Log, and QRZ.com. Exports stamp your station identity per
+  record; imports dedupe on (callsign, time, mode). See
+  [docs/logbook.md](docs/logbook.md) for the full guide.
+
 ### Radio Control
 - **rigctld (Hamlib)** -- TCP client for `rigctld`, supporting PTT, frequency,
   mode, and S-meter. Auto-launch rigctld from the settings dialog.
@@ -275,6 +295,10 @@ Robot 12, Robot 24, Robot 72. Planned for a future release.
 ![Open-SSTV main window](docs/screenshots/main-window.png)
 
 *Main window — TX panel with the v0.3 template gallery filtered by role, QSO state widget, mode selector, and the live RX panel waiting for a signal*
+
+![Logbook window](docs/screenshots/logbook.png)
+
+*Logbook window (v0.4) — filterable QSO table, image preview with full contact details, and one-click ADIF import/export*
 
 | | |
 |---|---|
@@ -494,7 +518,8 @@ with what you tried and what happened.
 - **Expanded font support** -- more typeface options for text overlays, including styles common in amateur radio use.
 - **Advanced text layout** -- multi-column overlays, alignment controls, and background fill options for finer control over callsign and caption placement.
 - FSKID transmission (CW ID already shipping — see Features → Transmit).
-- ADIF QSO logging.
+- LoTW (TQSL), eQSL, and QRZ.com direct upload from the logbook (ADIF
+  export covers them today — see Features → Logbook).
 - PSK Reporter / DX cluster spotting.
 - Installer packaging (.deb, .dmg, Flatpak).
 - PyPI publish.
