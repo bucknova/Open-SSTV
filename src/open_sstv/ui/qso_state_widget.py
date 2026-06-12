@@ -49,9 +49,14 @@ class QSOStateWidget(QWidget):
     state_changed(QSOState):
         Emitted after a 300 ms debounce whenever any field changes.
         Consumers (live preview, thumbnail gallery) should connect here.
+    logbook_requested():
+        Emitted when the [Logbook…] button is clicked.  Relayed up
+        through TxPanel to MainWindow, which owns the logbook window —
+        this widget stays standalone-testable with no logbook import.
     """
 
     state_changed = Signal(object)  # QSOState
+    logbook_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -96,15 +101,33 @@ class QSOStateWidget(QWidget):
         self._name.textChanged.connect(self._on_field_changed)
         row1.addWidget(self._name)
 
-        self._note = QLineEdit()  # hidden until v0.4 QSO logging
-
         row1.addStretch(1)
         self._clear_btn = QPushButton("Clear QSO")
         self._clear_btn.setMaximumWidth(90)
         self._clear_btn.clicked.connect(self.clear)
         row1.addWidget(self._clear_btn)
 
+        # v0.4: one-click path to the logbook while working a contact —
+        # same destination as Tools → Logbook… (Cmd/Ctrl+L).
+        self._logbook_btn = QPushButton("Logbook…")
+        self._logbook_btn.setMaximumWidth(90)
+        self._logbook_btn.setToolTip("Open the logbook window (Ctrl+L / Cmd+L)")
+        self._logbook_btn.clicked.connect(self.logbook_requested)
+        row1.addWidget(self._logbook_btn)
+
         layout.addLayout(row1)
+
+        # --- Row 2: free-form note (unhidden in v0.4) ---
+        # Resolves the {note} template token and pre-fills the Notes
+        # field of the v0.4 log-QSO capture dialog.
+        row2 = QHBoxLayout()
+        row2.setSpacing(6)
+        row2.addWidget(QLabel("Note:"))
+        self._note = QLineEdit()
+        self._note.setPlaceholderText("Optional — logged with the QSO")
+        self._note.textChanged.connect(self._on_field_changed)
+        row2.addWidget(self._note, stretch=1)
+        layout.addLayout(row2)
 
     # === Public API ===
 

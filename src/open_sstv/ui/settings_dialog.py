@@ -141,6 +141,8 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._build_audio_tab(), "Audio")
         tabs.addTab(self._build_radio_tab(), "Radio")
         tabs.addTab(self._build_images_tab(), "Images")
+        # v0.4: log level + log-folder access + diagnostics cross-link.
+        tabs.addTab(self._build_logging_tab(), "Logging")
         layout.addWidget(tabs)
 
         buttons = QDialogButtonBox(
@@ -232,6 +234,43 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(updates_group)
 
+        # --- Logbook (v0.4) ---
+        logbook_group = QGroupBox("Logbook")
+        logbook_form = QFormLayout(logbook_group)
+        self._auto_log_check = QCheckBox(
+            "Log QSOs silently (skip the dialog at TX/RX completion)"
+        )
+        self._auto_log_check.setToolTip(
+            "Default off: a log dialog opens after every transmission and\n"
+            "reception so you can capture callsign and signal report while\n"
+            "the contact is fresh (Esc dismisses it without logging).\n"
+            "When on, draft entries are saved silently instead — fill in\n"
+            "the callsigns later from Tools → Logbook."
+        )
+        self._auto_log_check.setChecked(self._config.auto_log_qsos)
+        logbook_form.addRow(self._auto_log_check)
+
+        # When should a finished reception offer the log dialog?  SSTV
+        # calling frequencies carry everyone's exchanges — a monitoring
+        # station mostly decodes contacts that aren't theirs.
+        self._rx_capture_combo = QComboBox()
+        self._rx_capture_combo.addItem("Ask after every reception", "always")
+        self._rx_capture_combo.addItem(
+            "Ask only while in a QSO (ToCall filled)", "in_qso"
+        )
+        self._rx_capture_combo.addItem(
+            "Never ask — log from the RX gallery", "never"
+        )
+        idx = self._rx_capture_combo.findData(self._config.rx_capture_prompt)
+        self._rx_capture_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._rx_capture_combo.setToolTip(
+            "Any decoded image can always be logged deliberately from the\n"
+            "RX gallery (right-click → Log QSO…), regardless of this choice.\n"
+            "Transmissions always offer the dialog — your own TX is yours."
+        )
+        logbook_form.addRow("RX capture:", self._rx_capture_combo)
+        layout.addWidget(logbook_group)
+
         # ── Diagnostics (v0.3.21) ────────────────────────────────────────
         # User-friendly diagnostics export.  Without this, the only way
         # to capture log output from a Windows GUI build (where the
@@ -264,7 +303,7 @@ class SettingsDialog(QDialog):
         menu bar (Open-SSTV's main window doesn't have one today on
         every platform).  The actual zip-building happens in
         ``open_sstv.ui.diagnostics.export_diagnostics`` — this slot is
-        just the file-dialog + error-toast UI glue.
+        just the options-prompt + file-dialog + error-toast UI glue.
         """
         from datetime import datetime  # noqa: PLC0415
         from pathlib import Path  # noqa: PLC0415
@@ -272,6 +311,31 @@ class SettingsDialog(QDialog):
         import platformdirs  # noqa: PLC0415
 
         from open_sstv.ui.diagnostics import export_diagnostics  # noqa: PLC0415
+
+        # v0.4: opt-in checkbox for bundling the logbook.  Default off —
+        # the logbook is the operator's list of worked callsigns, which
+        # is identifiable info that doesn't belong in a routine
+        # bug-report zip.  A QMessageBox-with-checkbox keeps the choice
+        # in the export flow itself (one source of truth no matter which
+        # tab's button launched it).
+        options_box = QMessageBox(self)
+        options_box.setWindowTitle("Export Diagnostics")
+        options_box.setIcon(QMessageBox.Icon.Information)
+        options_box.setText(
+            "Export a zip with the recent log, system info, and your "
+            "config (sensitive fields stripped)."
+        )
+        include_logbook_check = QCheckBox(
+            "Include logbook (contains the callsigns you have worked)"
+        )
+        include_logbook_check.setChecked(False)
+        options_box.setCheckBox(include_logbook_check)
+        options_box.setStandardButtons(
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
+        )
+        if options_box.exec() != QMessageBox.StandardButton.Ok:
+            return
+        include_logbook = include_logbook_check.isChecked()
 
         # Default filename includes UTC timestamp so a user can run
         # this multiple times without overwriting earlier exports.
@@ -289,7 +353,9 @@ class SettingsDialog(QDialog):
             return  # user cancelled
 
         try:
-            out_path = export_diagnostics(Path(path_str))
+            out_path = export_diagnostics(
+                Path(path_str), include_logbook=include_logbook
+            )
         except OSError as exc:
             QMessageBox.warning(
                 self,
@@ -306,6 +372,98 @@ class SettingsDialog(QDialog):
                 "Attach this file when filing an issue on GitHub."
             ),
         )
+
+    def _build_logging_tab(self) -> QWidget:
+        """v0.4: operational logging controls.
+
+        - **Log level**: root-logger level for stderr + the rotating
+          file handler.  Applied at next launch by ``app.main`` — live
+          re-levelling is deliberately out of scope (handlers are
+          created before any window exists).
+        - **Log files**: open the platform log folder directly —
+          beats telling Windows users to find
+          ``%LOCALAPPDATA%\\open_sstv\\open_sstv\\Logs`` by hand.
+        - **Diagnostics**: cross-link to the same export flow as the
+          General tab, since "grab the logs" and "file a bug" are the
+          same errand.
+        """
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        level_group = QGroupBox("Log level")
+        level_form = QFormLayout(level_group)
+        self._log_level_combo = QComboBox()
+        for level in ("DEBUG", "INFO", "WARNING", "ERROR"):
+            self._log_level_combo.addItem(level, level)
+        idx = self._log_level_combo.findData(self._config.log_level)
+        self._log_level_combo.setCurrentIndex(idx if idx >= 0 else 1)
+        level_form.addRow("Level:", self._log_level_combo)
+        level_note = QLabel(
+            "Takes effect on next launch.  DEBUG is verbose — use it when "
+            "reproducing a problem for a bug report.  The OPEN_SSTV_DEBUG "
+            "environment variable still forces DEBUG regardless."
+        )
+        level_note.setWordWrap(True)
+        level_note.setStyleSheet("color: gray; font-size: 10px;")
+        level_form.addRow(level_note)
+        layout.addWidget(level_group)
+
+        files_group = QGroupBox("Log files")
+        files_layout = QVBoxLayout(files_group)
+        files_help = QLabel(
+            "Open-SSTV writes a rotating log file (max ~6 MB across "
+            "3 files) regardless of how the app was launched."
+        )
+        files_help.setWordWrap(True)
+        files_help.setStyleSheet("color: gray; font-size: 10px;")
+        files_layout.addWidget(files_help)
+        open_folder_btn = QPushButton("Open Log Folder")
+        open_folder_btn.clicked.connect(self._on_open_log_folder)
+        files_layout.addWidget(open_folder_btn)
+        layout.addWidget(files_group)
+
+        diag_group = QGroupBox("Diagnostics")
+        diag_layout = QVBoxLayout(diag_group)
+        diag_help = QLabel(
+            "Bundle the log, system info, and redacted config into a "
+            "single zip for bug reports (same as the General tab button)."
+        )
+        diag_help.setWordWrap(True)
+        diag_help.setStyleSheet("color: gray; font-size: 10px;")
+        diag_layout.addWidget(diag_help)
+        export_btn = QPushButton("Export Diagnostics…")
+        export_btn.clicked.connect(self._on_export_diagnostics)
+        diag_layout.addWidget(export_btn)
+        layout.addWidget(diag_group)
+
+        layout.addStretch(1)
+        return tab
+
+    @Slot()
+    def _on_open_log_folder(self) -> None:
+        """Open the platform log directory in Finder / Explorer / etc.
+
+        Creates the directory first if logging never managed to — an
+        empty folder opening is a clearer outcome than a file-manager
+        error toast.
+        """
+        from pathlib import Path  # noqa: PLC0415
+
+        import platformdirs  # noqa: PLC0415
+        from PySide6.QtCore import QUrl  # noqa: PLC0415
+        from PySide6.QtGui import QDesktopServices  # noqa: PLC0415
+
+        try:
+            log_dir = Path(platformdirs.user_log_dir("open_sstv"))
+            log_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            QMessageBox.warning(
+                self,
+                "Could not open log folder",
+                f"The log directory could not be created:\n\n{exc}",
+            )
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_dir)))
 
     def _build_audio_tab(self) -> QWidget:
         tab = QWidget()
@@ -1633,6 +1791,13 @@ class SettingsDialog(QDialog):
             tx_banner_size=self._banner_size.currentData() or "small",
             check_for_updates=self._check_updates_setting.isChecked(),
             first_launch_seen=self._config.first_launch_seen,
+            # v0.4 logbook + logging.  logbook_db_path has no UI (it's
+            # an advanced hand-edit-the-TOML override) but must be
+            # carried through or a settings save would reset it.
+            auto_log_qsos=self._auto_log_check.isChecked(),
+            rx_capture_prompt=self._rx_capture_combo.currentData() or "always",
+            logbook_db_path=self._config.logbook_db_path,
+            log_level=self._log_level_combo.currentData() or "INFO",
         )
 
     @property

@@ -115,3 +115,19 @@ class TestDebounce:
         state = blocker.args[0]
         assert state.tocall == "N0CALL"
         assert state.note == "hello"
+
+
+class TestLogbookButton:
+    """v0.4: the [Logbook…] button relays a logbook_requested signal."""
+
+    def test_button_present_next_to_clear(self, widget: QSOStateWidget) -> None:
+        assert widget._logbook_btn.text() == "Logbook…"
+
+    def test_click_emits_logbook_requested(self, qtbot, widget: QSOStateWidget) -> None:
+        with qtbot.waitSignal(widget.logbook_requested, timeout=1000):
+            widget._logbook_btn.click()
+
+    def test_click_does_not_touch_qso_state(self, qtbot, widget: QSOStateWidget) -> None:
+        widget._tocall.setText("K1ABC")
+        widget._logbook_btn.click()
+        assert widget.get_state().tocall == "K1ABC"

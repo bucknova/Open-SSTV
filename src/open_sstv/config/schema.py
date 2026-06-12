@@ -201,6 +201,35 @@ class AppConfig:
     # smaller files.  Constrained by the Settings UI to "png" or "jpg".
     autosave_file_format: str = "png"
 
+    # --- Logbook (v0.4) ---
+    # When True, draft QSOs are written silently at TX/RX completion and
+    # edited later from the Logbook window.  Default False → a modal
+    # LogQsoDialog opens at completion so the contact is captured while
+    # it's fresh (Esc dismisses without writing a row).
+    auto_log_qsos: bool = False
+    # When does an RX completion offer the log dialog?  SSTV calling
+    # frequencies are party lines — most of what a monitoring station
+    # decodes is *other people's* exchanges, which don't belong in the
+    # logbook.  "always" = dialog after every decode (Esc dismisses);
+    # "in_qso" = only while the TX panel's ToCall is filled in (you're
+    # working someone); "never" = no dialog — log deliberately via the
+    # RX gallery's right-click → Log QSO….  TX completions always
+    # offer the dialog (your own transmissions are always yours), and
+    # ``auto_log_qsos=True`` overrides this entirely.
+    rx_capture_prompt: str = "always"
+    # Override for the logbook SQLite file.  Empty → the platform
+    # default, ``platformdirs.user_data_dir("open_sstv")/logbook.db``.
+    # Kept as ``str`` (not Path) for TOML round-trip, matching
+    # ``images_save_dir``.
+    logbook_db_path: str = ""
+
+    # --- Logging (v0.4) ---
+    # Root log level for both the stderr and rotating-file handlers.
+    # Applied at startup by ``app._setup_logging``; changing it in
+    # Settings takes effect on next launch.  ``OPEN_SSTV_DEBUG=1``
+    # still forces DEBUG regardless of this field.
+    log_level: str = "INFO"
+
     def __post_init__(self) -> None:
         # v0.1.12: slider ceiling reverted from 500% to 200%.
         # Clamp any stored value so users who raised it to ≤500% on v0.1.11
@@ -311,6 +340,34 @@ class AppConfig:
             _log.info(
                 "AppConfig: test_tone_freq_lo > test_tone_freq_hi — swapped"
             )
+
+        # v0.4: normalise rx_capture_prompt; unknown values fall back to
+        # "always" (the most conservative mode — never silently drops a
+        # capture opportunity).
+        rxp_original = self.rx_capture_prompt
+        rxp = (self.rx_capture_prompt or "").strip().lower()
+        if rxp not in ("always", "in_qso", "never"):
+            if rxp_original and rxp:
+                _log.warning(
+                    "AppConfig: unknown rx_capture_prompt %r — falling back to 'always'",
+                    rxp_original,
+                )
+            rxp = "always"
+        self.rx_capture_prompt = rxp
+
+        # v0.4: normalise log_level and fall back to INFO for unknown
+        # values so a hand-edited TOML can't silence logging entirely
+        # (an invalid level passed to logging would raise at startup).
+        lvl_original = self.log_level
+        lvl = (self.log_level or "").strip().upper()
+        if lvl not in ("DEBUG", "INFO", "WARNING", "ERROR"):
+            if lvl_original and lvl:
+                _log.warning(
+                    "AppConfig: unknown log_level %r — falling back to 'INFO'",
+                    lvl_original,
+                )
+            lvl = "INFO"
+        self.log_level = lvl
 
         # M1 (v0.3 audit): the remaining hand-editable fields had no
         # validation at all — a bad value loaded fine and then failed

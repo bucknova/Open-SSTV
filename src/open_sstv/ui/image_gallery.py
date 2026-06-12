@@ -74,6 +74,10 @@ class ImageGalleryWidget(QListView):
     #: Lets the user review prior decodes at full size without the
     #: previous save-and-reopen dance.
     image_preview_requested = Signal(object, object)  # (PIL.Image, Mode)
+    #: v0.4: context-menu *Log QSO…* — the deliberate logging path for
+    #: monitoring stations.  Relayed up to MainWindow, which opens the
+    #: pre-filled capture dialog for this image.
+    log_qso_requested = Signal(object, object)  # (PIL.Image, Mode)
 
     def __init__(self, parent: QListView | None = None) -> None:
         super().__init__(parent)
@@ -258,6 +262,12 @@ class ImageGalleryWidget(QListView):
         menu.addAction("View")
         menu.addAction("Save As\u2026")
         menu.addAction("Copy to Clipboard")
+        menu.addSeparator()
+        # v0.4: log this decode as a QSO.  Lives on the gallery (not
+        # only the completion dialog) because on a busy calling
+        # frequency most decodes are third-party traffic \u2014 operators
+        # monitor freely, then log just the exchange that was theirs.
+        menu.addAction("Log QSO\u2026")
         action = menu.exec(self.mapToGlobal(pos))
         if action is not None:
             self._dispatch_context_action(item, action.text())
@@ -290,6 +300,8 @@ class ImageGalleryWidget(QListView):
             # Qt warns ("Cannot keep promise…") and teardown can
             # segfault. QImage data is self-contained.
             QApplication.clipboard().setImage(_pil_to_qimage(image))
+        elif label.startswith("Log QSO"):
+            self.log_qso_requested.emit(image, mode)
 
 
 def _load_item_image(item: QStandardItem) -> PILImage | None:

@@ -259,13 +259,14 @@ class TestGeneralTabIsFirst:
         assert tabs is not None
         assert tabs.tabText(0) == "General"
 
-    def test_tab_order_general_audio_radio_images(
+    def test_tab_order_general_audio_radio_images_logging(
         self, dialog: SettingsDialog
     ) -> None:
         from PySide6.QtWidgets import QTabWidget
         tabs = dialog.findChild(QTabWidget)
         labels = [tabs.tabText(i) for i in range(tabs.count())]
-        assert labels == ["General", "Audio", "Radio", "Images"]
+        # v0.4 appends the Logging tab after the four domain tabs.
+        assert labels == ["General", "Audio", "Radio", "Images", "Logging"]
 
 
 class TestIdentityGroupOnGeneralTab:
@@ -450,3 +451,65 @@ class TestAutosavePatternHelpButton:
             # Spot-check that the body lists the load-bearing tokens.
             for token in ("%d", "%t", "%c", "%m", "%%"):
                 assert token in body, f"help body missing token reference {token!r}"
+
+
+# ---------------------------------------------------------------------------
+# v0.4: Logging tab + logbook settings
+# ---------------------------------------------------------------------------
+
+
+class TestLoggingTab:
+    def test_logging_tab_exists(self, qtbot, dialog: SettingsDialog) -> None:
+        from PySide6.QtWidgets import QTabWidget
+
+        tabs = dialog.findChild(QTabWidget)
+        labels = [tabs.tabText(i) for i in range(tabs.count())]
+        assert "Logging" in labels
+
+    def test_log_level_round_trip(self, qtbot) -> None:
+        cfg = AppConfig(callsign="W0AEZ", log_level="WARNING")
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        assert dlg._log_level_combo.currentData() == "WARNING"
+        dlg._log_level_combo.setCurrentIndex(dlg._log_level_combo.findData("DEBUG"))
+        assert dlg.result_config().log_level == "DEBUG"
+
+    def test_unknown_level_falls_back_to_info_in_combo(self, qtbot) -> None:
+        # AppConfig.__post_init__ normalises unknown levels to INFO
+        # before the dialog ever sees them.
+        cfg = AppConfig(callsign="W0AEZ", log_level="bogus")
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        assert dlg._log_level_combo.currentData() == "INFO"
+
+
+class TestLogbookSettings:
+    def test_auto_log_round_trip(self, qtbot) -> None:
+        cfg = AppConfig(callsign="W0AEZ", auto_log_qsos=True)
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        assert dlg._auto_log_check.isChecked()
+        dlg._auto_log_check.setChecked(False)
+        assert dlg.result_config().auto_log_qsos is False
+
+    def test_logbook_db_path_preserved_without_ui(self, qtbot) -> None:
+        cfg = AppConfig(callsign="W0AEZ")
+        cfg.logbook_db_path = "/tmp/custom-logbook.db"
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        assert dlg.result_config().logbook_db_path == "/tmp/custom-logbook.db"
+
+    def test_rx_capture_prompt_round_trip(self, qtbot) -> None:
+        cfg = AppConfig(callsign="W0AEZ", rx_capture_prompt="in_qso")
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        assert dlg._rx_capture_combo.currentData() == "in_qso"
+        dlg._rx_capture_combo.setCurrentIndex(dlg._rx_capture_combo.findData("never"))
+        assert dlg.result_config().rx_capture_prompt == "never"
+
+    def test_rx_capture_prompt_unknown_falls_back_to_always(self, qtbot) -> None:
+        cfg = AppConfig(callsign="W0AEZ", rx_capture_prompt="bogus")
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        # __post_init__ already normalised it.
+        assert dlg._rx_capture_combo.currentData() == "always"

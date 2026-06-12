@@ -9,6 +9,64 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-06-12
+
+The logbook release.  Every SSTV contact you make or hear can now be
+captured — image, mode, frequency, time, callsign, RSV report, and
+notes — and exchanged with the rest of the logging ecosystem as ADIF.
+Design notes live in ``docs/v0.4-plan.md``; the operator guide is
+``docs/logbook.md``.
+
+### Added
+
+- **QSO logbook** — SQLite database at ``user_data_dir/logbook.db``
+  (schema-versioned, stdlib ``sqlite3``, no new dependency).  Rows
+  store *paths* to images/audio, never blobs; deleting a QSO never
+  touches your files.
+- **Capture flow** — a pre-filled Log QSO dialog opens after every
+  transmission and reception (mode, UTC time, rig frequency, image
+  thumbnail; TX drafts pull ToCall/RST/Name/Note from the QSO bar).
+  Esc writes nothing.  ``auto_log_qsos`` switches to silent drafts.
+- **Party-line RX capture setting** — SSTV calling frequencies carry
+  everyone's exchanges, so Settings → General → Logbook → *RX
+  capture* chooses when a reception offers the dialog: after every
+  decode (default), only while a QSO is in progress (ToCall filled),
+  or never.  Your own transmissions always offer the dialog.
+- **Gallery "Log QSO…"** — right-click any decoded thumbnail to log
+  it deliberately; the monitoring workflow (decode freely, log only
+  the exchange that was yours).
+- **Logbook window** — Tools → Logbook… (Cmd/Ctrl+L) or the
+  [Logbook…] button on the QSO bar: filterable table (callsign,
+  mode, direction, local-day date range), image preview with
+  missing-file indicator, edit/delete, manual entry with Save & New.
+- **ADIF 3.1.5 import/export** — export the filtered view with your
+  station identity stamped per record (SUBMODE in MMSSTV compact
+  form); import from other loggers with dedupe on
+  (callsign, time, mode), batched in a single transaction.
+- **Settings → Logging tab** — log-level selection (next launch;
+  ``OPEN_SSTV_DEBUG`` still wins), Open Log Folder, diagnostics
+  cross-link.  New ``log_level`` config field.
+- **Diagnostics** — optional logbook member in the export zip,
+  default **off** (worked callsigns are identifiable info), snapshot
+  taken via sqlite's backup API for a consistent copy.
+- **Note field** on the TX panel QSO bar (the field reserved since
+  v0.3) — resolves the ``{note}`` template token and pre-fills the
+  capture dialog.
+
+### Fixed
+
+Pre-release audit hardening (full findings in
+``docs/audit_v0.4_logbook.md``): one corrupt record no longer aborts
+an entire ADIF import; silently-drafted QSOs keep their image on
+disk; the capture flow stands down during app shutdown; offline WAV
+decodes are stamped with the recording's mtime and no rig frequency;
+date filters interpret picked days in local time; ``%``/``_`` in
+filters match literally; failed edits can't display as saved; filter
+typing is debounced and a broken logbook DB degrades to an inline
+notice instead of modal storms.
+
+---
+
 ## [0.3.23] — 2026-06-09
 
 Stability and usability fixes from the 2026-06-09 full audit — the

@@ -173,3 +173,70 @@ not blocking logbook work in v0.4.
   rabbit hole — variable WPM, noisy conditions).
 - TX-side CW ID injection: **1–2 days** (much simpler than decode;
   just emit a CW tone train at end of PySSTV-generated audio).
+
+---
+
+## Logbook follow-ups deferred from the v0.4 build
+
+Captured 2026-06-11 while implementing the v0.4 logbook (PRs #2–#4 on
+the `v0.4-logbook` branch).  Upload integrations (LoTW/TQSL, eQSL,
+Club Log, QRZ.com) are already tracked in `v0.4-plan.md`'s deferral
+table and aren't repeated here.
+
+### Gallery metadata: decode timestamp + autosave path
+
+The RX gallery's *Log QSO…* action (party-line capture model) builds
+its draft at click time, so the row gets **log-time** frequency and
+timestamp, and — when image auto-save already wrote a file — a
+**second** image file is written at log time.  Storing two more
+fields on each gallery item (`decode_time_utc`, `autosave_path`, plus
+the poll-cache frequency at decode) would make gallery-logged rows
+exactly as accurate as dialog-logged ones and eliminate the duplicate
+write.  Small, self-contained; good first v0.4.x patch.
+
+### Multi-image QSOs (schema v2)
+
+One row per transmission/reception today.  A real SSTV contact
+exchanges several images both ways, and operators think "one QSO
+with K1ABC, four pictures."  The original plan sketched a
+`qso_images` 1-to-many table; v1 shipped without it.  Needs: schema
+migration (`PRAGMA user_version` 1 → 2), a merge/attach UI in the
+logbook window, and an ADIF answer (ADIF has no multi-image concept —
+likely one record per QSO, extra images app-local only).
+
+### Logbook table column sorting
+
+The store already supports `time_desc` / `time_asc` / `callsign_asc`;
+the window pins newest-first.  Click-to-sort headers via
+`QSortFilterProxyModel` (or piping the order through `list_qsos`) is
+straightforward; skipped in v0.4 to keep the first cut small.
+
+### Editable frequency / time in the QSO form
+
+Both are read-only auto-filled today.  Gallery-logged rows (above)
+and ADIF imports from sloppier loggers are the cases where an
+operator legitimately needs to correct them.  Unlocking them needs
+validation (UTC parsing, plausible-frequency bounds) the lenient
+model deliberately doesn't do.
+
+### Worked-before indicator
+
+At capture time, show "2 previous QSOs with K1ABC (last: 2026-05-02,
+20 m)" under the callsign field — a cheap `list_qsos(callsign=…)`
+count.  Distinct from award tracking (still out of scope); this is
+operating context, not bookkeeping.
+
+### Export-all guard
+
+ADIF export ships the *currently filtered* rows by design.  A user
+with a forgotten filter can upload a partial log; the row-count in
+the confirmation is the only guardrail.  Either an "Export all
+(ignore filters)" checkbox in the save dialog or a louder
+filtered-export warning would close it.
+
+### QRZ.com callsign lookup
+
+Auto-fill name / QTH / grid from the entered callsign.  Needs the
+XML-subscriber API (user-supplied key), network access from the
+dialog, and an offline fallback — park until the upload integrations
+land and establish the credentials pattern.

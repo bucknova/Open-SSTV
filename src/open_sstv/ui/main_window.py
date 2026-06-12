@@ -117,6 +117,7 @@ from open_sstv.config.schema import AppConfig
 from open_sstv.config.store import last_corrupt_backup, load_config, save_config
 from open_sstv.config.templates import load_templates
 from open_sstv.core.modes import Mode
+from open_sstv.logbook import QSO, LogbookCoordinator
 from open_sstv.radio.band_plan import mode_family
 from open_sstv.radio.base import ManualRig, Rig, RigConnectionMode
 from open_sstv.radio.exceptions import RigError
@@ -124,6 +125,8 @@ from open_sstv.radio.rigctld import RigctldClient, is_safe_rigctld_arg
 from open_sstv.radio.serial_rig import create_serial_rig
 from open_sstv.templates import TokenContext, build_autosave_filename, run_migration
 from open_sstv.ui.first_launch_dialog import FirstLaunchDialog
+from open_sstv.ui.log_qso_dialog import LogQsoDialog
+from open_sstv.ui.logbook_dialog import LogbookDialog
 from open_sstv.ui.offline_workers import OfflineDecodeWorker, OfflineEncodeWorker
 from open_sstv.ui.radio_panel import RadioPanel
 from open_sstv.ui.rx_panel import RxPanel
@@ -474,6 +477,39 @@ class MainWindow(QMainWindow):
         #: during TX.
         self._rig_poll_was_active: bool = False
 
+        # --- Logbook (v0.4) ---
+        #: Builds draft QSOs at TX/RX completion and owns the SQLite
+        #: store (opened lazily on first use).  The lambda indirection
+        #: matters: ``self._config`` is *replaced* on settings save, so
+        #: a direct reference would go stale.
+        self._logbook_coordinator = LogbookCoordinator(lambda: self._config)
+        self._logbook_dialog: LogbookDialog | None = None
+        #: Latest successful rig-poll frequency (Hz), or ``None`` when
+        #: no rig is connected.  This is the QSO frequency snapshot: the
+        #: poll is suspended during TX (OP-47), so at TX completion this
+        #: still holds the pre-TX value — the frequency the contact
+        #: actually happened on — and during RX it's ≤1 s old.  Reading
+        #: a cache here instead of calling ``get_freq()`` at completion
+        #: avoids a CAT read racing the poll thread on the serial port.
+        self._last_rig_freq_hz: int | None = None
+        #: In-flight capture dialog (window-modal, non-blocking) plus
+        #: the context needed at save time: the decoded/transmitted PIL
+        #: image (for deferred save-to-disk) and the original Mode (so
+        #: a deferred save builds the same filename autosave would).
+        #: ``None`` when no capture dialog is open; while one IS open,
+        #: further completions are silently written as drafts instead
+        #: of stacking dialogs.
+        self._capture_context: tuple[LogQsoDialog, PILImage | None, object] | None = None
+        #: Set at the top of ``closeEvent`` (audit #3): the shutdown
+        #: drain can deliver one final queued ``image_complete``, and
+        #: the capture flow must not run against a closing window /
+        #: closed store.
+        self._closing: bool = False
+        #: Source file of the in-flight offline decode (audit #4): its
+        #: mtime stamps the logbook draft instead of "now", and the
+        #: draft gets no rig frequency.
+        self._offline_decode_source: Path | None = None
+
         # --- Menu bar ---
         self._build_menu_bar()
 
@@ -644,6 +680,9 @@ class MainWindow(QMainWindow):
         self._tx_panel.export_to_audio_requested.connect(
             self._on_export_to_audio_requested
         )
+        # v0.4: [Logbook…] button on the QSO bar — same destination as
+        # Tools → Logbook… (Cmd/Ctrl+L).
+        self._tx_panel.logbook_requested.connect(self._open_logbook)
         self._radio_panel.test_tone_requested.connect(self._on_test_tone_requested)
         # Private dispatch signals → worker slots (QueuedConnection across thread)
         self._request_transmit.connect(self._tx_worker.transmit)
@@ -694,6 +733,10 @@ class MainWindow(QMainWindow):
         self._rx_panel.decode_audio_file_requested.connect(
             self._on_decode_audio_file_requested
         )
+        # v0.4: gallery right-click → Log QSO… — deliberate logging for
+        # monitoring stations (most decodes on a calling frequency are
+        # other people's exchanges; this logs only the one that's yours).
+        self._rx_panel.log_qso_requested.connect(self._on_gallery_log_qso)
 
         # Audio worker -> RX worker (chunks flow across the thread
         # boundary via queued connection; Qt handles the marshalling).
@@ -860,6 +903,17 @@ class MainWindow(QMainWindow):
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
+        # v0.4: detached logbook window, per established ham-app
+        # convention (MMSSTV / fldigi / WSJT-X all use one).
+        tools_menu = mb.addMenu("&Tools")
+        logbook_action = QAction("&Logbook…", self)
+        # NoRole for the same macOS reason as Settings above.
+        logbook_action.setMenuRole(QAction.MenuRole.NoRole)
+        logbook_action.setShortcut(QKeySequence("Ctrl+L"))  # Cmd+L on macOS
+        logbook_action.triggered.connect(self._open_logbook)
+        tools_menu.addAction(logbook_action)
+        self._logbook_action = logbook_action
+
         view_menu = mb.addMenu("&View")
         waterfall_action = QAction("&Waterfall", self)
         waterfall_action.setCheckable(True)
@@ -890,6 +944,167 @@ class MainWindow(QMainWindow):
             "github.com/bucknova/Open-SSTV</a></p>"
             "<p>GPL-3.0-or-later</p>",
         )
+
+    # === Logbook (v0.4) ===
+
+    @Slot()
+    def _open_logbook(self) -> None:
+        """Tools → Logbook… (Cmd/Ctrl+L): show the detached logbook window."""
+        try:
+            _ = self._logbook_coordinator.store  # force lazy open
+        except Exception as exc:  # noqa: BLE001 — SchemaTooNew, locked file, …
+            QMessageBox.warning(
+                self,
+                "Logbook unavailable",
+                f"Could not open the logbook database:\n\n{exc}",
+            )
+            return
+        if self._logbook_dialog is None:
+            self._logbook_dialog = LogbookDialog(self._logbook_coordinator, parent=self)
+        else:
+            self._logbook_dialog.refresh()
+        self._logbook_dialog.show()
+        self._logbook_dialog.raise_()
+        self._logbook_dialog.activateWindow()
+
+    def _refresh_logbook_if_open(self) -> None:
+        if self._logbook_dialog is not None and self._logbook_dialog.isVisible():
+            self._logbook_dialog.refresh()
+
+    def _capture_qso(
+        self,
+        draft: QSO,
+        preview_image: PILImage | None,
+        mode: object,
+        *,
+        draft_when_busy: bool = True,
+    ) -> None:
+        """Dispatch a completion draft: modal dialog, or silent insert.
+
+        ``auto_log_qsos`` writes everything silently.  When a capture
+        dialog is already open, ``draft_when_busy`` decides the
+        fallback: True (you're engaged — a partner's back-to-back
+        image) → silent draft so nothing of *your* QSO is lost; False
+        (third-party traffic on a monitored frequency) → drop with a
+        status hint, because strangers' exchanges don't belong in the
+        logbook — the image stays in the RX gallery for deliberate
+        logging.  Logbook failures are status-bar noise, never
+        dialogs: a broken logbook must not interrupt operating.
+        """
+        if self._closing:
+            return  # audit #3: never capture during window teardown
+        dialog_busy = (
+            self._capture_context is not None
+            and self._capture_context[0].isVisible()
+        )
+        if self._logbook_coordinator.auto_log or (dialog_busy and draft_when_busy):
+            # Audit #2: the silent paths must persist the picture too.
+            # Without this, an auto-logged or busy-drafted QSO keeps a
+            # path-less row and the image is lost — TX images
+            # immediately (they never enter the gallery), RX images at
+            # gallery eviction or app exit.
+            if draft.image_path is None and preview_image is not None:
+                draft.image_path = self._autosave_image(
+                    preview_image, mode, draft.direction, status_verb="Saved"
+                )
+            try:
+                saved = self._logbook_coordinator.save_draft(draft)
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("logbook draft save failed: %s", exc)
+                self.statusBar().showMessage(f"Logbook write failed: {exc}", 8000)
+                return
+            who = saved.callsign or "draft"
+            self.statusBar().showMessage(
+                f"Logged {who} QSO — edit in Tools → Logbook (Ctrl+L)", 5000
+            )
+            self._refresh_logbook_if_open()
+            return
+        if dialog_busy:
+            self.statusBar().showMessage(
+                "Log dialog already open — image kept in the gallery "
+                "(right-click it to log)",
+                5000,
+            )
+            return
+        self._open_capture_dialog(draft, preview_image, mode)
+
+    def _open_capture_dialog(
+        self, draft: QSO, preview_image: PILImage | None, mode: object
+    ) -> None:
+        """Open the window-modal LogQsoDialog for *draft*."""
+        if (
+            self._capture_context is not None
+            and self._capture_context[0].isVisible()
+        ):
+            # The gallery path can't normally reach here (window
+            # modality blocks the gallery while a capture dialog is
+            # up), but guard against racing completions anyway.
+            self.statusBar().showMessage("Finish the open log dialog first", 5000)
+            return
+        dlg = LogQsoDialog(draft, preview_image=preview_image, parent=self)
+        self._capture_context = (dlg, preview_image, mode)
+        dlg.finished.connect(self._on_capture_dialog_finished)
+        # Window-modal + non-blocking: the RX-resume timer, rig unlock,
+        # and decoder all keep running behind the dialog.
+        dlg.open()
+
+    @Slot(int)
+    def _on_capture_dialog_finished(self, result: int) -> None:
+        """Persist (or discard) the capture dialog's QSO.
+
+        Esc / Cancel writes nothing — that's the contract that makes a
+        noise-triggered RX completion cost one keypress.  On save, an
+        image that was never auto-saved is written to the images dir
+        now: a logbook row should keep its picture even when auto-save
+        is off, and the row stores the path per the v0.4 plan.
+        """
+        ctx = self._capture_context
+        self._capture_context = None
+        if ctx is None:
+            return
+        dlg, preview_image, mode = ctx
+        dlg.deleteLater()
+        if result != int(LogQsoDialog.DialogCode.Accepted):
+            return
+        qso = dlg.result_qso()
+        if qso.image_path is None and preview_image is not None:
+            qso.image_path = self._autosave_image(
+                preview_image, mode, qso.direction, status_verb="Saved"
+            )
+        try:
+            saved = self._logbook_coordinator.save_draft(qso)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("logbook save failed: %s", exc)
+            QMessageBox.warning(
+                self,
+                "Logbook save failed",
+                f"The QSO could not be written to the logbook:\n\n{exc}",
+            )
+            return
+        who = saved.callsign or "draft"
+        self.statusBar().showMessage(f"Logged {who} ({saved.mode})", 5000)
+        self._refresh_logbook_if_open()
+
+    @Slot(object, object)
+    def _on_gallery_log_qso(self, image: object, mode: object) -> None:
+        """RX-gallery *Log QSO…*: deliberately log a kept decode.
+
+        Bypasses both the capture gating (an explicit click always
+        means "log this one") and the auto-log silent path (the user
+        asked for the form, not a background draft).  The frequency
+        snapshot is the *current* poll cache — right while you're
+        still on frequency, stale if you QSYed since the decode; same
+        for the timestamp, which is log-time rather than decode-time
+        because gallery thumbnails don't carry their decode clock.
+        Close enough for the log-right-after-the-QSO workflow this
+        exists for.
+        """
+        pil_image: PILImage = image  # type: ignore[assignment]
+        draft = self._logbook_coordinator.build_rx_draft(
+            mode=mode,
+            frequency_hz=self._last_rig_freq_hz,
+        )
+        self._open_capture_dialog(draft, pil_image, mode)
 
     def _trigger_update_check(self) -> None:
         """Dispatch the one-shot update check to the worker thread."""
@@ -1122,6 +1337,10 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage(f"Decoding {Path(path).name}…")
 
+        # Audit #4: remember the source file so the logbook draft can be
+        # stamped with the recording's own clock instead of "now".
+        self._offline_decode_source = Path(path)
+
         thread = QThread(self)
         thread.setObjectName("offline-decode-thread")
         # Constructor-args pattern: path lives on the worker before
@@ -1134,7 +1353,10 @@ class MainWindow(QMainWindow):
         self._offline_decode_worker = worker
 
         worker.image_complete.connect(self._rx_panel.show_image_complete)
-        worker.image_complete.connect(self._on_rx_image_complete)
+        # Audit #4: offline decodes route through a wrapper that strips
+        # the live-rig context — the rig's current dial frequency says
+        # nothing about a WAV recorded last month.
+        worker.image_complete.connect(self._on_offline_image_complete)
         worker.image_complete.connect(self._on_offline_decode_complete)
         worker.error.connect(self._on_offline_decode_error)
         # One-shot cleanup: worker.finished → thread.quit → instance-attr
@@ -1489,17 +1711,34 @@ class MainWindow(QMainWindow):
             # save here (rather than in ``_on_tx_image_prepared``) so a
             # cancelled or errored TX doesn't produce a file that was
             # never actually put on the air.
+            tx_image_path: Path | None = None
             if (
                 self._config.autosave_tx
                 and self._last_tx_image is not None
                 and self._last_tx_mode is not None
             ):
-                self._autosave_image(
+                tx_image_path = self._autosave_image(
                     self._last_tx_image,
                     self._last_tx_mode,
                     "TX",
                     status_verb="TX saved",
                 )
+            # v0.4: draft a logbook entry for the completed TX.  The
+            # QSO-state bar (ToCall / RST / Name / Note) pre-fills the
+            # contact side; frequency comes from the rig-poll cache
+            # (still holding the pre-TX value — see _last_rig_freq_hz).
+            if self._last_tx_image is not None and self._last_tx_mode is not None:
+                qso_state = self._tx_panel.get_qso_state()
+                draft = self._logbook_coordinator.build_tx_draft(
+                    mode=self._last_tx_mode,
+                    frequency_hz=self._last_rig_freq_hz,
+                    image_path=tx_image_path,
+                    tocall=qso_state.tocall,
+                    rst_sent=qso_state.rst,
+                    to_name=qso_state.tocall_name,
+                    note=qso_state.note,
+                )
+                self._capture_qso(draft, self._last_tx_image, self._last_tx_mode)
             self._last_tx_image = None
             self._last_tx_mode = None
             self._tx_panel.set_status("Transmission complete.")
@@ -1795,24 +2034,93 @@ class MainWindow(QMainWindow):
 
     @Slot(object, object, int)
     def _on_rx_image_complete(
-        self, image: object, mode: object, vis_code: int
+        self, image: object, mode: object, vis_code: int, *, offline: bool = False
     ) -> None:
-        """Auto-save a newly decoded image (and optionally its raw audio)."""
+        """Auto-save a newly decoded image, then draft a logbook entry.
+
+        Fires for live RX, offline WAV decode (via the
+        ``_on_offline_image_complete`` wrapper), and watchdog-truncated
+        partial images alike — all of them are receptions worth
+        logging, and the capture dialog costs one Esc to dismiss when
+        they aren't (noise trigger, test decode).
+        """
         pending_audio = self._pending_rx_audio
         self._pending_rx_audio = None
-
-        if not self._config.auto_save and not self._config.autosave_rx_audio:
-            return
 
         pil_image: PILImage = image  # type: ignore[assignment]
         save_path: Path | None = None
         if self._config.auto_save:
             save_path = self._autosave_image(pil_image, mode, "RX")
 
+        audio_path: Path | None = None
         if self._config.autosave_rx_audio and pending_audio is not None:
             audio_arr, sr = pending_audio
             fmt = self._config.rx_audio_format
-            self._save_rx_audio(audio_arr, mode, sr, fmt, alongside=save_path)
+            audio_path = self._save_rx_audio(
+                audio_arr, mode, sr, fmt, alongside=save_path
+            )
+
+        # Audit #3: a stop-flush can deliver one last image_complete
+        # during closeEvent's shutdown drain.  The image auto-save
+        # above still runs (data preservation, matches v0.3), but the
+        # capture flow must not — the logbook store is being closed
+        # and a dialog would outlive the window.
+        if self._closing:
+            return
+
+        # v0.4: capture the reception in the logbook — gated, because
+        # SSTV calling frequencies are party lines and most of what a
+        # monitoring station decodes is other people's exchanges.
+        # "Engaged" = the TX panel's ToCall is filled in (you're
+        # working someone).  auto_log_qsos overrides the gate and
+        # drafts everything silently.
+        engaged = bool(self._tx_panel.get_qso_state().tocall.strip())
+        prompt_mode = self._config.rx_capture_prompt
+        if not self._logbook_coordinator.auto_log and (
+            prompt_mode == "never" or (prompt_mode == "in_qso" and not engaged)
+        ):
+            self.statusBar().showMessage(
+                "Image decoded — right-click it in the gallery to log a QSO", 5000
+            )
+            return
+        # Audit #4: live RX stamps the rig-poll frequency cache (≤1 s
+        # old, None with no rig) and the current clock.  An offline
+        # file decode gets NO frequency (the rig's dial says nothing
+        # about a recording) and the file's modified time — the best
+        # available stand-in for when the signal was actually on the
+        # air.
+        time_utc: datetime.datetime | None = None
+        frequency_hz = self._last_rig_freq_hz
+        if offline:
+            frequency_hz = None
+            if self._offline_decode_source is not None:
+                try:
+                    time_utc = datetime.datetime.fromtimestamp(
+                        self._offline_decode_source.stat().st_mtime,
+                        tz=datetime.UTC,
+                    )
+                except OSError:
+                    time_utc = None  # file vanished — fall back to now
+        draft = self._logbook_coordinator.build_rx_draft(
+            mode=mode,
+            frequency_hz=frequency_hz,
+            image_path=save_path,
+            audio_path=audio_path,
+            time_utc=time_utc,
+        )
+        self._capture_qso(draft, pil_image, mode, draft_when_busy=engaged)
+
+    @Slot(object, object, int)
+    def _on_offline_image_complete(
+        self, image: object, mode: object, vis_code: int
+    ) -> None:
+        """Offline-decode completions → capture flow minus live-rig context.
+
+        Separate slot (rather than ``sender()`` sniffing) so the
+        offline path is explicit at the connect site and directly
+        testable (audit #4).
+        """
+        self._on_rx_image_complete(image, mode, vis_code, offline=True)
 
     def _save_rx_audio(
         self,
@@ -1822,7 +2130,7 @@ class MainWindow(QMainWindow):
         fmt: str,
         *,
         alongside: Path | None = None,
-    ) -> None:
+    ) -> Path | None:
         """Write *audio_f64* (float64, [-1,1]) to an audio file.
 
         *fmt* is ``"wav"`` (stdlib, 16-bit PCM) or ``"flac"`` (soundfile,
@@ -1833,10 +2141,13 @@ class MainWindow(QMainWindow):
         If *alongside* is a path to an already-saved image, the audio file
         is written next to it with the same stem. Otherwise a filename is
         resolved from the save-directory template.
+
+        Returns the written path, or ``None`` when nothing was written
+        (empty buffer or save failure) — v0.4 stores it on the QSO row.
         """
         arr: np.ndarray = np.asarray(audio_f64, dtype=np.float64)
         if arr.size == 0:
-            return
+            return None
 
         fmt = fmt.lower().lstrip(".")
         if fmt not in ("wav", "flac"):
@@ -1857,7 +2168,7 @@ class MainWindow(QMainWindow):
                 )
             except OSError as exc:
                 QMessageBox.warning(self, "Audio save failed", str(exc))
-                return
+                return None
 
         try:
             if fmt == "wav":
@@ -1878,7 +2189,7 @@ class MainWindow(QMainWindow):
                 sf.write(str(out_path), arr, sample_rate, subtype="PCM_16")
         except OSError as exc:
             QMessageBox.warning(self, "Audio save failed", str(exc))
-            return
+            return None
         except ImportError:
             QMessageBox.warning(
                 self,
@@ -1886,8 +2197,9 @@ class MainWindow(QMainWindow):
                 "FLAC recording requires the 'soundfile' package.\n"
                 'Install it with:  pip install "open-sstv[flac]"',
             )
-            return
+            return None
         self.statusBar().showMessage(f"Audio saved {out_path.name}", 3000)
+        return out_path
 
     @Slot(object, object)
     def _on_rx_image_saved(self, image: object, mode: object) -> None:
@@ -2553,6 +2865,8 @@ class MainWindow(QMainWindow):
     def _on_rig_disconnect(self) -> None:
         """Stop polling and tear down the rig link."""
         self._rig_poll_timer.stop()
+        # v0.4: no rig → no trustworthy frequency for logbook drafts.
+        self._last_rig_freq_hz = None
         try:
             self._rig.close()
         except RigError:
@@ -2580,6 +2894,8 @@ class MainWindow(QMainWindow):
         if isinstance(self._rig, ManualRig):
             return  # already disconnected — guard against a queued double-fire
         self._rig_poll_timer.stop()
+        # v0.4: no rig → no trustworthy frequency for logbook drafts.
+        self._last_rig_freq_hz = None
         old_rig = self._rig
         self._rig = ManualRig()
         self._tx_worker.set_rig(self._rig)
@@ -2636,6 +2952,9 @@ class MainWindow(QMainWindow):
         on the GUI thread. ``poll_error`` from the worker connects directly
         to ``_radio_panel.set_connection_error``.
         """
+        # v0.4: cache for the logbook frequency snapshot (0 = ManualRig
+        # placeholder, not a real reading).
+        self._last_rig_freq_hz = freq if freq > 0 else None
         self._radio_panel.update_rig_status(freq, mode_name, strength)
 
     @Slot(int, str, int)
@@ -2714,6 +3033,12 @@ class MainWindow(QMainWindow):
             setattr(self, attr_worker, None)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 — Qt API
+        # Audit #3: flag first.  The shutdown drain below can deliver
+        # one final queued image_complete (stop-flush, RX watchdog);
+        # the capture flow checks this and stands down instead of
+        # opening dialogs / re-opening the logbook store mid-teardown.
+        self._closing = True
+
         # Abort any in-flight rig connect first — the QThread is a child of
         # this window and Qt calls fatal() if it is still running when the
         # parent is destroyed (OP2-02 regression fix).
@@ -2851,6 +3176,16 @@ class MainWindow(QMainWindow):
         ):
             thread.quit()
             thread.wait(4000)
+
+        # v0.4 (audit #3): close the logbook's SQLite connection only
+        # now — every worker thread that could emit a completion has
+        # been joined, so nothing can lazily re-open the store after
+        # this point.  The logbook/capture dialogs are children of
+        # this window; Qt tears them down.
+        try:
+            self._logbook_coordinator.close()
+        except Exception:  # noqa: BLE001 — never block shutdown on the logbook
+            pass
 
         try:
             self._rig.close()
