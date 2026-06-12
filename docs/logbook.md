@@ -65,7 +65,10 @@ Notes for the dialog:
   folder at the moment you save the QSO, so the logbook entry keeps
   its picture.  Dismissing the dialog writes neither a row nor a file.
 - Decoding a WAV through **Decode Audio** also offers a log entry —
-  useful for logging a contact you recorded off-air.
+  useful for logging a contact you recorded off-air.  File decodes
+  are stamped with the *recording's* modified time and no frequency
+  (the rig's current dial says nothing about an old recording), so
+  fill in what you know in the notes.
 
 ### Silent logging
 

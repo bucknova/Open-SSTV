@@ -182,7 +182,15 @@ def parse_qso_date_time(qso_date: str, time_on: str) -> datetime:
         second = int(time_on[4:6])
     else:
         raise AdifParseError(f"invalid TIME_ON {time_on!r}; expected HHMM or HHMMSS")
-    return datetime(year, month, day, hour, minute, second, tzinfo=UTC)
+    try:
+        return datetime(year, month, day, hour, minute, second, tzinfo=UTC)
+    except ValueError as exc:
+        # Digit-valid but out-of-range (Feb 31, hour 25, month 13, …).
+        # Must be AdifParseError so _build_qso skips just this record —
+        # a bare ValueError would abort the whole import (audit #1).
+        raise AdifParseError(
+            f"out-of-range QSO_DATE/TIME_ON {qso_date!r} {time_on!r}: {exc}"
+        ) from exc
 
 
 def datetime_to_created_timestamp(dt: datetime) -> str:

@@ -7,10 +7,10 @@ cross-file tracing, reuse, simplification, efficiency, altitude),
 ~36 candidates deduplicated, each survivor adversarially verified.
 Three findings were reproduced empirically during the audit.
 
-**Status: FINDINGS SAVED, FIXES PENDING.**  Decision deferred
-2026-06-11 (token budget); intended next step was a hardening pass
-fixing all ten with regression tests, then full-suite re-run, one
-commit, still no push.
+**Status: ALL TEN FIXED** (2026-06-12, same branch, commit after this
+doc update).  Every fix carries a regression test; the per-finding
+"Fix:" notes below describe what was implemented.  The cleanup-debt
+list at the bottom remains open for a later /simplify pass.
 
 Severity key: 🔴 must fix before release · 🟡 should fix · 🔵 ride-along.
 

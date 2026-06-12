@@ -441,3 +441,25 @@ class TestRoundtrip:
         loaded = import_adif(text)
         assert loaded[0].rsv_sent == "595"
         assert loaded[0].rsv_received == "479"
+
+
+class TestOutOfRangeDateTime:
+    """Audit #1: digit-valid but out-of-range dates must skip the one
+    record, not abort the whole import."""
+
+    def test_feb_31_raises_adif_parse_error(self) -> None:
+        with pytest.raises(AdifParseError):
+            parse_qso_date_time("20260231", "120000")
+
+    def test_hour_25_raises_adif_parse_error(self) -> None:
+        with pytest.raises(AdifParseError):
+            parse_qso_date_time("20260601", "250000")
+
+    def test_one_bad_record_does_not_abort_import(self) -> None:
+        doc = (
+            "<CALL:5>K1BAD <QSO_DATE:8>20260231 <TIME_ON:6>120000 <EOR>\n"
+            "<CALL:6>K9GOOD <QSO_DATE:8>20260601 <TIME_ON:6>120000 "
+            "<MODE:4>SSTV <EOR>\n"
+        )
+        qsos = import_adif(doc)
+        assert [q.callsign for q in qsos] == ["K9GOOD"]

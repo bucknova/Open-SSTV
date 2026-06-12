@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -118,6 +119,16 @@ def _path_str(p: Path | None) -> str | None:
     if p is None:
         return None
     return p.as_posix()
+
+
+def _like_escape(text: str) -> str:
+    r"""Escape SQL LIKE metacharacters in user-typed filter text.
+
+    Without this, a ``_`` typed into the callsign filter matches every
+    row (any-one-char wildcard) and ``%`` matches everything (audit
+    #6).  Pairs with an ``ESCAPE '\'`` clause on the LIKE.
+    """
+    return text.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +228,18 @@ class LogbookStore:
 
     # -- CRUD ----------------------------------------------------------
 
+    _INSERT_SQL = """
+        INSERT INTO qsos (
+            direction, callsign, time_utc, mode, frequency_hz,
+            rsv_sent, rsv_received, name, qth, grid, comment,
+            image_path, audio_path, created_at, updated_at
+        ) VALUES (
+            :direction, :callsign, :time_utc, :mode, :frequency_hz,
+            :rsv_sent, :rsv_received, :name, :qth, :grid, :comment,
+            :image_path, :audio_path, :created_at, :updated_at
+        )
+    """
+
     def insert(self, qso: QSO) -> QSO:
         """Insert a new QSO, returning a copy with id/created_at/updated_at filled.
 
@@ -226,25 +249,37 @@ class LogbookStore:
         now = datetime.now(UTC)
         params = _qso_to_params(qso, now=now)
         params["created_at"] = _iso(now)
-        cur = self._conn.execute(
-            """
-            INSERT INTO qsos (
-                direction, callsign, time_utc, mode, frequency_hz,
-                rsv_sent, rsv_received, name, qth, grid, comment,
-                image_path, audio_path, created_at, updated_at
-            ) VALUES (
-                :direction, :callsign, :time_utc, :mode, :frequency_hz,
-                :rsv_sent, :rsv_received, :name, :qth, :grid, :comment,
-                :image_path, :audio_path, :created_at, :updated_at
-            )
-            """,
-            params,
-        )
+        cur = self._conn.execute(self._INSERT_SQL, params)
         new_id = cur.lastrowid
         assert new_id is not None
         got = self.get(new_id)
         assert got is not None, "row vanished immediately after insert"
         return got
+
+    def insert_many(self, qsos: Iterable[QSO]) -> int:
+        """Insert many QSOs in ONE transaction.  Returns the count.
+
+        The connection runs in autocommit (``isolation_level=None``),
+        so looping over ``insert()`` costs one fsync'd transaction per
+        row — minutes of GUI freeze on a 10k-record ADIF import (audit
+        #10).  An explicit BEGIN…COMMIT batches the writes, and any
+        failure rolls back the whole batch so a half-imported file
+        can't leave the log in a guess-which-rows-made-it state.
+        """
+        now = datetime.now(UTC)
+        self._conn.execute("BEGIN")
+        try:
+            count = 0
+            for qso in qsos:
+                params = _qso_to_params(qso, now=now)
+                params["created_at"] = _iso(now)
+                self._conn.execute(self._INSERT_SQL, params)
+                count += 1
+        except BaseException:
+            self._conn.execute("ROLLBACK")
+            raise
+        self._conn.execute("COMMIT")
+        return count
 
     def update(self, qso: QSO) -> QSO:
         """Update an existing QSO by id, refreshing ``updated_at``.
@@ -325,16 +360,16 @@ class LogbookStore:
         clauses: list[str] = []
         params: dict[str, Any] = {}
         if callsign:
-            clauses.append("UPPER(callsign) LIKE :callsign")
-            params["callsign"] = f"%{callsign.upper()}%"
+            clauses.append(r"UPPER(callsign) LIKE :callsign ESCAPE '\'")
+            params["callsign"] = f"%{_like_escape(callsign.upper())}%"
         if direction:
             if direction not in DIRECTIONS:
                 raise ValueError(f"invalid direction filter: {direction!r}")
             clauses.append("direction = :direction")
             params["direction"] = direction
         if mode:
-            clauses.append("UPPER(mode) LIKE :mode")
-            params["mode"] = f"%{mode.upper()}%"
+            clauses.append(r"UPPER(mode) LIKE :mode ESCAPE '\'")
+            params["mode"] = f"%{_like_escape(mode.upper())}%"
         if since is not None:
             clauses.append("time_utc >= :since")
             params["since"] = _iso(since)
@@ -360,6 +395,20 @@ class LogbookStore:
     def count(self) -> int:
         """Total number of QSOs in the log."""
         return int(self._conn.execute("SELECT COUNT(*) FROM qsos").fetchone()[0])
+
+    def list_dedupe_fields(self) -> list[tuple[str, str, str]]:
+        """``(callsign, time_utc_iso, mode)`` for every row with a callsign.
+
+        Import dedupe needs only these three columns; materialising
+        full ``QSO`` objects (three datetime parses each) for a
+        10k-row log just to build identity keys is wasted work
+        (audit #10).  Empty-callsign drafts are excluded — they never
+        participate in dedupe.
+        """
+        rows = self._conn.execute(
+            "SELECT callsign, time_utc, mode FROM qsos WHERE callsign != ''"
+        ).fetchall()
+        return [(r["callsign"], r["time_utc"], r["mode"]) for r in rows]
 
     # -- lifecycle -----------------------------------------------------
 

@@ -15,6 +15,8 @@ all opening the same form.
 """
 from __future__ import annotations
 
+import dataclasses
+import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -24,6 +26,7 @@ from PySide6.QtCore import (
     QModelIndex,
     QPersistentModelIndex,
     Qt,
+    QTimer,
     Slot,
 )
 from PySide6.QtGui import QPixmap
@@ -57,7 +60,12 @@ if TYPE_CHECKING:
 
     from open_sstv.logbook.coordinator import LogbookCoordinator
 
+_log = logging.getLogger(__name__)
+
 _PREVIEW_W, _PREVIEW_H = 320, 240
+
+#: Text-filter debounce, matching the QSO bar's keystroke debounce.
+_FILTER_DEBOUNCE_MS = 300
 
 #: Shared invalid-index default for the model overrides (B008: no call
 #: in argument defaults).  Read-only, so one instance is safe.
@@ -162,20 +170,33 @@ class LogbookDialog(QDialog):
 
         root = QVBoxLayout(self)
 
+        # Text filters re-query on a debounce (audit #8): one query per
+        # pause-in-typing instead of a full query + model reset (and,
+        # on a broken DB, an error per keystroke).  Discrete controls
+        # (combo, checkboxes, date picks) still refresh immediately.
+        self._refresh_debounce = QTimer(self)
+        self._refresh_debounce.setSingleShot(True)
+        self._refresh_debounce.setInterval(_FILTER_DEBOUNCE_MS)
+        self._refresh_debounce.timeout.connect(self.refresh)
+
         # --- Filter bar --------------------------------------------------
         filter_row = QHBoxLayout()
         filter_row.addWidget(QLabel("Callsign:"))
         self._f_callsign = QLineEdit()
         self._f_callsign.setPlaceholderText("substring")
         self._f_callsign.setMaximumWidth(110)
-        self._f_callsign.textChanged.connect(self.refresh)
+        self._f_callsign.textChanged.connect(
+            lambda _t: self._refresh_debounce.start()
+        )
         filter_row.addWidget(self._f_callsign)
 
         filter_row.addWidget(QLabel("Mode:"))
         self._f_mode = QLineEdit()
         self._f_mode.setPlaceholderText("e.g. Martin")
         self._f_mode.setMaximumWidth(110)
-        self._f_mode.textChanged.connect(self.refresh)
+        self._f_mode.textChanged.connect(
+            lambda _t: self._refresh_debounce.start()
+        )
         filter_row.addWidget(self._f_mode)
 
         filter_row.addWidget(QLabel("Direction:"))
@@ -292,6 +313,18 @@ class LogbookDialog(QDialog):
 
     # === Querying ===
 
+    @staticmethod
+    def _local_day_start_utc(d: QDate) -> datetime:
+        """Midnight *local time* on the picked calendar day, as UTC.
+
+        The pickers show local calendar days, but the store's
+        ``time_utc`` column is UTC.  Treating the picked day as UTC
+        midnight hid this evening's QSOs for operators west of UTC
+        (audit #5) — a naive datetime ``astimezone()`` interprets it
+        in the system zone, which is what the operator meant.
+        """
+        return datetime(d.year(), d.month(), d.day()).astimezone(UTC)
+
     def _query_kwargs(self) -> dict[str, Any]:
         kw: dict[str, Any] = {}
         if self._f_callsign.text().strip():
@@ -301,13 +334,11 @@ class LogbookDialog(QDialog):
         if self._f_direction.currentText() in ("RX", "TX"):
             kw["direction"] = self._f_direction.currentText()
         if self._f_from_on.isChecked():
-            d = self._f_from.date()
-            kw["since"] = datetime(d.year(), d.month(), d.day(), tzinfo=UTC)
+            kw["since"] = self._local_day_start_utc(self._f_from.date())
         if self._f_until_on.isChecked():
             # The store's `until` is exclusive; a date picked in the UI
-            # should be *inclusive* of that whole day.
-            d = self._f_until.date().addDays(1)
-            kw["until"] = datetime(d.year(), d.month(), d.day(), tzinfo=UTC)
+            # should be *inclusive* of that whole local day.
+            kw["until"] = self._local_day_start_utc(self._f_until.date().addDays(1))
         return kw
 
     @Slot()
@@ -316,7 +347,12 @@ class LogbookDialog(QDialog):
         try:
             qsos = self._coordinator.store.list_qsos(**self._query_kwargs())
         except Exception as exc:  # noqa: BLE001 — surface, don't crash the window
-            QMessageBox.warning(self, "Logbook unavailable", str(exc))
+            # Never modal here (audit #8): refresh fires per filter
+            # change, and a locked/broken DB would stack one dialog per
+            # keystroke.  Inline state + log line instead; the next
+            # successful refresh clears it.
+            _log.warning("logbook refresh failed: %s", exc)
+            self._count_label.setText("Logbook unavailable — see log")
             return
         self._model.set_qsos(qsos)
         drafts = sum(1 for q in qsos if not q.callsign)
@@ -417,7 +453,11 @@ class LogbookDialog(QDialog):
         qso = self._selected_qso()
         if qso is None:
             return
-        dlg = LogQsoDialog(qso, parent=self)
+        # Edit a COPY (audit #7): the dialog mutates its QSO in
+        # result_qso() before store.update() can fail — handing it the
+        # model's own row object would leave a failed edit displayed
+        # (and exported) as if it were saved.
+        dlg = LogQsoDialog(dataclasses.replace(qso), parent=self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         try:

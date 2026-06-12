@@ -95,10 +95,26 @@ def qso_dedupe_key(qso: QSO) -> tuple[str, str, str]:
     the same mode differently and a re-import of our own export must
     never duplicate rows.
     """
+    return _dedupe_key_parts(qso.callsign, qso.time_utc, qso.mode)
+
+
+def _dedupe_key_parts(
+    callsign: str, time_utc: datetime | str, mode: str
+) -> tuple[str, str, str]:
+    """Build the dedupe key from raw fields.
+
+    ``time_utc`` may be a datetime (in-memory QSO) or the store's ISO
+    string (key-only dedupe query) — both normalise to the same
+    compact UTC form, so keys from either source collide correctly.
+    """
+    if isinstance(time_utc, str):
+        time_utc = datetime.fromisoformat(time_utc.replace("Z", "+00:00"))
+    if time_utc.tzinfo is None:
+        time_utc = time_utc.replace(tzinfo=UTC)
     return (
-        qso.callsign.strip().upper(),
-        qso.time_utc.astimezone(UTC).strftime("%Y%m%d%H%M%S"),
-        mode_to_submode(qso.mode).upper(),
+        callsign.strip().upper(),
+        time_utc.astimezone(UTC).strftime("%Y%m%d%H%M%S"),
+        mode_to_submode(mode).upper(),
     )
 
 
@@ -200,11 +216,18 @@ class LogbookCoordinator:
         frequency_hz: int | None = None,
         image_path: Path | None = None,
         audio_path: Path | None = None,
+        time_utc: datetime | None = None,
     ) -> QSO:
-        """Draft QSO for a completed reception (callsign unknown yet)."""
+        """Draft QSO for a completed reception (callsign unknown yet).
+
+        ``time_utc`` defaults to now (live RX completes in real time);
+        offline file decodes pass the recording's own timestamp so the
+        row doesn't claim the contact happened at decode time
+        (audit #4).
+        """
         return QSO(
             direction="RX",
-            time_utc=datetime.now(UTC),
+            time_utc=time_utc if time_utc is not None else datetime.now(UTC),
             mode=mode_display_name(mode),
             frequency_hz=frequency_hz,
             image_path=image_path,
@@ -225,23 +248,28 @@ class LogbookCoordinator:
         — re-importing a previously exported ADIF must be a no-op.
         Rows with an empty callsign are never treated as duplicates of
         each other (two un-filled RX drafts are distinct contacts).
+
+        Dedupe keys come from a key-only query and all inserts run in
+        one transaction (audit #10) — a 10k-record import is one fsync,
+        not ten thousand, and a mid-import failure rolls back cleanly
+        rather than half-importing.
         """
         seen = {
-            qso_dedupe_key(existing)
-            for existing in self.store.list_qsos()
-            if existing.callsign.strip()
+            _dedupe_key_parts(callsign, time_iso, mode)
+            for callsign, time_iso, mode in self.store.list_dedupe_fields()
         }
-        added = 0
+        to_insert: list[QSO] = []
         skipped = 0
         for qso in qsos:
-            key = qso_dedupe_key(qso)
-            if qso.callsign.strip() and key in seen:
-                skipped += 1
-                continue
-            if qso.callsign.strip():
+            has_callsign = bool(qso.callsign.strip())
+            if has_callsign:
+                key = qso_dedupe_key(qso)
+                if key in seen:
+                    skipped += 1
+                    continue
                 seen.add(key)
-            self.store.insert(qso)
-            added += 1
+            to_insert.append(qso)
+        added = self.store.insert_many(to_insert)
         return (added, skipped)
 
 

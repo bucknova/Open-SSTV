@@ -322,3 +322,105 @@ class TestGalleryLogQso:
         assert window._capture_context is not None
         assert window._capture_context[0]._qso.mode == "Martin M1"
         window._capture_context[0].reject()
+
+
+class TestSilentDraftImagePersistence:
+    """Audit #2: silent paths must write the picture to disk too."""
+
+    def test_auto_log_rx_draft_keeps_image(
+        self, qtbot, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, patched_audio
+    ) -> None:
+        # auto_save OFF + auto_log ON: previously lost the image.
+        window = _make_window(qtbot, monkeypatch, tmp_path, auto_log_qsos=True)
+        window._on_rx_image_complete(_rx_image(), Mode.MARTIN_M1, 44)
+        rows = window._logbook_coordinator.store.list_qsos()
+        assert len(rows) == 1
+        assert rows[0].image_path is not None
+        assert rows[0].image_path.is_file()
+
+    def test_auto_log_tx_draft_keeps_image(
+        self, qtbot, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, patched_audio
+    ) -> None:
+        window = _make_window(qtbot, monkeypatch, tmp_path, auto_log_qsos=True)
+        window._on_tx_image_prepared(_rx_image(), Mode.SCOTTIE_S1)
+        window._on_tx_complete()
+        rows = window._logbook_coordinator.store.list_qsos()
+        assert len(rows) == 1
+        assert rows[0].direction == "TX"
+        assert rows[0].image_path is not None
+        assert rows[0].image_path.is_file()
+
+    def test_busy_engaged_draft_keeps_image(
+        self, qtbot, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, patched_audio
+    ) -> None:
+        window = _make_window(qtbot, monkeypatch, tmp_path)
+        window._tx_panel._qso_widget._tocall.setText("K1ABC")
+        window._on_rx_image_complete(_rx_image(), Mode.MARTIN_M1, 44)
+        first_dlg = window._capture_context[0]
+        window._on_rx_image_complete(_rx_image(), Mode.PD_120, 95)
+        rows = window._logbook_coordinator.store.list_qsos()
+        assert len(rows) == 1
+        assert rows[0].image_path is not None
+        assert rows[0].image_path.is_file()
+        first_dlg.reject()
+
+
+class TestShutdownGuard:
+    """Audit #3: no capture activity once closeEvent has started."""
+
+    def test_closing_flag_blocks_capture(
+        self, qtbot, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, patched_audio
+    ) -> None:
+        window = _make_window(qtbot, monkeypatch, tmp_path, auto_log_qsos=True)
+        window._closing = True
+        window._on_rx_image_complete(_rx_image(), Mode.MARTIN_M1, 44)
+        assert window._capture_context is None
+        # Store never touched — guard fires before any logbook access.
+        assert not window._logbook_coordinator.store_is_open
+        assert not (tmp_path / "logbook.db").exists()
+
+    def test_close_sets_flag(
+        self, qtbot, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, patched_audio
+    ) -> None:
+        window = _make_window(qtbot, monkeypatch, tmp_path)
+        assert window._closing is False
+        window.close()
+        assert window._closing is True
+
+
+class TestOfflineDecodeStamping:
+    """Audit #4: file decodes get the file's clock and no frequency."""
+
+    def test_offline_uses_mtime_and_no_freq(
+        self, qtbot, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, patched_audio
+    ) -> None:
+        import os
+        from datetime import UTC, datetime
+
+        window = _make_window(qtbot, monkeypatch, tmp_path)
+        window._last_rig_freq_hz = 14_230_000  # live dial — must be ignored
+        wav = tmp_path / "old-recording.wav"
+        wav.write_bytes(b"RIFFfake")
+        recorded = datetime(2026, 5, 1, 14, 30, 0, tzinfo=UTC)
+        os.utime(wav, (recorded.timestamp(), recorded.timestamp()))
+        window._offline_decode_source = wav
+
+        window._on_offline_image_complete(_rx_image(), Mode.MARTIN_M1, 44)
+        assert window._capture_context is not None
+        q = window._capture_context[0]._qso
+        assert q.frequency_hz is None
+        assert q.time_utc == recorded
+        window._capture_context[0].reject()
+
+    def test_live_rx_still_uses_cache_and_now(
+        self, qtbot, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, patched_audio
+    ) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        window = _make_window(qtbot, monkeypatch, tmp_path)
+        window._last_rig_freq_hz = 7_171_000
+        window._on_rx_image_complete(_rx_image(), Mode.MARTIN_M1, 44)
+        q = window._capture_context[0]._qso
+        assert q.frequency_hz == 7_171_000
+        assert abs(q.time_utc - datetime.now(UTC)) < timedelta(seconds=5)
+        window._capture_context[0].reject()

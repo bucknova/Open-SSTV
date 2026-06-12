@@ -100,24 +100,42 @@ def _add_logbook_member(zf: zipfile.ZipFile) -> None:
     """Add the logbook DB to *zf*, or a placeholder explaining its absence.
 
     Resolves the same path the app uses (config override → platform
-    default).  Reads bytes rather than zipping the live file handle so a
-    concurrent app instance holding the SQLite connection can't wedge
-    the export.
+    default).  The snapshot goes through ``sqlite3``'s backup API
+    rather than a raw byte copy (audit #9): a raw read takes no lock
+    and ignores a hot ``-journal``/``-wal`` sidecar, so the zipped DB
+    could be torn mid-commit or silently missing a crash rollback —
+    exactly the wrong property for a file attached to bug reports.
+    Opening + backing up triggers SQLite's own journal recovery and
+    yields a consistent point-in-time copy.
     """
     try:
+        import sqlite3  # noqa: PLC0415
+        import tempfile  # noqa: PLC0415
+
         from open_sstv.config.store import load_config  # noqa: PLC0415
         from open_sstv.logbook.store import default_db_path  # noqa: PLC0415
 
         raw = (load_config().logbook_db_path or "").strip()
         db_path = Path(raw).expanduser() if raw else default_db_path()
-        if db_path.is_file():
-            zf.writestr("logbook.db", db_path.read_bytes())
-        else:
+        if not db_path.is_file():
             zf.writestr(
                 "logbook-missing.txt",
                 f"(no logbook database found at {db_path} — "
                 "the operator has not logged any QSOs yet)\n",
             )
+            return
+        with tempfile.TemporaryDirectory(prefix="open-sstv-diag-") as tmp_dir:
+            snapshot = Path(tmp_dir) / "logbook.db"
+            src = sqlite3.connect(db_path)
+            try:
+                dst = sqlite3.connect(snapshot)
+                try:
+                    src.backup(dst)
+                finally:
+                    dst.close()
+            finally:
+                src.close()
+            zf.write(snapshot, "logbook.db")
     except Exception as exc:  # noqa: BLE001
         zf.writestr("logbook-missing.txt", f"(logbook export failed: {exc})\n")
 

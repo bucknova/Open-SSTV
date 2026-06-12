@@ -367,3 +367,78 @@ class TestPathSerialization:
         # construction is normalized.
         assert got.image_path is not None
         assert "img.png" in str(got.image_path)
+
+
+class TestLikeEscaping:
+    """Audit #6: % and _ typed into filters are literals, not wildcards."""
+
+    def _store_with(self, tmp_path, *callsigns):
+        store = LogbookStore(tmp_path / "esc.db")
+        for c in callsigns:
+            store.insert(_q(callsign=c))
+        return store
+
+    def test_underscore_is_literal(self, tmp_path) -> None:
+        store = self._store_with(tmp_path, "W0AEZ", "W0_EZ")
+        got = [q.callsign for q in store.list_qsos(callsign="_")]
+        assert got == ["W0_EZ"]
+        store.close()
+
+    def test_percent_is_literal(self, tmp_path) -> None:
+        store = self._store_with(tmp_path, "W0AEZ")
+        assert store.list_qsos(callsign="%") == []
+        store.close()
+
+    def test_underscore_does_not_wildcard_match(self, tmp_path) -> None:
+        store = self._store_with(tmp_path, "W0AEZ")
+        assert store.list_qsos(callsign="W0_EZ") == []
+        store.close()
+
+    def test_mode_filter_escaped_too(self, tmp_path) -> None:
+        store = LogbookStore(tmp_path / "esc2.db")
+        store.insert(_q(mode="Martin M1"))
+        assert store.list_qsos(mode="M_rtin") == []
+        assert len(store.list_qsos(mode="Martin")) == 1
+        store.close()
+
+
+class TestInsertMany:
+    """Audit #10: batched import — one transaction, all-or-nothing."""
+
+    def test_inserts_all_and_returns_count(self, tmp_path) -> None:
+        store = LogbookStore(tmp_path / "many.db")
+        n = store.insert_many([_q(callsign=f"K{i}AAA") for i in range(5)])
+        assert n == 5
+        assert store.count() == 5
+        store.close()
+
+    def test_failure_rolls_back_whole_batch(self, tmp_path) -> None:
+        store = LogbookStore(tmp_path / "many2.db")
+        bad = _q()
+        bad.direction = "SIDEWAYS"  # type: ignore[assignment]
+        with pytest.raises(ValueError):
+            store.insert_many([_q(callsign="K1OK"), bad])
+        assert store.count() == 0, "partial import must roll back"
+        # Connection is healthy afterwards — normal inserts still work.
+        store.insert(_q(callsign="K2OK"))
+        assert store.count() == 1
+        store.close()
+
+    def test_empty_batch_is_noop(self, tmp_path) -> None:
+        store = LogbookStore(tmp_path / "many3.db")
+        assert store.insert_many([]) == 0
+        store.close()
+
+
+class TestListDedupeFields:
+    def test_returns_key_columns_excluding_drafts(self, tmp_path) -> None:
+        store = LogbookStore(tmp_path / "keys.db")
+        store.insert(_q(callsign="K1ABC", mode="Martin M1"))
+        store.insert(_q(callsign=""))  # draft — excluded
+        fields = store.list_dedupe_fields()
+        assert len(fields) == 1
+        callsign, time_iso, mode = fields[0]
+        assert callsign == "K1ABC"
+        assert mode == "Martin M1"
+        assert time_iso.endswith("+00:00")
+        store.close()
