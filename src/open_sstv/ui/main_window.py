@@ -142,6 +142,41 @@ if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
 
 
+def _drain_subprocess_stderr(proc: subprocess.Popen, name: str) -> None:
+    """Pump *proc*'s stderr into the app log on a daemon thread.
+
+    v0.4.0 audit high #2: a child launched with ``stderr=PIPE`` that
+    nobody reads wedges once the OS pipe buffer (~64 KB) fills — the
+    child blocks on ``write(2)`` and stops doing its real job.  For
+    rigctld that means the daemon stops servicing CAT commands, worst
+    case with PTT keyed.  The pump thread is a daemon so it can never
+    hold the interpreter open; it exits when the child closes stderr.
+
+    Qt-free and module-level so it's unit-testable without a window.
+    """
+    if proc.stderr is None:  # not launched with stderr=PIPE — nothing to do
+        return
+
+    def _pump() -> None:
+        try:
+            assert proc.stderr is not None
+            for raw in proc.stderr:
+                line = raw.decode("utf-8", errors="replace").rstrip()
+                if line:
+                    _log.info("%s: %s", name, line)
+        except Exception:  # noqa: BLE001 — the drain must never die loudly
+            pass
+        finally:
+            try:
+                proc.stderr.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    threading.Thread(
+        target=_pump, name=f"{name}-stderr-drain", daemon=True
+    ).start()
+
+
 class _RigPollWorker(QObject):
     """Polls the rig for frequency, mode, and S-meter on a dedicated thread.
 
@@ -242,14 +277,29 @@ class _RigConnectWorker(QObject):
         self._rig = rig
         self._cancel = cancel
 
+    def _close_quietly(self) -> None:
+        """Best-effort close of a rig we opened but nobody will use."""
+        try:
+            self._rig.close()
+        except Exception:  # noqa: BLE001 — already abandoned; never raise
+            pass
+
     @Slot()
     def run(self) -> None:
         try:
             self._rig.open()
             if self._cancel.is_set():
+                # v0.4.0 audit high #7: the GUI timeout/cancel won the
+                # race but open() succeeded anyway — close what we just
+                # opened or it leaks for the process lifetime (a leaked
+                # exclusive COM handle on Windows makes every subsequent
+                # Connect fail until the app restarts; a leaked TCI
+                # socket keeps a recv daemon thread alive per attempt).
+                self._close_quietly()
                 return
             self._rig.ping()
             if self._cancel.is_set():
+                self._close_quietly()
                 return
             self.succeeded.emit(self._rig)
         except RigError as exc:
@@ -509,6 +559,14 @@ class MainWindow(QMainWindow):
         #: mtime stamps the logbook draft instead of "now", and the
         #: draft gets no rig frequency.
         self._offline_decode_source: Path | None = None
+        #: Rig whose teardown was deferred because a TX was still
+        #: unwinding when the involuntary-disconnect handler ran
+        #: (v0.4.0 audit high #1).  The TX worker's ``_unkey_with_retry``
+        #: owns the backend until it reports idle; closing it (or
+        #: killing rigctld) underneath the retry loop can leave the
+        #: radio keyed.  Finished by ``_finish_deferred_rig_teardown``
+        #: from the TX completion/abort handlers.
+        self._deferred_rig_teardown: Rig | None = None
 
         # --- Menu bar ---
         self._build_menu_bar()
@@ -1655,6 +1713,12 @@ class MainWindow(QMainWindow):
         the existing disconnect path (``_on_rig_disconnect``) is what
         clears it, and re-starting here would poll a dead port.
         """
+        # v0.4.0 audit high #1: if an involuntary disconnect happened
+        # mid-TX, its backend teardown was deferred so the worker's
+        # unkey retries kept a live rig.  The completion/abort signal
+        # that brought us here fires only after _run_tx fully unwound
+        # (unkey included) — safe to finish the teardown now.
+        self._finish_deferred_rig_teardown()
         self._radio_panel.set_tx_active(False)
         self._settings_action.setEnabled(True)
         # Only resume polling if the rig is still a real backend. If the
@@ -2570,6 +2634,14 @@ class MainWindow(QMainWindow):
                     stderr=subprocess.PIPE,
                     start_new_session=True,
                 )
+                # v0.4.0 audit high #2: the stderr pipe MUST be drained.
+                # hamlib chatters per-transaction errors on a flaky CAT
+                # cable; once the OS pipe buffer (~64 KB) fills, rigctld
+                # blocks on write(2) and stops servicing its TCP socket
+                # entirely — worst case while PTT is keyed.  Draining
+                # into our log also lands hamlib's diagnostics in the
+                # diagnostics zip, where they belong.
+                _drain_subprocess_stderr(self._rigctld_proc, "rigctld")
             except FileNotFoundError:
                 self.statusBar().showMessage(
                     "rigctld not found — install Hamlib, or switch to Direct Serial in Settings", 5000,
@@ -2908,14 +2980,43 @@ class MainWindow(QMainWindow):
         # Abort any in-flight TX immediately so audio doesn't continue
         # playing through Mac speakers after the USB device is gone.
         self._tx_worker.request_stop()
+        if not self._tx_worker.wait_for_idle(0.0):
+            # v0.4.0 audit high #1: a TX is still unwinding, and its
+            # _unkey_with_retry is about to close/re-open THIS backend
+            # to drop PTT.  Killing rigctld / closing the rig here
+            # destroys that unkey path (rigctld dead before attempt 1;
+            # serial close racing the retry's open→set_ptt) and can
+            # leave the radio keyed after a recoverable glitch.  Defer:
+            # the TX complete/abort handler finishes the teardown once
+            # the worker reports idle.
+            self._deferred_rig_teardown = old_rig
+        else:
+            self._kill_rigctld()
+            try:
+                old_rig.close()
+            except Exception:  # noqa: BLE001 — dead port may raise termios.error
+                pass
+        self.statusBar().showMessage(
+            "Radio disconnected — check USB connection", 8000
+        )
+
+    def _finish_deferred_rig_teardown(self) -> None:
+        """Complete a rig teardown deferred by ``_on_radio_disconnected``.
+
+        Called from the TX completion/abort handlers (which fire after
+        ``_run_tx`` has fully unwound, unkey retries included) and from
+        ``closeEvent`` after the worker threads join — whichever comes
+        first.  No-op when nothing was deferred.
+        """
+        old_rig = self._deferred_rig_teardown
+        if old_rig is None:
+            return
+        self._deferred_rig_teardown = None
         self._kill_rigctld()
         try:
             old_rig.close()
         except Exception:  # noqa: BLE001 — dead port may raise termios.error
             pass
-        self.statusBar().showMessage(
-            "Radio disconnected — check USB connection", 8000
-        )
 
     def _kill_rigctld(self) -> None:
         """Terminate any rigctld process we spawned.
@@ -3076,7 +3177,10 @@ class MainWindow(QMainWindow):
         # thread.wait(3000) below would handle it anyway, but waiting here
         # first makes the shutdown ordering explicit and avoids the edge case
         # where the thread.quit() drains queued events before the worker exits.
-        self._tx_worker.wait_for_stop(timeout=1.0)
+        # v0.4.0 audit high #5: this must wait for the worker to be IDLE
+        # (fully unwound, unkey done) — the old wait_for_stop waited on
+        # the stop flag request_stop had just set, returning instantly.
+        self._tx_worker.wait_for_idle(timeout=1.0)
 
         # Stop RX audio capture via the queued signal so the actual
         # PortAudio/QTimer teardown runs on the audio worker thread
@@ -3167,6 +3271,18 @@ class MainWindow(QMainWindow):
             )
             t.start()
             t.join(timeout=3.0)
+            # v0.4.0 audit high #4: if the TX thread is STILL running
+            # after the emergency unkey, detach it from this window —
+            # it is a QThread(self) child, and ~QThread on a live
+            # thread is a qFatal process abort at window destruction.
+            # A leaked thread at exit beats an abort (same policy the
+            # offline-worker drain documents).
+            if not self._tx_thread.wait(500):
+                _logging.getLogger(__name__).warning(
+                    "TX worker thread still running at close — detaching "
+                    "from the window to avoid QThread destruction abort"
+                )
+                self._tx_thread.setParent(None)
 
         for thread in (
             self._audio_thread,
@@ -3175,7 +3291,17 @@ class MainWindow(QMainWindow):
             self._update_thread,
         ):
             thread.quit()
-            thread.wait(4000)
+            if not thread.wait(4000):
+                # v0.4.0 audit high #4: same detach-over-abort policy as
+                # the TX thread above — a wedged Core Audio stop() or a
+                # long P7 decode must not turn quit into a qFatal.
+                import logging as _logging2
+                _logging2.getLogger(__name__).warning(
+                    "%s did not stop within 4 s at close — detaching from "
+                    "the window to avoid QThread destruction abort",
+                    thread.objectName() or "worker thread",
+                )
+                thread.setParent(None)
 
         # v0.4 (audit #3): close the logbook's SQLite connection only
         # now — every worker thread that could emit a completion has
@@ -3186,6 +3312,13 @@ class MainWindow(QMainWindow):
             self._logbook_coordinator.close()
         except Exception:  # noqa: BLE001 — never block shutdown on the logbook
             pass
+
+        # v0.4.1 (audit high #1): if a mid-TX disconnect deferred its
+        # backend teardown and the app is quitting before the TX
+        # completion signal was processed, finish it here — the TX
+        # thread has joined (or been detached), so the unkey path is
+        # no longer using the old rig.
+        self._finish_deferred_rig_teardown()
 
         try:
             self._rig.close()

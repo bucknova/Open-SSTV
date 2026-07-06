@@ -66,6 +66,7 @@ use this helper at all — it has its own slowrx-style sampler.
 """
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import numpy as np
@@ -227,7 +228,10 @@ def _sample_pixels_inc(
             out[col] = neutral
             continue
         norm = (freq - span_lo) / span_range
-        if norm < 0.0:
+        # v0.4.0 audit high #3: NaN passes both range checks (NaN
+        # comparisons are False) and int(round(nan)) raises, wedging
+        # the streaming decoder — clamp non-finite to black instead.
+        if not math.isfinite(norm) or norm < 0.0:
             norm = 0.0
         elif norm > 1.0:
             norm = 1.0

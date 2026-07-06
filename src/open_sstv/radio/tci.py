@@ -362,10 +362,24 @@ class TciConnection:
     # --- recv loop ----------------------------------------------------------
 
     def _recv_loop(self) -> None:
+        # v0.4.0 audit high #6: websocket-client raises its own
+        # WebSocketTimeoutException (an ``Exception`` subclass, NOT
+        # ``TimeoutError``) when the socket timeout expires, so catching
+        # TimeoutError alone never matched — every idle period longer
+        # than ``_SOCKET_TIMEOUT_S`` killed this loop and the app then
+        # force-disconnected a perfectly healthy SDR (mid-TX, that
+        # aborts the image).  The import is free here: ``connect()``
+        # already imported the module before this thread starts.
+        import websocket  # noqa: PLC0415
+
+        timeout_excs: tuple[type[BaseException], ...] = (
+            TimeoutError,
+            websocket.WebSocketTimeoutException,
+        )
         while not self._closed and self._ws is not None:
             try:
                 opcode, data = self._ws.recv_data()
-            except TimeoutError:
+            except timeout_excs:
                 # Expected on idle: the ``_SOCKET_TIMEOUT_S`` we set after
                 # ``connect()`` makes every read block for at most that
                 # window so a wedged ``send_binary()`` can't hang the

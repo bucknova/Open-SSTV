@@ -65,6 +65,8 @@ from its neighbor, and converts YCbCr→RGB via Pillow.
 """
 from __future__ import annotations
 
+import logging
+import math
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -125,6 +127,30 @@ class DecodedImage:
     vis_code: int
 
 
+_log = logging.getLogger(__name__)
+
+
+def _sanitize_audio(arr: NDArray) -> NDArray:
+    """Replace non-finite samples (NaN / ±Inf) with silence.
+
+    v0.4.0 audit high #3: glitchy drivers and virtual audio cables can
+    hand the decoder NaN samples.  ``sosfiltfilt`` then smears them
+    across the whole filter window and the pixel samplers crash on
+    ``int(round(nan))`` — in the streaming decoder the offending line
+    window was never consumed, so every subsequent ``feed()`` re-raised
+    and RX was dead until a reset.  One ``isfinite`` pass per chunk at
+    the two public entry points is cheap insurance; the per-sampler
+    guards downstream are defence in depth.
+    """
+    if np.isfinite(arr).all():
+        return arr
+    _log.warning(
+        "audio chunk contains non-finite samples (driver glitch?) — "
+        "replacing with silence"
+    )
+    return np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+
+
 def decode_wav(
     samples: NDArray, fs: int
 ) -> DecodedImage | None:
@@ -146,6 +172,7 @@ def decode_wav(
     arr = np.asarray(samples, dtype=np.float64)
     if arr.ndim != 1 or arr.size == 0:
         return None
+    arr = _sanitize_audio(arr)
 
     # Bandpass-filter to the SSTV signalling band before demodulation.
     # Without this the Hilbert transform sees noise from DC to Nyquist,
@@ -809,7 +836,10 @@ def _sample_pixels(
         # Linear map 1500..2300 → 0..255 with clipping. Inlined to keep
         # this hot loop a single pass over the array.
         norm = (freq - span_lo) / span_range
-        if norm < chroma_floor:
+        # v0.4.0 audit high #3: NaN passes BOTH range checks (NaN
+        # comparisons are False) and int(round(nan)) raises — treat a
+        # non-finite sample as neutral rather than crashing the line.
+        if not math.isfinite(norm) or norm < chroma_floor:
             out[col] = neutral
             continue
         elif norm > 1.0:
@@ -1171,7 +1201,7 @@ class Decoder:
         if arr.ndim != 1:
             return [DecodeError(f"feed expected 1-D, got {arr.ndim}-D")]
         if arr.size > 0:
-            self._buffer.append(arr)
+            self._buffer.append(_sanitize_audio(arr))
 
         joined = self._joined()
         if joined.size == 0:

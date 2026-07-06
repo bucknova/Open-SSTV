@@ -48,6 +48,7 @@ Design notes
 """
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -95,7 +96,9 @@ def sample_pixel(
         return 0
     freq = float(np.mean(inst[lo:hi]))
     byte_val = (freq - SSTV_BLACK_HZ) / HZ_PER_BYTE
-    if byte_val < 0.0:
+    # v0.4.0 audit high #3: NaN passes both range checks (NaN comparisons
+    # are False) and int(round(nan)) raises — clamp non-finite to black.
+    if not math.isfinite(byte_val) or byte_val < 0.0:
         return 0
     if byte_val > 255.0:
         return 255

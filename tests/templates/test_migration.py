@@ -399,3 +399,59 @@ class TestV2CustomisationPreserved:
         from open_sstv.templates.model import TextLayer
         text_layers = [la for la in t.layers if isinstance(la, TextLayer)]
         assert text_layers[0].anchor == "BC"
+
+
+class TestReRunSafety:
+    """v0.4.1 audit high #8: the legacy migration is one-time and never
+    clobbers — re-running (starters deleted, legacy file still present)
+    must not revert user edits to migrated templates."""
+
+    def _first_run(self, tmp_path: Path) -> tuple[Path, Path]:
+        tdir = tmp_path / "templates"
+        cfg = tmp_path / "config"
+        cfg.mkdir()
+        _write_v2_templates(
+            cfg, [{"name": "My Custom", "overlays": [{"text": "CQ CQ de W0AEZ"}]}]
+        )
+        result = run_migration(templates_dir=tdir, user_config_dir=cfg)
+        assert result.startswith("legacy_migrated:")
+        return tdir, cfg
+
+    def test_marker_written_after_legacy_migration(self, tmp_path: Path) -> None:
+        tdir, _cfg = self._first_run(tmp_path)
+        assert (tdir / ".v2_migration_done").exists()
+
+    def test_rerun_after_starter_deletion_keeps_user_edits(
+        self, tmp_path: Path
+    ) -> None:
+        tdir, cfg = self._first_run(tmp_path)
+        migrated = tdir / "my_custom.toml"
+        assert migrated.exists()
+        # User edits their migrated template and curates away starters.
+        edited = migrated.read_text().replace("CQ CQ de W0AEZ", "EDITED BY USER")
+        migrated.write_text(edited)
+        for starter in tdir.glob("*.toml"):
+            if starter != migrated:
+                starter.unlink()
+        # Next launch: gate 1 fails (no starters), but the marker stops
+        # the legacy re-migration — edits survive, starters reinstall.
+        result = run_migration(templates_dir=tdir, user_config_dir=cfg)
+        assert result == "starter_pack_installed"
+        assert "EDITED BY USER" in migrated.read_text()
+
+    def test_pre_marker_rerun_never_overwrites_existing_file(
+        self, tmp_path: Path
+    ) -> None:
+        # Users who migrated under pre-v0.4.1 code have no marker: the
+        # exists-skip is their protection on the one re-run that writes it.
+        tdir, cfg = self._first_run(tmp_path)
+        (tdir / ".v2_migration_done").unlink()
+        migrated = tdir / "my_custom.toml"
+        migrated.write_text(migrated.read_text().replace("CQ CQ de W0AEZ", "KEEP ME"))
+        for starter in tdir.glob("*.toml"):
+            if starter != migrated:
+                starter.unlink()
+        result = run_migration(templates_dir=tdir, user_config_dir=cfg)
+        assert result.startswith("legacy_migrated:")
+        assert "KEEP ME" in migrated.read_text()
+        assert (tdir / ".v2_migration_done").exists()  # marker healed

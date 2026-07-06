@@ -317,3 +317,46 @@ class TestSocketTimeout:
             "recv loop broke on socket.timeout instead of continuing"
         )
         assert call_count["n"] >= 3, "expected at least 3 recv_data calls"
+
+
+class TestRecvLoopTimeoutTolerance:
+    """v0.4.1 audit high #6: a socket timeout on an idle control channel
+    must keep the recv loop alive — websocket-client raises its own
+    WebSocketTimeoutException, not TimeoutError."""
+
+    def _loop_with_fake_ws(self, exceptions: list[BaseException]) -> int:
+
+        from open_sstv.radio.tci import TciConnection
+
+        conn = TciConnection("127.0.0.1", 40001)
+        calls = {"n": 0}
+
+        class FakeWs:
+            def recv_data(self_inner):
+                calls["n"] += 1
+                if exceptions:
+                    raise exceptions.pop(0)
+                conn._closed = True  # clean exit after the script runs dry
+                return (1, b"")
+
+        conn._ws = FakeWs()
+        conn._recv_loop()
+        return calls["n"]
+
+    def test_websocket_timeout_is_tolerated(self) -> None:
+        import websocket
+
+        # Three idle timeouts, then a clean read: the loop must survive
+        # all three (the v0.4.0 bug killed it on the first).
+        n = self._loop_with_fake_ws(
+            [
+                websocket.WebSocketTimeoutException("timed out"),
+                TimeoutError("timed out"),
+                websocket.WebSocketTimeoutException("timed out"),
+            ]
+        )
+        assert n == 4  # 3 timeouts tolerated + 1 final read
+
+    def test_real_errors_still_end_the_loop(self) -> None:
+        n = self._loop_with_fake_ws([ConnectionResetError("gone")])
+        assert n == 1  # loop exits on the first genuine error
