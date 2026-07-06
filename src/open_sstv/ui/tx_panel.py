@@ -467,7 +467,14 @@ class TxPanel(QWidget):
     def _on_duplicate_template_requested(self, path: Path) -> None:
         try:
             new_path = template_manager.duplicate_template(path)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
+            # v0.4.0 audit low #17: duplicate_template re-loads the
+            # source file, which raises TOMLDecodeError /
+            # TemplateLoadError / SchemaVersionError (all ValueError
+            # subclasses) if the file was corrupted after the gallery
+            # listed it — those escaped the old OSError-only catch and
+            # left the user with a console traceback instead of a
+            # dialog.
             QMessageBox.critical(
                 self, "Duplicate failed", f"Could not duplicate template:\n{exc}"
             )

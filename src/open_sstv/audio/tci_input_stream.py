@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import logging
 import queue
+import threading
+import time
 
 import numpy as np
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
@@ -29,6 +31,15 @@ _log = logging.getLogger(__name__)
 
 _QUEUE_MAXSIZE: int = 256
 _POLL_INTERVAL_MS: int = 50
+
+#: v0.4.0 audit medium #12: how long the drain timer tolerates an empty
+#: queue while subscribed before declaring the stream dead.  The
+#: PortAudio worker has a device watchdog for exactly this failure
+#: class; without one here, a server whose audio pipeline stalls while
+#: its control channel stays alive (rig poll keeps succeeding) left the
+#: app in "Capturing" forever, silently recording nothing for a
+#: monitoring station.  Matches InputStreamWorker's outer 6 s bound.
+_STALL_TIMEOUT_S: float = 6.0
 
 
 class TciInputStreamWorker(QObject):
@@ -62,6 +73,15 @@ class TciInputStreamWorker(QObject):
         self._timer: QTimer | None = None
         self._running: bool = False
         self._dropped_chunks: int = 0
+        # v0.4.0 audit low #15: the counter is incremented on the
+        # WebSocket recv thread and reset/read on the worker thread —
+        # same race InputStreamWorker fixed with its drop lock (H5).
+        self._drop_lock = threading.Lock()
+        # v0.4.0 audit medium #12: stall watchdog state.  Written only
+        # on the worker thread (start() and the drain timer), so no
+        # lock is needed.
+        self._last_chunk_monotonic: float = 0.0
+        self._stall_reported: bool = False
 
     @property
     def is_running(self) -> bool:
@@ -85,8 +105,11 @@ class TciInputStreamWorker(QObject):
             self.error.emit("TCI input stream already running; stop first")
             return
 
-        self._dropped_chunks = 0
+        with self._drop_lock:
+            self._dropped_chunks = 0
         self._running = True
+        self._last_chunk_monotonic = time.monotonic()
+        self._stall_reported = False
 
         # Drain stale chunks from a previous session.
         while not self._queue.empty():
@@ -158,10 +181,10 @@ class TciInputStreamWorker(QObject):
             except queue.Empty:
                 break
 
-        if self._dropped_chunks > 0:
-            self.error.emit(
-                f"TCI input overflow: dropped {self._dropped_chunks} chunks"
-            )
+        with self._drop_lock:
+            dropped = self._dropped_chunks
+        if dropped > 0:
+            self.error.emit(f"TCI input overflow: dropped {dropped} chunks")
 
         self.stopped.emit()
 
@@ -187,16 +210,48 @@ class TciInputStreamWorker(QObject):
         try:
             q.put_nowait(samples)
         except queue.Full:
-            self._dropped_chunks += 1
+            lock = getattr(self, "_drop_lock", None)
+            if lock is None:
+                return
+            with lock:
+                self._dropped_chunks += 1
 
     @Slot()
     def _drain_queue(self) -> None:
+        drained = 0
         while True:
             try:
                 chunk = self._queue.get_nowait()
             except queue.Empty:
                 break
             self.chunk_ready.emit(chunk)
+            drained += 1
+
+        # v0.4.0 audit medium #12: data-flow watchdog.  A TCI server
+        # whose audio pipeline stalls while the control channel stays
+        # healthy produces no chunks — the rig poll keeps succeeding,
+        # so nothing else notices.  Mirror InputStreamWorker's device
+        # watchdog: after _STALL_TIMEOUT_S of silence, report a stream
+        # error so MainWindow's device-lost handling can stop the
+        # capture and tell the operator instead of "Capturing" forever.
+        if drained > 0:
+            self._last_chunk_monotonic = time.monotonic()
+            return
+        if (
+            self._running
+            and not self._stall_reported
+            and time.monotonic() - self._last_chunk_monotonic > _STALL_TIMEOUT_S
+        ):
+            self._stall_reported = True
+            _log.warning(
+                "TCI audio stream stalled: no chunks for %.0f s with the "
+                "control channel still up",
+                _STALL_TIMEOUT_S,
+            )
+            self.stream_error.emit(
+                "TCI audio stream stalled — no audio from the server for "
+                f"{_STALL_TIMEOUT_S:.0f} s"
+            )
 
 
 __all__ = ["TciInputStreamWorker"]

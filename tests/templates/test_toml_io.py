@@ -745,3 +745,45 @@ class TestBundledStarterTemplates:
             t = load_template(bdir / filename)
             assert any(isinstance(l, PhotoLayer) for l in t.layers), \
                 f"{filename} should have a PhotoLayer"
+
+
+class TestLayerNumericHardening:
+    """v0.4.1 audit medium #13: hostile numeric layer fields are clamped
+    at load instead of reaching the renderer (OOM) or the next save
+    (TypeError)."""
+
+    def _load_with_layer_fields(self, tmp_path, fields: str):
+        from open_sstv.templates.toml_io import load_template
+
+        p = tmp_path / "hostile.toml"
+        p.write_text(
+            '[template]\n'
+            'name = "Hostile"\n'
+            'role = "custom"\n'
+            'reference_frame = [320, 256]\n'
+            'schema_version = 1\n'
+            '[[layer]]\n'
+            'type = "text"\n'
+            'id = "t1"\n'
+            'text = "hi"\n'
+            'font_family = "DejaVu Sans Bold"\n'
+            'font_size_pct = 6.5\n'
+            'fill = [255, 255, 255, 255]\n'
+            + fields
+        )
+        return load_template(p)
+
+    def test_absurd_width_pct_is_clamped(self, tmp_path) -> None:
+        t = self._load_with_layer_fields(tmp_path, "width_pct = 100000000.0\n")
+        assert t.layers[0].width_pct == 1000.0
+
+    def test_wrong_type_opacity_falls_back_to_default(self, tmp_path) -> None:
+        t = self._load_with_layer_fields(tmp_path, 'opacity = "0.5"\n')
+        assert t.layers[0].opacity == 1.0  # dataclass default, not the string
+
+    def test_sane_values_pass_through(self, tmp_path) -> None:
+        t = self._load_with_layer_fields(
+            tmp_path, "width_pct = 55.5\nopacity = 0.75\n"
+        )
+        assert t.layers[0].width_pct == 55.5
+        assert t.layers[0].opacity == 0.75

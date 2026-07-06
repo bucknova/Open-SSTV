@@ -47,6 +47,12 @@ _log = logging.getLogger(__name__)
 
 _APP_NAME = "open_sstv"
 
+#: Dotfile written into the templates dir after the one-time v0.2 →
+#: v0.3 legacy migration.  Gates step 2 of ``run_migration`` so the
+#: never-deleted legacy ``templates.toml`` can't be re-migrated over
+#: the user's edited templates on a later launch (v0.4.0 audit high #8).
+_V2_MIGRATION_MARKER = ".v2_migration_done"
+
 # v0.2 default template texts — if the loaded v0.2 templates match these
 # exactly, we skip legacy migration and install the starter pack instead.
 _V2_DEFAULT_TEXTS: frozenset[str] = frozenset([
@@ -228,27 +234,68 @@ def run_migration(
         return "already_populated"
 
     # Step 2: Check for user-customised v0.2 templates.
+    #
+    # v0.4.0 audit high #8: this step must be ONE-TIME.  The legacy
+    # ``templates.toml`` is deliberately never deleted, and the step-1
+    # gate only checks starter filenames — a v0.2 upgrader who later
+    # curated away all eight starters re-entered this branch on every
+    # launch, which re-generated the migrated templates over any edits
+    # the user had made to them and force-reinstalled the deleted
+    # starter pack.  A marker file records that the legacy migration
+    # already ran; and even when it does run, existing files are never
+    # overwritten (the user's copy always wins).
+    marker = tdir / _V2_MIGRATION_MARKER
     v2_path = _v2_templates_path(user_config_dir)
-    legacy_texts = _load_v2_texts(v2_path)
+    legacy_texts = [] if marker.exists() else _load_v2_texts(v2_path)
 
     if legacy_texts:
         tdir.mkdir(parents=True, exist_ok=True)
         count = 0
+        written_this_run: set[str] = set()
         for i, (text, name, overlay_raw) in enumerate(legacy_texts, start=1):
             t = _make_v3_from_v2(text, name, i, overlay_raw)
             safe = t.name.replace(" ", "_").replace("(", "").replace(")", "").lower()
             safe = "".join(c for c in safe if c.isalnum() or c in "_-")
-            path = tdir / f"{safe}.toml"
+            safe = safe or f"template_{i}"
+            # v0.4.0 audit low #16: two same-named v0.2 templates (or two
+            # customised overlays of one template) collide on the slug —
+            # the second used to silently overwrite the first, losing one
+            # overlay's text with the migration count still reporting
+            # both.  Uniquify within THIS run; a file that already
+            # existed on disk before the run is the user's and is
+            # skipped, not suffixed (see the exists check below).
+            candidate = safe
+            n = 2
+            while candidate in written_this_run:
+                candidate = f"{safe}-{n}"
+                n += 1
+            path = tdir / f"{candidate}.toml"
+            if path.exists():
+                # Never clobber — a file that exists is either a prior
+                # migration the user may have edited, or their own
+                # template that happens to share the slug.
+                _log.debug(
+                    "Migrated template %s already exists — keeping the "
+                    "user's copy",
+                    path.name,
+                )
+                continue
+            written_this_run.add(candidate)
             try:
                 save_template(t, path)
                 count += 1
                 _log.info("Migrated v0.2 template '%s' → %s", name, path.name)
             except OSError as exc:
                 _log.error("Failed to write migrated template %s: %s", path, exc)
+        try:
+            marker.touch()
+        except OSError as exc:
+            _log.warning("Could not write migration marker %s: %s", marker, exc)
         install_starter_pack(tdir)
         return f"legacy_migrated:{count}"
 
-    # Step 3: No legacy customisations — install the starter pack.
+    # Step 3: No legacy customisations (or the one-time legacy migration
+    # already ran) — install the starter pack.
     written = install_starter_pack(tdir)
     _log.info("Installed %d starter templates", len(written))
     return "starter_pack_installed"

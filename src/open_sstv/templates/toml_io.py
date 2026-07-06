@@ -112,16 +112,62 @@ def _shadow(d: dict) -> ShadowSpec:
     )
 
 
-def _base_kwargs(d: dict) -> dict:
-    """Extract LayerBase constructor kwargs from a TOML layer dict."""
+#: v0.4.0 audit medium #13: numeric layer fields were fed straight from
+#: TOML with no validation.  A shared template with ``width_pct = 1e8``
+#: survived load and made ``PIL.Image.new`` request hundreds of GB at
+#: render time — on Linux overcommit the OOM killer takes the whole app
+#: mid-TX, which no ``except`` can catch.  Wrong TYPES (string opacity)
+#: loaded fine too, then raised ``TypeError`` from ``tomli_w`` on the
+#: next re-save.  Bounds are generous (bleed/overscan layouts stay
+#: legal); the ceiling only exists to stop pathological values.
+_LAYER_NUMERIC_BOUNDS: dict[str, tuple[float, float]] = {
+    "opacity": (0.0, 1.0),
+    "width_pct": (0.0, 1000.0),
+    "height_pct": (0.0, 1000.0),
+    "offset_x_pct": (-1000.0, 1000.0),
+    "offset_y_pct": (-1000.0, 1000.0),
+    "rotation_deg": (-360.0, 360.0),
+}
+
+
+def _base_kwargs(d: dict, file_name: str = "<template>") -> dict:
+    """Extract LayerBase constructor kwargs from a TOML layer dict.
+
+    Numeric fields are type-checked and range-clamped (audit #13):
+    a hostile or fat-fingered value is clamped to a safe bound — or,
+    for a wrong type, dropped so the dataclass default applies — with
+    a warning, instead of reaching the renderer.  Same defensive-load
+    policy as ``AppConfig.__post_init__``.
+    """
     kw: dict = {"id": d["id"]}
     for key in (
         "name", "visible", "opacity", "anchor",
         "offset_x_pct", "offset_y_pct", "width_pct",
         "height_pct", "rotation_deg",
     ):
-        if key in d:
-            kw[key] = d[key]
+        if key not in d:
+            continue
+        val = d[key]
+        bounds = _LAYER_NUMERIC_BOUNDS.get(key)
+        if bounds is None:
+            kw[key] = val
+            continue
+        if isinstance(val, bool) or not isinstance(val, (int, float)):
+            _log.warning(
+                "Template %r: layer field %s must be a number, got %s %r "
+                "— using the default",
+                file_name, key, type(val).__name__, val,
+            )
+            continue  # omitted → LayerBase default
+        lo, hi = bounds
+        clamped = max(lo, min(hi, float(val)))
+        if clamped != float(val):
+            _log.warning(
+                "Template %r: layer field %s=%r out of range [%g, %g] — "
+                "clamped to %g",
+                file_name, key, val, lo, hi, clamped,
+            )
+        kw[key] = clamped
     return kw
 
 

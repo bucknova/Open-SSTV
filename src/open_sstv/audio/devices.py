@@ -25,11 +25,14 @@ This is the only module that imports ``sounddevice`` from outside
 """
 from __future__ import annotations
 
+import logging
 import platform
 import time
 from dataclasses import dataclass
 
 import sounddevice as sd
+
+_log = logging.getLogger(__name__)
 
 #: L1: TTL for the ``_all_devices`` cache.  ``sd.query_devices()`` is
 #: slow on macOS Core Audio (~50–500 ms after a USB event) and used to
@@ -117,29 +120,46 @@ def _all_devices() -> list[AudioDevice]:
     ):
         return list(_devices_cache[1])
 
-    host_apis = sd.query_hostapis()
-    host_api_names = [str(h["name"]) for h in host_apis]
-    # Index → True iff the host API name contains "jack" (case-insensitive).
-    # Linux-only: JACK doesn't ship as a PortAudio host API on macOS or
-    # Windows in any standard install, so the check is a no-op elsewhere
-    # but we still gate on platform to make the intent explicit.
-    on_linux = platform.system() == "Linux"
-    is_jack_hostapi = [
-        on_linux and "jack" in name.lower() for name in host_api_names
-    ]
-    devices = sd.query_devices()
-    out: list[AudioDevice] = []
-    for pa_index, raw in enumerate(devices):
-        # PortAudio yields each entry as a dict on this codepath; the
-        # ``index`` field isn't always present (some host APIs omit it),
-        # so we patch it in from the PortAudio enumeration position.
-        # Using len(out) would be wrong when earlier devices were skipped.
-        if "index" not in raw:
-            raw = {**raw, "index": pa_index}
-        hostapi_idx = int(raw["hostapi"])
-        if 0 <= hostapi_idx < len(is_jack_hostapi) and is_jack_hostapi[hostapi_idx]:
-            continue
-        out.append(_build(dict(raw), host_api_names))
+    # v0.4.0 audit medium #11: PortAudio can raise (PortAudioError on a
+    # broken ALSA/PipeWire config, or after USB device churn leaves the
+    # host API in an error state).  This function sits under
+    # MainWindow.__init__ and the Settings device combos — an escaping
+    # exception here aborted app launch entirely and made Settings
+    # unopenable, so the user couldn't even switch to a working device.
+    # Degrade to "no devices" (logged, uncached so recovery is possible
+    # on the next call) instead.
+    try:
+        host_apis = sd.query_hostapis()
+        host_api_names = [str(h["name"]) for h in host_apis]
+        # Index → True iff the host API name contains "jack"
+        # (case-insensitive).  Linux-only: JACK doesn't ship as a
+        # PortAudio host API on macOS or Windows in any standard
+        # install, so the check is a no-op elsewhere but we still gate
+        # on platform to make the intent explicit.
+        on_linux = platform.system() == "Linux"
+        is_jack_hostapi = [
+            on_linux and "jack" in name.lower() for name in host_api_names
+        ]
+        devices = sd.query_devices()
+        out: list[AudioDevice] = []
+        for pa_index, raw in enumerate(devices):
+            # PortAudio yields each entry as a dict on this codepath; the
+            # ``index`` field isn't always present (some host APIs omit it),
+            # so we patch it in from the PortAudio enumeration position.
+            # Using len(out) would be wrong when earlier devices were skipped.
+            if "index" not in raw:
+                raw = {**raw, "index": pa_index}
+            hostapi_idx = int(raw["hostapi"])
+            if 0 <= hostapi_idx < len(is_jack_hostapi) and is_jack_hostapi[hostapi_idx]:
+                continue
+            out.append(_build(dict(raw), host_api_names))
+    except Exception as exc:  # noqa: BLE001 — PortAudioError isn't importable everywhere
+        _log.warning(
+            "audio device enumeration failed (%s) — continuing with no "
+            "devices; check the system audio configuration",
+            exc,
+        )
+        return []
     _devices_cache = (now, list(out))
     return out
 

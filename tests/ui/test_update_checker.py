@@ -233,3 +233,24 @@ def test_check_updates_can_be_disabled(qtbot) -> None:
     qtbot.addWidget(dlg)
     dlg._check_updates.setChecked(False)
     assert dlg.check_updates_enabled() is False
+
+
+class TestNonUtf8Response:
+    """v0.4.1 audit low #18: a captive portal returning non-UTF-8 bytes
+    must not crash the worker slot — UnicodeDecodeError is a ValueError,
+    which the except tuple now covers."""
+
+    def test_invalid_utf8_body_is_swallowed(self) -> None:
+        bad = MagicMock()
+        bad.__enter__ = MagicMock(return_value=bad)
+        bad.__exit__ = MagicMock(return_value=False)
+        bad.read.return_value = b"\xff\xfe\xfa latin-1 error page"
+        worker = UpdateCheckerWorker()
+        done: list[bool] = []
+        worker.check_complete.connect(lambda: done.append(True))
+        with patch(
+            "open_sstv.ui.update_checker.urllib.request.urlopen",
+            return_value=bad,
+        ):
+            worker.check()  # must not raise
+        assert done == [True]

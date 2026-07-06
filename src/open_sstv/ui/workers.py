@@ -480,6 +480,15 @@ class TxWorker(QObject):
         #: while the worker thread writes it.
         self._tx_id_lock = threading.Lock()
         self._tx_id: int = 0
+        #: Set while NO transmission is in flight (set at construction,
+        #: cleared on entry to transmit/transmit_test_tone, re-set in
+        #: their finally).  ``wait_for_idle`` waits on THIS — the v0.4.0
+        #: audit (high #5) found closeEvent's grace period waiting on
+        #: ``_stop_event``, which ``request_stop`` had just set, so the
+        #: "let TX unwind" wait always returned immediately and the
+        #: worker was still mid-unkey when the thread was quit.
+        self._idle_event = threading.Event()
+        self._idle_event.set()
         # When set, TX audio is routed via this TCI connection instead of
         # PortAudio.  Accepts any object with a send_tx_audio_chunk() method
         # (duck-typed so workers.py doesn't import from radio.tci).
@@ -650,6 +659,20 @@ class TxWorker(QObject):
     @Slot(object, object)
     def transmit(self, image: PILImage, mode: Mode) -> None:
         """Encode and transmit one image. Worker-thread entry point.
+
+        Thin wrapper owning the idle flag: consumers of
+        ``wait_for_idle`` (closeEvent, deferred rig teardown) need a
+        guarantee that covers the WHOLE transmission — including the
+        finally-block unkey retries — not just playback.
+        """
+        self._idle_event.clear()
+        try:
+            self._transmit_impl(image, mode)
+        finally:
+            self._idle_event.set()
+
+    def _transmit_impl(self, image: PILImage, mode: Mode) -> None:
+        """Encode and transmit one image (body of :meth:`transmit`).
 
         Always emits exactly one of ``transmission_complete`` or
         ``transmission_aborted`` per call (or, on early encode/PTT
@@ -847,6 +870,17 @@ class TxWorker(QObject):
     @Slot()
     def transmit_test_tone(self) -> None:
         """Generate and transmit a two-tone test signal. Worker-thread entry point.
+
+        Thin wrapper owning the idle flag — see :meth:`transmit`.
+        """
+        self._idle_event.clear()
+        try:
+            self._test_tone_impl()
+        finally:
+            self._idle_event.set()
+
+    def _test_tone_impl(self) -> None:
+        """Two-tone test signal (body of :meth:`transmit_test_tone`).
 
         Produces ``_TEST_TONE_DURATION_S`` seconds of 700 Hz + 1900 Hz at
         −1 dBFS peak.  Follows the identical PTT-key → ptt_delay → play →
@@ -1329,10 +1363,26 @@ class TxWorker(QObject):
         Returns ``True`` if the flag was set within the timeout, ``False``
         if the timeout expired first. Safe to call from any thread.
 
-        Intended for ``closeEvent`` so the TX worker can unwind out of
-        ``play_blocking`` before the owning ``QThread`` is quit.
+        NOTE: this waits on the stop *request*, not on the worker
+        having unwound — a caller that needs "TX is actually finished,
+        PTT dropped, rig released" wants :meth:`wait_for_idle`.
         """
         return self._stop_event.wait(timeout=timeout)
+
+    def wait_for_idle(self, timeout: float) -> bool:
+        """Block until no transmission is in flight, or *timeout* elapses.
+
+        Returns ``True`` when the worker is idle — ``transmit`` /
+        ``transmit_test_tone`` fully unwound, including the
+        finally-block unkey retries — and ``False`` if the timeout
+        expired with a transmission still running.  Safe to call from
+        any thread; ``timeout=0`` is a non-blocking idle check.
+
+        v0.4.0 audit high #5: closeEvent previously "waited" on the
+        stop flag it had just set, which returned instantly and let the
+        owning QThread be quit while the worker was mid-unkey.
+        """
+        return self._idle_event.wait(timeout=timeout)
 
     def _watchdog_fire(self, duration_s: float = 0.0, tx_id: int = 0) -> None:
         """Called by a watchdog timer when TX exceeds its allowed budget.

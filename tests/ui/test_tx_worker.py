@@ -955,3 +955,75 @@ class TestUnkeyResilience:
         assert log["error"] and "no audio" in log["error"][0]
         assert log["aborted"] == [True]
         assert log["complete"] == []
+
+
+class TestWaitForIdle:
+    """v0.4.1 audit high #5: wait_for_idle tracks actual TX unwind —
+    unlike wait_for_stop, which waits on the request flag."""
+
+    def test_idle_before_any_tx(self) -> None:
+        worker = TxWorker()
+        assert worker.wait_for_idle(timeout=0.0) is True
+
+    def test_wait_for_stop_semantics_unchanged(self) -> None:
+        # The old method still waits on the stop REQUEST (OP-30 tests
+        # above cover it); this pins the distinction: after
+        # request_stop with no TX running, both return True but for
+        # different reasons.
+        worker = TxWorker()
+        worker.request_stop()
+        assert worker.wait_for_stop(timeout=0.0) is True
+        assert worker.wait_for_idle(timeout=0.0) is True
+
+    def test_not_idle_while_tx_in_flight(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        gradient_image: Image.Image,
+    ) -> None:
+        import threading as _threading
+
+        release = _threading.Event()
+        started = _threading.Event()
+
+        def blocking_play(*a, **k):
+            started.set()
+            release.wait(timeout=5.0)
+
+        monkeypatch.setattr(
+            "open_sstv.ui.workers.output_stream.play_blocking", blocking_play
+        )
+        worker = TxWorker()
+        t = _threading.Thread(
+            target=worker.transmit, args=(gradient_image, Mode.ROBOT_36)
+        )
+        t.start()
+        try:
+            # Wait until playback has actually begun — otherwise
+            # request_stop below can win the pre-playback stop check
+            # and the worker unwinds without ever blocking.
+            assert started.wait(timeout=2.0) is True
+            # TX is blocked inside playback: confirm the OLD bug's
+            # signature — after request_stop the stop flag reads True
+            # while the worker has NOT actually unwound (idle False).
+            assert worker.wait_for_idle(timeout=0.2) is False
+            worker.request_stop()
+            assert worker.wait_for_stop(timeout=0.5) is True
+            assert worker.wait_for_idle(timeout=0.2) is False
+            release.set()
+            assert worker.wait_for_idle(timeout=5.0) is True
+        finally:
+            release.set()
+            t.join(timeout=5.0)
+
+    def test_idle_restored_after_error_path(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        gradient_image: Image.Image,
+        patch_encode_and_playback: dict,
+    ) -> None:
+        # The wrapper's finally must set idle even when the impl bails
+        # early (encode failure).
+        patch_encode_and_playback["encode"].side_effect = RuntimeError("boom")
+        worker = TxWorker()
+        worker.transmit(gradient_image, Mode.ROBOT_36)
+        assert worker.wait_for_idle(timeout=0.0) is True

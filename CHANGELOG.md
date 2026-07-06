@@ -9,6 +9,69 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.4.1] — 2026-06-13
+
+Stability patch: a full-project audit run immediately after the
+v0.4.0 release (four subsystem auditors, findings adversarially
+verified — ``docs/audit_fable_5_v0.4.0.md``) produced nineteen
+findings, all fixed here with a regression test each.  No new
+features; every change hardens an error, shutdown, or stall path.
+
+### Fixed
+
+**PTT safety & TX lifecycle**
+- A transient CAT failure mid-TX could leave the radio keyed: the
+  involuntary-disconnect handler tore down the rig backend while the
+  TX worker's unkey retries were using it.  Teardown is now deferred
+  until the worker reports fully unwound.
+- ``closeEvent``'s "let TX unwind" grace period waited on the stop
+  *request* flag (a no-op); it now waits on a real idle event that
+  covers the whole transmission including unkey retries.
+- A wedged worker thread at quit no longer qFatal-aborts the process
+  — timed-out threads are detached from the window (leak-with-log).
+
+**Rig plumbing**
+- Auto-launched rigctld's stderr is drained into the app log — the
+  unread pipe used to fill (~64 KB of hamlib chatter) and wedge the
+  daemon, worst case while PTT was keyed.  A rigctld that dies at
+  launch is now reaped and cleared so reconnect can respawn it, and
+  ``kill()`` is followed by a reap (no zombie racing the respawn).
+- TCI: the recv loop now catches websocket-client's actual timeout
+  exception — an idle control channel no longer force-disconnects a
+  healthy SDR (or aborts a TX).  The TCI audio stream gains the same
+  stall watchdog the PortAudio input has, and its overflow counter is
+  lock-protected.
+- A cancelled/timed-out connect closes the rig it opened — a leaked
+  exclusive COM handle on Windows blocked reconnects until restart.
+
+**Decoder & audio**
+- Non-finite samples (NaN/Inf from glitchy drivers or virtual audio
+  cables) are zeroed at the decode entry points and clamped in all
+  three pixel samplers — one NaN chunk used to wedge the streaming
+  decoder permanently.
+- A stalled decode (VIS lock then dead carrier, or a mid-image fade)
+  no longer grows memory without bound (~2.8 GB/hour): both the
+  streaming front-end and the incremental backend now cap their
+  buffers at 1.5 image-durations.
+- PortAudio enumeration failure degrades to "no devices" instead of
+  aborting app launch and locking the user out of Settings.
+
+**Templates, migration & misc**
+- The one-time v0.2 template migration is marker-gated and never
+  overwrites existing files — upgraders who deleted the starter pack
+  no longer have their edited templates silently reverted every
+  launch; same-named legacy templates get unique slugs instead of
+  overwriting each other.
+- Template numeric layer fields are validated at load: a shared
+  template with an absurd ``width_pct`` can no longer OOM-kill the
+  app at render time.
+- Duplicating a template corrupted after gallery listing shows an
+  error dialog instead of a traceback; the update checker tolerates
+  non-UTF-8 (captive portal) responses; ``open-sstv-encode`` rejects
+  non-positive ``--sample-rate`` values cleanly.
+
 ## [0.4.0] — 2026-06-12
 
 The logbook release.  Every SSTV contact you make or hear can now be
