@@ -455,3 +455,31 @@ class TestReRunSafety:
         assert result.startswith("legacy_migrated:")
         assert "KEEP ME" in migrated.read_text()
         assert (tdir / ".v2_migration_done").exists()  # marker healed
+
+
+class TestSlugCollisions:
+    """v0.4.1 audit low #16: same-named v0.2 templates must not
+    overwrite each other during migration — uniquify within the run."""
+
+    def test_same_name_templates_both_survive(self, tmp_path: Path) -> None:
+        tdir = tmp_path / "templates"
+        cfg = tmp_path / "config"
+        cfg.mkdir()
+        _write_v2_templates(
+            cfg,
+            [
+                {"name": "My QSL", "overlays": [{"text": "FIRST TEXT"}]},
+                {"name": "My QSL", "overlays": [{"text": "SECOND TEXT"}]},
+            ],
+        )
+        result = run_migration(templates_dir=tdir, user_config_dir=cfg)
+        assert result == "legacy_migrated:2"
+        migrated = sorted(
+            p.name for p in tdir.glob("my_qsl*.toml")
+        )
+        assert migrated == ["my_qsl-2.toml", "my_qsl.toml"] or migrated == [
+            "my_qsl.toml",
+            "my_qsl-2.toml",
+        ]
+        blob = "".join(p.read_text() for p in tdir.glob("my_qsl*.toml"))
+        assert "FIRST TEXT" in blob and "SECOND TEXT" in blob

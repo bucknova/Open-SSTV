@@ -1149,10 +1149,55 @@ class Decoder:
         # High-water mark for lines_decoded; prevents backward progress events
         # from Robot 36 per-line back-fill re-emissions.
         self._incremental_max_row: int = 0
+        # v0.4.0 audit medium #10: set when the DECODING-state buffer cap
+        # trimmed retained audio — the full-fidelity re-decode buffer is
+        # then incomplete and must not be offered at completion.
+        self._retained_buffer_trimmed: bool = False
 
     @property
     def sample_rate(self) -> int:
         return self._fs
+
+    def _enforce_decoding_buffer_cap(self) -> None:
+        """Bound the DECODING-state buffer on the incremental path.
+
+        v0.4.0 audit medium #10 (reproduced): a VIS lock followed by
+        dead carrier grew the retained buffer without limit — ~2.8 GB
+        per hour for a headless caller of the streaming API — with an
+        O(N²) ``_joined()`` concat on top.  The retained audio's only
+        DECODING-state consumer is the full-fidelity re-decode snapshot
+        at completion, so past a generous cap (mode duration × 1.5 +
+        10 s, mirroring the RX watchdog's total-elapsed budget) we drop
+        the head and simply withhold that snapshot for this image.
+
+        The legacy batch path (``incremental_decode=False``) re-decodes
+        from the VIS on every flush and structurally needs the whole
+        buffer — it stays uncapped and remains bounded by the caller's
+        watchdog, as before.
+        """
+        if (
+            self._state != _DecoderState.DECODING
+            or not self._incremental_decode
+            or self._incremental_dec is None
+            or self._spec is None
+        ):
+            return
+        cap = int((self._spec.total_duration_s * 1.5 + 10.0) * self._fs)
+        total = sum(a.size for a in self._buffer)
+        if total <= cap:
+            return
+        joined = self._joined()
+        drop = total - cap
+        self._buffer = [joined[drop:]]
+        self._incremental_total_fed = max(0, self._incremental_total_fed - drop)
+        if not self._retained_buffer_trimmed:
+            self._retained_buffer_trimmed = True
+            _log.warning(
+                "decode buffer exceeded %.0f s cap (stalled decode?) — "
+                "trimming; the full-quality re-decode pass will be "
+                "unavailable for this image",
+                cap / self._fs,
+            )
 
     def last_complete_buffer(self) -> np.ndarray | None:
         """Return the raw audio that produced the most recent ``ImageComplete``.
@@ -1202,6 +1247,7 @@ class Decoder:
             return [DecodeError(f"feed expected 1-D, got {arr.ndim}-D")]
         if arr.size > 0:
             self._buffer.append(_sanitize_audio(arr))
+            self._enforce_decoding_buffer_cap()
 
         joined = self._joined()
         if joined.size == 0:
@@ -1372,7 +1418,12 @@ class Decoder:
 
         if self._incremental_dec.complete:
             img = self._incremental_dec.get_image()
-            self._last_complete_buffer = self._joined()
+            # Audit #10: a cap-trimmed buffer is missing its start —
+            # offering it for the full-quality re-decode would produce
+            # a corrupt image, so withhold the snapshot instead.
+            self._last_complete_buffer = (
+                None if self._retained_buffer_trimmed else self._joined()
+            )
             events.append(
                 ImageComplete(image=img, mode=self._mode, vis_code=self._vis_code)
             )
@@ -1436,6 +1487,7 @@ class Decoder:
         self._incremental_dec = None
         self._incremental_total_fed = 0
         self._incremental_max_row = 0
+        self._retained_buffer_trimmed = False
 
     def _joined(self) -> NDArray:
         if not self._buffer:

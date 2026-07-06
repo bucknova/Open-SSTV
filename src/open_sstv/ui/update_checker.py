@@ -178,7 +178,12 @@ class UpdateCheckerWorker(QObject):
         except (
             URLError,
             TimeoutError,
-            json.JSONDecodeError,
+            # v0.4.0 audit low #18: ValueError covers json.JSONDecodeError
+            # AND UnicodeDecodeError — a captive portal / corporate proxy
+            # returning a non-UTF-8 body (Latin-1 HTML error page) made
+            # json.loads raise UnicodeDecodeError, the one decode failure
+            # the old tuple (JSONDecodeError only) didn't catch.
+            ValueError,
             OSError,
             # M1: ``http.client.HTTPException`` (IncompleteRead, BadStatusLine,
             # etc.) is NOT an OSError subclass — a malformed response chunk

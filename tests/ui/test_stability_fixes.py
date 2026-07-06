@@ -215,3 +215,49 @@ class TestStderrDrain:
         )
         _drain_subprocess_stderr(proc, "fakectl")  # must not raise
         assert proc.wait(timeout=5) == 0
+
+
+class TestKillRigctldReaps:
+    """v0.4.1 audit low #14: kill() must be followed by a reap so the
+    child never lingers as a zombie racing the respawn for its ports."""
+
+    def test_sigterm_ignoring_child_is_reaped(
+        self, qtbot, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, patched_audio
+    ) -> None:
+        window = _make_window(qtbot, monkeypatch, tmp_path)
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import signal, time; "
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "time.sleep(60)",
+            ]
+        )
+        window._rigctld_proc = proc
+        window._kill_rigctld()
+        assert window._rigctld_proc is None
+        assert proc.returncode is not None, "child must be reaped, not zombied"
+
+
+class TestTemplateDuplicateErrors:
+    """v0.4.1 audit low #17: corrupting a template between gallery
+    listing and Duplicate must produce a dialog, not a traceback."""
+
+    def test_corrupt_file_shows_dialog(
+        self, qtbot, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
+        from open_sstv.ui.tx_panel import TxPanel
+
+        panel = TxPanel()
+        qtbot.addWidget(panel)
+        corrupt = tmp_path / "broken.toml"
+        corrupt.write_text("this is [ not toml = =")
+        shown: list[tuple] = []
+        monkeypatch.setattr(
+            QMessageBox, "critical", staticmethod(lambda *a, **k: shown.append(a))
+        )
+        panel._on_duplicate_template_requested(corrupt)  # must not raise
+        assert len(shown) == 1

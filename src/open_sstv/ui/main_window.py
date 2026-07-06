@@ -2691,6 +2691,23 @@ class MainWindow(QMainWindow):
         def _on_error(message: str) -> None:
             if not self.isVisible():
                 return
+            # v0.4.0 audit medium #9: if the rigctld we auto-launched
+            # died at startup (wrong -m model, serial port held by
+            # another program), keeping the dead Popen in
+            # ``_rigctld_proc`` made the ``is None`` guard skip
+            # auto-launch on every retry — the connection was
+            # unrecoverable without restarting the app, even after the
+            # user fixed the root cause.  ``poll()`` also reaps the
+            # zombie.  A still-running daemon is left alone: the retry
+            # will dial it again.
+            proc = self._rigctld_proc
+            if proc is not None and proc.poll() is not None:
+                _log.warning(
+                    "auto-launched rigctld exited with code %s — clearing "
+                    "so the next Connect can respawn it",
+                    proc.returncode,
+                )
+                self._rigctld_proc = None
             self._radio_panel.set_connection_error()
             self.statusBar().showMessage(
                 f"Could not connect to rigctld at {host}:{port} — {message}",
@@ -3037,7 +3054,12 @@ class MainWindow(QMainWindow):
             except subprocess.TimeoutExpired:
                 try:
                     self._rigctld_proc.kill()
-                except (ProcessLookupError, OSError):
+                    # v0.4.0 audit low #14: reap after kill().  Without
+                    # this wait the child lingers as a zombie and a
+                    # respawned rigctld can race the dying one for the
+                    # serial port and TCP listen port.
+                    self._rigctld_proc.wait(timeout=2)
+                except (ProcessLookupError, OSError, subprocess.TimeoutExpired):
                     pass
         except (ProcessLookupError, OSError):
             # Already gone — nothing to do.

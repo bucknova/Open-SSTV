@@ -33,6 +33,24 @@ from open_sstv.core.encoder import DEFAULT_SAMPLE_RATE, encode
 from open_sstv.core.modes import Mode
 
 
+def _positive_int(text: str) -> int:
+    """argparse type: a strictly positive integer.
+
+    v0.4.0 audit low #19: ``--sample-rate 0`` produced a
+    ZeroDivisionError traceback from inside PySSTV and negative rates
+    an uncaught ``wave.Error`` — both violating the documented 0/1/2
+    exit-code contract.  An ArgumentTypeError makes argparse reject the
+    value with a usage message and exit code 2, mirroring
+    ``Decoder.__init__``'s ``fs <= 0`` guard.
+    """
+    value = int(text)
+    if value <= 0:
+        raise argparse.ArgumentTypeError(
+            f"sample rate must be a positive integer, got {value}"
+        )
+    return value
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="open-sstv-encode",
@@ -62,7 +80,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--sample-rate",
-        type=int,
+        type=_positive_int,
         default=DEFAULT_SAMPLE_RATE,
         help=f"Output sample rate in Hz (default: {DEFAULT_SAMPLE_RATE}).",
     )

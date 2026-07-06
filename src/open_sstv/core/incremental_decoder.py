@@ -459,6 +459,7 @@ class IncrementalDecoderBase:
                 break
 
         self._prune()
+        self._enforce_stall_cap()
         return new_lines
 
     # --- Private helpers (shared across all concrete decoders) ---
@@ -581,6 +582,38 @@ class IncrementalDecoderBase:
         out.extend(new_rows)
         self._syncs_consumed += 1
         return True
+
+    def _enforce_stall_cap(self) -> None:
+        """Bound ``_buf`` when a decode stalls (audit #10).
+
+        ``_prune`` trims only behind the next expected grid position, so
+        a stalled decode grows without limit in two ways: before the
+        first line ever decodes (``_prune`` early-returns entirely) and
+        after a mid-image signal loss (the prune anchor freezes while
+        dead-carrier audio piles up behind it).  Either way, once we've
+        buffered more than 1.5 image-durations past the anchor the
+        decode is not going to complete from that grid — drop the head
+        and discard sync candidates that fell off the front.
+
+        Consequences are deliberately conservative: rows already
+        decoded stay in the image; if the trim leaves fewer grid
+        positions than ``_syncs_consumed``, ``_try_decode_next``'s
+        bounds check simply stops producing new rows (bounded memory,
+        no corruption), and the caller's watchdog/reset handles the
+        stalled image exactly as it did before — just without the
+        multi-GB memory bill for long headless sessions.
+        """
+        cap = (
+            int(self._grid_len * self._line_samp * 1.5)
+            + self._g_lookback
+            + self.FILTER_MARGIN
+        )
+        if len(self._buf) <= cap:
+            return
+        drop = len(self._buf) - cap
+        self._buf = self._buf[drop:]
+        self._buf_abs_start += drop
+        self._sync_abs = [s for s in self._sync_abs if s >= self._buf_abs_start]
 
     def _prune(self) -> None:
         """Trim audio we no longer need.

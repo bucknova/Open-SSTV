@@ -10,8 +10,12 @@ auditors, and seven load-bearing claims re-verified by hand against
 the source (7/7 upheld).  Known deferrals in `docs/future_work.md`,
 `docs/v0.4-plan.md`, and the v0.4 logbook audit were excluded.
 
-**Status: FINDINGS RECORDED, FIXES PENDING** — intended vehicle is a
-v0.4.1 stability patch PR.
+**Status: ALL NINETEEN FINDINGS FIXED** on the ``v0.4.1-stability``
+branch — highs in one commit, mediums + lows in the next, every fix
+with a regression test.  Note on #10: the fix went one hole deeper
+than the finding — ``_prune``'s anchor also freezes on a MID-image
+stall (``_syncs_consumed > 0``), discovered by the regression test,
+so the backend cap covers both stall shapes.
 
 Severity: 🔴 high (PTT safety / process death / data loss) ·
 🟡 medium · 🔵 low.

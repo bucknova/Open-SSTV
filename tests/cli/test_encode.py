@@ -113,3 +113,24 @@ def test_cli_requires_output(fixture_image: Path) -> None:
     with pytest.raises(SystemExit) as excinfo:
         main([str(fixture_image), "--mode", "robot_36"])
     assert excinfo.value.code == 2
+
+
+class TestSampleRateValidation:
+    """v0.4.1 audit low #19: non-positive sample rates are rejected by
+    argparse (exit 2) instead of crashing with tracebacks."""
+
+    def test_zero_rate_exits_2(self, tmp_path) -> None:
+        from open_sstv.cli.encode import main
+
+        with pytest.raises(SystemExit) as exc:
+            main(["img.png", "-o", str(tmp_path / "o.wav"),
+                  "--mode", "robot_36", "--sample-rate", "0"])
+        assert exc.value.code == 2
+
+    def test_negative_rate_exits_2(self, tmp_path) -> None:
+        from open_sstv.cli.encode import main
+
+        with pytest.raises(SystemExit) as exc:
+            main(["img.png", "-o", str(tmp_path / "o.wav"),
+                  "--mode", "robot_36", "--sample-rate", "-48000"])
+        assert exc.value.code == 2

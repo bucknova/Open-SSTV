@@ -294,3 +294,44 @@ class TestJackFilterNoOpWhenNoJackHostApi:
         ), _patch_platform("Linux"):
             inputs = devices.list_input_devices()
         assert [d.name for d in inputs] == ["USB Codec"]
+
+
+class TestEnumerationFailureHardening:
+    """v0.4.1 audit medium #11: PortAudio failure must degrade to 'no
+    devices', never abort app launch or block Settings."""
+
+    def test_query_failure_returns_empty(self, monkeypatch) -> None:
+        from open_sstv.audio import devices as mod
+
+        mod.invalidate_device_cache()
+
+        def boom() -> object:
+            raise RuntimeError("PortAudioError: host API unavailable")
+
+        monkeypatch.setattr(mod.sd, "query_hostapis", boom)
+        try:
+            assert mod.list_input_devices() == []
+            assert mod.list_output_devices() == []
+            assert mod.find_output_device_by_name("anything") is None
+        finally:
+            mod.invalidate_device_cache()
+
+    def test_failure_is_not_cached(self, monkeypatch) -> None:
+        from open_sstv.audio import devices as mod
+
+        mod.invalidate_device_cache()
+        calls = {"n": 0}
+
+        def flaky() -> object:
+            calls["n"] += 1
+            raise RuntimeError("transient")
+
+        monkeypatch.setattr(mod.sd, "query_hostapis", flaky)
+        try:
+            mod.list_input_devices()
+            mod.list_input_devices()
+            # Both calls re-queried — a cached failure would pin the app
+            # in no-device mode until restart.
+            assert calls["n"] == 2
+        finally:
+            mod.invalidate_device_cache()

@@ -251,11 +251,25 @@ def run_migration(
     if legacy_texts:
         tdir.mkdir(parents=True, exist_ok=True)
         count = 0
+        written_this_run: set[str] = set()
         for i, (text, name, overlay_raw) in enumerate(legacy_texts, start=1):
             t = _make_v3_from_v2(text, name, i, overlay_raw)
             safe = t.name.replace(" ", "_").replace("(", "").replace(")", "").lower()
             safe = "".join(c for c in safe if c.isalnum() or c in "_-")
-            path = tdir / f"{safe}.toml"
+            safe = safe or f"template_{i}"
+            # v0.4.0 audit low #16: two same-named v0.2 templates (or two
+            # customised overlays of one template) collide on the slug —
+            # the second used to silently overwrite the first, losing one
+            # overlay's text with the migration count still reporting
+            # both.  Uniquify within THIS run; a file that already
+            # existed on disk before the run is the user's and is
+            # skipped, not suffixed (see the exists check below).
+            candidate = safe
+            n = 2
+            while candidate in written_this_run:
+                candidate = f"{safe}-{n}"
+                n += 1
+            path = tdir / f"{candidate}.toml"
             if path.exists():
                 # Never clobber — a file that exists is either a prior
                 # migration the user may have edited, or their own
@@ -266,6 +280,7 @@ def run_migration(
                     path.name,
                 )
                 continue
+            written_this_run.add(candidate)
             try:
                 save_template(t, path)
                 count += 1
