@@ -386,3 +386,19 @@ def test_save_config_concurrent_calls_are_serialized(
 
     # And no orphan .tmp sibling left behind.
     assert not p.with_suffix(p.suffix + ".tmp").exists()
+
+
+def test_round_trip_gallery_extra_dirs(tmp_path: Path) -> None:
+    """v0.5: the list[str] gallery_extra_dirs field survives TOML round-trip."""
+    cfg = AppConfig(gallery_extra_dirs=["/mnt/sstv/archive", "/home/w0aez/rx"])
+    p = tmp_path / "config.toml"
+    save_config(cfg, path=p)
+    loaded = load_config(path=p)
+    assert loaded.gallery_extra_dirs == ["/mnt/sstv/archive", "/home/w0aez/rx"]
+    assert loaded == cfg
+
+
+def test_gallery_extra_dirs_bad_value_coerced(tmp_path: Path) -> None:
+    # A hand-edited scalar must not crash load — __post_init__ resets it.
+    cfg = AppConfig(gallery_extra_dirs="oops")  # type: ignore[arg-type]
+    assert cfg.gallery_extra_dirs == []

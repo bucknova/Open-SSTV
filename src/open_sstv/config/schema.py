@@ -201,6 +201,14 @@ class AppConfig:
     # smaller files.  Constrained by the Settings UI to "png" or "jpg".
     autosave_file_format: str = "png"
 
+    # v0.5: extra folders the image Gallery scans in addition to
+    # ``images_save_dir``.  Advanced / no UI in v0.5 (TOML-only, mirrors
+    # ``logbook_db_path``) — for operators who keep received images in
+    # more than one place.  ``__post_init__`` coerces a hand-edited
+    # non-list value back to an empty list so a bad TOML can't crash the
+    # gallery scan.
+    gallery_extra_dirs: list[str] = field(default_factory=list)
+
     # --- Logbook (v0.4) ---
     # When True, draft QSOs are written silently at TX/RX completion and
     # edited later from the Logbook window.  Default False → a modal
@@ -340,6 +348,20 @@ class AppConfig:
             _log.info(
                 "AppConfig: test_tone_freq_lo > test_tone_freq_hi — swapped"
             )
+
+        # v0.5: a hand-edited TOML could set gallery_extra_dirs to a
+        # scalar or a list with non-string entries; coerce to a clean
+        # list[str] so the gallery scan never chokes.
+        if not isinstance(self.gallery_extra_dirs, list):
+            _log.warning(
+                "AppConfig: gallery_extra_dirs is not a list (%r) — ignoring",
+                self.gallery_extra_dirs,
+            )
+            self.gallery_extra_dirs = []
+        else:
+            self.gallery_extra_dirs = [
+                str(d) for d in self.gallery_extra_dirs if str(d).strip()
+            ]
 
         # v0.4: normalise rx_capture_prompt; unknown values fall back to
         # "always" (the most conservative mode — never silently drops a

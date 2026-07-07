@@ -125,6 +125,7 @@ from open_sstv.radio.rigctld import RigctldClient, is_safe_rigctld_arg
 from open_sstv.radio.serial_rig import create_serial_rig
 from open_sstv.templates import TokenContext, build_autosave_filename, run_migration
 from open_sstv.ui.first_launch_dialog import FirstLaunchDialog
+from open_sstv.ui.gallery_dialog import GalleryDialog
 from open_sstv.ui.log_qso_dialog import LogQsoDialog
 from open_sstv.ui.logbook_dialog import LogbookDialog
 from open_sstv.ui.offline_workers import OfflineDecodeWorker, OfflineEncodeWorker
@@ -534,6 +535,9 @@ class MainWindow(QMainWindow):
         #: a direct reference would go stale.
         self._logbook_coordinator = LogbookCoordinator(lambda: self._config)
         self._logbook_dialog: LogbookDialog | None = None
+        #: v0.5: detached image gallery window, lazily created on first
+        #: Tools → Gallery… (Cmd/Ctrl+G).
+        self._gallery_dialog: GalleryDialog | None = None
         #: Latest successful rig-poll frequency (Hz), or ``None`` when
         #: no rig is connected.  This is the QSO frequency snapshot: the
         #: poll is suspended during TX (OP-47), so at TX completion this
@@ -972,6 +976,14 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(logbook_action)
         self._logbook_action = logbook_action
 
+        # v0.5: detached image gallery, paired with the logbook window.
+        gallery_action = QAction("&Gallery…", self)
+        gallery_action.setMenuRole(QAction.MenuRole.NoRole)
+        gallery_action.setShortcut(QKeySequence("Ctrl+G"))  # Cmd+G on macOS
+        gallery_action.triggered.connect(self._open_gallery)
+        tools_menu.addAction(gallery_action)
+        self._gallery_action = gallery_action
+
         view_menu = mb.addMenu("&View")
         waterfall_action = QAction("&Waterfall", self)
         waterfall_action.setCheckable(True)
@@ -1028,6 +1040,21 @@ class MainWindow(QMainWindow):
     def _refresh_logbook_if_open(self) -> None:
         if self._logbook_dialog is not None and self._logbook_dialog.isVisible():
             self._logbook_dialog.refresh()
+
+    @Slot()
+    def _open_gallery(self) -> None:
+        """Tools → Gallery… (Cmd/Ctrl+G): show the detached image gallery."""
+        if self._gallery_dialog is None:
+            self._gallery_dialog = GalleryDialog(
+                self._logbook_coordinator,
+                config_getter=lambda: self._config,
+                parent=self,
+            )
+        else:
+            self._gallery_dialog.refresh()
+        self._gallery_dialog.show()
+        self._gallery_dialog.raise_()
+        self._gallery_dialog.activateWindow()
 
     def _capture_qso(
         self,
@@ -3334,6 +3361,13 @@ class MainWindow(QMainWindow):
             self._logbook_coordinator.close()
         except Exception:  # noqa: BLE001 — never block shutdown on the logbook
             pass
+
+        # v0.5: best-effort thumbnail-cache housekeeping on the way out.
+        if self._gallery_dialog is not None:
+            try:
+                self._gallery_dialog.prune_cache()
+            except Exception:  # noqa: BLE001 — never block shutdown on the gallery
+                pass
 
         # v0.4.1 (audit high #1): if a mid-TX disconnect deferred its
         # backend teardown and the app is quitting before the TX
