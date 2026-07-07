@@ -7,7 +7,7 @@ radio. Receives and decodes SSTV images live off your radio, and encodes and
 transmits images back, with optional Hamlib, direct serial, or TCI (ExpertSDR2 /
 SunSDR2 / AetherSDR) rig control.
 
-**Status: Beta (v0.4.1) — ready for user testing and feedback.** TX and RX paths work
+**Status: Beta (v0.5.0) — ready for user testing and feedback.** TX and RX paths work
 end-to-end across all 22 supported modes, and v0.4 adds a built-in QSO logbook with
 ADIF import/export. Rig control via rigctld or direct serial CAT is functional.
 Weak-signal decode is usable down to roughly 0 dB SNR on Robot 36.
@@ -200,6 +200,19 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
   eQSL, Club Log, and QRZ.com. Exports stamp your station identity per
   record; imports dedupe on (callsign, time, mode). See
   [docs/logbook.md](docs/logbook.md) for the full guide.
+
+### Image Gallery (v0.5)
+- **Built-in image browser** -- browse received (and opt-in transmitted)
+  images in a thumbnail grid, opened via Tools → Gallery… (Cmd/Ctrl+G).
+  The gallery joins your image folder to the logbook: a logged image shows
+  its contact's callsign / mode / frequency / time and a one-click **→ QSO**
+  jump; unlogged images still appear, dated and mode-tagged from the filename.
+- **Filter & group** -- by callsign, mode, or date range, sorted by date,
+  callsign, or mode, with lazy on-demand thumbnails cached to disk so the
+  grid stays smooth into the tens of thousands of images.
+- **Operations** -- re-send an image to the TX panel, export a copy, or
+  delete the file (a linked logbook contact is kept, its image link cleared).
+  See [docs/gallery.md](docs/gallery.md) for the full guide.
 
 ### Radio Control
 - **rigctld (Hamlib)** -- TCP client for `rigctld`, supporting PTT, frequency,

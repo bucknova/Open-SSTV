@@ -11,6 +11,41 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.5.0] — 2026-07-07
+
+The image gallery — completing the v0.4 logging workflow.  A built-in
+browser for the pictures you've received (and, with TX auto-save on,
+transmitted), joined to the logbook so every image knows its contact.
+Design notes: ``docs/v0.5-plan.md``; operator guide: ``docs/gallery.md``.
+
+### Added
+
+- **Image gallery** — Tools → Gallery… (Cmd/Ctrl+G) opens a detached
+  thumbnail-grid window paired with the Logbook.  It scans your image
+  save directory (plus opt-in TX auto-saves and any
+  ``gallery_extra_dirs``) and **left-joins the logbook**: a logged
+  image shows its callsign / mode / frequency / time and a one-click
+  **→ QSO** jump; images you never logged still appear, dated and
+  mode-tagged from their filename.
+- **Filter & group** — by callsign, mode, or date range (debounced,
+  UTC-correct), sorted by date / callsign / mode with captions that
+  follow the sort.
+- **Operations** — **Re-send to TX** (loads an image into the TX panel
+  to transmit again), **Export…** (copy elsewhere; original untouched),
+  and **Delete** (removes the file; a linked contact is kept, its image
+  link cleared — the mirror of the Logbook's "delete a QSO keeps the
+  file").
+- **Cross-links** — Gallery **→ QSO** focuses the Logbook on that
+  contact; the Logbook's **Show in Gallery** does the return trip.
+- **Lazy disk-cached thumbnails** — generated on demand as you scroll
+  and cached under the platform cache dir (keyed by path + mtime, so
+  edits regenerate), pruned on close.  Smooth into the tens of
+  thousands of images with a plain list view — no virtualization.
+- New advanced config: ``gallery_extra_dirs`` (extra scan folders,
+  TOML-only) and ``find_by_image_path`` on the logbook store.
+
+---
+
 ## [0.4.1] — 2026-06-13
 
 Stability patch: a full-project audit run immediately after the

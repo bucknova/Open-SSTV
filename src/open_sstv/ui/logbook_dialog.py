@@ -27,6 +27,7 @@ from PySide6.QtCore import (
     QPersistentModelIndex,
     Qt,
     QTimer,
+    Signal,
     Slot,
 )
 from PySide6.QtGui import QPixmap
@@ -156,6 +157,11 @@ class LogbookDialog(QDialog):
     coordinator's store so the capture flow and this window always see
     the same rows."""
 
+    #: v0.5: emitted by the detail panel's "Show in Gallery" button;
+    #: carries the selected QSO's image ``Path``.  MainWindow opens /
+    #: focuses the Gallery window on that image.
+    show_in_gallery_requested = Signal(object)  # Path
+
     def __init__(
         self, coordinator: LogbookCoordinator, parent: QWidget | None = None
     ) -> None:
@@ -273,6 +279,11 @@ class LogbookDialog(QDialog):
         self._edit_btn_detail = QPushButton("Edit…")
         self._edit_btn_detail.clicked.connect(self._on_edit)
         detail_layout.addWidget(self._edit_btn_detail)
+
+        # v0.5: cross-link to the gallery for the selected QSO's image.
+        self._gallery_btn = QPushButton("Show in Gallery")
+        self._gallery_btn.clicked.connect(self._on_show_in_gallery)
+        detail_layout.addWidget(self._gallery_btn)
         detail_layout.addStretch(1)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -370,10 +381,37 @@ class LogbookDialog(QDialog):
         return self._model.qso_at(indexes[0].row())
 
     def _update_action_state(self) -> None:
-        has_sel = self._selected_qso() is not None
+        qso = self._selected_qso()
+        has_sel = qso is not None
         self._edit_btn.setEnabled(has_sel)
         self._edit_btn_detail.setEnabled(has_sel)
         self._delete_btn.setEnabled(has_sel)
+        # "Show in Gallery" only when the selected QSO links a live file.
+        self._gallery_btn.setEnabled(
+            has_sel
+            and qso.image_path is not None
+            and qso.image_path.is_file()
+        )
+
+    def select_qso(self, qso_id: int) -> None:
+        """Select the row for *qso_id* (v0.5 gallery → logbook cross-link).
+
+        Refreshes first so the row is present even if the logbook was
+        showing a filtered view; a no-op if the id isn't found.
+        """
+        self.refresh()
+        for row in range(self._model.rowCount()):
+            qso = self._model.qso_at(row)
+            if qso is not None and qso.id == qso_id:
+                self._table.selectRow(row)
+                self._table.scrollTo(self._model.index(row, 0))
+                return
+
+    @Slot()
+    def _on_show_in_gallery(self) -> None:
+        qso = self._selected_qso()
+        if qso is not None and qso.image_path is not None:
+            self.show_in_gallery_requested.emit(qso.image_path)
 
     # === Detail panel ===
 

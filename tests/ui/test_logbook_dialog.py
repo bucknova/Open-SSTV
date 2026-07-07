@@ -337,3 +337,49 @@ class TestRefreshErrorHandling:
         dlg.refresh()
         assert called == [], "refresh must never raise a modal (audit #8)"
         assert "unavailable" in dlg._count_label.text()
+
+
+class TestGalleryCrossLink:
+    """v0.5: select_qso + Show in Gallery."""
+
+    def test_select_qso_selects_row(self, qtbot, coordinator: LogbookCoordinator) -> None:
+        _insert(coordinator, callsign="K1ABC", time_utc=datetime(2026, 6, 1, 8, 0, tzinfo=UTC))
+        target = _insert(
+            coordinator, callsign="N0XYZ",
+            time_utc=datetime(2026, 6, 5, 8, 0, tzinfo=UTC),
+        )
+        dlg = LogbookDialog(coordinator)
+        qtbot.addWidget(dlg)
+        dlg.select_qso(target.id)
+        assert dlg._selected_qso() is not None
+        assert dlg._selected_qso().id == target.id
+
+    def test_show_in_gallery_button_needs_live_image(
+        self, qtbot, coordinator: LogbookCoordinator, tmp_path: Path
+    ) -> None:
+        img = tmp_path / "x.png"
+        Image.new("RGB", (16, 16)).save(img)
+        _insert(coordinator, image_path=img)
+        _insert(coordinator, callsign="N0IMG")  # no image
+        dlg = LogbookDialog(coordinator)
+        qtbot.addWidget(dlg)
+        # Row 0 is newest; both share default time so order by id desc —
+        # select each and check button state.
+        dlg._table.selectRow(0)
+        state0 = dlg._gallery_btn.isEnabled()
+        dlg._table.selectRow(1)
+        state1 = dlg._gallery_btn.isEnabled()
+        assert {state0, state1} == {True, False}  # one has image, one doesn't
+
+    def test_show_in_gallery_emits_path(
+        self, qtbot, coordinator: LogbookCoordinator, tmp_path: Path
+    ) -> None:
+        img = tmp_path / "y.png"
+        Image.new("RGB", (16, 16)).save(img)
+        _insert(coordinator, image_path=img)
+        dlg = LogbookDialog(coordinator)
+        qtbot.addWidget(dlg)
+        dlg._table.selectRow(0)
+        with qtbot.waitSignal(dlg.show_in_gallery_requested, timeout=1000) as blocker:
+            dlg._gallery_btn.click()
+        assert Path(blocker.args[0]) == img
