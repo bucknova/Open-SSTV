@@ -332,6 +332,24 @@ class LogbookStore:
         ).fetchone()
         return _row_to_qso(row) if row is not None else None
 
+    def find_by_image_path(self, image_path: Path | str) -> QSO | None:
+        """Return the QSO linking *image_path*, or ``None`` (v0.5 gallery).
+
+        Matches the stored representation exactly: ``image_path`` is
+        persisted as ``Path.as_posix()`` (see ``_path_str``), so the
+        lookup normalises the argument the same way.  If several rows
+        somehow share an image (manual edits), the most recent by id
+        wins — the freshest link is the useful one.
+        """
+        posix = _path_str(Path(image_path))
+        if posix is None:
+            return None
+        row = self._conn.execute(
+            "SELECT * FROM qsos WHERE image_path = ? ORDER BY id DESC LIMIT 1",
+            (posix,),
+        ).fetchone()
+        return _row_to_qso(row) if row is not None else None
+
     # -- queries -------------------------------------------------------
 
     def list_qsos(
