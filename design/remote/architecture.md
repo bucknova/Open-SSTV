@@ -1,0 +1,260 @@
+# Remote Web Access — Architecture
+
+> **Status:** Design. No implementation yet. This is the spec the mockup
+> is a front-end for.
+>
+> **Mockup:** [`design/remote/mockup.html`](mockup.html) — interactive,
+> self-contained. Poke the TX gate, the confirm modal, and the
+> dead-man's-switch.
+
+Let a web browser remotely **view** decoded SSTV images, **compose &
+send** images (including camera "selfies"), over the local network — while
+the desktop app remains the single point of control and responsibility for
+the radio.
+
+---
+
+## 1. Principles (ratified)
+
+1. **The web is a request surface; the app is the sole authority.** The
+   browser can only *ask*. The desktop app *decides and acts*. The web has
+   no direct control over the rig — there is no wire command that keys the
+   transmitter, sets frequency, or touches CAT/PTT.
+2. **Two planes.** A *view plane* (read-only, safe, high value) and a
+   *control plane* (keys the transmitter — dangerous, regulated). They are
+   authorized differently and fail differently.
+3. **The request vocabulary is the security boundary.** Capability is
+   expressed by *which typed commands exist*, not by trusting the client.
+4. **Reuse, don't reinvent, the safety primitives.** TX gating,
+   watchdog/unkey, and the compositor already exist. Remote access routes
+   through them; it does not add parallel rig-control paths.
+5. **LAN-first.** WAN is explicitly out of scope (§10).
+
+---
+
+## 2. Server-inside-the-app
+
+The server is **embedded in the desktop app** (not a headless-engine
+refactor, not a standalone sidecar). It runs so the Qt event loop is never
+blocked:
+
+- **Async HTTP + WebSocket server on a dedicated thread** with its own
+  asyncio loop (aiohttp or Starlette). Qt owns the main thread.
+- **Inbound rig-touching requests marshal onto the Qt main thread via the
+  app's existing internal signals** — `_request_transmit` /
+  `_request_test_tone`. A `tx.confirm` handler emits the *same signal the
+  GUI Send button emits*. The web is just another button on the same
+  panel, so there is exactly one code path that can key the rig.
+- **A broadcast hub goes the other way:** it subscribes to
+  `RxWorker` / `TxWorker` Qt signals (one in-app subscriber) and fans
+  events out to all connected WebSocket clients.
+
+```
+  Browser ──HTTP/WS──▶ Server thread ──Qt queued signal──▶ Qt main thread
+                          (asyncio)      (_request_transmit)    (rig I/O)
+  Browser ◀───WS──────  Broadcast hub ◀──Qt signal───────  RxWorker/TxWorker
+```
+
+**Load-bearing invariant:** web requests enter the rig *only* through the
+existing internal signals. This is what makes "sole authority" real.
+
+---
+
+## 3. Protocol — the two planes
+
+The request vocabulary is the API *and* the authorization model. There is
+no `rig.setFrequency`, no `ptt.on`; the web cannot express "key the rig,"
+only "request a transmit the app may refuse."
+
+| Plane | Commands | Gate |
+|---|---|---|
+| **View** | `rig.subscribe`, `rx.stream`, `gallery.list` / `gallery.thumb` / `gallery.image`, `logbook.list` | authenticated |
+| **Compose** | `compose.upload(photo)`, `compose.render(template, tokens)` → preview | authenticated |
+| **Control** | `tx.request` → `tx.confirm(token)` → `tx.abort` | authenticated **+ TX-enable gate + per-TX confirm + live heartbeat** |
+
+Transport: request/response over HTTP for discrete calls; a single
+per-client **WebSocket** carries the live event stream (rig state, RX
+progress, TX progress, request log, lease changes) and the TX heartbeat.
+
+---
+
+## 4. Authentication — QR pairing + device tokens
+
+**Decision: QR pairing with per-device tokens.** No passwords typed on a
+phone.
+
+- The app's Settings → Remote shows a **QR code / link containing a
+  one-time pairing code** (short TTL).
+- The browser opens it once and is issued a **long-lived per-device
+  token**, stored client-side, sent on every subsequent request.
+- **Tokens are per-device and individually revocable** in Settings
+  (name, last-seen, revoke). Compromise of one device never exposes
+  others.
+- A token authenticates the *device*; it does **not** by itself confer TX
+  authority (see §5).
+- Pairing codes and tokens are generated and validated **in the app**; the
+  browser never sees a shared secret it could leak.
+
+> Never route real credentials through chat or the browser's URL; pairing
+> is code-based and app-issued. (Consistent with the project's credential
+> policy.)
+
+---
+
+## 5. TX authority — single-writer lease
+
+**Decision: single-writer lease.** Being paired lets you *view* and
+*compose*; transmitting requires holding the lease.
+
+- **Exactly one client holds TX authority at a time**, via an explicit,
+  revocable lease surfaced in the UI ("You have the key" / "Held by
+  <device>").
+- Other clients are **view+compose only** until they explicitly *take the
+  key* (which the app may require the current holder to release, or
+  timeout).
+- **The local GUI can always reclaim** the lease instantly — the physical
+  operator at the machine is never locked out by a remote.
+- The lease is **liveness-bound**: if the holder's WebSocket drops, the
+  lease lapses (and any in-flight TX hits the dead-man's-switch, §6).
+
+This prevents two operators racing for the transmitter while keeping the
+mental model simple.
+
+---
+
+## 6. Control plane lifecycle
+
+Reuses the v0.4.1 watchdog / unkey-retry primitives; adds no new keying
+logic.
+
+```
+tx.request        → app checks TX-enable gate AND lease holder
+                  → app renders composite (§7), returns preview + token
+tx.confirm(token) → marshal _request_transmit onto the Qt thread
+                  → TxWorker keys rig, streams tx.progress over WS
+heartbeat lapses  → dead-man's-switch fires
+  OR socket drops → v0.4.1 unkey-retry path unkeys the rig
+tx.abort          → operator-initiated stop → same unkey path
+```
+
+The browser holds the WS open and pings a **heartbeat** each second during
+TX. Miss the window → the app assumes the operator lost the link and
+**unkeys automatically**. This is the single most important safety
+behavior and it lives entirely in the app.
+
+---
+
+## 7. Media pipeline — camera → app → air
+
+The selfie path is the one place bytes travel *up*:
+
+1. Browser captures via `getUserMedia`; does only **lossless pre-upload
+   framing** (rotate / crop) client-side.
+2. Browser `compose.upload`s the photo bytes; app stages them.
+3. App runs the photo through the **existing v0.3 template compositor**
+   (`templates/renderer.py`) with the token values (`{tocall}`, `{rst}`,
+   `{name}`, `{note}`, `{callsign}`, …).
+4. **That composited image is what `tx.confirm` transmits.** The browser
+   preview was always an approximation; the on-air bytes come from one
+   renderer. WYSIWYG fidelity, zero duplicated layout logic.
+
+**Editing scope (deliberately narrow):** rotate + crop + pick-a-template
+covers ~95% of the value. Filters / paint / text placement belong as
+**template layers on the server**, never as a JS image editor — otherwise
+the compositor forks.
+
+---
+
+## 8. Logging — draft entry, operator confirms
+
+**Decision: remote TX opens a pre-filled logbook draft the control op
+confirms.**
+
+- A remote send pre-fills a v0.4 QSO draft from the compose tokens
+  (`{tocall}`, `{rst}`, name, freq/mode from rig state) and surfaces it for
+  confirmation.
+- Consistent with the **party-line rule**: we don't auto-log by default;
+  the human decides what counts as a worked QSO.
+- Nothing is written silently.
+
+---
+
+## 9. Regulatory spine
+
+Part 97 makes a licensed **control operator** responsible for every
+emission. The design already respects this because the app *is* the control
+point:
+
+- **Station ID timer, TX time limits, and the enable-gate live in the app**
+  and fire regardless of what the browser does — or whether a browser is
+  even connected.
+- The browser is a convenience surface for a control operator who remains
+  legally the operator. This is the honest framing for user docs.
+
+---
+
+## 10. Scope boundary — LAN only
+
+**WAN is out of scope for v1.** No NAT traversal, port-forwarding, dynamic
+DNS, or relay. Exposing a transmitter to the open internet multiplies the
+security and reliability surface for little gain.
+
+**Recommended answer to remote-over-internet:** run **Tailscale or a VPN**
+— the app then serves over the existing LAN design with no new code. One
+sentence of documentation instead of a subsystem.
+
+---
+
+## 11. Configuration surface
+
+New **Settings → Remote** tab (all default-off):
+
+- Enable remote access (master switch).
+- Bind address + port; default bind to LAN interface, not `0.0.0.0`
+  blindly.
+- TLS (self-signed cert generated by the app; browser trust-on-first-use,
+  or documented import). Even on LAN, the control plane should not run
+  cleartext.
+- Paired devices list (name, last-seen, revoke).
+- TX-from-remote master enable (separate from the master switch — you can
+  allow remote *viewing* while forbidding remote *transmit*).
+- Show pairing QR.
+
+---
+
+## 12. Security hardening (checklist)
+
+- TLS on the control plane; TOFU or documented cert import.
+- Origin / host header checks; reject cross-origin WS upgrades.
+- Rate-limit auth and `tx.request`.
+- Bind to the intended interface; never assume LAN = trusted for TX.
+- Per-device token revocation; short pairing-code TTL.
+- Audit trail: the request log (already in the mockup) persists who
+  transmitted what, when.
+
+---
+
+## 13. Phasing
+
+1. **Read-only spike** — embedded server streams the real gallery to a
+   browser. Proves the threading model and the broadcast hub. No auth
+   beyond a dev token, no TX.
+2. **View plane** — pairing/tokens, live RX stream from `RxWorker`, gallery
+   + logbook read APIs, Settings → Remote (view only).
+3. **Compose plane** — camera upload, server-side `compose.render`,
+   template strip.
+4. **Control plane** — single-writer lease, `tx.request/confirm`,
+   heartbeat + dead-man's-switch, remote-TX enable gate, logbook draft.
+5. **Hardening** — TLS, revocation UI, rate limits, audit persistence,
+   docs (incl. Part 97 framing + Tailscale for WAN).
+
+---
+
+## References
+
+- Mockup: [`mockup.html`](mockup.html) ·
+  [artifact](https://claude.ai/code/artifact/5364a6d0-f8e3-4372-9d4f-fa9a360295c4)
+- Reused seams: `gallery/` and `logbook/` (Qt-free, cheap to serve),
+  `templates/renderer.py` (compositor), `ui/workers.py`
+  (`RxWorker`/`TxWorker`), the `_request_transmit` / `_request_test_tone`
+  internal signals, and the v0.4.1 watchdog / unkey-retry path.

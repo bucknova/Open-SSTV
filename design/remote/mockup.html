@@ -1,0 +1,1163 @@
+<style>
+  :root {
+    /* dark — the "night shack" (default) */
+    --bg: #0c1416;
+    --panel: #111d20;
+    --panel-2: #17262a;
+    --line: #26383d;
+    --line-soft: #1c2b2f;
+    --ink: #e9f1ec;
+    --muted: #7f9a95;
+    --muted-2: #5f7873;
+    --accent: #34e39a;      /* signal / RX lock / interactive */
+    --accent-ink: #04120c;
+    --accent-dim: rgba(52,227,154,.13);
+    --amber: #f2b544;       /* standby / gated */
+    --amber-dim: rgba(242,181,68,.13);
+    --tx: #ff5b48;          /* on-air / transmit / critical */
+    --tx-dim: rgba(255,91,72,.13);
+    --radius: 12px;
+    --radius-s: 8px;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    --shadow: 0 8px 30px rgba(0,0,0,.35);
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #e8efec; --panel: #ffffff; --panel-2: #f2f6f4;
+      --line: #d1ddd8; --line-soft: #e2eae7;
+      --ink: #10201c; --muted: #52706a; --muted-2: #7c948e;
+      --accent: #0f9b64; --accent-ink: #ffffff; --accent-dim: rgba(15,155,100,.10);
+      --amber: #b3781a; --amber-dim: rgba(179,120,26,.12);
+      --tx: #d6392a; --tx-dim: rgba(214,57,42,.10);
+      --shadow: 0 8px 24px rgba(30,50,45,.12);
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #e8efec; --panel: #ffffff; --panel-2: #f2f6f4;
+    --line: #d1ddd8; --line-soft: #e2eae7;
+    --ink: #10201c; --muted: #52706a; --muted-2: #7c948e;
+    --accent: #0f9b64; --accent-ink: #ffffff; --accent-dim: rgba(15,155,100,.10);
+    --amber: #b3781a; --amber-dim: rgba(179,120,26,.12);
+    --tx: #d6392a; --tx-dim: rgba(214,57,42,.10);
+    --shadow: 0 8px 24px rgba(30,50,45,.12);
+  }
+  :root[data-theme="dark"] {
+    --bg: #0c1416; --panel: #111d20; --panel-2: #17262a;
+    --line: #26383d; --line-soft: #1c2b2f;
+    --ink: #e9f1ec; --muted: #7f9a95; --muted-2: #5f7873;
+    --accent: #34e39a; --accent-ink: #04120c; --accent-dim: rgba(52,227,154,.13);
+    --amber: #f2b544; --amber-dim: rgba(242,181,68,.13);
+    --tx: #ff5b48; --tx-dim: rgba(255,91,72,.13);
+    --shadow: 0 8px 30px rgba(0,0,0,.35);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: var(--sans); line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 0 clamp(12px, 3vw, 22px); }
+  .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .eyebrow { font-family: var(--mono); font-size: 11px; letter-spacing: .16em;
+    text-transform: uppercase; color: var(--muted); }
+  button { font-family: inherit; cursor: pointer; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+  canvas { display: block; image-rendering: pixelated; }
+
+  /* ---------- status rail ---------- */
+  .rail {
+    position: sticky; top: 0; z-index: 30;
+    background: color-mix(in srgb, var(--panel) 92%, transparent);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--line);
+  }
+  .rail-inner {
+    display: flex; align-items: center; gap: clamp(10px, 2vw, 22px);
+    padding: 10px clamp(12px, 3vw, 22px); flex-wrap: wrap;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand .dot {
+    width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center;
+    background: var(--accent-dim); border: 1px solid var(--accent); font-size: 16px;
+  }
+  .brand b { font-size: 14px; letter-spacing: .02em; }
+  .brand small { display: block; font-family: var(--mono); font-size: 10.5px;
+    color: var(--muted); letter-spacing: .08em; }
+
+  .readout {
+    display: flex; align-items: baseline; gap: 12px; padding: 4px 12px;
+    background: var(--panel-2); border: 1px solid var(--line-soft); border-radius: var(--radius-s);
+  }
+  .readout .freq { font-family: var(--mono); font-size: 19px; font-weight: 600; letter-spacing: .01em; }
+  .readout .freq .hz { color: var(--muted); font-size: 12px; }
+  .readout .mode { font-family: var(--mono); font-size: 11px; color: var(--accent);
+    letter-spacing: .1em; text-transform: uppercase; }
+  .smeter { display: flex; gap: 2px; align-items: flex-end; height: 18px; }
+  .smeter i { width: 3px; background: var(--line); border-radius: 1px; display: block; }
+  .smeter i.on { background: var(--accent); }
+  .smeter i.pk { background: var(--amber); }
+
+  .rail-spacer { flex: 1 1 auto; }
+
+  .lamp {
+    display: inline-flex; align-items: center; gap: 8px; font-family: var(--mono);
+    font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
+    padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line);
+    color: var(--muted); background: var(--panel-2); white-space: nowrap;
+  }
+  .lamp .bulb { width: 9px; height: 9px; border-radius: 50%; background: var(--muted-2); }
+  .lamp.rx { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+  .lamp.rx .bulb { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+  .lamp.tx { color: var(--tx); border-color: var(--tx); background: var(--tx-dim); }
+  .lamp.tx .bulb { background: var(--tx); box-shadow: 0 0 10px var(--tx); animation: throb 1s infinite; }
+  @keyframes throb { 50% { opacity: .35; } }
+
+  .gate { display: inline-flex; align-items: center; gap: 9px; font-family: var(--mono);
+    font-size: 11px; letter-spacing: .08em; color: var(--muted); }
+  .switch {
+    --w: 42px; --h: 23px; width: var(--w); height: var(--h); border-radius: 999px;
+    border: 1px solid var(--line); background: var(--panel-2); position: relative;
+    transition: background .18s, border-color .18s; flex: none; padding: 0;
+  }
+  .switch::after { content: ""; position: absolute; top: 2px; left: 2px;
+    width: 17px; height: 17px; border-radius: 50%; background: var(--muted);
+    transition: transform .18s, background .18s; }
+  .switch[aria-pressed="true"] { background: var(--accent-dim); border-color: var(--accent); }
+  .switch[aria-pressed="true"]::after { transform: translateX(19px); background: var(--accent); }
+  .gate b { color: var(--ink); }
+
+  .theme-btn { background: var(--panel-2); border: 1px solid var(--line); color: var(--muted);
+    width: 34px; height: 34px; border-radius: 8px; font-size: 15px; }
+
+  /* ---------- nav ---------- */
+  nav.tabs { display: flex; gap: 4px; padding: 10px 0 0; }
+  nav.tabs button {
+    background: none; border: 0; color: var(--muted); font-size: 14px; font-weight: 500;
+    padding: 9px 15px 12px; border-bottom: 2px solid transparent; letter-spacing: .01em;
+    display: inline-flex; align-items: center; gap: 7px;
+  }
+  nav.tabs button .ic { font-size: 15px; }
+  nav.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
+  nav.tabs button:hover { color: var(--ink); }
+
+  main { padding: 20px 0 40px; }
+  .view { display: none; animation: fade .25s ease; }
+  .view.active { display: block; }
+  @keyframes fade { from { opacity: 0; transform: translateY(4px); } }
+
+  .grid2 { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 20px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+  .card .hd { padding: 13px 16px; border-bottom: 1px solid var(--line-soft);
+    display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .card .hd h2 { margin: 0; font-size: 13px; letter-spacing: .04em; text-transform: uppercase;
+    font-family: var(--mono); color: var(--ink); }
+  .card .bd { padding: 16px; }
+
+  /* screen (decode canvas) */
+  .screen {
+    position: relative; background: #05090a; border-radius: var(--radius-s);
+    overflow: hidden; aspect-ratio: 320 / 256; display: grid; place-items: center;
+    border: 1px solid var(--line);
+  }
+  .screen canvas { width: 100%; height: 100%; }
+  .screen .scan { position: absolute; left: 0; right: 0; height: 2px;
+    background: color-mix(in srgb, var(--accent) 80%, #fff); box-shadow: 0 0 12px var(--accent);
+    opacity: 0; pointer-events: none; }
+  .screen .ph { position: absolute; inset: 0; display: grid; place-items: center;
+    color: var(--muted); font-family: var(--mono); font-size: 12px; letter-spacing: .1em; }
+
+  .bar { height: 6px; border-radius: 999px; background: var(--line-soft); overflow: hidden; }
+  .bar > i { display: block; height: 100%; width: 0%; background: var(--accent);
+    transition: width .2s linear; }
+  .bar.tx > i { background: var(--tx); }
+
+  .meta { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 13px; }
+  .meta dt { color: var(--muted); font-family: var(--mono); font-size: 11px;
+    letter-spacing: .06em; text-transform: uppercase; align-self: center; }
+  .meta dd { margin: 0; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+  .btn { border: 1px solid var(--line); background: var(--panel-2); color: var(--ink);
+    padding: 9px 14px; border-radius: var(--radius-s); font-size: 13px; font-weight: 500;
+    display: inline-flex; align-items: center; gap: 7px; transition: border-color .15s, background .15s; }
+  .btn:hover { border-color: var(--accent); }
+  .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+  .btn.primary:hover { filter: brightness(1.06); }
+  .btn.tx { background: var(--tx); border-color: var(--tx); color: #fff; font-weight: 600; }
+  .btn.ghost { background: none; }
+  .btn.danger { color: var(--tx); border-color: color-mix(in srgb, var(--tx) 40%, var(--line)); background: none; }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+  .btn-row { display: flex; gap: 10px; flex-wrap: wrap; }
+
+  /* gallery */
+  .filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; align-items: center; }
+  .chip { font-family: var(--mono); font-size: 11.5px; letter-spacing: .04em; color: var(--muted);
+    border: 1px solid var(--line); background: var(--panel); padding: 6px 11px; border-radius: 999px; }
+  .chip[aria-pressed="true"] { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
+  .thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 12px; }
+  .thumb { border: 1px solid var(--line); border-radius: var(--radius-s); overflow: hidden;
+    background: var(--panel); text-align: left; padding: 0; position: relative; }
+  .thumb.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .thumb canvas { width: 100%; aspect-ratio: 320/256; }
+  .thumb .cap { padding: 7px 9px; }
+  .thumb .cap .c { font-family: var(--mono); font-size: 12px; font-weight: 600; }
+  .thumb .cap .s { font-family: var(--mono); font-size: 10px; color: var(--muted); letter-spacing: .04em; }
+  .thumb .tag { position: absolute; top: 7px; left: 7px; font-family: var(--mono); font-size: 9px;
+    letter-spacing: .08em; text-transform: uppercase; padding: 2px 6px; border-radius: 5px;
+    background: var(--accent); color: var(--accent-ink); font-weight: 700; }
+  .thumb .tag.un { background: color-mix(in srgb, var(--muted) 30%, var(--panel)); color: var(--muted); }
+  .thumb .tag.tx { background: var(--tx); color: #fff; }
+
+  .detail .screen { margin-bottom: 14px; }
+  .empty { color: var(--muted); font-family: var(--mono); font-size: 12px; text-align: center;
+    padding: 30px 10px; letter-spacing: .04em; }
+
+  /* compose */
+  .srcbar { display: flex; gap: 6px; margin-bottom: 16px; background: var(--panel-2);
+    border: 1px solid var(--line-soft); border-radius: 999px; padding: 4px; width: fit-content; }
+  .srcbar button { border: 0; background: none; color: var(--muted); font-size: 12.5px; font-weight: 500;
+    padding: 7px 15px; border-radius: 999px; display: inline-flex; gap: 7px; align-items: center; }
+  .srcbar button[aria-selected="true"] { background: var(--panel); color: var(--ink); box-shadow: var(--shadow); }
+  .editor-row { display: grid; grid-template-columns: minmax(0,1fr) 230px; gap: 18px; }
+  .editor-row > .card { min-width: 0; }
+  .field { margin-bottom: 14px; }
+  .field label { display: block; font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+  .field input[type=text], .field select {
+    width: 100%; background: var(--panel-2); border: 1px solid var(--line); color: var(--ink);
+    padding: 9px 11px; border-radius: var(--radius-s); font-family: var(--mono); font-size: 13px; }
+  .seg { display: flex; gap: 6px; flex-wrap: wrap; }
+  .seg button { flex: 1; min-width: 60px; border: 1px solid var(--line); background: var(--panel-2);
+    color: var(--muted); border-radius: var(--radius-s); padding: 8px 6px; font-size: 12px; font-family: var(--mono); }
+  .seg button[aria-pressed="true"] { color: var(--ink); border-color: var(--accent); background: var(--accent-dim); }
+
+  /* template strip */
+  .tplhd { display: flex; align-items: baseline; justify-content: space-between;
+    gap: 10px; margin: 16px 0 10px; padding-top: 14px; border-top: 1px solid var(--line); }
+  .tplhd label { font-family: var(--mono); font-size: 12px; letter-spacing: .04em; color: var(--ink); }
+  .tplstrip { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 4px; scrollbar-width: thin; }
+  .tplcard { flex: none; width: 120px; border: 1px solid var(--line); border-radius: var(--radius-s);
+    background: var(--panel); padding: 0; overflow: hidden; text-align: left; transition: border-color .15s; }
+  .tplcard:hover { border-color: var(--muted); }
+  .tplcard.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .tplcard canvas { width: 100%; aspect-ratio: 320/256; display: block; }
+  .tplcard .n { padding: 6px 8px; font-family: var(--mono); font-size: 10.5px; color: var(--ink);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ownchip { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono);
+    font-size: 11px; color: var(--muted); background: var(--panel-2); border: 1px solid var(--line-soft);
+    padding: 5px 9px; border-radius: 6px; }
+
+  /* request log */
+  .log { margin-top: 22px; }
+  .log .hd { cursor: pointer; }
+  .logbody { max-height: 210px; overflow-y: auto; padding: 12px 16px; font-family: var(--mono);
+    font-size: 12px; line-height: 1.7; }
+  .logbody .ln { display: flex; gap: 9px; white-space: nowrap; }
+  .logbody .t { color: var(--muted-2); }
+  .logbody .d { width: 14px; flex: none; text-align: center; }
+  .logbody .req .d { color: var(--accent); }
+  .logbody .res .d { color: var(--muted); }
+  .logbody .warn { color: var(--tx); }
+  .logbody .warn .d { color: var(--tx); }
+  .logbody .ok .m { color: var(--accent); }
+
+  /* toast */
+  .toasts { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+    z-index: 60; display: flex; flex-direction: column; gap: 8px; width: min(440px, 92vw); }
+  .toast { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--accent);
+    border-radius: var(--radius-s); padding: 11px 14px; font-size: 13px; box-shadow: var(--shadow);
+    animation: pop .2s ease; }
+  .toast.warn { border-left-color: var(--tx); }
+  .toast.amber { border-left-color: var(--amber); }
+  .toast b { font-family: var(--mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase;
+    display: block; color: var(--muted); margin-bottom: 2px; }
+  @keyframes pop { from { opacity: 0; transform: translateY(8px); } }
+
+  /* modal + tx overlay */
+  .scrim { position: fixed; inset: 0; z-index: 50; background: rgba(3,8,9,.68);
+    display: none; place-items: center; padding: 18px; backdrop-filter: blur(3px); }
+  .scrim.show { display: grid; }
+  .modal { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    width: min(460px, 96vw); box-shadow: var(--shadow); overflow: hidden; }
+  .modal .mh { padding: 16px 18px; border-bottom: 1px solid var(--line-soft); }
+  .modal .mh .eyebrow { color: var(--amber); }
+  .modal .mh h3 { margin: 4px 0 0; font-size: 17px; text-wrap: balance; }
+  .modal .mb { padding: 18px; display: flex; gap: 16px; }
+  .modal .mb .screen { width: 128px; flex: none; }
+  .modal .mf { padding: 14px 18px; border-top: 1px solid var(--line-soft);
+    display: flex; gap: 10px; justify-content: flex-end; }
+  .note { font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+  .note b { color: var(--ink); }
+
+  .txcard { background: var(--panel); border: 1px solid var(--tx); border-radius: var(--radius);
+    width: min(520px, 96vw); box-shadow: 0 12px 50px rgba(255,91,72,.2); overflow: hidden; }
+  .txcard .th { padding: 15px 18px; border-bottom: 1px solid var(--line-soft);
+    display: flex; align-items: center; gap: 10px; }
+  .txcard .tb { padding: 18px; display: flex; gap: 18px; }
+  .txcard .heart { display: flex; align-items: center; gap: 8px; font-family: var(--mono);
+    font-size: 11px; letter-spacing: .06em; color: var(--accent); }
+  .txcard .heart .hb { width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
+    animation: beat 1s infinite; }
+  .txcard .heart.lost { color: var(--tx); }
+  .txcard .heart.lost .hb { background: var(--tx); animation: none; opacity: .4; }
+  @keyframes beat { 0%,100%{ transform: scale(1); opacity:1;} 30%{ transform: scale(1.7); opacity:.5;} }
+  .txcard .tf { padding: 14px 18px; border-top: 1px solid var(--line-soft); display: flex;
+    gap: 10px; justify-content: space-between; flex-wrap: wrap; }
+
+  footer { border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+  footer .wrap { padding: 18px clamp(12px,3vw,22px); display: flex; gap: 16px 24px; flex-wrap: wrap;
+    align-items: center; justify-content: space-between; }
+  footer .assum { display: flex; gap: 8px 16px; flex-wrap: wrap; font-family: var(--mono); font-size: 11px; }
+  footer .assum span::before { content: "▹ "; color: var(--accent); }
+
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+
+  /* responsive — the phone-in-hand use case */
+  @media (max-width: 860px) {
+    .grid2 { grid-template-columns: 1fr; }
+    .editor-row { grid-template-columns: 1fr; }
+    .readout .freq { font-size: 16px; }
+    .rail-inner { gap: 10px 14px; }
+    .rail .readout, .rail .smeter-wrap { order: 5; }
+  }
+  @media (max-width: 560px) {
+    nav.tabs button { flex: 1; justify-content: center; padding: 9px 6px 12px; }
+    nav.tabs button .lbl { display: none; }
+    nav.tabs button .ic { font-size: 18px; }
+    .brand small { display: none; }
+    .lamp .lbltx { display: none; }
+  }
+</style>
+
+<header class="rail">
+  <div class="rail-inner">
+    <div class="brand">
+      <span class="dot">📡</span>
+      <span><b>Open-SSTV Remote</b><small>W0AEZ · shack-pi.local</small></span>
+    </div>
+
+    <div class="readout smeter-wrap" title="Rig state — reported by the station, read-only">
+      <div>
+        <div class="freq">14.230<span class="hz"> MHz</span></div>
+        <div class="mode">USB · 20m</div>
+      </div>
+      <div class="smeter" id="smeter" aria-hidden="true"></div>
+    </div>
+
+    <span class="rail-spacer"></span>
+
+    <span class="lamp rx" id="lamp"><span class="bulb"></span><span id="lampTxt">Receiving</span></span>
+
+    <span class="gate" title="Enforced by the station app — the web portal cannot key the rig, it can only request">
+      <button class="switch" id="txGate" aria-pressed="true" aria-label="Remote transmit enable"></button>
+      <span>Remote&nbsp;TX&nbsp;<b id="gateState">enabled</b></span>
+    </span>
+
+    <button class="theme-btn" id="themeBtn" aria-label="Toggle theme" title="Toggle light / dark">◐</button>
+  </div>
+  <div class="wrap">
+    <nav class="tabs" role="tablist">
+      <button role="tab" aria-selected="true" data-view="live"><span class="ic">📶</span><span class="lbl">Live</span></button>
+      <button role="tab" aria-selected="false" data-view="gallery"><span class="ic">🖼️</span><span class="lbl">Gallery</span></button>
+      <button role="tab" aria-selected="false" data-view="compose"><span class="ic">📷</span><span class="lbl">Compose &amp; Send</span></button>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <!-- LIVE -->
+  <section class="view active" id="view-live">
+    <div class="grid2">
+      <div class="card">
+        <div class="hd">
+          <h2>Incoming — live decode</h2>
+          <span class="eyebrow" id="liveStatus">Idle</span>
+        </div>
+        <div class="bd">
+          <div class="screen">
+            <canvas id="liveCanvas" width="320" height="256"></canvas>
+            <div class="scan" id="liveScan"></div>
+            <div class="ph" id="livePh">Awaiting VIS header…</div>
+          </div>
+          <div style="margin:14px 0 4px" class="bar"><i id="liveBar"></i></div>
+          <div class="btn-row" style="margin-top:14px">
+            <button class="btn primary" id="simRx">Simulate incoming signal</button>
+            <span class="eyebrow" id="liveLines" style="align-self:center"></span>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="hd"><h2>Signal report</h2></div>
+        <div class="bd">
+          <dl class="meta">
+            <dt>Mode</dt><dd id="m-mode">—</dd>
+            <dt>VIS</dt><dd id="m-vis">—</dd>
+            <dt>Freq</dt><dd>14.230 MHz</dd>
+            <dt>Started</dt><dd id="m-start">—</dd>
+            <dt>Progress</dt><dd id="m-prog">—</dd>
+            <dt>S-meter</dt><dd id="m-sig">S7 · −73 dBm</dd>
+          </dl>
+          <p class="note" style="margin-top:16px; border-top:1px solid var(--line-soft); padding-top:14px">
+            This pane mirrors what the station is decoding right now — pushed over the live
+            event channel. It's <b>read-only</b>: nothing here touches the radio.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- GALLERY -->
+  <section class="view" id="view-gallery">
+    <div class="grid2">
+      <div>
+        <div class="filters" id="filters">
+          <span class="eyebrow" style="align-self:center; margin-right:4px">Filter</span>
+          <button class="chip" data-f="all" aria-pressed="true">All</button>
+          <button class="chip" data-f="logged">Logged</button>
+          <button class="chip" data-f="rx">Received</button>
+          <button class="chip" data-f="tx">Sent</button>
+        </div>
+        <div class="thumbs" id="thumbs"></div>
+      </div>
+      <div class="card detail">
+        <div class="hd"><h2>Details</h2><span class="eyebrow" id="dTag"></span></div>
+        <div class="bd" id="detailBody">
+          <div class="empty">Select an image to see its contact and options.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- COMPOSE -->
+  <section class="view" id="view-compose">
+    <div class="srcbar" role="tablist" aria-label="Image source">
+      <button role="tab" aria-selected="true" data-src="camera"><span>📷</span> Camera</button>
+      <button role="tab" aria-selected="false" data-src="upload"><span>⬆️</span> Upload</button>
+      <button role="tab" aria-selected="false" data-src="gallery"><span>🖼️</span> From gallery</button>
+    </div>
+
+    <div class="editor-row">
+      <div class="card">
+        <div class="hd"><h2>Preview</h2><span class="eyebrow" id="composeSrc">Camera</span></div>
+        <div class="bd">
+          <div class="screen">
+            <canvas id="composeCanvas" width="320" height="256"></canvas>
+            <div class="ph" id="composePh">No image yet</div>
+          </div>
+          <div class="btn-row" style="margin-top:14px" id="captureRow">
+            <button class="btn primary" id="captureBtn">📸 Capture selfie</button>
+            <button class="btn ghost" id="rerollBtn" style="display:none">Try another</button>
+          </div>
+          <p class="note" style="margin-top:10px">Preview approximates the station's compositor — the
+            app renders the exact bytes that go on the air.</p>
+          <div class="tplhd">
+            <label>Template</label><span class="eyebrow">composited by the station</span>
+          </div>
+          <div class="tplstrip" id="tplStrip"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="hd"><h2>QSO fields</h2><span class="ownchip">📻 de W0AEZ</span></div>
+        <div class="bd">
+          <div class="field">
+            <label for="tocallF">To call &nbsp;<span style="color:var(--muted-2)">{tocall}</span></label>
+            <input type="text" id="tocallF" maxlength="10" placeholder="K1ABC" />
+          </div>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px">
+            <div class="field">
+              <label for="rstF">RST &nbsp;<span style="color:var(--muted-2)">{rst}</span></label>
+              <input type="text" id="rstF" maxlength="4" placeholder="595" />
+            </div>
+            <div class="field">
+              <label for="nameF">Name &nbsp;<span style="color:var(--muted-2)">{name}</span></label>
+              <input type="text" id="nameF" maxlength="12" placeholder="Sam" />
+            </div>
+          </div>
+          <div class="field">
+            <label for="noteF">Note &nbsp;<span style="color:var(--muted-2)">{note}</span></label>
+            <input type="text" id="noteF" maxlength="24" placeholder="Great signal!" />
+          </div>
+          <div class="field">
+            <label>Rotate photo</label>
+            <div class="btn-row">
+              <button class="btn ghost" id="rotL">⟲ Left</button>
+              <button class="btn ghost" id="rotR">⟳ Right</button>
+            </div>
+          </div>
+          <div class="field">
+            <label for="modeSel">SSTV mode</label>
+            <select id="modeSel">
+              <option value="scottie_s1">Scottie S1 · ~110 s</option>
+              <option value="martin_m1">Martin M1 · ~114 s</option>
+              <option value="pd_120">PD-120 · ~120 s</option>
+              <option value="robot_36">Robot 36 · ~36 s</option>
+            </select>
+          </div>
+          <button class="btn tx" id="requestTx" style="width:100%; justify-content:center" disabled>
+            📡 Request transmit
+          </button>
+          <p class="note" style="margin-top:12px">
+            The fields fill the template's text tokens — the same station-side render the desktop app
+            uses. The web only sends the values.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- REQUEST LOG -->
+  <div class="card log">
+    <div class="hd" id="logHd">
+      <h2>Station link · request log</h2>
+      <span class="eyebrow" id="logToggle">hide ▾</span>
+    </div>
+    <div class="logbody" id="logBody"></div>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="assum">
+      <span>Mockup — assumes an authenticated LAN session</span>
+      <span>Web = request surface; the app decides &amp; acts</span>
+      <span>TX gated: enable + confirm + heartbeat</span>
+    </div>
+    <span class="mono" style="font-size:11px; color:var(--muted-2)">Open-SSTV Remote · concept</span>
+  </div>
+</footer>
+
+<div class="scrim" id="confirmScrim">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="cfTitle">
+    <div class="mh">
+      <div class="eyebrow">Station confirmation required</div>
+      <h3 id="cfTitle">Ask W0AEZ's station to transmit?</h3>
+    </div>
+    <div class="mb">
+      <div class="screen"><canvas id="cfCanvas" width="320" height="256"></canvas></div>
+      <div>
+        <dl class="meta" style="grid-template-columns:auto 1fr">
+          <dt>On air</dt><dd id="cfMode">Scottie S1</dd>
+          <dt>Freq</dt><dd>14.230 MHz USB</dd>
+          <dt>Duration</dt><dd id="cfDur">~110 s</dd>
+          <dt>Token</dt><dd id="cfTok" style="color:var(--muted)">—</dd>
+        </dl>
+        <p class="note" style="margin-top:12px">
+          The control operator's station will verify the request token and hold PTT only while
+          your link stays alive.
+        </p>
+      </div>
+    </div>
+    <div class="mf">
+      <button class="btn ghost" id="cfCancel">Cancel</button>
+      <button class="btn tx" id="cfConfirm">Confirm &amp; send request</button>
+    </div>
+  </div>
+</div>
+
+<div class="scrim" id="txScrim">
+  <div class="txcard" role="dialog" aria-modal="true" aria-labelledby="txTitle">
+    <div class="th">
+      <span class="lamp tx"><span class="bulb"></span>On air</span>
+      <b id="txTitle" style="font-size:15px">Transmitting — Scottie S1</b>
+    </div>
+    <div class="tb">
+      <div class="screen" style="width:150px; flex:none"><canvas id="txCanvas" width="320" height="256"></canvas></div>
+      <div style="flex:1; min-width:0">
+        <div class="bar tx" style="margin-bottom:6px"><i id="txBar"></i></div>
+        <div class="mono" style="font-size:12px; color:var(--muted); margin-bottom:16px">
+          <span id="txPct">0%</span> · <span id="txElapsed">0.0s</span> elapsed
+        </div>
+        <div class="heart" id="heart"><span class="hb"></span><span id="heartTxt">Link alive · last beat 0.0s ago</span></div>
+        <p class="note" style="margin-top:14px" id="txNote">
+          Your browser sends a heartbeat every second. If it stops, the station's dead-man's-switch
+          unkeys the rig automatically.
+        </p>
+      </div>
+    </div>
+    <div class="tf">
+      <button class="btn danger" id="simDrop">⚡ Simulate dropped link</button>
+      <button class="btn" id="txAbort">Abort transmission</button>
+    </div>
+  </div>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<script>
+(function () {
+  "use strict";
+  const $ = (s, r) => (r || document).querySelector(s);
+  const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
+  const now = () => {
+    // deterministic-ish clock label
+    const d = new Date(Date.now());
+    return d.toTimeString().slice(0, 8);
+  };
+  const MODES = {
+    scottie_s1: { name: "Scottie S1", dur: "~110 s", secs: 110 },
+    martin_m1:  { name: "Martin M1",  dur: "~114 s", secs: 114 },
+    pd_120:     { name: "PD-120",     dur: "~120 s", secs: 120 },
+    robot_36:   { name: "Robot 36",   dur: "~36 s",  secs: 36 },
+  };
+
+  /* ---------- palette helpers for canvas art ---------- */
+  function css(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+  // Draw a synthetic "decoded" SSTV image into ctx (320x256). variant picks a look.
+  function drawImage(ctx, variant, caption) {
+    const W = 320, H = 256;
+    const seed = variant.seed || 1;
+    // background field
+    if (variant.kind === "testcard") {
+      const bars = ["#c8c8c8","#c8c820","#20c8c8","#20c820","#c820c8","#c82020","#2020c8","#101010"];
+      const bw = W / bars.length;
+      bars.forEach((c,i)=>{ ctx.fillStyle=c; ctx.fillRect(i*bw,0,bw+1,H*0.62); });
+      // gradient strip
+      const g = ctx.createLinearGradient(0,0,W,0);
+      g.addColorStop(0,"#000"); g.addColorStop(1,"#fff");
+      ctx.fillStyle=g; ctx.fillRect(0,H*0.62,W,H*0.16);
+      // sync bars
+      for(let i=0;i<W;i+=16){ ctx.fillStyle = (i/16)%2? "#111":"#eee"; ctx.fillRect(i,H*0.78,16,H*0.22); }
+      ctx.fillStyle="#0a0a0a"; ctx.fillRect(W*0.28,H*0.80,W*0.44,H*0.16);
+      ctx.fillStyle="#f4c430"; ctx.font="bold 22px "+css('--mono'); ctx.textAlign="center";
+      ctx.fillText(variant.call || "W0AEZ", W/2, H*0.915);
+    } else if (variant.kind === "photo") {
+      // faux landscape/selfie: sky gradient + sun + hills
+      const sky = ctx.createLinearGradient(0,0,0,H);
+      sky.addColorStop(0, variant.sky[0]); sky.addColorStop(1, variant.sky[1]);
+      ctx.fillStyle=sky; ctx.fillRect(0,0,W,H);
+      ctx.fillStyle="rgba(255,240,180,.85)"; ctx.beginPath();
+      ctx.arc(variant.sun*W, H*0.3, 26, 0, 7); ctx.fill();
+      ctx.fillStyle=variant.hill; ctx.beginPath(); ctx.moveTo(0,H);
+      for(let x=0;x<=W;x+=20){ ctx.lineTo(x, H*0.62 + Math.sin((x*seed)*0.03)*20 + (x*0.05)); }
+      ctx.lineTo(W,H); ctx.closePath(); ctx.fill();
+      ctx.fillStyle=variant.hill2; ctx.beginPath(); ctx.moveTo(0,H);
+      for(let x=0;x<=W;x+=18){ ctx.lineTo(x, H*0.76 + Math.cos((x*seed)*0.05)*14); }
+      ctx.lineTo(W,H); ctx.closePath(); ctx.fill();
+    } else if (variant.kind === "selfie") {
+      const bg = ctx.createRadialGradient(W/2,H*0.4,20,W/2,H*0.4,200);
+      bg.addColorStop(0, variant.c1); bg.addColorStop(1, variant.c2);
+      ctx.fillStyle=bg; ctx.fillRect(0,0,W,H);
+      // simple avatar
+      ctx.fillStyle="rgba(0,0,0,.18)"; ctx.beginPath(); ctx.ellipse(W/2,H+30,120,90,0,0,7); ctx.fill();
+      ctx.fillStyle=variant.skin; ctx.beginPath(); ctx.arc(W/2,H*0.46,54,0,7); ctx.fill();
+      ctx.fillStyle=variant.hair; ctx.beginPath(); ctx.arc(W/2,H*0.40,56,Math.PI*1.05,Math.PI*1.95); ctx.fill();
+      ctx.fillStyle="#1a1a1a"; ctx.beginPath(); ctx.arc(W/2-18,H*0.45,5,0,7); ctx.arc(W/2+18,H*0.45,5,0,7); ctx.fill();
+      ctx.strokeStyle="rgba(0,0,0,.4)"; ctx.lineWidth=3; ctx.beginPath(); ctx.arc(W/2,H*0.5,16,0.15,Math.PI-0.15); ctx.stroke();
+      ctx.fillStyle=variant.shirt; ctx.fillRect(W*0.3,H*0.7,W*0.4,H*0.3);
+    }
+    // caption overlay (compose)
+    if (caption) {
+      ctx.fillStyle="rgba(0,0,0,.55)"; ctx.fillRect(0,H-40,W,40);
+      ctx.fillStyle="#fff"; ctx.font="bold 20px "+css('--mono'); ctx.textAlign="center";
+      ctx.fillText(caption.slice(0,24), W/2, H-13);
+    }
+    // template chrome
+    if (variant.tpl === "banner") {
+      ctx.fillStyle=css('--accent'); ctx.fillRect(0,0,W,26);
+      ctx.fillStyle="#04120c"; ctx.font="bold 15px "+css('--mono'); ctx.textAlign="left";
+      ctx.fillText("W0AEZ  ·  Open-SSTV", 8, 18);
+    } else if (variant.tpl === "frame") {
+      ctx.strokeStyle=css('--accent'); ctx.lineWidth=8; ctx.strokeRect(4,4,W-8,H-8);
+    }
+  }
+
+  const VARIANTS = {
+    tc:  { kind:"testcard", call:"W0AEZ" },
+    ph1: { kind:"photo", seed:1.2, sky:["#2a6cb0","#bfe0f0"], sun:0.72, hill:"#2f6b3a", hill2:"#1c4426" },
+    ph2: { kind:"photo", seed:2.1, sky:["#e88a3c","#ffd8a0"], sun:0.3, hill:"#7a4a2a", hill2:"#4a2c18" },
+    ph3: { kind:"photo", seed:0.7, sky:["#183a5a","#3a6a8a"], sun:0.5, hill:"#22303a","hill2":"#141d24" },
+    sf1: { kind:"selfie", c1:"#3a5a7a", c2:"#12202e", skin:"#e0b48c", hair:"#3a2a1a", shirt:"#c23b3b" },
+    sf2: { kind:"selfie", c1:"#5a7a3a", c2:"#1e2e12", skin:"#c89468", hair:"#1a1a1a", shirt:"#2a5aa0" },
+  };
+
+  /* ---------- request log ---------- */
+  const logBody = $("#logBody");
+  function log(kind, dir, text) {
+    const ln = document.createElement("div");
+    ln.className = "ln " + kind;
+    ln.innerHTML = `<span class="t">${now()}</span><span class="d">${dir}</span><span class="m">${text}</span>`;
+    logBody.appendChild(ln);
+    logBody.scrollTop = logBody.scrollHeight;
+  }
+  log("res", "○", "session.auth(user=w0aez, scope=view+compose+tx) → ok");
+  log("res", "←", "rig.state(freq=14.230MHz, mode=USB, ptt=off)");
+
+  /* ---------- toasts ---------- */
+  function toast(kind, label, msg) {
+    const t = document.createElement("div");
+    t.className = "toast " + (kind || "");
+    t.innerHTML = `<b>${label}</b>${msg}`;
+    $("#toasts").appendChild(t);
+    setTimeout(() => { t.style.transition="opacity .3s"; t.style.opacity="0"; setTimeout(()=>t.remove(),300); }, 4200);
+  }
+
+  /* ---------- theme ---------- */
+  $("#themeBtn").addEventListener("click", () => {
+    const root = document.documentElement;
+    const cur = root.getAttribute("data-theme")
+      || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    root.setAttribute("data-theme", cur === "dark" ? "light" : "dark");
+    // re-render canvases that depend on css() colors
+    renderGallery(); renderTplStrip(); if (composeState.variant) renderCompose();
+    drawImage($("#liveCanvas").getContext("2d"), VARIANTS.tc, null);
+  });
+
+  /* ---------- nav ---------- */
+  $$("nav.tabs button").forEach(b => b.addEventListener("click", () => {
+    $$("nav.tabs button").forEach(x => x.setAttribute("aria-selected", "false"));
+    b.setAttribute("aria-selected", "true");
+    $$(".view").forEach(v => v.classList.remove("active"));
+    $("#view-" + b.dataset.view).classList.add("active");
+  }));
+
+  /* ---------- S-meter idle animation ---------- */
+  const smeter = $("#smeter");
+  for (let i=0;i<12;i++){ const b=document.createElement("i"); b.style.height=(5+i*1.1)+"px"; smeter.appendChild(b); }
+  const sBars = $$("#smeter i");
+  let sTarget = 7;
+  setInterval(() => {
+    if (!reduce) sTarget = Math.max(3, Math.min(11, sTarget + (Math.random()*4-2)|0));
+    sBars.forEach((b,i)=>{ b.className = i < sTarget ? (i>9?"pk on":"on") : ""; });
+  }, 700);
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  /* ---------- LIVE decode ---------- */
+  const liveCanvas = $("#liveCanvas"), liveCtx = liveCanvas.getContext("2d");
+  liveCtx.fillStyle = "#05090a"; liveCtx.fillRect(0,0,320,256);
+  let liveTimer = null;
+  function simulateRx() {
+    if (liveTimer) return;
+    $("#livePh").style.display = "none";
+    $("#liveStatus").textContent = "VIS detected";
+    $("#m-mode").textContent = "Scottie S1";
+    $("#m-vis").textContent = "0x3C";
+    $("#m-start").textContent = now();
+    setLamp("rx", "Receiving");
+    log("req", "←", "rx.image_started(mode=scottie_s1, vis=0x3c)");
+    // render full image offscreen, reveal line by line
+    const off = document.createElement("canvas"); off.width=320; off.height=256;
+    drawImage(off.getContext("2d"), VARIANTS.ph1, null);
+    liveCtx.fillStyle="#05090a"; liveCtx.fillRect(0,0,320,256);
+    let row = 0; const scan = $("#liveScan");
+    scan.style.opacity = "1";
+    const total = 256, step = reduce ? 256 : 3;
+    liveTimer = setInterval(() => {
+      const next = Math.min(total, row + step);
+      liveCtx.drawImage(off, 0, row, 320, next-row, 0, row, 320, next-row);
+      row = next;
+      const pct = Math.round(row/total*100);
+      $("#liveBar").style.width = pct + "%";
+      $("#m-prog").textContent = pct + "%  (" + row + "/256 lines)";
+      $("#liveLines").textContent = row + " / 256 lines";
+      scan.style.top = (row/total*100) + "%";
+      if (pct===50) log("res", "←", "rx.progress(lines=128/256)");
+      if (row >= total) {
+        clearInterval(liveTimer); liveTimer = null; scan.style.opacity="0";
+        $("#liveStatus").textContent = "Complete";
+        setLamp("rx", "Receiving");
+        log("res", "←", "rx.image_complete(saved=2026-07-07_ph1.png, logged=false)");
+        toast("", "New image", "Decode complete — saved to the shack gallery.");
+        rxImages.unshift({ id:"rx-live", v:VARIANTS.ph1, call:"", mode:"Scottie S1",
+          freq:"14.230", time:now(), dir:"rx", logged:false });
+        renderGallery();
+      }
+    }, reduce ? 1 : 45);
+  }
+  $("#simRx").addEventListener("click", simulateRx);
+
+  function setLamp(kind, txt) {
+    const l = $("#lamp");
+    l.className = "lamp " + kind;
+    $("#lampTxt").textContent = txt;
+  }
+
+  /* ---------- GALLERY ---------- */
+  let rxImages = [
+    { id:"g1", v:VARIANTS.ph2, call:"K1ABC", mode:"Martin M1", freq:"14.230", time:"19:42:10", dir:"rx", logged:true, rsv:"595/575", op:"Sam · Boston MA" },
+    { id:"g2", v:VARIANTS.tc,  call:"",       mode:"Scottie S1", freq:"14.230", time:"19:20:03", dir:"rx", logged:false },
+    { id:"g3", v:VARIANTS.ph3, call:"N0XYZ", mode:"PD-120",    freq:"14.230", time:"18:55:41", dir:"rx", logged:true, rsv:"575/559", op:"Dale · Reno NV" },
+    { id:"g4", v:VARIANTS.sf1, call:"W0AEZ", mode:"Scottie S1", freq:"14.230", time:"18:31:12", dir:"tx", logged:true, rsv:"—/—", op:"self (transmitted)" },
+    { id:"g5", v:VARIANTS.ph1, call:"",       mode:"Robot 36",   freq:"14.230", time:"18:02:55", dir:"rx", logged:false },
+    { id:"g6", v:VARIANTS.ph2, call:"VE3QQ", mode:"Scottie S1", freq:"14.230", time:"17:44:20", dir:"rx", logged:true, rsv:"559/569", op:"Marie · ON" },
+  ];
+  let filter = "all", selected = null;
+  const thumbs = $("#thumbs");
+  function passFilter(im){
+    if (filter==="all") return true;
+    if (filter==="logged") return im.logged;
+    if (filter==="rx") return im.dir==="rx";
+    if (filter==="tx") return im.dir==="tx";
+    return true;
+  }
+  function renderGallery() {
+    thumbs.innerHTML = "";
+    const list = rxImages.filter(passFilter);
+    if (!list.length) { thumbs.innerHTML = '<div class="empty" style="grid-column:1/-1">No images match this filter.</div>'; return; }
+    list.forEach(im => {
+      const b = document.createElement("button");
+      b.className = "thumb" + (selected===im.id ? " sel":"");
+      const tag = im.dir==="tx" ? '<span class="tag tx">Sent</span>'
+        : im.logged ? `<span class="tag">${im.call}</span>` : '<span class="tag un">Unlogged</span>';
+      b.innerHTML = `${tag}<canvas width="320" height="256"></canvas>
+        <div class="cap"><div class="c">${im.logged? im.call : "(unlogged)"}</div>
+        <div class="s">${im.mode} · ${im.time}</div></div>`;
+      drawImage(b.querySelector("canvas").getContext("2d"), im.v, null);
+      b.addEventListener("click", () => { selected = im.id; renderGallery(); showDetail(im); });
+      thumbs.appendChild(b);
+    });
+  }
+  function showDetail(im) {
+    $("#dTag").textContent = im.dir==="tx" ? "Sent" : (im.logged ? "Logged" : "Unlogged");
+    const body = $("#detailBody");
+    body.innerHTML = `<div class="screen" style="margin-bottom:14px"><canvas id="dCv" width="320" height="256"></canvas></div>
+      <dl class="meta">
+        <dt>Callsign</dt><dd>${im.logged? im.call : "(not logged)"}</dd>
+        <dt>Mode</dt><dd>${im.mode}</dd>
+        <dt>Freq</dt><dd>${im.freq} MHz</dd>
+        <dt>Time</dt><dd>${im.time} UTC</dd>
+        <dt>RSV</dt><dd>${im.rsv || "—"}</dd>
+        <dt>Op</dt><dd>${im.op || "—"}</dd>
+      </dl>
+      <div class="btn-row" style="margin-top:16px">
+        <button class="btn" id="dResend">📡 Re-send to TX</button>
+        ${im.logged? '<button class="btn ghost" id="dQso">→ Logbook</button>' : ''}
+      </div>`;
+    drawImage($("#dCv").getContext("2d"), im.v, null);
+    $("#dResend").addEventListener("click", () => {
+      composeSetImage(im.v, "gallery");
+      $$("nav.tabs button").forEach(x=>x.setAttribute("aria-selected","false"));
+      $('nav.tabs button[data-view="compose"]').setAttribute("aria-selected","true");
+      $$(".view").forEach(v=>v.classList.remove("active"));
+      $("#view-compose").classList.add("active");
+      $$('.srcbar button').forEach(x=>x.setAttribute("aria-selected", x.dataset.src==="gallery"?"true":"false"));
+      $("#composeSrc").textContent = "From gallery";
+      $("#captureRow").style.display = "none";
+      toast("", "Loaded to compose", "Image staged — edit and request transmit.");
+      log("req", "→", `compose.load(source=gallery, id=${im.id})`);
+    });
+    if (im.logged) $("#dQso") && $("#dQso").addEventListener("click", ()=> toast("","Cross-link", "The shack app would open the Logbook on this contact."));
+  }
+  $$("#filters .chip").forEach(c => c.addEventListener("click", () => {
+    $$("#filters .chip").forEach(x=>x.setAttribute("aria-pressed","false"));
+    c.setAttribute("aria-pressed","true"); filter = c.dataset.f; selected=null; renderGallery();
+    $("#detailBody").innerHTML = '<div class="empty">Select an image to see its contact and options.</div>';
+    $("#dTag").textContent="";
+  }));
+  renderGallery();
+
+  /* ---------- COMPOSE + TEMPLATES ---------- */
+  // Mirrors Open-SSTV's server-side compositor: the web collects a photo + token
+  // values + a template choice; the *app* would render. These applyTemplate()
+  // functions are a faithful preview of the real starter templates.
+  const composeState = { variant:null, rotation:0, tpl:"cqsstv", mode:"scottie_s1", source:"camera" };
+  const composeCanvas = $("#composeCanvas"), composeCtx = composeCanvas.getContext("2d");
+  const selfiePool = [VARIANTS.sf1, VARIANTS.sf2];
+  let selfieIdx = 0;
+
+  const TEMPLATES = [
+    { id:"none",   name:"None (bare photo)" },
+    { id:"cqsstv", name:"CQ SSTV" },
+    { id:"cq_de",  name:"CQ de W0AEZ" },
+    { id:"reply",  name:"Reply / exchange" },
+    { id:"73",     name:"73!" },
+    { id:"73card", name:"73 Card" },
+  ];
+
+  function tokens() {
+    return {
+      call: "W0AEZ",
+      tocall: ($("#tocallF") ? $("#tocallF").value : "").toUpperCase(),
+      rst: $("#rstF") ? $("#rstF").value : "",
+      name: $("#nameF") ? $("#nameF").value : "",
+      note: $("#noteF") ? $("#noteF").value : "",
+    };
+  }
+
+  // Overlay a template's layers + token-resolved text over the (already-drawn) photo.
+  function applyTemplate(ctx, id, tk) {
+    const W = 320, H = 256, mono = css('--mono');
+    ctx.textAlign = "left";
+    if (id === "cqsstv") {
+      ctx.fillStyle = "#0a8a3a"; ctx.fillRect(0, 0, W, 34);
+      ctx.fillStyle = "#fff"; ctx.font = "bold 17px " + mono; ctx.fillText("CQ  CQ  CQ  SSTV", 8, 24);
+      ctx.fillStyle = "rgba(206,26,26,.94)"; ctx.font = "bold 46px " + mono; ctx.textAlign = "center";
+      ctx.fillText("CQSSTV", W/2, H*0.57);
+      ctx.textAlign = "right"; ctx.fillStyle = "#2f78ff"; ctx.font = "bold 20px " + mono;
+      ctx.fillText(tk.call, W-8, H-12);
+    } else if (id === "cq_de") {
+      ctx.fillStyle = "rgba(0,0,0,.62)"; ctx.fillRect(0, H-42, W, 42);
+      ctx.textAlign = "center"; ctx.fillStyle = "#fff"; ctx.font = "bold 24px " + mono;
+      ctx.fillText("CQ de " + tk.call, W/2, H-14);
+    } else if (id === "reply") {
+      ctx.fillStyle = "rgba(0,0,0,.58)"; ctx.fillRect(0, 0, W, 60);
+      ctx.fillStyle = css('--accent'); ctx.font = "bold 17px " + mono;
+      ctx.fillText("TO  " + (tk.tocall || "———"), 10, 24);
+      ctx.fillStyle = "#fff"; ctx.font = "13px " + mono;
+      ctx.fillText("RST " + (tk.rst || "—") + "    de " + tk.call, 10, 46);
+      if (tk.name) { ctx.textAlign = "right"; ctx.fillStyle = "#ffd86a"; ctx.font = "13px " + mono;
+        ctx.fillText("TNX " + tk.name, W-10, 24); }
+    } else if (id === "73") {
+      ctx.fillStyle = "rgba(0,0,0,.32)"; ctx.fillRect(0, H*0.3, W, H*0.42);
+      ctx.textAlign = "center"; ctx.fillStyle = "#ffd86a"; ctx.font = "bold 72px " + mono;
+      ctx.fillText("73!", W/2, H*0.61);
+      ctx.fillStyle = "#fff"; ctx.font = "bold 16px " + mono; ctx.fillText("de " + tk.call, W/2, H*0.75);
+    } else if (id === "73card") {
+      ctx.strokeStyle = css('--accent'); ctx.lineWidth = 6; ctx.strokeRect(3, 3, W-6, H-6);
+      ctx.fillStyle = "rgba(0,0,0,.62)"; ctx.fillRect(0, H-48, W, 48);
+      ctx.textAlign = "center"; ctx.fillStyle = "#fff"; ctx.font = "bold 18px " + mono;
+      const who = tk.name ? (tk.name + " · ") : "";
+      ctx.fillText("73  " + who + "de " + tk.call, W/2, H-27);
+      if (tk.note) { ctx.font = "13px " + mono; ctx.fillStyle = "#bfe8d6"; ctx.fillText(tk.note, W/2, H-9); }
+    }
+  }
+
+  // photo (rotatable) + template chrome (upright) — one composite.
+  function renderComposite(ctx, st, tk) {
+    ctx.save();
+    ctx.clearRect(0,0,320,256);
+    ctx.fillStyle = "#05090a"; ctx.fillRect(0,0,320,256);
+    ctx.translate(160,128); ctx.rotate((st.rotation||0) * Math.PI/180); ctx.translate(-160,-128);
+    if (st.variant) drawImage(ctx, st.variant, null);
+    ctx.restore();
+    applyTemplate(ctx, st.tpl, tk);
+  }
+  function renderCompose() {
+    if (!composeState.variant) { renderTplStrip(); return; }
+    renderComposite(composeCtx, composeState, tokens());
+  }
+
+  // template picker with live token-resolved previews
+  function renderTplStrip() {
+    const strip = $("#tplStrip"); if (!strip) return;
+    const sample = { call:"W0AEZ", tocall:"K1ABC", rst:"595", name:"Sam", note:"73!" };
+    strip.innerHTML = "";
+    TEMPLATES.forEach(t => {
+      const c = document.createElement("button");
+      c.className = "tplcard" + (composeState.tpl === t.id ? " sel" : "");
+      c.innerHTML = `<canvas width="320" height="256"></canvas><div class="n">${t.name}</div>`;
+      renderComposite(c.querySelector("canvas").getContext("2d"),
+        { variant: composeState.variant || VARIANTS.ph3, rotation:0, tpl:t.id }, sample);
+      c.addEventListener("click", () => {
+        composeState.tpl = t.id; renderTplStrip(); renderCompose(); logRender();
+      });
+      strip.appendChild(c);
+    });
+  }
+
+  let renderTimer = null;
+  function logRender() {
+    clearTimeout(renderTimer);
+    renderTimer = setTimeout(() => {
+      const tk = tokens();
+      log("req", "→", `compose.render(template=${composeState.tpl}, tokens={tocall:${tk.tocall||"—"}, rst:${tk.rst||"—"}, name:${tk.name||"—"}, note:${tk.note?"…":"—"}})`);
+      log("res", "←", "render.preview(320×256, ~7ms)");
+    }, 500);
+  }
+
+  function composeSetImage(variant, source) {
+    composeState.variant = variant;
+    $("#composePh").style.display = "none";
+    $("#requestTx").disabled = false;
+    renderTplStrip();
+    renderCompose();
+  }
+
+  ["tocallF","rstF","nameF","noteF"].forEach(id => {
+    const el = $("#" + id);
+    if (el) el.addEventListener("input", () => { renderTplStrip(); renderCompose(); logRender(); });
+  });
+  function attemptCamera() {
+    // Try the real device camera; gracefully fall back (sandbox usually blocks it).
+    $("#composePh").textContent = "Requesting camera…";
+    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+      navigator.mediaDevices.getUserMedia({ video: true }).then(stream => {
+        stream.getTracks().forEach(t=>t.stop());
+        $("#composePh").textContent = "Camera ready — tap Capture";
+      }).catch(() => {
+        $("#composePh").textContent = "Camera blocked in preview — Capture uses a sample selfie";
+      });
+    } else {
+      $("#composePh").textContent = "No camera here — Capture uses a sample selfie";
+    }
+  }
+  $$('.srcbar button').forEach(b => b.addEventListener("click", () => {
+    $$('.srcbar button').forEach(x=>x.setAttribute("aria-selected","false"));
+    b.setAttribute("aria-selected","true");
+    composeState.source = b.dataset.src;
+    $("#composeSrc").textContent = b.textContent.trim();
+    $("#captureRow").style.display = (b.dataset.src==="gallery") ? "none" : "flex";
+    if (b.dataset.src==="camera") { $("#captureBtn").textContent = "📸 Capture selfie"; attemptCamera(); }
+    if (b.dataset.src==="upload") { $("#captureBtn").textContent = "⬆️ Choose a sample photo"; $("#composePh").textContent="Pick a sample photo"; $("#composePh").style.display="grid"; }
+    if (b.dataset.src==="gallery") { toast("","Tip","Open Gallery → Re-send to load an image here."); }
+  }));
+  $("#captureBtn").addEventListener("click", () => {
+    if (composeState.source==="upload") {
+      composeSetImage(VARIANTS.ph2, "upload");
+      log("req", "→", "compose.upload(sample_landscape.jpg)");
+    } else {
+      composeSetImage(selfiePool[selfieIdx % selfiePool.length], "camera");
+      log("req", "→", "compose.capture(device_camera → selfie)");
+      $("#rerollBtn").style.display = "inline-flex";
+    }
+    toast("", "Captured", "Image loaded — pick a template, fill the QSO fields, then request transmit.");
+  });
+  $("#rerollBtn").addEventListener("click", ()=>{ selfieIdx++; composeSetImage(selfiePool[selfieIdx%selfiePool.length],"camera"); });
+  $("#rotL").addEventListener("click", ()=>{ composeState.rotation-=90; renderCompose(); });
+  $("#rotR").addEventListener("click", ()=>{ composeState.rotation+=90; renderCompose(); });
+  $("#modeSel").addEventListener("change", e => composeState.mode = e.target.value);
+  renderTplStrip();
+  attemptCamera();
+
+  /* ---------- TX gate ---------- */
+  let txEnabled = true;
+  $("#txGate").addEventListener("click", () => {
+    txEnabled = !txEnabled;
+    $("#txGate").setAttribute("aria-pressed", String(txEnabled));
+    $("#gateState").textContent = txEnabled ? "enabled" : "disabled";
+    log("res", "←", `policy.remote_tx = ${txEnabled ? "enabled" : "disabled"} (set by control op)`);
+    toast(txEnabled?"":"amber", "TX gate", txEnabled
+      ? "Remote transmit enabled by the control operator."
+      : "Remote transmit disabled — the station will refuse TX requests.");
+  });
+
+  /* ---------- REQUEST TRANSMIT flow ---------- */
+  const confirmScrim = $("#confirmScrim");
+  $("#requestTx").addEventListener("click", () => {
+    if (!composeState.variant) return;
+    log("req", "→", `tx.request(image=composed, mode=${composeState.mode})`);
+    if (!txEnabled) {
+      log("warn", "⚠", "tx.denied(reason=remote_tx_disabled)");
+      toast("warn", "Station refused", "Remote transmit is disabled by the control operator. Flip the TX gate to allow it.");
+      return;
+    }
+    // build confirm
+    const m = MODES[composeState.mode];
+    $("#cfMode").textContent = m.name;
+    $("#cfDur").textContent = m.dur;
+    const tk = tokens();
+    const tok = "tx-" + Math.abs(hash(composeState.tpl + tk.tocall + tk.rst + composeState.mode + Date.now())).toString(36).slice(0,8);
+    $("#cfTok").textContent = tok;
+    confirmScrim._tok = tok;
+    renderComposite($("#cfCanvas").getContext("2d"), composeState, tk);
+    log("res", "←", `tx.awaiting_confirm(token=${tok}, template=${composeState.tpl}, duration=${m.dur})`);
+    confirmScrim.classList.add("show");
+  });
+  function hash(s){ let h=0; for(let i=0;i<s.length;i++){ h=(h<<5)-h+s.charCodeAt(i)|0; } return h; }
+  $("#cfCancel").addEventListener("click", () => {
+    confirmScrim.classList.remove("show");
+    log("res", "←", "tx.cancelled(by=operator)");
+  });
+  $("#cfConfirm").addEventListener("click", () => {
+    confirmScrim.classList.remove("show");
+    log("req", "→", `tx.confirm(token=${confirmScrim._tok})`);
+    startTransmit();
+  });
+
+  /* ---------- TX in flight + heartbeat / dead-man's-switch ---------- */
+  const txScrim = $("#txScrim");
+  let txState = null;
+  function startTransmit() {
+    const m = MODES[composeState.mode];
+    setLamp("tx", "Transmitting");
+    $("#txTitle").textContent = "Transmitting — " + m.name;
+    // offscreen full image, paint line by line as it "goes out"
+    const off = document.createElement("canvas"); off.width=320; off.height=256;
+    renderComposite(off.getContext("2d"), composeState, tokens());
+    const txCtx = $("#txCanvas").getContext("2d");
+    txCtx.fillStyle="#05090a"; txCtx.fillRect(0,0,320,256);
+    $("#txBar").style.width="0%"; $("#txPct").textContent="0%"; $("#txElapsed").textContent="0.0s";
+    const heart = $("#heart"); heart.className="heart"; $("#heartTxt").textContent="Link alive · last beat 0.0s ago";
+    $("#txNote").textContent = "Your browser sends a heartbeat every second. If it stops, the station's dead-man's-switch unkeys the rig automatically.";
+    txScrim.classList.add("show");
+    log("res", "←", "tx.started(ptt=on)");
+    toast("", "On air", `Station keyed — transmitting ${m.name}.`);
+
+    const startT = performance.now();
+    const durMs = reduce ? 400 : Math.min(9000, m.secs*70);  // compressed
+    let lastBeat = performance.now(), linkAlive = true, row = 0;
+    txState = { alive:true };
+
+    // heartbeat every 1s
+    const beatTimer = setInterval(() => {
+      if (!linkAlive) return;
+      lastBeat = performance.now();
+      log("req", "→", "tx.heartbeat()");
+    }, 1000);
+
+    const tick = setInterval(() => {
+      const t = performance.now();
+      const sinceBeat = (t - lastBeat)/1000;
+      // dead-man's-switch: station aborts if no beat within 2.5s
+      if (sinceBeat > 2.5 && linkAlive === false) {
+        // handled by drop path
+      }
+      if (!linkAlive) {
+        $("#heartTxt").textContent = `No heartbeat · ${sinceBeat.toFixed(1)}s — station watchdog ${(2.5-sinceBeat>0)?("in "+(2.5-sinceBeat).toFixed(1)+"s"):"firing"}`;
+        if (sinceBeat >= 2.5) { finishAbort(); return; }
+      } else {
+        $("#heartTxt").textContent = `Link alive · last beat ${sinceBeat.toFixed(1)}s ago`;
+      }
+      const p = Math.min(1, (t - startT)/durMs);
+      const targetRow = Math.floor(p*256);
+      if (targetRow>row){ txCtx.drawImage(off,0,row,320,targetRow-row,0,row,320,targetRow-row); row=targetRow; }
+      $("#txBar").style.width = Math.round(p*100)+"%";
+      $("#txPct").textContent = Math.round(p*100)+"%";
+      $("#txElapsed").textContent = ((t-startT)/1000).toFixed(1)+"s";
+      if (p>=1 && linkAlive) { finishOk(); }
+    }, reduce?1:60);
+
+    function cleanup(){ clearInterval(tick); clearInterval(beatTimer); }
+    function finishOk() {
+      cleanup(); txState=null;
+      log("res","←","tx.complete(ptt=off, sent=100%)");
+      setLamp("rx","Receiving");
+      txScrim.classList.remove("show");
+      toast("", "Sent", `${m.name} transmitted successfully — PTT released.`);
+      // add to gallery as a sent image
+      rxImages.unshift({ id:"tx-"+Date.now(), v:composeState.variant, call:"W0AEZ",
+        mode:m.name, freq:"14.230", time:now(), dir:"tx", logged:true, rsv:"—/—", op:"self (transmitted)" });
+      renderGallery();
+    }
+    function finishAbort() {
+      cleanup(); txState=null;
+      const pct = Math.round(Math.min(1,(performance.now()-startT)/durMs)*100);
+      log("warn","⚠",`tx.abort(reason=link_lost) — dead-man's-switch, unkeyed at ${pct}%`);
+      log("res","←","rig.ptt=off (forced by station watchdog)");
+      $("#txNote").textContent = `Link lost. The station's dead-man's-switch fired and unkeyed the rig at ${pct}%. No operator action was needed.`;
+      setLamp("rx","Receiving");
+      $("#heart").className="heart lost";
+      toast("warn","Auto-unkeyed", `Link dropped mid-TX — the station aborted and released PTT at ${pct}%.`);
+      setTimeout(()=> txScrim.classList.remove("show"), 2600);
+    }
+
+    $("#simDrop").onclick = () => {
+      if (!linkAlive) return;
+      linkAlive = false;
+      $("#heart").className = "heart lost";
+      log("warn","⚠","tx.heartbeat STOPPED (browser link dropped)");
+    };
+    $("#txAbort").onclick = () => {
+      cleanup(); txState=null;
+      log("req","→","tx.abort(reason=operator_cancel)");
+      log("res","←","tx.aborted(ptt=off)");
+      setLamp("rx","Receiving"); txScrim.classList.remove("show");
+      toast("amber","Aborted","You aborted the transmission — station released PTT.");
+    };
+  }
+
+  /* ---------- log collapse ---------- */
+  $("#logHd").addEventListener("click", () => {
+    const b = $("#logBody"); const open = b.style.display !== "none";
+    b.style.display = open ? "none" : "block";
+    $("#logToggle").textContent = open ? "show ▸" : "hide ▾";
+  });
+
+  // seed the live canvas with a faint idle testcard ghost
+  drawImage(liveCtx, VARIANTS.tc, null);
+  liveCtx.fillStyle="rgba(5,9,10,.82)"; liveCtx.fillRect(0,0,320,256);
+})();
+</script>

@@ -123,6 +123,7 @@ from open_sstv.radio.base import ManualRig, Rig, RigConnectionMode
 from open_sstv.radio.exceptions import RigError
 from open_sstv.radio.rigctld import RigctldClient, is_safe_rigctld_arg
 from open_sstv.radio.serial_rig import create_serial_rig
+from open_sstv.remote import GalleryService, RemoteServer
 from open_sstv.templates import TokenContext, build_autosave_filename, run_migration
 from open_sstv.ui.first_launch_dialog import FirstLaunchDialog
 from open_sstv.ui.gallery_dialog import GalleryDialog
@@ -535,6 +536,11 @@ class MainWindow(QMainWindow):
         #: a direct reference would go stale.
         self._logbook_coordinator = LogbookCoordinator(lambda: self._config)
         self._logbook_dialog: LogbookDialog | None = None
+        #: v0.6 (Phase 1): embedded read-only remote gallery server, started
+        #: on launch when ``remote_enabled`` and stopped in ``closeEvent``.
+        #: The lambda keeps the service reading the live config across saves.
+        self._remote_server: RemoteServer | None = None
+        self._remote_service = GalleryService(lambda: self._config)
         #: v0.5: detached image gallery window, lazily created on first
         #: Tools → Gallery… (Cmd/Ctrl+G).
         self._gallery_dialog: GalleryDialog | None = None
@@ -925,6 +931,78 @@ class MainWindow(QMainWindow):
             # Fresh installs trigger the check from _show_first_launch_dialog
             # after the user dismisses the welcome dialog.
             QTimer.singleShot(2000, self._trigger_update_check)
+
+        # v0.6 (Phase 1): bring up the read-only remote gallery server if
+        # the operator opted in via TOML.  Never blocks launch.
+        self._apply_remote_server()
+
+    # === Remote gallery server (Phase 1) ===
+
+    def _apply_remote_server(self) -> None:
+        """Start / stop the embedded remote server to match the live config.
+
+        Called at startup and again after every settings apply so toggling
+        ``remote_enabled`` (or changing host/port/token) takes effect
+        without a relaunch.  A bind failure (port in use, permission) is
+        logged and surfaced to the status bar but never blocks the app —
+        the desktop side keeps working with or without the server.
+        """
+        cfg = self._config
+        want = bool(cfg.remote_enabled)
+        running = self._remote_server is not None
+
+        # Stop first if disabled, or if a running server's binding params
+        # changed (simplest correct behaviour: stop-and-recreate).  The
+        # configured token "" means "mint a random one", which never
+        # equals the server's resolved token — so an unchanged blank token
+        # must not count as a change, or the server would restart on every
+        # settings save and churn the URL.
+        srv = self._remote_server
+        token_changed = bool(cfg.remote_token) and srv is not None and srv.token != cfg.remote_token
+        if running and srv is not None and (
+            not want
+            or srv.host != cfg.remote_host
+            or srv.port != cfg.remote_port
+            or token_changed
+        ):
+            self._stop_remote_server()
+            running = False
+
+        if not want or running:
+            return
+
+        try:
+            self._remote_server = RemoteServer(
+                self._remote_service,
+                host=cfg.remote_host,
+                port=cfg.remote_port,
+                token=cfg.remote_token,
+            )
+            self._remote_server.start()
+        except OSError as exc:
+            self._remote_server = None
+            _log.warning("remote gallery server could not start: %s", exc)
+            self.statusBar().showMessage(
+                f"Remote gallery server failed to start on "
+                f"{cfg.remote_host}:{cfg.remote_port} — {exc}",
+                10000,
+            )
+            return
+        _log.info("remote gallery server started: %s", self._remote_server.url)
+        self.statusBar().showMessage(
+            f"Remote gallery server running — open {self._remote_server.url}", 10000
+        )
+
+    def _stop_remote_server(self) -> None:
+        """Stop the remote server if running (safe to call unconditionally)."""
+        if self._remote_server is None:
+            return
+        try:
+            self._remote_server.stop()
+        except Exception as exc:  # noqa: BLE001 — teardown must not raise
+            _log.warning("remote gallery server stop failed: %s", exc)
+        finally:
+            self._remote_server = None
 
     # === Menu bar ===
 
@@ -1702,6 +1780,10 @@ class MainWindow(QMainWindow):
         # TX panel needs the rate too so the progress-bar elapsed/total
         # seconds label is correct at 44.1 kHz (OP-06).
         self._tx_panel.set_sample_rate(self._config.sample_rate)
+        # v0.6 (Phase 1): start/stop/restart the remote server to match
+        # the freshly-saved config (the service reads the live config, so
+        # host/port/token changes are picked up on restart).
+        self._apply_remote_server()
 
     # === TX slots ===
 
@@ -3221,6 +3303,11 @@ class MainWindow(QMainWindow):
         # the capture flow checks this and stands down instead of
         # opening dialogs / re-opening the logbook store mid-teardown.
         self._closing = True
+
+        # v0.6 (Phase 1): stop the read-only remote server early — it's
+        # independent of the rig/worker teardown and its daemon threads
+        # should be released cleanly before we tear the rest down.
+        self._stop_remote_server()
 
         # Abort any in-flight rig connect first — the QThread is a child of
         # this window and Qt calls fatal() if it is still running when the

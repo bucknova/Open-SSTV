@@ -231,6 +231,25 @@ class AppConfig:
     # ``images_save_dir``.
     logbook_db_path: str = ""
 
+    # --- Remote web access (Phase 1 — read-only gallery) ---
+    # Embedded HTTP server that lets a browser on the LAN *view* decoded
+    # images.  Read-only: no compose, no camera, no transmit.  Advanced /
+    # TOML-only for now (no Settings UI yet — a Settings → Remote tab
+    # arrives with the Phase 2 view plane), mirroring how gallery_extra_dirs
+    # and logbook_db_path shipped config-first.  See
+    # ``design/remote/architecture.md``.
+    remote_enabled: bool = False
+    # Bind address.  Defaults to loopback so enabling the server is
+    # local-only until the operator deliberately binds a LAN interface
+    # (e.g. "0.0.0.0" or the host's LAN IP) — the design's "don't bind
+    # 0.0.0.0 blindly" stance, taken to the safe extreme for the spike.
+    remote_host: str = "127.0.0.1"
+    remote_port: int = 8730
+    # Dev access token.  Empty → the server mints a random one at startup
+    # and logs the full URL (http://host:port/?token=…).  Set a value to
+    # keep a stable URL across restarts.
+    remote_token: str = ""
+
     # --- Logging (v0.4) ---
     # Root log level for both the stderr and rotating-file handlers.
     # Applied at startup by ``app._setup_logging``; changing it in
@@ -399,7 +418,7 @@ class AppConfig:
         # as the fields above.
 
         # TCP ports: [1, 65535].
-        for attr in ("rigctld_port", "tci_port"):
+        for attr in ("rigctld_port", "tci_port", "remote_port"):
             v = int(getattr(self, attr))
             clamped_port = max(1, min(65535, v))
             if clamped_port != v:
