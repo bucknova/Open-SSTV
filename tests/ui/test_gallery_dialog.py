@@ -276,3 +276,161 @@ class TestMainWindowIntegration:
         w._open_gallery()
         assert w._gallery_dialog is not None
         assert w._gallery_dialog.isVisible()
+
+
+class TestOperations:
+    def test_delete_removes_file_keeps_qso(
+        self, qtbot, coordinator, images_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
+        coord, _cfg = coordinator
+        img = _img(images_dir / "2026-06-10_120000_martin_m1.png")
+        saved = _log(coord, img, callsign="K1ABC")
+        dlg = _dialog(qtbot, coordinator)
+        dlg._view.setCurrentIndex(dlg._model.index(0, 0))
+        monkeypatch.setattr(
+            QMessageBox, "question",
+            staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes),
+        )
+        dlg._on_delete()
+        assert not img.exists()                          # file gone
+        assert dlg._model.rowCount() == 0                # dropped from grid
+        row = coord.store.get(saved.id)
+        assert row is not None                           # QSO row survives
+        assert row.image_path is None                    # link cleared
+
+    def test_delete_declined_keeps_everything(
+        self, qtbot, coordinator, images_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
+        img = _img(images_dir / "keep.png")
+        dlg = _dialog(qtbot, coordinator)
+        dlg._view.setCurrentIndex(dlg._model.index(0, 0))
+        monkeypatch.setattr(
+            QMessageBox, "question",
+            staticmethod(lambda *a, **k: QMessageBox.StandardButton.No),
+        )
+        dlg._on_delete()
+        assert img.exists()
+        assert dlg._model.rowCount() == 1
+
+    def test_export_copies_original_untouched(
+        self, qtbot, coordinator, images_dir: Path, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from PySide6.QtWidgets import QFileDialog
+
+        img = _img(images_dir / "orig.png")
+        dest = tmp_path / "exported.png"
+        dlg = _dialog(qtbot, coordinator)
+        dlg._view.setCurrentIndex(dlg._model.index(0, 0))
+        monkeypatch.setattr(
+            QFileDialog, "getSaveFileName",
+            staticmethod(lambda *a, **k: (str(dest), "")),
+        )
+        dlg._on_export()
+        assert dest.is_file()
+        assert img.is_file()  # original never moved
+
+    def test_resend_emits_path(
+        self, qtbot, coordinator, images_dir: Path
+    ) -> None:
+        img = _img(images_dir / "resend.png")
+        dlg = _dialog(qtbot, coordinator)
+        dlg._view.setCurrentIndex(dlg._model.index(0, 0))
+        with qtbot.waitSignal(dlg.resend_requested, timeout=1000) as blocker:
+            dlg._resend_btn.click()
+        assert Path(blocker.args[0]) == img
+
+    def test_buttons_disabled_without_selection(self, qtbot, coordinator) -> None:
+        dlg = _dialog(qtbot, coordinator)
+        assert not dlg._resend_btn.isEnabled()
+        assert not dlg._export_btn.isEnabled()
+        assert not dlg._delete_btn.isEnabled()
+
+
+class TestFocusOnPath:
+    def test_focus_selects_matching_item(
+        self, qtbot, coordinator, images_dir: Path
+    ) -> None:
+        _img(images_dir / "a.png")
+        target = _img(images_dir / "b.png")
+        dlg = _dialog(qtbot, coordinator)
+        dlg.focus_on_path(target)
+        sel = dlg._selected_item()
+        assert sel is not None and sel.path == target
+
+    def test_focus_missing_path_clears_selection(
+        self, qtbot, coordinator, images_dir: Path
+    ) -> None:
+        _img(images_dir / "a.png")
+        dlg = _dialog(qtbot, coordinator)
+        dlg.focus_on_path(images_dir / "not-here.png")
+        assert dlg._selected_item() is None
+
+
+class TestMainWindowCrossLinks:
+    """v0.5: the three Logbook↔Gallery↔TX cross-links wired in MainWindow."""
+
+    @pytest.fixture
+    def window(self, qtbot, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+        from unittest.mock import MagicMock
+
+        import numpy as np
+
+        from open_sstv.radio.base import ManualRig
+        from open_sstv.ui.main_window import MainWindow
+
+        monkeypatch.setattr(
+            "open_sstv.ui.workers.encode",
+            MagicMock(return_value=np.zeros(100, dtype=np.int16)),
+        )
+        monkeypatch.setattr(
+            "open_sstv.ui.workers.output_stream.play_blocking", MagicMock()
+        )
+        monkeypatch.setattr("open_sstv.ui.workers.output_stream.stop", MagicMock())
+        cfg = AppConfig(first_launch_seen=True, check_for_updates=False)
+        cfg.logbook_db_path = str(tmp_path / "logbook.db")
+        images = tmp_path / "images"
+        images.mkdir()
+        cfg.images_save_dir = str(images)
+        monkeypatch.setattr("open_sstv.ui.main_window.load_config", lambda: cfg)
+        w = MainWindow(rig=ManualRig())
+        qtbot.addWidget(w)
+        return w, images
+
+    def test_gallery_open_qso_focuses_logbook(self, qtbot, window) -> None:
+        w, images = window
+        img = _img(images / "x.png")
+        saved = w._logbook_coordinator.store.insert(
+            QSO(direction="RX", callsign="W0AEZ", mode="Martin M1",
+                time_utc=datetime(2026, 6, 1, tzinfo=UTC), image_path=img)
+        )
+        w._open_gallery()
+        w._gallery_dialog.open_qso_requested.emit(saved)
+        assert w._logbook_dialog is not None
+        assert w._logbook_dialog.isVisible()
+        assert w._logbook_dialog._selected_qso().id == saved.id
+
+    def test_gallery_resend_loads_tx_panel(self, qtbot, window) -> None:
+        w, images = window
+        img = _img(images / "resend.png")
+        w._open_gallery()
+        w._gallery_dialog.resend_requested.emit(img)
+        assert w._tx_panel._current_path == img
+
+    def test_logbook_show_in_gallery_focuses(self, qtbot, window) -> None:
+        w, images = window
+        img = _img(images / "shown.png")
+        w._logbook_coordinator.store.insert(
+            QSO(direction="RX", callsign="K1ABC", mode="PD 120",
+                time_utc=datetime(2026, 6, 1, tzinfo=UTC), image_path=img)
+        )
+        w._open_logbook()
+        w._logbook_dialog.show_in_gallery_requested.emit(img)
+        assert w._gallery_dialog is not None
+        assert w._gallery_dialog.isVisible()
+        sel = w._gallery_dialog._selected_item()
+        assert sel is not None and sel.path == img

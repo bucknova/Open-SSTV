@@ -65,7 +65,8 @@
 16. [Configuration Files](#16-configuration-files)
 17. [Troubleshooting](#17-troubleshooting)
 18. [The Logbook (v0.4)](#18-the-logbook-v04)
-19. [Glossary](#19-glossary)
+19. [The Gallery (v0.5)](#19-the-gallery-v05)
+20. [Glossary](#20-glossary)
 
 ---
 
@@ -231,7 +232,7 @@ At the bottom is the **image gallery** — a horizontal strip of thumbnails show
 
 The **File** menu contains **Settings** (opens the configuration dialog) and **Quit**.
 
-The **Tools** menu (v0.4) contains **Logbook…** (keyboard shortcut **Ctrl+L**, **Cmd+L** on macOS), which opens the QSO logbook in its own window — see [Section 18](#18-the-logbook-v04).
+The **Tools** menu (v0.4) contains **Logbook…** (keyboard shortcut **Ctrl+L**, **Cmd+L** on macOS), which opens the QSO logbook in its own window — see [Section 18](#18-the-logbook-v04).  It also contains **Gallery…** (**Ctrl+G** / **Cmd+G**), which opens the image browser — see [Section 19](#19-the-gallery-v05).
 
 The **Help** menu contains **About**, which shows the application name, version, and license.
 
@@ -1050,7 +1051,46 @@ explicitly opt in.
 
 ---
 
-## 19. Glossary
+## 19. The Gallery (v0.5)
+
+Open-SSTV v0.5 adds a built-in image browser for the pictures you've
+received (and, with TX auto-save on, transmitted).  This is the short
+tour — the full guide is [docs/gallery.md](docs/gallery.md).
+
+### 19.1 Opening it
+
+**Tools → Gallery…** (Ctrl+G / Cmd+G) opens the gallery in its own
+window, alongside the Logbook.  The two are companion views of the
+same data: the Logbook is the table of contacts, the Gallery is the
+wall of pictures.
+
+### 19.2 What you see
+
+Every image in your save directory appears as a thumbnail.  The
+gallery joins those files to your logbook, so an image linked to a
+logged contact shows that contact's callsign, mode, frequency, and
+time in the detail panel — and a **→ QSO** button that jumps to the
+row in the Logbook.  Images you received but never logged still
+appear, with their date and mode read from the filename.
+
+Filter by callsign, mode, or date range (as in the Logbook), and
+sort / group by date, callsign, or mode.  Dates are UTC throughout.
+
+### 19.3 What you can do
+
+Select a thumbnail, then **Re-send to TX** (loads it into the TX
+panel to transmit again), **Export…** (save a copy elsewhere; the
+original stays put), or **Delete** (removes the file — a linked
+logbook contact is kept, only its image link is cleared).  From the
+Logbook, a contact with a saved image gets a **Show in Gallery**
+button for the return trip.
+
+Thumbnails are cached on disk, so reopening the gallery is instant;
+editing an image regenerates its thumbnail automatically.
+
+---
+
+## 20. Glossary
 
 **CAT (Computer Aided Transceiver)**: A protocol for controlling a radio from a computer, typically over a serial or USB connection. Allows reading and setting frequency, mode, and PTT state.
 

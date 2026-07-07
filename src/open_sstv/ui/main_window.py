@@ -1031,6 +1031,10 @@ class MainWindow(QMainWindow):
             return
         if self._logbook_dialog is None:
             self._logbook_dialog = LogbookDialog(self._logbook_coordinator, parent=self)
+            # v0.5: Logbook "Show in Gallery" → focus the gallery.
+            self._logbook_dialog.show_in_gallery_requested.connect(
+                self._on_show_in_gallery
+            )
         else:
             self._logbook_dialog.refresh()
         self._logbook_dialog.show()
@@ -1050,11 +1054,40 @@ class MainWindow(QMainWindow):
                 config_getter=lambda: self._config,
                 parent=self,
             )
+            # v0.5 cross-links: Gallery → Logbook row, and Gallery
+            # "Re-send to TX" → load the image into the TX panel.
+            self._gallery_dialog.open_qso_requested.connect(self._on_gallery_open_qso)
+            self._gallery_dialog.resend_requested.connect(self._on_gallery_resend)
         else:
             self._gallery_dialog.refresh()
         self._gallery_dialog.show()
         self._gallery_dialog.raise_()
         self._gallery_dialog.activateWindow()
+
+    @Slot(object)
+    def _on_gallery_open_qso(self, qso: QSO) -> None:
+        """Gallery → QSO: open the Logbook focused on this contact's row."""
+        self._open_logbook()
+        if self._logbook_dialog is not None and qso.id is not None:
+            self._logbook_dialog.select_qso(qso.id)
+
+    @Slot(object)
+    def _on_gallery_resend(self, path: object) -> None:
+        """Gallery "Re-send to TX": load the image into the TX panel."""
+        from pathlib import Path  # noqa: PLC0415
+
+        self._tx_panel.load_image(Path(path))  # type: ignore[arg-type]
+        self.raise_()
+        self.activateWindow()
+
+    @Slot(object)
+    def _on_show_in_gallery(self, path: object) -> None:
+        """Logbook "Show in Gallery": open the Gallery focused on this image."""
+        from pathlib import Path  # noqa: PLC0415
+
+        self._open_gallery()
+        if self._gallery_dialog is not None:
+            self._gallery_dialog.focus_on_path(Path(path))  # type: ignore[arg-type]
 
     def _capture_qso(
         self,

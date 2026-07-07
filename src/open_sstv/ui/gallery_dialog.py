@@ -18,8 +18,10 @@ cross-link will consume.
 from __future__ import annotations
 
 import logging
+import shutil
 from collections import OrderedDict
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import (
@@ -40,11 +42,13 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDateEdit,
     QDialog,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListView,
+    QMessageBox,
     QPushButton,
     QSplitter,
     QVBoxLayout,
@@ -62,7 +66,6 @@ from open_sstv.ui.log_qso_dialog import format_frequency
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from open_sstv.config.schema import AppConfig
     from open_sstv.gallery.model import GalleryItem
@@ -183,9 +186,11 @@ class GalleryDialog(QDialog):
     """The gallery window.  Scans the filesystem and left-joins the log."""
 
     #: Emitted when the user clicks "→ QSO" on a logged image; carries
-    #: the linked ``QSO``.  MainWindow consumes this in PR #3 to focus
-    #: the Logbook window on that row.
+    #: the linked ``QSO``.  MainWindow focuses the Logbook on that row.
     open_qso_requested = Signal(object)  # QSO
+    #: Emitted by "Re-send to TX"; carries the image ``Path``.
+    #: MainWindow loads it into the TX panel and raises the main window.
+    resend_requested = Signal(object)  # Path
 
     def __init__(
         self,
@@ -317,6 +322,19 @@ class GalleryDialog(QDialog):
 
         # --- Action row ---------------------------------------------------
         actions = QHBoxLayout()
+        self._resend_btn = QPushButton("Re-send to TX")
+        self._resend_btn.setToolTip("Load this image into the TX panel")
+        self._resend_btn.clicked.connect(self._on_resend)
+        actions.addWidget(self._resend_btn)
+        self._export_btn = QPushButton("Export…")
+        self._export_btn.setToolTip("Save a copy to another location")
+        self._export_btn.clicked.connect(self._on_export)
+        actions.addWidget(self._export_btn)
+        self._delete_btn = QPushButton("Delete")
+        self._delete_btn.setToolTip("Delete the image file (the QSO row is kept)")
+        self._delete_btn.clicked.connect(self._on_delete)
+        actions.addWidget(self._delete_btn)
+        actions.addSpacing(24)
         refresh_btn = QPushButton("Refresh")
         refresh_btn.clicked.connect(self.refresh)
         actions.addWidget(refresh_btn)
@@ -330,8 +348,6 @@ class GalleryDialog(QDialog):
     # === Scan + join ===
 
     def _source_dirs(self) -> list[Path]:
-        from pathlib import Path  # noqa: PLC0415
-
         cfg = self._config_getter()
         dirs: list[Path] = []
         if cfg.images_save_dir:
@@ -420,7 +436,15 @@ class GalleryDialog(QDialog):
     def _on_selection_changed(self) -> None:
         self._show_detail(self._selected_item())
 
+    def _update_action_buttons(self, item: GalleryItem | None) -> None:
+        has_sel = item is not None
+        self._resend_btn.setEnabled(has_sel)
+        self._export_btn.setEnabled(has_sel)
+        self._delete_btn.setEnabled(has_sel)
+        self._qso_btn.setEnabled(has_sel and item.is_logged)
+
     def _show_detail(self, item: GalleryItem | None) -> None:
+        self._update_action_buttons(item)
         if item is None:
             self._preview.setText("No image selected")
             for lbl in (
@@ -433,7 +457,6 @@ class GalleryDialog(QDialog):
                 self._d_source,
             ):
                 lbl.setText("—")
-            self._qso_btn.setEnabled(False)
             return
 
         self._set_preview(item.path)
@@ -455,7 +478,6 @@ class GalleryDialog(QDialog):
             self._d_operator.setText("—")
             self._d_notes.setText("—")
         self._d_source.setText(item.path.name)
-        self._qso_btn.setEnabled(item.is_logged)
 
     def _set_preview(self, image_path: Path) -> None:
         if not image_path.is_file():
@@ -479,6 +501,95 @@ class GalleryDialog(QDialog):
         item = self._selected_item()
         if item is not None and item.qso is not None:
             self.open_qso_requested.emit(item.qso)
+
+    # === Operations ===
+
+    @Slot()
+    def _on_resend(self) -> None:
+        """Load the selected image into the TX panel via MainWindow."""
+        item = self._selected_item()
+        if item is None:
+            return
+        if not item.path.is_file():
+            QMessageBox.warning(
+                self, "Re-send", "The image file is no longer on disk."
+            )
+            return
+        self.resend_requested.emit(item.path)
+
+    @Slot()
+    def _on_export(self) -> None:
+        """Copy the selected image to a user-chosen location (original kept)."""
+        item = self._selected_item()
+        if item is None:
+            return
+        if not item.path.is_file():
+            QMessageBox.warning(self, "Export", "The image file is no longer on disk.")
+            return
+        dest_str, _ = QFileDialog.getSaveFileName(
+            self, "Export image", item.path.name, "Images (*.png *.jpg *.jpeg *.bmp)"
+        )
+        if not dest_str:
+            return
+        try:
+            shutil.copy2(item.path, Path(dest_str))
+        except OSError as exc:
+            QMessageBox.warning(self, "Export failed", str(exc))
+            return
+        self._count_label.setText(f"Exported {Path(dest_str).name}")
+
+    @Slot()
+    def _on_delete(self) -> None:
+        """Delete the image file; a linked QSO row survives (image cleared).
+
+        The mirror of the Logbook's "delete row keeps file": here,
+        deleting the file keeps the row — we just clear its
+        ``image_path`` so it stops pointing at a file that's gone.
+        """
+        item = self._selected_item()
+        if item is None:
+            return
+        linked = " (its logbook entry will be kept)" if item.is_logged else ""
+        if QMessageBox.question(
+            self,
+            "Delete image",
+            f"Delete {item.path.name}?{linked}\n\nThis removes the file from disk.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            item.path.unlink(missing_ok=True)
+        except OSError as exc:
+            QMessageBox.warning(self, "Delete failed", str(exc))
+            return
+        # Clear the QSO's image link so it doesn't dangle.
+        if item.qso is not None and item.qso.id is not None:
+            item.qso.image_path = None
+            try:
+                self._coordinator.store.update(item.qso)
+            except Exception as exc:  # noqa: BLE001 — file's already gone; log only
+                _log.warning("could not clear image link on QSO %s: %s", item.qso.id, exc)
+        self.refresh()
+
+    # === Cross-link target ===
+
+    def focus_on_path(self, path: Path) -> None:
+        """Select the grid item for *path*, rescanning first (cross-link).
+
+        Called by MainWindow when the Logbook's "Show in Gallery" points
+        here.  No-op (selection cleared) if the file isn't in the grid.
+        """
+        self.refresh()
+        target = Path(path).as_posix()
+        for row in range(self._model.rowCount()):
+            item = self._model.item_at(row)
+            if item is not None and item.path.as_posix() == target:
+                idx = self._model.index(row, 0)
+                self._view.setCurrentIndex(idx)
+                self._view.scrollTo(idx)
+                return
+        self._view.clearSelection()
 
     # === Lifecycle ===
 
