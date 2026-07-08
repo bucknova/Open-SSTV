@@ -137,12 +137,40 @@ _PAGE = """<!doctype html>
     border:1px solid var(--line); }
   #box .cap { position:fixed; bottom:16px; left:0; right:0; text-align:center;
     font-family:var(--mono); font-size:12px; color:var(--muted); }
+  #box .boxinner { display:flex; flex-direction:column; align-items:center; gap:14px; }
+  /* control plane (TX) */
+  .txchip { display:none; align-items:center; gap:8px; }
+  .txchip.on { display:inline-flex; }
+  .txchip .muted { color:var(--muted); font-family:var(--mono); font-size:12px; }
+  .btn { font:inherit; color:var(--ink); background:var(--panel);
+    border:1px solid var(--line); border-radius:8px; padding:6px 13px; cursor:pointer; }
+  .btn:hover { border-color:var(--muted); }
+  .btn.tx { color:var(--tx); background:color-mix(in srgb,var(--tx) 16%,var(--panel));
+    border-color:color-mix(in srgb,var(--tx) 45%,var(--line)); }
+  .btn.tx:hover { border-color:var(--tx); }
+  .onair { display:inline-flex; align-items:center; gap:8px; font-family:var(--mono);
+    font-size:12px; text-transform:uppercase; letter-spacing:.09em; color:var(--tx); }
+  .onair.ctl { color:var(--accent); }
+  .onair .d { width:9px; height:9px; border-radius:50%; background:var(--tx);
+    box-shadow:0 0 10px var(--tx); animation:pulse 1s ease-in-out infinite; }
+  .onair.ctl .d { background:var(--accent); box-shadow:none; animation:none; }
+  .scrim { position:fixed; inset:0; background:rgba(3,6,7,.9); display:none;
+    align-items:center; justify-content:center; padding:24px; z-index:30; }
+  .scrim.show { display:flex; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:14px;
+    padding:22px; max-width:420px; width:100%; }
+  .panel h3 { margin:0 0 6px; }
+  .panel .sub { color:var(--muted); font-size:13px; }
+  .panel select { width:100%; margin-top:14px; background:#05090a; color:var(--ink);
+    border:1px solid var(--line); border-radius:8px; padding:9px; font:inherit; }
+  .panel .actions { display:flex; gap:10px; margin-top:20px; justify-content:flex-end; }
 </style>
 </head>
 <body>
 <header>
   <b>Open-SSTV</b><span class="sub">remote gallery · read-only</span>
   <span class="spacer"></span>
+  <span class="txchip" id="txchip"></span>
   <span class="statuspill" id="status" data-state="offline" title="live link status">
     <span class="d"></span><span class="t">Connecting…</span></span>
   <span id="count"></span>
@@ -179,7 +207,25 @@ _PAGE = """<!doctype html>
     <div class="empty" id="logEmpty" hidden>No logged QSOs yet.</div>
   </section>
 </main>
-<div id="box"><img id="boxImg" alt="" /><div class="cap" id="boxCap"></div></div>
+<div id="box">
+  <div class="boxinner">
+    <img id="boxImg" alt="" />
+    <button class="btn tx" id="txSend" style="display:none">📡 Transmit this image</button>
+  </div>
+  <div class="cap" id="boxCap"></div>
+</div>
+<div class="scrim" id="cfScrim">
+  <div class="panel">
+    <h3>Transmit image?</h3>
+    <div class="sub" id="cfName"></div>
+    <select id="cfMode" aria-label="SSTV mode"></select>
+    <div class="sub" style="margin-top:12px">This keys the station's transmitter.</div>
+    <div class="actions">
+      <button class="btn" id="cfCancel">Cancel</button>
+      <button class="btn tx" id="cfConfirm">Confirm transmit</button>
+    </div>
+  </div>
+</div>
 <script>
   const token = new URLSearchParams(location.search).get("token") || "";
   const q = (p) => p + (p.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token);
@@ -223,16 +269,23 @@ _PAGE = """<!doctype html>
     return el;
   }
 
-  function openImage(id, caption) {
+  let currentImage = null;  // {id, name, mode} of the open lightbox image
+  function openImage(id, caption, meta) {
     $("boxImg").src = q("/api/image/" + id);
     $("boxCap").textContent = caption || "";
+    currentImage = meta || null;
     $("box").classList.add("show");
+    renderTx();
   }
   function open_(item) {
     const when = new Date(item.timestamp).toLocaleString();
-    openImage(item.id, `${item.name} · ${item.mode} · ${when} · ${fmtBytes(item.size_bytes)}`);
+    openImage(item.id, `${item.name} · ${item.mode} · ${when} · ${fmtBytes(item.size_bytes)}`,
+      { id: item.id, name: item.name, mode: item.mode });
   }
-  $("box").addEventListener("click", () => $("box").classList.remove("show"));
+  // Close only on the backdrop, so the Transmit button stays clickable.
+  $("box").addEventListener("click", (e) => {
+    if (e.target === $("box")) { $("box").classList.remove("show"); currentImage = null; }
+  });
 
   function errMsg(e) {
     return e.message === "unauthorized"
@@ -290,8 +343,9 @@ _PAGE = """<!doctype html>
           `<td>${esc(rst)}</td><td>${esc(r.name) || "—"}</td>`;
         if (r.image_id) {
           tr.dataset.img = r.image_id;
-          tr.addEventListener("click",
-            () => openImage(r.image_id, esc(r.callsign) + " · " + esc(r.mode)));
+          tr.addEventListener("click", () => openImage(
+            r.image_id, esc(r.callsign) + " · " + esc(r.mode),
+            { id: r.image_id, name: r.callsign || r.image_id, mode: r.mode }));
         }
         body.appendChild(tr);
       }
@@ -352,7 +406,105 @@ _PAGE = """<!doctype html>
       else if (ev.type === "rx.progress") progressLive(ev);
       else if (ev.type === "rx.complete") hideLive();
       else if (ev.type === "gallery.new") load();
+      else if (ev.type === "tx.state") onTxState(ev);
     };
+  }
+
+  /* ---- control plane: remote transmit ---- */
+  const MODES = [
+    { v: "scottie_s1", n: "Scottie S1" }, { v: "scottie_s2", n: "Scottie S2" },
+    { v: "martin_m1", n: "Martin M1" }, { v: "martin_m2", n: "Martin M2" },
+    { v: "pd_120", n: "PD-120" }, { v: "pd_180", n: "PD-180" },
+    { v: "robot_36", n: "Robot 36" },
+  ];
+  let clientId = sessionStorage.getItem("sstv_client");
+  if (!clientId) {
+    clientId = "c-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+    sessionStorage.setItem("sstv_client", clientId);
+  }
+  let txInfo = { state: "idle", lease_held: false, tx_enabled: false };
+  let iHold = false, hbTimer = null, cfImage = null;
+
+  async function txPost(action, extra) {
+    try {
+      const res = await fetch(q("/api/tx/" + action), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(Object.assign({ client: clientId }, extra || {})),
+      });
+      let body = {}; try { body = await res.json(); } catch {}
+      return { ok: res.ok, body };
+    } catch { return { ok: false, body: {} }; }
+  }
+  function startHb() {
+    if (hbTimer) return;
+    // 1.5 s keeps the lease alive (< 15 s) and satisfies the dead-man's-
+    // switch during TX (< 2.5 s). Stop heartbeating → the station unkeys.
+    hbTimer = setInterval(async () => {
+      const r = await txPost("heartbeat");
+      if (!r.ok) { iHold = false; stopHb(); renderTx(); }
+    }, 1500);
+  }
+  function stopHb() { if (hbTimer) { clearInterval(hbTimer); hbTimer = null; } }
+
+  async function takeControl() {
+    const r = await txPost("lease");
+    if (r.ok) { iHold = true; startHb(); }
+    renderTx();
+  }
+  async function releaseControl() { await txPost("release"); iHold = false; stopHb(); renderTx(); }
+  async function abortTx() { await txPost("abort"); }
+
+  function askTransmit() {
+    if (!iHold || txInfo.state !== "idle" || !currentImage) return;
+    cfImage = currentImage;
+    $("cfMode").innerHTML = MODES.map(m =>
+      `<option value="${m.v}"${m.v === cfImage.mode ? " selected" : ""}>${m.n}</option>`
+    ).join("");
+    $("cfName").textContent = cfImage.name || "";
+    $("cfScrim").classList.add("show");
+  }
+  $("txSend").addEventListener("click", askTransmit);
+  $("cfCancel").addEventListener("click", () => $("cfScrim").classList.remove("show"));
+  $("cfConfirm").addEventListener("click", async () => {
+    $("cfScrim").classList.remove("show");
+    const req = await txPost("request", { image_id: cfImage.id, mode: $("cfMode").value });
+    if (!req.ok || !req.body.token) { renderTx(); return; }
+    await txPost("confirm", { token: req.body.token });  // tx.state SSE flips to on-air
+  });
+
+  function mkbtn(text, cls, fn) {
+    const b = document.createElement("button");
+    b.className = cls; b.textContent = text; b.addEventListener("click", fn);
+    return b;
+  }
+  function renderTx() {
+    const chip = $("txchip");
+    chip.replaceChildren();
+    if (!txInfo.tx_enabled) { chip.className = "txchip"; }
+    else {
+      chip.className = "txchip on";
+      if (txInfo.state === "transmitting" && iHold) {
+        chip.insertAdjacentHTML("beforeend",
+          '<span class="onair"><span class="d"></span> On air</span>');
+        chip.appendChild(mkbtn("Abort", "btn tx", abortTx));
+      } else if (iHold) {
+        chip.insertAdjacentHTML("beforeend",
+          '<span class="onair ctl"><span class="d"></span> You have control</span>');
+        chip.appendChild(mkbtn("Release", "btn", releaseControl));
+      } else if (txInfo.lease_held) {
+        chip.insertAdjacentHTML("beforeend",
+          '<span class="muted">in use by another station</span>');
+      } else {
+        chip.appendChild(mkbtn("Take control", "btn", takeControl));
+      }
+    }
+    $("txSend").style.display =
+      (iHold && txInfo.state === "idle" && currentImage) ? "" : "none";
+  }
+  function onTxState(ev) {
+    txInfo = { state: ev.state, lease_held: !!ev.lease_held, tx_enabled: !!ev.tx_enabled };
+    if (!txInfo.lease_held) { iHold = false; stopHb(); }  // server released/lapsed it
+    renderTx();
   }
 
   load();

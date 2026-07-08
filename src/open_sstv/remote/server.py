@@ -403,8 +403,12 @@ class RemoteServer:
                 last_ping = time.monotonic()
                 try:
                     # A first comment flushes headers so the browser's
-                    # EventSource fires `onopen` immediately.
+                    # EventSource fires `onopen` immediately; follow it with
+                    # the current TX state so the control UI initialises
+                    # without waiting for the next state change.
                     self.wfile.write(b": connected\n\n")
+                    init = json.dumps({"type": "tx.state", **control.status()})
+                    self.wfile.write(b"data: " + init.encode("utf-8") + b"\n\n")
                     self.wfile.flush()
                     while not stopping.is_set():
                         try:

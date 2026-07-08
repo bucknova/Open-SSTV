@@ -377,19 +377,17 @@ class TestEventStream:
         resp = self._open_stream(server, TOKEN)
         assert resp.status == 200
         assert resp.headers["Content-Type"] == "text/event-stream"
-        # Read the initial ": connected" comment — once seen, the client is
-        # subscribed, so a publish now will reach this stream.
-        first = resp.fp.readline()
-        assert first.startswith(b":")
+
+        def next_data() -> dict:
+            for _ in range(6):
+                line = resp.fp.readline()
+                if line.startswith(b"data: "):
+                    return json.loads(line[len(b"data: "):].decode("utf-8"))
+            raise AssertionError("no data frame received")
+
+        # On connect the server sends a tx.state snapshot first; once we've
+        # read it the client is subscribed, so a publish now reaches us.
+        assert next_data()["type"] == "tx.state"
         server.hub.publish({"type": "rx.started", "mode": "scottie_s1"})
-        # Read forward to the data line (skips the blank line after the comment).
-        data_line = b""
-        for _ in range(5):
-            line = resp.fp.readline()
-            if line.startswith(b"data: "):
-                data_line = line
-                break
-        assert data_line, "no data frame received"
-        payload = json.loads(data_line[len(b"data: "):].decode("utf-8"))
-        assert payload == {"type": "rx.started", "mode": "scottie_s1"}
+        assert next_data() == {"type": "rx.started", "mode": "scottie_s1"}
         resp.close()
