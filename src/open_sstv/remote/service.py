@@ -140,6 +140,48 @@ class GalleryService:
             )
         return out
 
+    # -- logbook (read-only) -------------------------------------------
+
+    def logbook_payload(self, limit: int = 500) -> list[dict[str, object]]:
+        """JSON-serialisable QSO list (newest first), or ``[]`` if no logbook.
+
+        Opens its own read connection per call (thread-safe) and never
+        creates a ``logbook.db`` — a station with no logbook simply
+        returns an empty list.  ``image_id`` is the same opaque id the
+        gallery uses, so a logged image can be fetched via
+        ``/api/image/<id>`` when it's one of the scanned gallery files.
+        """
+        db_path = self._db_path()
+        if not db_path.exists():
+            return []
+        store: LogbookStore | None = None
+        try:
+            store = LogbookStore(db_path)
+            rows = store.list_qsos(order="time_desc", limit=limit)
+        except Exception as exc:  # noqa: BLE001 — a bad DB must not 500 the view
+            _log.warning("remote logbook: unavailable: %s", exc)
+            return []
+        finally:
+            if store is not None:
+                store.close()
+        out: list[dict[str, object]] = []
+        for q in rows:
+            out.append(
+                {
+                    "id": q.id,
+                    "callsign": q.callsign,
+                    "direction": q.direction,
+                    "time": q.time_utc.isoformat(),
+                    "mode": q.mode,
+                    "frequency_hz": q.frequency_hz,
+                    "rst_sent": q.rsv_sent,
+                    "rst_received": q.rsv_received,
+                    "name": q.name,
+                    "image_id": _image_id(q.image_path) if q.image_path else None,
+                }
+            )
+        return out
+
     # -- id → file resolution (the path-traversal fence) ---------------
 
     def resolve(self, image_id: str) -> Path | None:

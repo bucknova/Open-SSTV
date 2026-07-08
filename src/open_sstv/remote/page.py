@@ -104,6 +104,32 @@ _PAGE = """<!doctype html>
   .empty,.err { color:var(--muted); font-family:var(--mono); padding:40px 8px;
     text-align:center; }
   .err { color:var(--tx); }
+  /* view tabs */
+  .tabs { display:flex; gap:8px; padding:14px 18px 0; }
+  .tabs button { background:transparent; border:1px solid var(--line); color:var(--muted);
+    border-radius:20px; padding:6px 16px; font-size:13px; }
+  .tabs button[aria-selected="true"] { color:var(--accent);
+    border-color:color-mix(in srgb,var(--accent) 45%,var(--line));
+    background:color-mix(in srgb,var(--accent) 10%,transparent); }
+  /* logbook table */
+  .logwrap { overflow-x:auto; }
+  .logtable { width:100%; border-collapse:collapse; font-size:13px; }
+  .logtable th { text-align:left; color:var(--muted); font-family:var(--mono);
+    font-size:10.5px; text-transform:uppercase; letter-spacing:.07em;
+    padding:8px 12px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  .logtable td { padding:10px 12px; border-bottom:1px solid var(--line);
+    font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .logtable tr[data-img] { cursor:pointer; }
+  .logtable tr[data-img]:hover td { background:var(--panel); }
+  .logtable .call { font-weight:600; color:var(--ink); }
+  .logtable .thumb { width:44px; height:33px; object-fit:cover; border-radius:4px;
+    background:#05090a; display:block; }
+  .dirbadge { font-family:var(--mono); font-size:10px; letter-spacing:.05em;
+    padding:2px 7px; border-radius:20px; border:1px solid var(--line); color:var(--muted); }
+  .dirbadge.tx { color:var(--tx);
+    border-color:color-mix(in srgb,var(--tx) 40%,var(--line)); }
+  .dirbadge.rx { color:var(--accent);
+    border-color:color-mix(in srgb,var(--accent) 40%,var(--line)); }
   #box { position:fixed; inset:0; background:rgba(3,6,7,.9); display:none;
     align-items:center; justify-content:center; padding:24px; z-index:20; }
   #box.show { display:flex; }
@@ -122,18 +148,36 @@ _PAGE = """<!doctype html>
   <span id="count"></span>
   <button id="refresh">Refresh</button>
 </header>
+<nav class="tabs" role="tablist">
+  <button role="tab" aria-selected="true" data-view="gallery">Gallery</button>
+  <button role="tab" aria-selected="false" data-view="logbook">Logbook</button>
+</nav>
 <main>
-  <section class="live" id="live">
-    <div class="screen"><img id="liveImg" alt="in-progress decode" style="display:none" />
-      <span class="ph" id="livePh">waiting for lines…</span></div>
-    <div class="info">
-      <div class="eyebrow"><span class="pulse"></span> Receiving</div>
-      <h2 id="liveMode">SSTV</h2>
-      <div class="bar"><span id="liveBar"></span></div>
-      <div class="pct" id="livePct">0%</div>
-    </div>
+  <section id="galleryView">
+    <section class="live" id="live">
+      <div class="screen"><img id="liveImg" alt="in-progress decode" style="display:none" />
+        <span class="ph" id="livePh">waiting for lines…</span></div>
+      <div class="info">
+        <div class="eyebrow"><span class="pulse"></span> Receiving</div>
+        <h2 id="liveMode">SSTV</h2>
+        <div class="bar"><span id="liveBar"></span></div>
+        <div class="pct" id="livePct">0%</div>
+      </div>
+    </section>
+    <div class="grid" id="grid"></div>
   </section>
-  <div class="grid" id="grid"></div>
+  <section id="logbookView" hidden>
+    <div class="logwrap">
+      <table class="logtable">
+        <thead><tr>
+          <th></th><th>Time (UTC)</th><th>Call</th><th></th><th>Mode</th>
+          <th>Freq</th><th>RST S/R</th><th>Name</th>
+        </tr></thead>
+        <tbody id="logBody"></tbody>
+      </table>
+    </div>
+    <div class="empty" id="logEmpty" hidden>No logged QSOs yet.</div>
+  </section>
 </main>
 <div id="box"><img id="boxImg" alt="" /><div class="cap" id="boxCap"></div></div>
 <script>
@@ -141,11 +185,22 @@ _PAGE = """<!doctype html>
   const q = (p) => p + (p.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token);
   const $ = (id) => document.getElementById(id);
   const grid = $("grid"), countEl = $("count"), live = $("live");
+  let activeView = "gallery", galleryCount = "", logCount = "";
 
   function fmtBytes(n) {
     if (n < 1024) return n + " B";
     if (n < 1048576) return (n / 1024).toFixed(0) + " KB";
     return (n / 1048576).toFixed(1) + " MB";
+  }
+  function esc(s) {
+    return (s == null ? "" : String(s)).replace(/[&<>"]/g,
+      c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  }
+  function fmtFreq(hz) { return hz ? (hz / 1e6).toFixed(3) + " MHz" : "—"; }
+  function fmtUTC(iso) {
+    const d = new Date(iso), p = (n) => String(n).padStart(2, "0");
+    return d.getUTCFullYear() + "-" + p(d.getUTCMonth() + 1) + "-" + p(d.getUTCDate()) +
+      " " + p(d.getUTCHours()) + ":" + p(d.getUTCMinutes());
   }
 
   function card(item, fresh) {
@@ -165,23 +220,32 @@ _PAGE = """<!doctype html>
     return el;
   }
 
-  function open_(item) {
-    $("boxImg").src = q("/api/image/" + item.id);
-    const when = new Date(item.timestamp).toLocaleString();
-    $("boxCap").textContent =
-      `${item.name} · ${item.mode} · ${when} · ${fmtBytes(item.size_bytes)}`;
+  function openImage(id, caption) {
+    $("boxImg").src = q("/api/image/" + id);
+    $("boxCap").textContent = caption || "";
     $("box").classList.add("show");
+  }
+  function open_(item) {
+    const when = new Date(item.timestamp).toLocaleString();
+    openImage(item.id, `${item.name} · ${item.mode} · ${when} · ${fmtBytes(item.size_bytes)}`);
   }
   $("box").addEventListener("click", () => $("box").classList.remove("show"));
 
+  function errMsg(e) {
+    return e.message === "unauthorized"
+      ? "Not authorized — check the token in the URL."
+      : "Could not reach the station — is Open-SSTV running?";
+  }
+
   async function load() {
-    countEl.textContent = "loading…";
+    if (activeView === "gallery") countEl.textContent = "loading…";
     try {
       const res = await fetch(q("/api/gallery"));
       if (res.status === 401) throw new Error("unauthorized");
       if (!res.ok) throw new Error("HTTP " + res.status);
       const items = await res.json();
-      countEl.textContent = items.length + (items.length === 1 ? " image" : " images");
+      galleryCount = items.length + (items.length === 1 ? " image" : " images");
+      if (activeView === "gallery") countEl.textContent = galleryCount;
       grid.innerHTML = "";
       if (!items.length) {
         grid.innerHTML = '<div class="empty">No images in the gallery yet.</div>';
@@ -189,14 +253,66 @@ _PAGE = """<!doctype html>
       }
       for (const it of items) grid.appendChild(card(it, false));
     } catch (e) {
-      countEl.textContent = "";
-      const msg = e.message === "unauthorized"
-        ? "Not authorized — check the token in the URL."
-        : "Could not reach the station — is Open-SSTV running?";
-      grid.innerHTML = '<div class="err">' + msg + "</div>";
+      if (activeView === "gallery") countEl.textContent = "";
+      grid.innerHTML = '<div class="err">' + errMsg(e) + "</div>";
     }
   }
-  $("refresh").addEventListener("click", load);
+
+  async function loadLogbook() {
+    const body = $("logBody"), empty = $("logEmpty");
+    if (activeView === "logbook") countEl.textContent = "loading…";
+    try {
+      const res = await fetch(q("/api/logbook"));
+      if (res.status === 401) throw new Error("unauthorized");
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const rows = await res.json();
+      logCount = rows.length + (rows.length === 1 ? " QSO" : " QSOs");
+      if (activeView === "logbook") countEl.textContent = logCount;
+      body.innerHTML = "";
+      empty.hidden = rows.length > 0;
+      empty.textContent = "No logged QSOs yet.";
+      for (const r of rows) {
+        const tr = document.createElement("tr");
+        const dcls = r.direction === "TX" ? "dirbadge tx"
+          : (r.direction === "RX" ? "dirbadge rx" : "dirbadge");
+        const thumb = r.image_id
+          ? `<img class="thumb" loading="lazy" alt="" src="${q("/api/thumb/" + r.image_id)}" />`
+          : "";
+        const rst = [r.rst_sent, r.rst_received].filter(Boolean).join(" / ") || "—";
+        tr.innerHTML =
+          `<td>${thumb}</td><td>${fmtUTC(r.time)}</td>` +
+          `<td class="call">${esc(r.callsign) || "—"}</td>` +
+          `<td><span class="${dcls}">${esc(r.direction)}</span></td>` +
+          `<td>${esc(r.mode) || "—"}</td><td>${fmtFreq(r.frequency_hz)}</td>` +
+          `<td>${esc(rst)}</td><td>${esc(r.name) || "—"}</td>`;
+        if (r.image_id) {
+          tr.dataset.img = r.image_id;
+          tr.addEventListener("click",
+            () => openImage(r.image_id, esc(r.callsign) + " · " + esc(r.mode)));
+        }
+        body.appendChild(tr);
+      }
+    } catch (e) {
+      if (activeView === "logbook") countEl.textContent = "";
+      body.innerHTML = "";
+      empty.hidden = false;
+      empty.innerHTML = '<span class="err">' + errMsg(e) + "</span>";
+    }
+  }
+
+  function showView(name) {
+    activeView = name;
+    $("galleryView").hidden = name !== "gallery";
+    $("logbookView").hidden = name !== "logbook";
+    document.querySelectorAll(".tabs button").forEach(
+      b => b.setAttribute("aria-selected", b.dataset.view === name ? "true" : "false"));
+    countEl.textContent = name === "gallery" ? galleryCount : logCount;
+    if (name === "logbook") loadLogbook();
+  }
+  document.querySelectorAll(".tabs button").forEach(
+    b => b.addEventListener("click", () => showView(b.dataset.view)));
+  $("refresh").addEventListener("click",
+    () => (activeView === "gallery" ? load() : loadLogbook()));
 
   /* ---- live view plane: Server-Sent Events ---- */
   let seq = 0;

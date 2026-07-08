@@ -82,6 +82,11 @@ class TestPage:
         html = body.decode("utf-8")
         assert 'id="status"' in html and "statuspill" in html
 
+    def test_page_has_logbook_view(self, server: RemoteServer) -> None:
+        _, body, _ = _get(server, "/")
+        html = body.decode("utf-8")
+        assert 'data-view="logbook"' in html and 'id="logBody"' in html
+
 
 class TestAuth:
     def test_gallery_requires_token(self, server: RemoteServer) -> None:
@@ -106,6 +111,17 @@ class TestImages:
         items = json.loads(body)
         assert len(items) == 1
         assert items[0]["mode"] == "scottie_s1"
+
+    def test_logbook_requires_token(self, server: RemoteServer) -> None:
+        status, _, _ = _get(server, "/api/logbook")
+        assert status == 401
+
+    def test_logbook_empty_without_db(self, server: RemoteServer) -> None:
+        # The fixture points at a logbook path that was never created.
+        status, body, ctype = _get(server, "/api/logbook", token=TOKEN)
+        assert status == 200
+        assert ctype == "application/json"
+        assert json.loads(body) == []
 
     def test_thumbnail_is_png(self, server: RemoteServer) -> None:
         (item_id,) = _ids(server)

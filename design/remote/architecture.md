@@ -275,7 +275,11 @@ New **Settings → Remote** tab (all default-off):
    Settings → Remote tab (enable / LAN bind / port / token + live browse
    URL **and a scannable pairing QR** via `segno`); `result_config` now
    round-trips the `remote_*` fields so a save no longer resets them, and
-   Save restarts the server live. *2c (next)*: logbook read view.
+   Save restarts the server live. *2c* ✅ *(shipped, branch)*: read-only
+   logbook view in the browser (`GET /api/logbook`, Gallery/Logbook tabs,
+   RX/TX badges, logbook→image cross-link). **View plane complete.**
+   Web header shows a live status pill; the desktop app shows a
+   persistent "Remote on" status-bar indicator.
 3. **Compose plane** — camera upload, server-side `compose.render`,
    template strip.
 4. **Control plane** — single-writer lease, `tx.request/confirm`,

@@ -110,3 +110,29 @@ class TestEnrichment:
         assert item["logged"] is False
         assert item["callsign"] == ""
         assert not (tmp_path / "logbook.db").exists()
+
+
+class TestLogbookPayload:
+    def test_no_db_returns_empty_and_creates_nothing(self, tmp_path: Path) -> None:
+        svc = _service(tmp_path)
+        assert svc.logbook_payload() == []
+        assert not (tmp_path / "logbook.db").exists()
+
+    def test_lists_qsos_newest_first(self, tmp_path: Path) -> None:
+        svc = _service(tmp_path)
+        img = _img(tmp_path / "images" / "a.png")
+        store = LogbookStore(tmp_path / "logbook.db")
+        store.insert(QSO(direction="RX", callsign="K1ABC", mode="Scottie 1",
+                         frequency_hz=14_230_000, rsv_received="595", image_path=img))
+        store.insert(QSO(direction="TX", callsign="W2XYZ", mode="Martin M1"))
+        store.close()
+        rows = svc.logbook_payload()
+        assert len(rows) == 2
+        # Newest first: W2XYZ (inserted last) leads.
+        assert rows[0]["callsign"] == "W2XYZ"
+        assert rows[0]["direction"] == "TX"
+        k1 = next(r for r in rows if r["callsign"] == "K1ABC")
+        assert k1["frequency_hz"] == 14_230_000
+        assert k1["rst_received"] == "595"
+        # A logged image exposes the same opaque id the gallery uses.
+        assert k1["image_id"] and svc.image_path(str(k1["image_id"])) == img

@@ -175,6 +175,10 @@ class RemoteServer:
                     self._json(HTTPStatus.OK, service.payload())
                     return
 
+                if path == "/api/logbook":
+                    self._json(HTTPStatus.OK, service.logbook_payload())
+                    return
+
                 if path == "/api/events":
                     self._sse()
                     return
