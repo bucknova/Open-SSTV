@@ -271,9 +271,11 @@ New **Settings → Remote** tab (all default-off):
    no TX. Proved the threading model on real hardware (Mac + phone).
 2. **View plane** — *2a* ✅ *(shipped, branch)*: live RX stream via SSE
    (`EventHub` + `/api/events`), live in-progress preview
-   (`/api/rx/preview`), auto-updating gallery. *2b (next)*: Settings →
-   Remote tab + QR pairing (replaces TOML-only config, which any Settings
-   save currently resets). *2c*: logbook read view.
+   (`/api/rx/preview`), auto-updating gallery. *2b* ✅ *(shipped, branch)*:
+   Settings → Remote tab (enable / LAN bind / port / token + live browse
+   URL); `result_config` now round-trips the `remote_*` fields so a save
+   no longer resets them, and Save restarts the server live. *2c (next)*:
+   logbook read view; optional QR of the browse URL for phone pairing.
 3. **Compose plane** — camera upload, server-side `compose.render`,
    template strip.
 4. **Control plane** — single-writer lease, `tx.request/confirm`,
