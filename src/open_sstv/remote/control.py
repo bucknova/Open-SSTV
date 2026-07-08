@@ -78,7 +78,18 @@ class Result:
 
 
 class ControlPlane:
-    """Owns remote-TX authority and the transmit lifecycle."""
+    """Owns remote-TX authority and the transmit lifecycle.
+
+    **Callback contract.** ``transmit`` and ``unkey`` are invoked while the
+    internal lock is held, so their *dispatch order* always matches the
+    state-transition order (a key can never be dispatched after the unkey
+    that supersedes it).  They must therefore be **non-blocking and must
+    not re-enter** this object — in the app they post onto the Qt loop /
+    call the thread-safe TX stop and return immediately.  Critically, both
+    must travel the **same ordered channel** so they *execute* in dispatch
+    order too (e.g. both marshalled onto the Qt thread), or the ordering
+    guarantee stops at dispatch.
+    """
 
     def __init__(
         self,
@@ -117,29 +128,25 @@ class ControlPlane:
 
     def release_lease(self, client_id: str) -> Result:
         """Give up TX authority.  Aborts + unkeys if mid-transmit."""
-        unkey_reason: str | None = None
         with self._lock:
             if self._lease_holder != client_id:
                 return Result(False, "not_lease_holder")
-            if self._state is TxState.TRANSMITTING:
-                unkey_reason = "lease_released"
+            was_tx = self._state is TxState.TRANSMITTING
             self._reset_locked()
             self._lease_holder = None
-        if unkey_reason:
-            self._unkey(unkey_reason)
-        return Result(True)
+            if was_tx:
+                self._unkey("lease_released")  # under lock: ordered vs transmit
+            return Result(True)
 
     def reclaim_local(self) -> None:
         """The local GUI takes back control unconditionally — unkeys any
         in-flight remote TX and clears the lease.  Always available."""
-        unkey = False
         with self._lock:
-            if self._state is TxState.TRANSMITTING:
-                unkey = True
+            was_tx = self._state is TxState.TRANSMITTING
             self._reset_locked()
             self._lease_holder = None
-        if unkey:
-            self._unkey("local_reclaim")
+            if was_tx:
+                self._unkey("local_reclaim")  # under lock: ordered vs transmit
 
     def heartbeat(self, client_id: str) -> Result:
         """Liveness ping from the holder.  Refreshes the lease and, while
@@ -199,23 +206,23 @@ class ControlPlane:
             self._tx_last_hb = t
             self._lease_seen = t
             self._confirm_token = None
-        self._transmit(image_id, mode)
-        return Result(True)
+            # Dispatch under the lock so no concurrent abort/reclaim can
+            # slip its unkey ahead of this key (see the callback contract).
+            self._transmit(image_id, mode)
+            return Result(True)
 
     def abort(self, client_id: str) -> Result:
         """Operator-initiated stop of a pending or in-flight transmit."""
-        unkey = False
         with self._lock:
             if self._lease_holder != client_id:
                 return Result(False, "not_lease_holder")
-            if self._state is TxState.TRANSMITTING:
-                unkey = True
-            elif self._state is TxState.IDLE:
+            if self._state is TxState.IDLE:
                 return Result(False, "busy")
+            was_tx = self._state is TxState.TRANSMITTING
             self._reset_locked()
-        if unkey:
-            self._unkey("operator_abort")
-        return Result(True)
+            if was_tx:
+                self._unkey("operator_abort")  # under lock: ordered vs transmit
+            return Result(True)
 
     def on_tx_finished(self) -> None:
         """The app calls this when the TX worker reports the transmission
@@ -227,18 +234,26 @@ class ControlPlane:
     def tick(self) -> None:
         """Periodic safety sweep — the dead-man's-switch lives here.
 
-        Call on a short timer.  Unkeys the rig if the transmitting holder
-        stopped heartbeating; expires stale confirm tokens; lapses an idle
-        lease whose holder went silent.
+        Call on a short timer (well under HEARTBEAT_TIMEOUT_S).  Unkeys the
+        rig if the transmitting holder stopped heartbeating OR remote TX was
+        disabled mid-transmission; expires stale confirm tokens; lapses an
+        idle lease whose holder went silent.
         """
-        unkey_reason: str | None = None
         with self._lock:
             t = self._now()
             if self._state is TxState.TRANSMITTING:
+                unkey_reason: str | None = None
                 if t - self._tx_last_hb > HEARTBEAT_TIMEOUT_S:
                     unkey_reason = "heartbeat_lost"
+                elif not self._enabled():
+                    # Gate revoked mid-TX — enforce it continuously, not
+                    # just at request time.
+                    unkey_reason = "tx_disabled"
+                if unkey_reason is not None:
                     self._reset_locked()
-                    self._lease_holder = None  # lost link → drop authority too
+                    self._lease_holder = None  # lost link / revoked → drop authority
+                    _log.warning("remote TX safety sweep: %s → unkey", unkey_reason)
+                    self._unkey(unkey_reason)  # under lock: ordered vs transmit
             elif self._state is TxState.AWAITING_CONFIRM:
                 if t >= self._confirm_expires:
                     self._reset_locked()
@@ -248,9 +263,6 @@ class ControlPlane:
                 and t - self._lease_seen > LEASE_TIMEOUT_S
             ):
                 self._lease_holder = None
-        if unkey_reason:
-            _log.warning("remote TX dead-man's-switch: %s → unkey", unkey_reason)
-            self._unkey(unkey_reason)
 
     # -- introspection -------------------------------------------------
 

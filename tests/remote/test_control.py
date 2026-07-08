@@ -168,6 +168,22 @@ class TestDeadMansSwitch:
         assert cp.status()["state"] == TxState.IDLE.value
         assert not cp.holds_lease("A")  # lost link drops authority
 
+    def test_disabling_gate_mid_tx_unkeys(self) -> None:
+        # The enable gate is enforced continuously, not just at request.
+        clock, spy = Clock(), Spy()
+        gate = {"on": True}
+        cp = ControlPlane(
+            now=clock, transmit=spy.transmit, unkey=spy.unkey,
+            enabled=lambda: gate["on"],
+        )
+        cp.take_lease("A")
+        tok = cp.request("A", "img1", "martin_m1").token
+        assert cp.confirm("A", tok or "").ok
+        gate["on"] = False  # operator turns remote TX off during a transmission
+        cp.tick()
+        assert spy.unkeys == ["tx_disabled"]
+        assert cp.status()["state"] == TxState.IDLE.value
+
     def test_heartbeats_keep_tx_alive(self) -> None:
         clock, spy = Clock(), Spy()
         cp = _armed(clock, spy)

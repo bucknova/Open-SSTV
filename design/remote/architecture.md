@@ -195,6 +195,27 @@ stream open for progress). Miss the window → the app assumes the operator
 lost the link and **unkeys automatically**. This is the single most
 important safety behavior and it lives entirely in the app.
 
+**3c wiring invariants** (the `ControlPlane` state machine from 3a already
+enforces its side; these are the app-side obligations when it is wired):
+
+- **`transmit` and `unkey` must execute in dispatch order** — route both
+  through the *same* ordered channel (e.g. both marshalled onto the Qt
+  thread), or a stale key can outlive the unkey that supersedes it. The
+  state machine dispatches them in the correct order under its lock; the
+  app must not reorder them.
+- **`tick()` must run on a reliable short timer** (a QTimer, ≪ 2.5 s) —
+  the dead-man's-switch only fires when `tick()` runs. The `TxWorker`'s
+  own v0.4.1 watchdog is the independent backstop if the GUI loop stalls.
+- **`unkey` should be the thread-safe stop** (`TxWorker.request_stop`,
+  already safe from any thread) so a lost-heartbeat unkey doesn't depend
+  on the event loop being responsive.
+- **Disabling `remote_tx_enabled` mid-TX** already unkeys via `tick()`'s
+  continuous gate check; the config-apply path should additionally
+  `reclaim_local()` for immediacy.
+- **`client_id` must be a stable per-browser id**, distinct from the
+  shared access token (two tabs share the token but must be different
+  lease clients) — the browser generates one and sends it.
+
 ---
 
 ## 7. Media pipeline — camera → app → air
