@@ -125,7 +125,13 @@ from open_sstv.radio.base import ManualRig, Rig, RigConnectionMode
 from open_sstv.radio.exceptions import RigError
 from open_sstv.radio.rigctld import RigctldClient, is_safe_rigctld_arg
 from open_sstv.radio.serial_rig import create_serial_rig
-from open_sstv.remote import ControlPlane, EventHub, GalleryService, RemoteServer
+from open_sstv.remote import (
+    ComposeService,
+    ControlPlane,
+    EventHub,
+    GalleryService,
+    RemoteServer,
+)
 from open_sstv.templates import TokenContext, build_autosave_filename, run_migration
 from open_sstv.ui.first_launch_dialog import FirstLaunchDialog
 from open_sstv.ui.gallery_dialog import GalleryDialog
@@ -552,6 +558,10 @@ class MainWindow(QMainWindow):
         #: hub the current server is draining.
         self._remote_hub = EventHub()
         self._remote_service = GalleryService(lambda: self._config)
+        #: v0.6 (Phase 4): server-side compositor + in-memory staging store.
+        #: Created here (not in RemoteServer) so the stage endpoint and the
+        #: transmit path below share the same staged images.
+        self._remote_compose = ComposeService(lambda: self._config)
         #: Throttle for the live RX preview push (monotonic seconds).
         self._remote_last_preview_t = 0.0
         #: v0.6 (Phase 3c): remote-TX control plane — the reference monitor
@@ -1026,6 +1036,7 @@ class MainWindow(QMainWindow):
                 token=cfg.remote_token,
                 hub=self._remote_hub,
                 control=self._remote_control,
+                compose=self._remote_compose,
             )
             self._remote_server.start()
         except OSError as exc:
@@ -1140,24 +1151,34 @@ class MainWindow(QMainWindow):
 
         if self._remote_control.status().get("state") != "transmitting":
             return  # superseded by an abort / dead-man's-switch — don't key
-        path = self._remote_service.image_path(image_id)
-        if path is None:
-            _log.warning("remote TX: image id %s no longer resolvable", image_id)
-            self._remote_tx_abandon()
-            return
         try:
             mode_enum = Mode(mode)
         except ValueError:
             _log.warning("remote TX: rejected unknown mode %r", mode)
             self._remote_tx_abandon()
             return
-        try:
-            img = Image.open(path)
-            img.load()
-        except Exception as exc:  # noqa: BLE001 — bad file must not key the rig
-            _log.warning("remote TX: cannot load %s: %s", path, exc)
-            self._remote_tx_abandon()
-            return
+        if self._remote_compose.is_staged_id(image_id):
+            # A browser-composed image, held in memory (no gallery/disk).
+            img = self._remote_compose.staged_image(image_id)
+            if img is None:
+                _log.warning("remote TX: staged image %s expired", image_id)
+                self._remote_tx_abandon()
+                return
+            what = "composed image"
+        else:
+            path = self._remote_service.image_path(image_id)
+            if path is None:
+                _log.warning("remote TX: image id %s no longer resolvable", image_id)
+                self._remote_tx_abandon()
+                return
+            try:
+                img = Image.open(path)
+                img.load()
+            except Exception as exc:  # noqa: BLE001 — bad file must not key the rig
+                _log.warning("remote TX: cannot load %s: %s", path, exc)
+                self._remote_tx_abandon()
+                return
+            what = path.name
         # RE-CHECK the state a SECOND time, immediately before keying — the
         # image load above is the widest window in which an abort / reclaim
         # could have landed (workers.py clears its stop flag at TX entry, so
@@ -1169,7 +1190,7 @@ class MainWindow(QMainWindow):
         # hit it because confirm() just refreshed the heartbeat clock.)
         if self._remote_control.status().get("state") != "transmitting":
             return
-        _log.info("remote TX: transmitting %s in %s", path.name, mode)
+        _log.info("remote TX: transmitting %s in %s", what, mode)
         self._last_tx_was_test_tone = False
         self._request_transmit.emit(img, mode_enum)
 

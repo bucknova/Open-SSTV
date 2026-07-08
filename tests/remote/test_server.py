@@ -155,7 +155,8 @@ def compose_server(tmp_path: Path) -> Iterator[RemoteServer]:
                     logbook_db_path=str(tmp_path / "l.db"))
     svc = GalleryService(lambda: cfg, thumbnail_cache=ThumbnailCache(cache_dir=tmp_path / "t"))
     compose = ComposeService(lambda: cfg, templates_dir=manager._bundled_templates_dir())
-    srv = RemoteServer(svc, host="127.0.0.1", port=0, token=TOKEN, compose=compose)
+    srv = RemoteServer(svc, host="127.0.0.1", port=0, token=TOKEN, compose=compose,
+                       tx_enabled=lambda: True)
     srv.start()
     buf = _io.BytesIO()
     Image.new("RGB", (200, 150), (30, 60, 90)).save(buf, "JPEG")
@@ -210,6 +211,43 @@ class TestComposeEndpoints:
                                 {"photo": "", "template_id": "x", "mode": "scottie_s1"},
                                 origin="http://evil.example")
         assert status == 403
+
+    def test_stage_returns_staging_id(self, compose_server: RemoteServer) -> None:
+        _, body, _ = _get(compose_server, "/api/compose/templates", token=TOKEN)
+        tid = json.loads(body)[0]["id"]
+        status, out = _post(compose_server, "/api/compose/stage", {
+            "photo": compose_server._b64_photo, "template_id": tid, "mode": "scottie_s1",
+            "tokens": {"tocall": "K1ABC"},
+        })
+        assert status == 200
+        assert out["image_id"].startswith("s-")
+
+    def test_stage_denied_when_tx_disabled(self, tmp_path: Path) -> None:
+        import base64
+        import io as _io
+
+        from open_sstv.remote.compose import ComposeService
+        from open_sstv.templates import manager
+
+        images = tmp_path / "images"
+        images.mkdir()
+        cfg = AppConfig(callsign="W0AEZ", images_save_dir=str(images),
+                        logbook_db_path=str(tmp_path / "l.db"))
+        svc = GalleryService(lambda: cfg, thumbnail_cache=ThumbnailCache(cache_dir=tmp_path / "t"))
+        compose = ComposeService(lambda: cfg, templates_dir=manager._bundled_templates_dir())
+        # No tx_enabled → default gate is OFF.
+        srv = RemoteServer(svc, host="127.0.0.1", port=0, token=TOKEN, compose=compose)
+        srv.start()
+        try:
+            buf = _io.BytesIO()
+            Image.new("RGB", (200, 150), (0, 0, 0)).save(buf, "JPEG")
+            b64 = base64.b64encode(buf.getvalue()).decode()
+            tid = json.loads(_get(srv, "/api/compose/templates", token=TOKEN)[1])[0]["id"]
+            status, body = _post(srv, "/api/compose/stage",
+                                {"photo": b64, "template_id": tid, "mode": "scottie_s1"})
+            assert status == 403 and body["error"] == "tx_disabled"
+        finally:
+            srv.stop()
 
 
 class TestControlEndpoints:

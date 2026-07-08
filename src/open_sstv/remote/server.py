@@ -369,6 +369,39 @@ class RemoteServer:
                 img.convert("RGB").save(buf, "PNG")
                 self._send(HTTPStatus.OK, buf.getvalue(), "image/png")
 
+            def _do_stage(self) -> None:
+                """POST /api/compose/stage — render + hold the image in memory
+                for transmit, returning a staging id.  Gated on remote TX
+                being enabled (staging is only useful to then transmit)."""
+                import base64  # noqa: PLC0415
+
+                if not control.status().get("tx_enabled"):
+                    self._json(HTTPStatus.FORBIDDEN, {"error": "tx_disabled"})
+                    return
+                body = self._read_json(_MAX_UPLOAD_BYTES)
+                if body is None:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid or missing body"})
+                    return
+                photo_b64 = body.get("photo")
+                template_id = body.get("template_id")
+                mode = body.get("mode")
+                tokens = body.get("tokens")
+                if not isinstance(photo_b64, str) or not isinstance(template_id, str) \
+                        or not isinstance(mode, str):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "missing photo/template_id/mode"})
+                    return
+                try:
+                    photo = base64.b64decode(photo_b64, validate=True)
+                except ValueError:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "bad base64 photo"})
+                    return
+                tok = {k: str(v) for k, v in tokens.items()} if isinstance(tokens, dict) else {}
+                staging_id = compose.stage(photo, template_id, tok, mode)
+                if staging_id is None:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "could not render"})
+                    return
+                self._json(HTTPStatus.OK, {"image_id": staging_id})
+
             def _tx_result(self, result: Result, extra: dict[str, object] | None = None) -> None:
                 # Fan the new control state to viewers, then answer the caller.
                 hub.publish({"type": "tx.state", **control.status()})
@@ -386,7 +419,8 @@ class RemoteServer:
             def do_POST(self) -> None:  # noqa: N802 — stdlib API
                 parts = urlsplit(self.path)
                 path, query = parts.path, parse_qs(parts.query)
-                if path not in ("/api/compose/render",) and not path.startswith("/api/tx/"):
+                if path not in ("/api/compose/render", "/api/compose/stage") \
+                        and not path.startswith("/api/tx/"):
                     self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
                     return
                 if not self._authed(query):
@@ -397,6 +431,9 @@ class RemoteServer:
                     return
                 if path == "/api/compose/render":
                     self._do_compose()
+                    return
+                if path == "/api/compose/stage":
+                    self._do_stage()
                     return
                 body = self._read_json()
                 if body is None:

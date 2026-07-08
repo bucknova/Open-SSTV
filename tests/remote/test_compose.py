@@ -73,3 +73,31 @@ class TestRender:
         tid = service.list_templates()[0]["id"]
         img = service.render(_photo_bytes(), tid, {"rst": ""}, "martin_m1")
         assert img is not None
+
+
+class TestStaging:
+    def test_stage_and_resolve(self, service: ComposeService) -> None:
+        tid = service.list_templates()[0]["id"]
+        sid = service.stage(_photo_bytes(), tid, {"tocall": "K1ABC"}, "scottie_s1")
+        assert sid is not None and service.is_staged_id(sid)
+        img = service.staged_image(sid)
+        assert img is not None
+
+    def test_unknown_staged_id(self, service: ComposeService) -> None:
+        assert service.staged_image("s-deadbeef") is None
+
+    def test_bad_render_does_not_stage(self, service: ComposeService) -> None:
+        assert service.stage(b"not an image", "x", {}, "scottie_s1") is None
+
+    def test_staging_store_is_bounded(self, service: ComposeService) -> None:
+        from open_sstv.remote.compose import _MAX_STAGED
+
+        tid = service.list_templates()[0]["id"]
+        ids = [service.stage(_photo_bytes(), tid, {}, "scottie_s1")
+               for _ in range(_MAX_STAGED + 3)]
+        # The oldest were evicted; only the last _MAX_STAGED survive.
+        assert service.staged_image(ids[0]) is None
+        assert service.staged_image(ids[-1]) is not None
+
+    def test_gallery_id_is_not_staged(self, service: ComposeService) -> None:
+        assert service.is_staged_id("ee5998afb64b94f6") is False

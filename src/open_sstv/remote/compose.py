@@ -18,6 +18,9 @@ from __future__ import annotations
 import hashlib
 import io
 import logging
+import secrets
+import threading
+from collections import OrderedDict
 from typing import TYPE_CHECKING
 
 from open_sstv.core.modes import MODE_TABLE, Mode
@@ -38,6 +41,12 @@ _log = logging.getLogger(__name__)
 #: Reject oversized uploads.  A phone photo is a few MB; the SSTV frame is
 #: tiny, so anything past this is abuse or a mistake.
 MAX_PHOTO_BYTES = 12 * 1024 * 1024
+#: Prefix marking an id as an in-memory *staged* composed image (vs. an
+#: opaque *gallery* id).  The transmit path routes on this.
+STAGE_PREFIX = "s-"
+#: Bound the staging store — a stage is normally transmitted right away,
+#: so only a couple ever coexist; drop the oldest past this.
+_MAX_STAGED = 8
 
 
 def _template_id(path: Path) -> str:
@@ -59,6 +68,10 @@ class ComposeService:
     ) -> None:
         self._config_getter = config_getter
         self._templates_dir = templates_dir
+        #: In-memory staged composed images (id → PIL image), for transmit.
+        #: Nothing is written to disk; the control plane keys these directly.
+        self._staged: OrderedDict[str, PIL.Image.Image] = OrderedDict()
+        self._stage_lock = threading.Lock()
 
     def _dir(self) -> Path:
         return self._templates_dir or template_manager.default_templates_dir()
@@ -126,5 +139,39 @@ class ComposeService:
             _log.warning("compose: render failed for %s: %s", path.name, exc)
             return None
 
+    # -- staging for transmit (in-memory, no disk write) ---------------
 
-__all__ = ["MAX_PHOTO_BYTES", "ComposeService"]
+    def stage(
+        self,
+        photo_bytes: bytes,
+        template_id: str,
+        tokens: dict[str, str],
+        mode_value: str,
+    ) -> str | None:
+        """Render and hold the composed image in memory for transmit.
+
+        Returns a staging id (``s-…``) the control plane's transmit path
+        resolves via :meth:`staged_image`, or ``None`` if the render fails.
+        Nothing is written to disk.
+        """
+        img = self.render(photo_bytes, template_id, tokens, mode_value)
+        if img is None:
+            return None
+        staging_id = STAGE_PREFIX + secrets.token_hex(8)
+        with self._stage_lock:
+            self._staged[staging_id] = img
+            while len(self._staged) > _MAX_STAGED:
+                self._staged.popitem(last=False)  # drop oldest
+        return staging_id
+
+    def staged_image(self, staging_id: str) -> PIL.Image.Image | None:
+        """The staged image for *staging_id*, or ``None`` if unknown/evicted."""
+        with self._stage_lock:
+            return self._staged.get(staging_id)
+
+    @staticmethod
+    def is_staged_id(image_id: str) -> bool:
+        return image_id.startswith(STAGE_PREFIX)
+
+
+__all__ = ["MAX_PHOTO_BYTES", "STAGE_PREFIX", "ComposeService"]
