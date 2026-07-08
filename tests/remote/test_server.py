@@ -77,6 +77,11 @@ class TestPage:
     def test_url_contains_token(self, server: RemoteServer) -> None:
         assert f"token={TOKEN}" in server.url
 
+    def test_page_has_live_status_indicator(self, server: RemoteServer) -> None:
+        _, body, _ = _get(server, "/")
+        html = body.decode("utf-8")
+        assert 'id="status"' in html and "statuspill" in html
+
 
 class TestAuth:
     def test_gallery_requires_token(self, server: RemoteServer) -> None:

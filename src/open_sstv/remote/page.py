@@ -33,9 +33,23 @@ _PAGE = """<!doctype html>
   header { position:sticky; top:0; z-index:5; display:flex; align-items:center;
     gap:14px; padding:12px 18px; background:rgba(12,20,22,.92);
     backdrop-filter:blur(8px); border-bottom:1px solid var(--line); }
-  header .dot { width:9px; height:9px; border-radius:50%; background:var(--muted);
+  .statuspill { display:inline-flex; align-items:center; gap:7px; padding:4px 11px;
+    border-radius:20px; border:1px solid var(--line); font-family:var(--mono);
+    font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted);
+    transition:color .3s, border-color .3s; white-space:nowrap; }
+  .statuspill .d { width:8px; height:8px; border-radius:50%; background:var(--muted);
     transition:background .3s, box-shadow .3s; }
-  header .dot.live { background:var(--accent); box-shadow:0 0 10px var(--accent); }
+  .statuspill[data-state="live"] { color:var(--accent);
+    border-color:color-mix(in srgb,var(--accent) 45%,var(--line)); }
+  .statuspill[data-state="live"] .d { background:var(--accent);
+    box-shadow:0 0 9px var(--accent); }
+  .statuspill[data-state="receiving"] { color:var(--amber);
+    border-color:color-mix(in srgb,var(--amber) 45%,var(--line)); }
+  .statuspill[data-state="receiving"] .d { background:var(--amber);
+    box-shadow:0 0 9px var(--amber); animation:pulse 1.1s ease-in-out infinite; }
+  .statuspill[data-state="offline"] { color:var(--tx);
+    border-color:color-mix(in srgb,var(--tx) 45%,var(--line)); }
+  .statuspill[data-state="offline"] .d { background:var(--tx); }
   header b { letter-spacing:.02em; }
   header .sub { color:var(--muted); font-family:var(--mono); font-size:12px; }
   header .spacer { flex:1; }
@@ -101,9 +115,10 @@ _PAGE = """<!doctype html>
 </head>
 <body>
 <header>
-  <span class="dot" id="conn" title="live link"></span>
   <b>Open-SSTV</b><span class="sub">remote gallery · read-only</span>
   <span class="spacer"></span>
+  <span class="statuspill" id="status" data-state="offline" title="live link status">
+    <span class="d"></span><span class="t">Connecting…</span></span>
   <span id="count"></span>
   <button id="refresh">Refresh</button>
 </header>
@@ -185,7 +200,13 @@ _PAGE = """<!doctype html>
 
   /* ---- live view plane: Server-Sent Events ---- */
   let seq = 0;
+  const statusEl = $("status");
+  function setStatus(state, label) {
+    statusEl.dataset.state = state;
+    statusEl.querySelector(".t").textContent = label;
+  }
   function showLive(mode) {
+    setStatus("receiving", "Receiving");
     $("liveMode").textContent = mode || "SSTV";
     $("liveBar").style.width = "0%"; $("livePct").textContent = "0%";
     $("liveImg").style.display = "none"; $("livePh").style.display = "";
@@ -199,12 +220,13 @@ _PAGE = """<!doctype html>
     img.src = q("/api/rx/preview") + "&t=" + (++seq);
     img.style.display = ""; $("livePh").style.display = "none";
   }
-  function hideLive() { live.classList.remove("show"); }
+  function hideLive() { live.classList.remove("show"); setStatus("live", "Live"); }
 
   function connect() {
     const es = new EventSource(q("/api/events"));
-    es.onopen = () => $("conn").classList.add("live");
-    es.onerror = () => $("conn").classList.remove("live");  // browser auto-reconnects
+    es.onopen = () => setStatus("live", "Live");
+    // EventSource auto-reconnects; reflect the gap instead of hiding it.
+    es.onerror = () => setStatus("offline", "Reconnecting…");
     es.onmessage = (m) => {
       let ev; try { ev = JSON.parse(m.data); } catch { return; }
       if (ev.type === "rx.started") showLive(ev.mode);
