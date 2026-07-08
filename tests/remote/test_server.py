@@ -14,6 +14,7 @@ from PIL import Image
 
 from open_sstv.config.schema import AppConfig
 from open_sstv.gallery.thumbnail_cache import ThumbnailCache
+from open_sstv.remote.control import ControlPlane
 from open_sstv.remote.server import RemoteServer
 from open_sstv.remote.service import GalleryService
 
@@ -170,6 +171,31 @@ class TestPathSafety:
     def test_unknown_route_is_404(self, server: RemoteServer) -> None:
         status, _, _ = _get(server, "/api/nope", token=TOKEN)
         assert status == 404
+
+
+class TestControlWiring:
+    def test_server_exposes_a_control_plane(self, server: RemoteServer) -> None:
+        assert isinstance(server.control, ControlPlane)
+
+    def test_injected_control_is_used(self, tmp_path: Path) -> None:
+        cp = ControlPlane(
+            now=lambda: 0.0, transmit=lambda *a: None, unkey=lambda *a: None,
+            enabled=lambda: True,
+        )
+        images = tmp_path / "images"
+        images.mkdir()
+        cfg = AppConfig(images_save_dir=str(images), logbook_db_path=str(tmp_path / "l.db"))
+        svc = GalleryService(lambda: cfg, thumbnail_cache=ThumbnailCache(cache_dir=tmp_path / "t"))
+        srv = RemoteServer(svc, host="127.0.0.1", port=0, token=TOKEN, control=cp)
+        assert srv.control is cp
+
+    def test_default_control_tx_gate_follows_getter(self, tmp_path: Path) -> None:
+        images = tmp_path / "images"
+        images.mkdir()
+        cfg = AppConfig(images_save_dir=str(images), logbook_db_path=str(tmp_path / "l.db"))
+        svc = GalleryService(lambda: cfg, thumbnail_cache=ThumbnailCache(cache_dir=tmp_path / "t"))
+        srv = RemoteServer(svc, host="127.0.0.1", port=0, token=TOKEN, tx_enabled=lambda: True)
+        assert srv.control.status()["tx_enabled"] is True
 
 
 class TestLivePreview:

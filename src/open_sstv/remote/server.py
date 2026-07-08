@@ -47,10 +47,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
 
+from open_sstv.remote.control import ControlPlane
 from open_sstv.remote.events import EventHub
 from open_sstv.remote.page import render_page
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from open_sstv.remote.service import GalleryService
 
 #: Seconds a stalled SSE reader waits before re-checking the stop flag.
@@ -64,6 +67,10 @@ _SSE_PING_S = 15.0
 #: A home station has a handful of viewers; this bounds thread/memory use
 #: if a client reconnect-storms or many tabs pile up.
 _MAX_SSE_CLIENTS = 16
+#: How often the control-plane safety sweep runs.  Must be well under
+#: ``control.HEARTBEAT_TIMEOUT_S`` (2.5 s) so the dead-man's-switch fires
+#: promptly after a lost heartbeat.
+_TICK_INTERVAL_S = 0.5
 #: Content Security Policy.  The page is inline-everything, so script/style
 #: need ``'unsafe-inline'`` — but ``default-src 'none'`` + ``connect-src
 #: 'self'`` mean that even if markup ever slips past escaping, it can't
@@ -92,10 +99,26 @@ class RemoteServer:
         port: int = 8730,
         token: str = "",
         hub: EventHub | None = None,
+        control: ControlPlane | None = None,
+        tx_enabled: Callable[[], bool] | None = None,
     ) -> None:
         self._service = service
         self._host = host
         self._port = port
+        #: Remote-TX control plane (Phase 3).  Defaults to one whose enable
+        #: gate is ``tx_enabled`` (or hard-off) with **stub** transmit/unkey
+        #: callbacks that only log — the server never touches the rig by
+        #: itself.  The app (3c) passes a ControlPlane with real callbacks.
+        #: A dedicated tick thread drives the dead-man's-switch, independent
+        #: of any GUI event loop.
+        self._tx_enabled = tx_enabled or (lambda: False)
+        self._control = control if control is not None else ControlPlane(
+            now=time.monotonic,
+            transmit=self._stub_transmit,
+            unkey=self._stub_unkey,
+            enabled=self._tx_enabled,
+        )
+        self._tick_thread: threading.Thread | None = None
         #: Never run unprotected: mint a token if the caller gave none.
         self._token = token or secrets.token_urlsafe(16)
         #: Live event fan-out for the SSE stream.  The app publishes RX
@@ -105,6 +128,25 @@ class RemoteServer:
         self._stopping = threading.Event()
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+
+    # -- default (no-rig) control callbacks ----------------------------
+    # Used only when no ControlPlane is injected (Phase 3b / standalone /
+    # tests).  They NEVER touch a rig — the server cannot transmit by
+    # itself; the app supplies real callbacks in 3c.
+
+    def _stub_transmit(self, image_id: str, mode: str) -> None:
+        _log.info("remote TX (stub — no rig): would transmit %s in %s", image_id, mode)
+
+    def _stub_unkey(self, reason: str) -> None:
+        _log.info("remote TX (stub — no rig): would unkey (%s)", reason)
+
+    @property
+    def control(self) -> ControlPlane:
+        return self._control
+
+    def _publish_tx_state(self) -> None:
+        """Fan the current control-plane state out to SSE viewers."""
+        self._hub.publish({"type": "tx.state", **self._control.status()})
 
     # -- lifecycle -----------------------------------------------------
 
@@ -275,22 +317,37 @@ class RemoteServer:
             daemon=True,
         )
         self._thread.start()
+        # Drive the control-plane safety sweep (dead-man's-switch, token
+        # expiry, lease lapse) on a dedicated thread — deliberately NOT the
+        # GUI loop, so a stalled UI can't stop the watchdog from unkeying.
+        self._tick_thread = threading.Thread(
+            target=self._tick_loop, name="open-sstv-remote-tick", daemon=True
+        )
+        self._tick_thread.start()
         # NB: log the bind, never ``self.url`` — the URL embeds the token,
         # and the log file rides along in diagnostics exports.
         _log.info("remote gallery server listening on %s:%d", self._host, self._port)
 
+    def _tick_loop(self) -> None:
+        while not self._stopping.wait(_TICK_INTERVAL_S):
+            try:
+                self._control.tick()
+            except Exception:  # noqa: BLE001 — the watchdog must never die
+                _log.exception("remote control tick failed")
+
     def stop(self) -> None:
         """Stop serving and release the socket.  Safe to call when not running."""
-        httpd, thread = self._httpd, self._thread
-        self._httpd = self._thread = None
-        # Signal SSE readers first so they unwind out of their queue wait
-        # instead of lingering until the next keep-alive write.
+        httpd, thread, ticker = self._httpd, self._thread, self._tick_thread
+        self._httpd = self._thread = self._tick_thread = None
+        # Signal SSE readers + the tick loop first so they unwind promptly.
         self._stopping.set()
         if httpd is not None:
             httpd.shutdown()
             httpd.server_close()
         if thread is not None:
             thread.join(timeout=5.0)
+        if ticker is not None:
+            ticker.join(timeout=2.0)
 
     # -- introspection -------------------------------------------------
 
