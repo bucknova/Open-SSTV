@@ -337,9 +337,17 @@ New **Settings → Remote** tab (all default-off):
      unit-tested headless.
    - *3b* — POST endpoints (`do_POST`, Origin/Host checks) + control-plane
      SSE events + browser UI, still stubbed away from the rig.
-   - *3c* — wire `tx.confirm` to the real `_request_transmit` (marshalled
-     onto the Qt thread) behind gate+lease+confirm; logbook draft. First
-     real key-down — explicit opt-in, careful real-hardware shakedown.
+   - *3c* ✅ *(built, branch — awaiting real-HW shakedown)* — `ControlPlane`
+     in `main_window` with real callbacks: `transmit` marshals onto the Qt
+     thread (`_remote_tx_request`) which **re-checks the state** before
+     keying via the same `_request_transmit` as local Send; `unkey` is the
+     thread-safe `TxWorker.request_stop` (works even if the GUI stalls).
+     `on_tx_finished` fed from TX-complete/aborted; `reclaim_local` on
+     local Send/test-tone, gate-off, and closeEvent. Remote TX reuses the
+     existing auto-save + logbook-draft path. Settings "Allow remote
+     transmit" checkbox (default off). **First real key-down still needs
+     explicit opt-in + a careful real-hardware shakedown + its own
+     adversarial review** before a browser keys the rig live.
 4. **Compose plane** *(was #3)* — camera upload, server-side
    `compose.render`, template strip. Additive: gives the (already-built)
    control plane new image sources; its "send" endpoint is control's

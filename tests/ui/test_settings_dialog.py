@@ -594,3 +594,18 @@ class TestRemoteTab:
         qtbot.addWidget(dlg)
         pm = dlg._remote_qr.pixmap()
         assert pm is None or pm.isNull()
+
+    def test_remote_tx_enabled_round_trips(self, qtbot) -> None:
+        cfg = AppConfig(callsign="W0AEZ", remote_tx_enabled=True)
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        assert dlg._remote_tx.isChecked() is True
+        assert dlg.result_config().remote_tx_enabled is True
+        dlg._remote_tx.setChecked(False)
+        assert dlg.result_config().remote_tx_enabled is False
+
+    def test_remote_tx_defaults_off(self, qtbot) -> None:
+        dlg = SettingsDialog(config=AppConfig(callsign="W0AEZ"), rig_connected=False)
+        qtbot.addWidget(dlg)
+        assert dlg._remote_tx.isChecked() is False
+        assert dlg.result_config().remote_tx_enabled is False

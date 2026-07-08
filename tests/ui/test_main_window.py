@@ -1476,3 +1476,42 @@ class TestRemoteStatusIndicator:
         window._show_remote_indicator("http://127.0.0.1:8730/?token=demo")
         window._stop_remote_server()
         assert window._remote_status_label.isVisible() is False
+
+
+class TestRemoteTxWiring:
+    """Phase 3c: the control plane's key/unkey callbacks are wired to the
+    real TX worker, with the GUI-thread state guard that stops a stale key
+    from surviving an abort."""
+
+    def test_unkey_stops_the_worker(self, window: MainWindow) -> None:
+        window._tx_worker.request_stop = MagicMock()  # type: ignore[method-assign]
+        window._remote_tx_unkey("heartbeat_lost")
+        window._tx_worker.request_stop.assert_called_once()
+
+    def test_request_ignored_when_not_transmitting(self, window: MainWindow) -> None:
+        # The GUI-thread guard: if the control plane isn't TRANSMITTING
+        # (e.g. an abort landed first), the rig must not be keyed.
+        spy = MagicMock()
+        window._request_transmit.connect(spy)
+        window._on_remote_tx_request("some-id", "martin_m1")
+        spy.assert_not_called()
+
+    def test_request_keys_rig_when_transmitting(
+        self, window: MainWindow, tmp_path: Path
+    ) -> None:
+        img_path = tmp_path / "a.png"
+        Image.new("RGB", (32, 24), (1, 2, 3)).save(img_path)
+        window._remote_service.image_path = MagicMock(return_value=img_path)  # type: ignore[method-assign]
+        window._config.remote_tx_enabled = True
+        cp = window._remote_control
+        assert cp.take_lease("A").ok
+        tok = cp.request("A", "some-id", "martin_m1").token
+        assert cp.confirm("A", tok or "").ok  # -> TRANSMITTING
+        assert cp.status()["state"] == "transmitting"
+
+        spy = MagicMock()
+        window._request_transmit.connect(spy)
+        window._on_remote_tx_request("some-id", "martin_m1")
+        assert spy.call_count == 1
+        from open_sstv.core.modes import Mode
+        assert spy.call_args[0][1] == Mode.MARTIN_M1

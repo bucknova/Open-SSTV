@@ -511,16 +511,36 @@ class SettingsDialog(QDialog):
         form.addRow("Scan to open:", self._remote_qr)
 
         note = QLabel(
-            "The browser can view decoded images live — it cannot transmit "
-            "or control the rig.  Every request needs the token.  Changes "
-            "take effect as soon as you click Save.  Leave "
+            "By default the browser can only <b>view</b> decoded images — it "
+            "cannot transmit or control the rig.  Every request needs the "
+            "token.  Changes take effect as soon as you click Save.  Leave "
             "“other devices” off to keep it to this computer only."
         )
+        note.setTextFormat(Qt.RichText)
         note.setWordWrap(True)
         note.setStyleSheet("color: gray; font-size: 10px;")
         form.addRow(note)
 
         layout.addWidget(group)
+
+        tx_group = QGroupBox("Remote transmit")
+        tx_form = QVBoxLayout(tx_group)
+        self._remote_tx = QCheckBox("Allow a paired browser to transmit (key the rig)")
+        self._remote_tx.setChecked(self._config.remote_tx_enabled)
+        tx_form.addWidget(self._remote_tx)
+        tx_note = QLabel(
+            "⚠ This lets a remote browser key your transmitter over the "
+            "network — you remain the control operator and are responsible "
+            "for every emission (FCC Part 97).  It stays off unless you turn "
+            "it on here.  Even then, a remote must take exclusive control and "
+            "confirm each transmission, and the rig unkeys automatically if "
+            "the browser stops responding (dead-man's-switch).  You can "
+            "reclaim control at the radio at any time."
+        )
+        tx_note.setWordWrap(True)
+        tx_note.setStyleSheet("color: gray; font-size: 10px;")
+        tx_form.addWidget(tx_note)
+        layout.addWidget(tx_group)
         layout.addStretch(1)
 
         self._remote_enabled.toggled.connect(self._update_remote_url)
@@ -1940,9 +1960,7 @@ class SettingsDialog(QDialog):
             remote_host="0.0.0.0" if self._remote_lan.isChecked() else "127.0.0.1",
             remote_port=self._remote_port.value(),
             remote_token=self._remote_token.text().strip(),
-            # No UI yet (Phase 3b adds the "Allow remote transmit" checkbox);
-            # carry it through so a save doesn't reset the safety gate.
-            remote_tx_enabled=self._config.remote_tx_enabled,
+            remote_tx_enabled=self._remote_tx.isChecked(),
         )
 
     @property
