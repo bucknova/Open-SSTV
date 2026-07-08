@@ -107,6 +107,29 @@ POST is well inside the 2.5 s dead-man window. No meaningful cost.
 
 ---
 
+## 3b. Ordering — control before compose
+
+**Decision:** build the **control plane before the compose plane**
+(reversing the original phasing).
+
+The dependency runs one way: **compose depends on control, not the
+reverse.** Compose (camera → template → an image) exists *to transmit the
+result* — its "send" action is control's `tx.request`. Built first, it's a
+staging screen whose only button does nothing. Control, by contrast, needs
+no compose: the view plane already surfaces a gallery full of images, and
+the desktop already re-sends a gallery image to TX, so "remotely transmit
+an existing image" is fully buildable and testable today.
+
+The original ordering was a risk gradient — do the safe, no-rig work
+(compose) before the dangerous, regulated work (control). But deferring
+control doesn't make it safer; it just postpones the crux, since *all* the
+hard safety design (lease, per-TX confirm, dead-man's-switch, enable gate,
+Part 97) lives in control. Control-first is in fact more conservative: it
+gets the transmitter-keying path onto real hardware sooner, with more time
+to shake it down before compose complexity is layered on top.
+
+---
+
 ## 4. Authentication — QR pairing + device tokens
 
 **Decision: QR pairing with per-device tokens.** No passwords typed on a
@@ -280,10 +303,26 @@ New **Settings → Remote** tab (all default-off):
    RX/TX badges, logbook→image cross-link). **View plane complete.**
    Web header shows a live status pill; the desktop app shows a
    persistent "Remote on" status-bar indicator.
-3. **Compose plane** — camera upload, server-side `compose.render`,
-   template strip.
-4. **Control plane** — single-writer lease, `tx.request/confirm`,
-   heartbeat + dead-man's-switch, remote-TX enable gate, logbook draft.
+3. **Control plane** *(next — was #4; moved ahead of compose, see §3b)* —
+   remotely transmit an **existing gallery image**. Single-writer lease,
+   `tx.request → confirm → transmit`, heartbeat + dead-man's-switch,
+   remote-TX enable gate (default off, separate from view), logbook draft.
+   Reuses the desktop `_request_transmit` seam and the v0.4.1 unkey path;
+   the only new image source is "re-send a gallery image", so it needs
+   nothing from compose.
+   - *3a* — foundations, **no rig contact**: config gate
+     `remote_tx_enabled`, the pure lease + TX state machine +
+     dead-man's-switch (injected clock + transmit/unkey callbacks), fully
+     unit-tested headless.
+   - *3b* — POST endpoints (`do_POST`, Origin/Host checks) + control-plane
+     SSE events + browser UI, still stubbed away from the rig.
+   - *3c* — wire `tx.confirm` to the real `_request_transmit` (marshalled
+     onto the Qt thread) behind gate+lease+confirm; logbook draft. First
+     real key-down — explicit opt-in, careful real-hardware shakedown.
+4. **Compose plane** *(was #3)* — camera upload, server-side
+   `compose.render`, template strip. Additive: gives the (already-built)
+   control plane new image sources; its "send" endpoint is control's
+   `tx.request`.
 5. **Hardening** — TLS, revocation UI, rate limits, audit persistence,
    docs (incl. Part 97 framing + Tailscale for WAN).
 

@@ -249,6 +249,14 @@ class AppConfig:
     # and logs the full URL (http://host:port/?token=…).  Set a value to
     # keep a stable URL across restarts.
     remote_token: str = ""
+    # Phase 3 (control plane): allow a paired browser to *transmit* an
+    # image remotely.  SEPARATE from remote_enabled and default OFF — you
+    # can allow remote viewing while forbidding remote transmit.  Even when
+    # true, every transmit still requires holding the single-writer lease
+    # and a per-transmit confirmation, and a lost heartbeat unkeys the rig
+    # (dead-man's-switch).  This keys your transmitter over the network, so
+    # it is opt-in and off by default.  See design/remote/architecture.md.
+    remote_tx_enabled: bool = False
 
     # --- Logging (v0.4) ---
     # Root log level for both the stderr and rotating-file handlers.

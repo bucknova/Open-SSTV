@@ -1940,6 +1940,9 @@ class SettingsDialog(QDialog):
             remote_host="0.0.0.0" if self._remote_lan.isChecked() else "127.0.0.1",
             remote_port=self._remote_port.value(),
             remote_token=self._remote_token.text().strip(),
+            # No UI yet (Phase 3b adds the "Allow remote transmit" checkbox);
+            # carry it through so a save doesn't reset the safety gate.
+            remote_tx_enabled=self._config.remote_tx_enabled,
         )
 
     @property
