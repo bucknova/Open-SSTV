@@ -640,15 +640,24 @@ class TxWorker(QObject):
         self._tx_banner_size = size
 
     def emergency_unkey(self) -> None:
-        """Best-effort PTT-off for the shutdown path.
+        """Best-effort direct PTT-off, independent of the playback thread.
 
-        Called from closeEvent if the TX thread doesn't join within the
-        timeout.  Runs on the GUI thread; ignores all errors so we never
-        block the exit path.
+        Two callers, both needing an unkey that does NOT wait on the TX
+        worker unwinding out of ``play_blocking``:
 
-        Failures still emit ``error_occurred`` so a debug build (or a test
-        sitting on the queue) records them — a stuck-keyed rig at shutdown
-        is a real safety concern even if the GUI itself is going away.
+        * closeEvent, if the TX thread doesn't join within the timeout;
+        * the remote dead-man's-switch (``_remote_tx_unkey``), so a worker
+          wedged in a blocking ``stream.write()`` — where ``request_stop``'s
+          abort can't reach it — still can't leave the rig keyed.
+
+        Thread-safe: takes ``_rig_lock`` to snapshot the backend and calls
+        ``set_ptt(False)``, whose own serial lock serialises against any
+        concurrent rig I/O.  Safe to call from the GUI thread, the tick
+        thread, or a request thread.  A wedged worker holds no rig lock, so
+        this never contends with it.  Ignores all errors so it never blocks
+        the caller; failures still emit ``error_occurred`` so a debug build
+        (or a test on the queue) records them — a stuck-keyed rig is a real
+        safety concern regardless of who is unkeying.
         """
         try:
             with self._rig_lock:

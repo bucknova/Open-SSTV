@@ -1488,6 +1488,26 @@ class TestRemoteTxWiring:
         window._remote_tx_unkey("heartbeat_lost")
         window._tx_worker.request_stop.assert_called_once()
 
+    def test_unkey_drops_ptt_directly_and_first(self, window: MainWindow) -> None:
+        # The dead-man's-switch must not rely on the audio worker unwinding
+        # to drop PTT: a worker wedged in a blocking write() would never
+        # reach its finally-block set_ptt(False).  So emergency_unkey (a
+        # direct PTT-off) fires, and BEFORE request_stop, so the transmitter
+        # unkeys even if stopping the audio hangs.
+        calls: list[str] = []
+        window._tx_worker.emergency_unkey = MagicMock(  # type: ignore[method-assign]
+            side_effect=lambda: calls.append("emergency_unkey")
+        )
+        window._tx_worker.request_stop = MagicMock(  # type: ignore[method-assign]
+            side_effect=lambda: calls.append("request_stop")
+        )
+        window._remote_tx_unkey("heartbeat_lost")
+        window._tx_worker.emergency_unkey.assert_called_once()
+        assert calls == ["emergency_unkey", "request_stop"], (
+            "PTT must be dropped directly before (and independent of) "
+            "stopping the audio worker"
+        )
+
     def test_request_ignored_when_not_transmitting(self, window: MainWindow) -> None:
         # The GUI-thread guard: if the control plane isn't TRANSMITTING
         # (e.g. an abort landed first), the rig must not be keyed.

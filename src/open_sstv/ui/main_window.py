@@ -1128,15 +1128,31 @@ class MainWindow(QMainWindow):
     # --- remote TX control bridge (Phase 3c) ---
 
     def _remote_tx_unkey(self, reason: str) -> None:
-        """ControlPlane ``unkey`` callback — abort/stop the rig.
+        """ControlPlane ``unkey`` callback — drop PTT and stop the rig.
 
-        ``request_stop`` is thread-safe and immediate (sets the stop flag +
-        yanks PortAudio), so this works from the control-plane tick thread
-        or a request thread and does NOT depend on the GUI event loop — the
-        dead-man's-switch fires even if the UI has stalled.
+        Ordering matters for safety.  We command PTT **off directly first**
+        via ``emergency_unkey`` and only then ask the audio worker to stop.
+
+        Why not rely on ``request_stop`` alone?  ``request_stop`` sets the
+        stop flag and aborts PortAudio, then trusts the TX worker thread to
+        unwind out of ``play_blocking`` and drop PTT in its ``finally``.  If
+        that worker is wedged in a blocking ``stream.write()`` that the
+        cross-thread ``abort()`` fails to interrupt (observed on a real USB
+        CODEC), the ``finally`` never runs and the rig stays keyed until app
+        close — the worst failure this app has.  The wedged worker holds no
+        rig lock, so ``emergency_unkey`` can command the CAT backend
+        directly, under its own lock, from this thread and unkey the
+        transmitter within one tick regardless of the audio thread's state.
+
+        Both calls are thread-safe and independent of the GUI event loop, so
+        the dead-man's-switch fires even if the UI or the worker has stalled.
+        ``request_stop`` still runs so the audio actually stops in the common
+        (non-wedged) case; a redundant second ``set_ptt(False)`` from the
+        worker's own unwind is harmless (idempotent).
         """
-        _log.warning("remote TX unkey (%s) — stopping transmission", reason)
-        self._tx_worker.request_stop()
+        _log.warning("remote TX unkey (%s) — dropping PTT + stopping TX", reason)
+        self._tx_worker.emergency_unkey()  # PTT off NOW, independent of audio
+        self._tx_worker.request_stop()     # then stop the audio (best-effort)
 
     @Slot(str, str)
     def _on_remote_tx_request(self, image_id: str, mode: str) -> None:
