@@ -47,7 +47,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
 
-from open_sstv.remote.control import ControlPlane
+from open_sstv.remote.control import ControlPlane, Result
 from open_sstv.remote.events import EventHub
 from open_sstv.remote.page import render_page
 
@@ -71,6 +71,16 @@ _MAX_SSE_CLIENTS = 16
 #: ``control.HEARTBEAT_TIMEOUT_S`` (2.5 s) so the dead-man's-switch fires
 #: promptly after a lost heartbeat.
 _TICK_INTERVAL_S = 0.5
+#: Control-plane POST bodies are tiny JSON; reject anything larger.
+_MAX_BODY_BYTES = 64 * 1024
+#: Map a ControlPlane ``Result.error`` code to an HTTP status.
+_ERR_STATUS = {
+    "busy": HTTPStatus.CONFLICT,
+    "not_lease_holder": HTTPStatus.FORBIDDEN,
+    "tx_disabled": HTTPStatus.FORBIDDEN,
+    "bad_token": HTTPStatus.BAD_REQUEST,
+    "confirm_expired": HTTPStatus.CONFLICT,
+}
 #: Content Security Policy.  The page is inline-everything, so script/style
 #: need ``'unsafe-inline'`` — but ``default-src 'none'`` + ``connect-src
 #: 'self'`` mean that even if markup ever slips past escaping, it can't
@@ -82,6 +92,20 @@ _CSP = (
 )
 
 _log = logging.getLogger(__name__)
+
+
+def _is_known_mode(mode: str) -> bool:
+    """True if *mode* is a valid ``core.modes.Mode`` value.
+
+    Lazy import so this module doesn't pull the DSP stack for callers that
+    never transmit; if it can't import, don't block here — the transmit
+    path validates again downstream.
+    """
+    try:
+        from open_sstv.core.modes import Mode  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return True
+    return mode in {m.value for m in Mode}
 
 
 class RemoteServer:
@@ -161,7 +185,7 @@ class RemoteServer:
             return
         self._stopping.clear()
         service, token = self._service, self._token
-        hub, stopping = self._hub, self._stopping
+        hub, stopping, control = self._hub, self._stopping, self._control
 
         class _Handler(BaseHTTPRequestHandler):
             # Route stdlib access logs through our logger at DEBUG rather
@@ -265,6 +289,100 @@ class RemoteServer:
                     return
 
                 self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+
+            # -- control plane (POST) ---------------------------------
+            # State-changing requests: token + same-origin + JSON body with
+            # a per-browser ``client`` id.  Every route maps a ControlPlane
+            # Result to an HTTP status and fans the new state out over SSE.
+
+            def _origin_ok(self) -> bool:
+                """Reject cross-origin POSTs (CSRF).  A browser always sends
+                Origin on a POST; a same-origin one matches Host.  Non-browser
+                clients (curl/tests) omit it and are allowed — the token still
+                gates them."""
+                origin = self.headers.get("Origin")
+                if origin is None:
+                    return True
+                netloc = origin.split("://", 1)[-1] if "://" in origin else ""
+                return netloc == self.headers.get("Host", "")
+
+            def _read_json(self) -> dict[str, object] | None:
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    return None
+                if length <= 0 or length > _MAX_BODY_BYTES:
+                    return None
+                try:
+                    obj = json.loads(self.rfile.read(length))
+                except (ValueError, UnicodeDecodeError):
+                    return None
+                return obj if isinstance(obj, dict) else None
+
+            def _tx_result(self, result: Result, extra: dict[str, object] | None = None) -> None:
+                # Fan the new control state to viewers, then answer the caller.
+                hub.publish({"type": "tx.state", **control.status()})
+                if result.ok:
+                    body: dict[str, object] = {"ok": True, **control.status()}
+                    if extra:
+                        body.update(extra)
+                    self._json(HTTPStatus.OK, body)
+                else:
+                    status = _ERR_STATUS.get(result.error or "", HTTPStatus.BAD_REQUEST)
+                    self._json(
+                        status, {"ok": False, "error": result.error, **control.status()}
+                    )
+
+            def do_POST(self) -> None:  # noqa: N802 — stdlib API
+                parts = urlsplit(self.path)
+                path, query = parts.path, parse_qs(parts.query)
+                if not path.startswith("/api/tx/"):
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+                    return
+                if not self._authed(query):
+                    self._json(HTTPStatus.UNAUTHORIZED, {"error": "invalid or missing token"})
+                    return
+                if not self._origin_ok():
+                    self._json(HTTPStatus.FORBIDDEN, {"error": "cross-origin refused"})
+                    return
+                body = self._read_json()
+                if body is None:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid or missing body"})
+                    return
+                client = body.get("client")
+                if not isinstance(client, str) or not client:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "missing client id"})
+                    return
+
+                if path == "/api/tx/lease":
+                    self._tx_result(control.take_lease(client))
+                elif path == "/api/tx/release":
+                    self._tx_result(control.release_lease(client))
+                elif path == "/api/tx/heartbeat":
+                    self._tx_result(control.heartbeat(client))
+                elif path == "/api/tx/abort":
+                    self._tx_result(control.abort(client))
+                elif path == "/api/tx/confirm":
+                    tok = body.get("token")
+                    if not isinstance(tok, str):
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "missing token"})
+                        return
+                    self._tx_result(control.confirm(client, tok))
+                elif path == "/api/tx/request":
+                    image_id, mode = body.get("image_id"), body.get("mode")
+                    if not isinstance(image_id, str) or not isinstance(mode, str):
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "missing image_id/mode"})
+                        return
+                    if not _is_known_mode(mode):
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "unknown mode"})
+                        return
+                    if service.image_path(image_id) is None:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": "unknown image"})
+                        return
+                    result = control.request(client, image_id, mode)
+                    self._tx_result(result, {"token": result.token} if result.token else None)
+                else:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
             def _sse(self) -> None:
                 """Stream live events to the client until it (or we) hang up."""

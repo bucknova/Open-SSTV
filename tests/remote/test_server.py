@@ -68,6 +68,151 @@ def _ids(srv: RemoteServer) -> list[str]:
     return [item["id"] for item in json.loads(body)]
 
 
+def _post(
+    srv: RemoteServer, path: str, body: dict, *, token: str | None = TOKEN,
+    origin: str | None = None,
+) -> tuple[int, dict]:
+    url = f"http://127.0.0.1:{srv.port}{path}"
+    if token is not None:
+        url += f"?token={token}"
+    headers = {"Content-Type": "application/json"}
+    if origin is not None:
+        headers["Origin"] = origin
+    req = urllib.request.Request(  # noqa: S310 — localhost test
+        url, data=json.dumps(body).encode(), headers=headers, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:  # noqa: S310
+            return resp.status, json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read() or b"{}")
+
+
+class _CtlSpy:
+    def __init__(self) -> None:
+        self.transmits: list[tuple[str, str]] = []
+        self.unkeys: list[str] = []
+
+    def transmit(self, image_id: str, mode: str) -> None:
+        self.transmits.append((image_id, mode))
+
+    def unkey(self, reason: str) -> None:
+        self.unkeys.append(reason)
+
+
+@pytest.fixture
+def tx_server(tmp_path: Path) -> Iterator[tuple[RemoteServer, _CtlSpy]]:
+    import time as _time
+
+    images = tmp_path / "images"
+    images.mkdir()
+    _img(images / "2026-04-17_213512_scottie_s1.png")
+    cfg = AppConfig(images_save_dir=str(images), logbook_db_path=str(tmp_path / "l.db"))
+    svc = GalleryService(lambda: cfg, thumbnail_cache=ThumbnailCache(cache_dir=tmp_path / "t"))
+    spy = _CtlSpy()
+    control = ControlPlane(
+        now=_time.monotonic, transmit=spy.transmit, unkey=spy.unkey, enabled=lambda: True
+    )
+    srv = RemoteServer(svc, host="127.0.0.1", port=0, token=TOKEN, control=control)
+    srv.start()
+    try:
+        yield srv, spy
+    finally:
+        srv.stop()
+
+
+class TestControlEndpoints:
+    def test_lease_take_and_busy(self, tx_server: tuple[RemoteServer, _CtlSpy]) -> None:
+        srv, _ = tx_server
+        assert _post(srv, "/api/tx/lease", {"client": "A"})[0] == 200
+        status, body = _post(srv, "/api/tx/lease", {"client": "B"})
+        assert status == 409 and body["error"] == "busy"
+
+    def test_endpoints_require_token(self, tx_server: tuple[RemoteServer, _CtlSpy]) -> None:
+        srv, _ = tx_server
+        assert _post(srv, "/api/tx/lease", {"client": "A"}, token=None)[0] == 401
+
+    def test_cross_origin_refused(self, tx_server: tuple[RemoteServer, _CtlSpy]) -> None:
+        srv, _ = tx_server
+        status, body = _post(srv, "/api/tx/lease", {"client": "A"}, origin="http://evil.example")
+        assert status == 403 and body["error"] == "cross-origin refused"
+
+    def test_missing_client_id(self, tx_server: tuple[RemoteServer, _CtlSpy]) -> None:
+        srv, _ = tx_server
+        assert _post(srv, "/api/tx/lease", {})[0] == 400
+
+    def test_request_needs_lease(self, tx_server: tuple[RemoteServer, _CtlSpy]) -> None:
+        srv, _ = tx_server
+        (iid,) = _ids(srv)
+        status, body = _post(srv, "/api/tx/request",
+                             {"client": "A", "image_id": iid, "mode": "scottie_s1"})
+        assert status == 403 and body["error"] == "not_lease_holder"
+
+    def test_full_flow_confirms_and_transmits(
+        self, tx_server: tuple[RemoteServer, _CtlSpy]
+    ) -> None:
+        srv, spy = tx_server
+        (iid,) = _ids(srv)
+        assert _post(srv, "/api/tx/lease", {"client": "A"})[0] == 200
+        status, body = _post(srv, "/api/tx/request",
+                             {"client": "A", "image_id": iid, "mode": "scottie_s1"})
+        assert status == 200 and body["token"]
+        assert _post(srv, "/api/tx/confirm", {"client": "A", "token": body["token"]})[0] == 200
+        assert spy.transmits == [(iid, "scottie_s1")]
+        # abort unkeys.
+        assert _post(srv, "/api/tx/abort", {"client": "A"})[0] == 200
+        assert spy.unkeys == ["operator_abort"]
+
+    def test_request_unknown_image(self, tx_server: tuple[RemoteServer, _CtlSpy]) -> None:
+        srv, _ = tx_server
+        _post(srv, "/api/tx/lease", {"client": "A"})
+        status, _ = _post(srv, "/api/tx/request",
+                          {"client": "A", "image_id": "deadbeef", "mode": "scottie_s1"})
+        assert status == 404
+
+    def test_request_unknown_mode(self, tx_server: tuple[RemoteServer, _CtlSpy]) -> None:
+        srv, _ = tx_server
+        (iid,) = _ids(srv)
+        _post(srv, "/api/tx/lease", {"client": "A"})
+        status, body = _post(srv, "/api/tx/request",
+                            {"client": "A", "image_id": iid, "mode": "banana"})
+        assert status == 400 and body["error"] == "unknown mode"
+
+    def test_confirm_bad_token(self, tx_server: tuple[RemoteServer, _CtlSpy]) -> None:
+        srv, spy = tx_server
+        (iid,) = _ids(srv)
+        _post(srv, "/api/tx/lease", {"client": "A"})
+        _post(srv, "/api/tx/request", {"client": "A", "image_id": iid, "mode": "scottie_s1"})
+        status, body = _post(srv, "/api/tx/confirm", {"client": "A", "token": "wrong"})
+        assert status == 400 and body["error"] == "bad_token"
+        assert spy.transmits == []
+
+
+class TestControlGateDisabled:
+    def test_request_denied_when_tx_disabled(self, tmp_path: Path) -> None:
+        import time as _time
+
+        images = tmp_path / "images"
+        images.mkdir()
+        _img(images / "2026-04-17_213512_scottie_s1.png")
+        cfg = AppConfig(images_save_dir=str(images), logbook_db_path=str(tmp_path / "l.db"))
+        svc = GalleryService(lambda: cfg, thumbnail_cache=ThumbnailCache(cache_dir=tmp_path / "t"))
+        control = ControlPlane(
+            now=_time.monotonic, transmit=lambda *a: None, unkey=lambda *a: None,
+            enabled=lambda: False,  # TX gate OFF
+        )
+        srv = RemoteServer(svc, host="127.0.0.1", port=0, token=TOKEN, control=control)
+        srv.start()
+        try:
+            (iid,) = _ids(srv)
+            _post(srv, "/api/tx/lease", {"client": "A"})
+            status, body = _post(srv, "/api/tx/request",
+                                {"client": "A", "image_id": iid, "mode": "scottie_s1"})
+            assert status == 403 and body["error"] == "tx_disabled"
+        finally:
+            srv.stop()
+
+
 class TestPage:
     def test_root_serves_html_without_token(self, server: RemoteServer) -> None:
         status, body, ctype = _get(server, "/")
