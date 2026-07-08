@@ -466,7 +466,14 @@ class RemoteServer:
                     if not _is_known_mode(mode):
                         self._json(HTTPStatus.BAD_REQUEST, {"error": "unknown mode"})
                         return
-                    if service.image_path(image_id) is None:
+                    # The image must exist: a staged compose (in memory) or a
+                    # gallery file (on disk).
+                    known = (
+                        compose.staged_image(image_id) is not None
+                        if compose.is_staged_id(image_id)
+                        else service.image_path(image_id) is not None
+                    )
+                    if not known:
                         self._json(HTTPStatus.NOT_FOUND, {"error": "unknown image"})
                         return
                     result = control.request(client, image_id, mode)

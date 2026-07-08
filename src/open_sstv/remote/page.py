@@ -130,6 +130,33 @@ _PAGE = """<!doctype html>
     border-color:color-mix(in srgb,var(--tx) 40%,var(--line)); }
   .dirbadge.rx { color:var(--accent);
     border-color:color-mix(in srgb,var(--accent) 40%,var(--line)); }
+  /* compose */
+  .cwrap { display:grid; grid-template-columns:minmax(0,1fr) 260px; gap:18px; }
+  @media (max-width:640px) { .cwrap { grid-template-columns:1fr; } }
+  .ccol { padding:14px; }
+  .cshot { aspect-ratio:4/3; max-height:min(58vh,460px); background:#05090a;
+    border:1px solid var(--line); border-radius:10px; overflow:hidden;
+    display:grid; place-items:center; }
+  .cshot img, .cshot video { width:100%; height:100%; object-fit:contain; display:block; }
+  .cshot .ph { color:var(--muted); font-family:var(--mono); font-size:12px;
+    padding:20px; text-align:center; }
+  .crow { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+  .chd { font-family:var(--mono); font-size:11px; text-transform:uppercase;
+    letter-spacing:.06em; color:var(--muted); margin:16px 0 8px; }
+  .ctpl { display:flex; gap:8px; overflow-x:auto; padding-bottom:4px; }
+  .ctpl button { flex:none; padding:8px 12px; border-radius:8px; border:1px solid var(--line);
+    background:transparent; color:var(--muted); font-size:12px; white-space:nowrap; cursor:pointer; }
+  .ctpl button[aria-pressed="true"] { color:var(--accent);
+    border-color:color-mix(in srgb,var(--accent) 45%,var(--line));
+    background:color-mix(in srgb,var(--accent) 10%,transparent); }
+  .field { margin-bottom:12px; }
+  .field label { display:block; font-family:var(--mono); font-size:11px; color:var(--muted);
+    margin-bottom:5px; letter-spacing:.04em; }
+  .field input, #composeView select { width:100%; background:#05090a; color:var(--ink);
+    border:1px solid var(--line); border-radius:8px; padding:9px; font:inherit; }
+  .field2 { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .chint { color:var(--muted); font-size:11px; margin-top:10px; line-height:1.5; }
+  .chint.err { color:var(--tx); }
   #box { position:fixed; inset:0; background:rgba(3,6,7,.9); display:none;
     align-items:center; justify-content:center; padding:24px; z-index:20; }
   #box.show { display:flex; }
@@ -204,6 +231,7 @@ _PAGE = """<!doctype html>
 <nav class="tabs" role="tablist">
   <button role="tab" aria-selected="true" data-view="gallery">Gallery</button>
   <button role="tab" aria-selected="false" data-view="logbook">Logbook</button>
+  <button role="tab" aria-selected="false" data-view="compose">Compose</button>
 </nav>
 <main>
   <section id="galleryView">
@@ -230,6 +258,39 @@ _PAGE = """<!doctype html>
       </table>
     </div>
     <div class="empty" id="logEmpty" hidden>No logged QSOs yet.</div>
+  </section>
+  <section id="composeView" hidden>
+    <div class="cwrap">
+      <div class="card ccol">
+        <div class="cshot">
+          <video id="cVideo" autoplay playsinline muted style="display:none"></video>
+          <img id="cPreview" alt="composed preview" style="display:none" />
+          <span class="ph" id="cPh">Take or upload a photo to compose a card</span>
+        </div>
+        <div class="crow">
+          <button class="btn" id="cCamera">📷 Camera</button>
+          <button class="btn" id="cCapture" style="display:none">◉ Capture</button>
+          <button class="btn" id="cUpload">⬆ Upload</button>
+          <input type="file" id="cFile" accept="image/*" style="display:none" />
+        </div>
+        <div class="chd">Template — composited by the station</div>
+        <div class="ctpl" id="cTpl"></div>
+      </div>
+      <div class="card ccol">
+        <div class="field"><label>To call {tocall}</label>
+          <input id="cTocall" maxlength="12" placeholder="K1ABC" /></div>
+        <div class="field2">
+          <div class="field"><label>RST {rst}</label><input id="cRst" maxlength="5" value="595" /></div>
+          <div class="field"><label>Name {name}</label><input id="cName" maxlength="16" placeholder="Sam" /></div>
+        </div>
+        <div class="field"><label>Note {note}</label>
+          <input id="cNote" maxlength="32" placeholder="73!" /></div>
+        <div class="field"><label>SSTV mode</label><select id="cMode"></select></div>
+        <button class="btn tx" id="cTransmit"
+          style="width:100%; justify-content:center; margin-top:4px">📡 Transmit</button>
+        <div class="chint" id="cHint">The station renders the exact bytes it sends.</div>
+      </div>
+    </div>
   </section>
 </main>
 <div id="box">
@@ -392,13 +453,17 @@ _PAGE = """<!doctype html>
   }
 
   function showView(name) {
+    if (activeView === "compose" && name !== "compose") stopCamera();
     activeView = name;
     $("galleryView").hidden = name !== "gallery";
     $("logbookView").hidden = name !== "logbook";
+    $("composeView").hidden = name !== "compose";
     document.querySelectorAll(".tabs button").forEach(
       b => b.setAttribute("aria-selected", b.dataset.view === name ? "true" : "false"));
-    countEl.textContent = name === "gallery" ? galleryCount : logCount;
+    countEl.textContent =
+      name === "gallery" ? galleryCount : (name === "logbook" ? logCount : "");
     if (name === "logbook") loadLogbook();
+    else if (name === "compose") initCompose();
   }
   document.querySelectorAll(".tabs button").forEach(
     b => b.addEventListener("click", () => showView(b.dataset.view)));
@@ -551,6 +616,136 @@ _PAGE = """<!doctype html>
     if (!txInfo.lease_held) { iHold = false; stopHb(); }  // server released/lapsed it
     renderTx();
   }
+
+  /* ---- compose (camera / upload → template → transmit) ---- */
+  let cPhoto = null, cTemplateId = null, cStream = null, cRenderTimer = null,
+      composeInited = false;
+  function cHint(msg, err) {
+    const h = $("cHint"); h.textContent = msg; h.classList.toggle("err", !!err);
+  }
+  function blobToDataUrl(blob) {
+    return new Promise((res, rej) => {
+      const r = new FileReader();
+      r.onload = () => res(r.result); r.onerror = () => rej(r.error);
+      r.readAsDataURL(blob);
+    });
+  }
+  function composeTokens() {
+    return { tocall: $("cTocall").value, rst: $("cRst").value,
+             name: $("cName").value, note: $("cNote").value };
+  }
+  function initCompose() {
+    if (composeInited) return;
+    composeInited = true;
+    $("cMode").innerHTML = MODES.map(m => `<option value="${m.v}">${m.n}</option>`).join("");
+    loadComposeTemplates();
+  }
+  async function loadComposeTemplates() {
+    try {
+      const res = await fetch(q("/api/compose/templates"));
+      if (!res.ok) { cHint("Could not load templates.", true); return; }
+      const tpls = await res.json();
+      const strip = $("cTpl"); strip.innerHTML = "";
+      tpls.forEach((t, i) => {
+        const b = document.createElement("button");
+        b.textContent = t.name;
+        b.setAttribute("aria-pressed", i === 0 ? "true" : "false");
+        if (i === 0) cTemplateId = t.id;
+        b.addEventListener("click", () => {
+          cTemplateId = t.id;
+          strip.querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", "false"));
+          b.setAttribute("aria-pressed", "true");
+          renderComposePreview();
+        });
+        strip.appendChild(b);
+      });
+    } catch { cHint("Could not reach the station.", true); }
+  }
+  function stopCamera() {
+    if (cStream) { cStream.getTracks().forEach(t => t.stop()); cStream = null; }
+    $("cCapture").style.display = "none"; $("cCamera").style.display = "";
+    $("cVideo").style.display = "none";
+  }
+  async function startCamera() {
+    try {
+      cStream = await navigator.mediaDevices.getUserMedia(
+        { video: { facingMode: "environment" }, audio: false });
+      $("cVideo").srcObject = cStream; $("cVideo").style.display = "";
+      $("cPreview").style.display = "none"; $("cPh").style.display = "none";
+      $("cCapture").style.display = ""; $("cCamera").style.display = "none";
+    } catch { cHint("Camera unavailable — use Upload instead.", true); }
+  }
+  function setPhoto(dataUrl) {
+    cPhoto = (dataUrl.split(",")[1]) || null;   // strip the data:...;base64, prefix
+    stopCamera();
+    const img = $("cPreview"); img.src = dataUrl; img.style.display = "";
+    $("cPh").style.display = "none";
+    renderComposePreview();
+  }
+  function capture() {
+    const v = $("cVideo"); if (!v.videoWidth) return;
+    const c = document.createElement("canvas");
+    c.width = v.videoWidth; c.height = v.videoHeight;
+    c.getContext("2d").drawImage(v, 0, 0);
+    setPhoto(c.toDataURL("image/jpeg", 0.85));
+  }
+  function scheduleRender() {
+    clearTimeout(cRenderTimer); cRenderTimer = setTimeout(renderComposePreview, 400);
+  }
+  async function renderComposePreview() {
+    if (!cPhoto || !cTemplateId) return;
+    try {
+      const res = await fetch(q("/api/compose/render"), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ photo: cPhoto, template_id: cTemplateId,
+          mode: $("cMode").value, tokens: composeTokens() }),
+      });
+      if (!res.ok) { cHint("Preview failed (HTTP " + res.status + ").", true); return; }
+      const url = await blobToDataUrl(await res.blob());
+      const img = $("cPreview");
+      img.src = url; img.style.display = "";
+      $("cVideo").style.display = "none"; $("cPh").style.display = "none";
+      cHint("Preview approximates the on-air image — the station renders the exact bytes.");
+    } catch { cHint("Could not reach the station.", true); }
+  }
+  async function composeTransmit() {
+    if (!cPhoto || !cTemplateId) { cHint("Take or upload a photo first.", true); return; }
+    if (!txInfo.tx_enabled) {
+      cHint("Remote transmit is off in the station's settings.", true); return;
+    }
+    if (!iHold) { await takeControl(); if (!iHold) {
+      cHint("Couldn't take control — another station may hold it.", true); return; } }
+    cHint("Staging…");
+    let stage;
+    try {
+      stage = await fetch(q("/api/compose/stage"), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ photo: cPhoto, template_id: cTemplateId,
+          mode: $("cMode").value, tokens: composeTokens() }),
+      });
+    } catch { cHint("Could not reach the station.", true); return; }
+    if (!stage.ok) { cHint("Stage failed (HTTP " + stage.status + ").", true); return; }
+    const { image_id } = await stage.json();
+    const req = await txPost("request", { image_id, mode: $("cMode").value });
+    if (!req.ok || !req.body.token) { cHint("Transmit request refused.", true); return; }
+    const mn = $("cMode").selectedOptions[0] ? $("cMode").selectedOptions[0].text : "";
+    txSendingLabel = "composed image · " + mn;
+    await txPost("confirm", { token: req.body.token });   // → ON AIR takeover
+    cHint("Transmitting…");
+  }
+  $("cCamera").addEventListener("click", startCamera);
+  $("cCapture").addEventListener("click", capture);
+  $("cUpload").addEventListener("click", () => $("cFile").click());
+  $("cFile").addEventListener("change", (e) => {
+    const f = e.target.files && e.target.files[0]; if (!f) return;
+    const r = new FileReader();
+    r.onload = () => setPhoto(r.result);
+    r.readAsDataURL(f);
+  });
+  ["cTocall", "cRst", "cName", "cNote"].forEach(
+    id => $(id).addEventListener("input", scheduleRender));
+  $("cMode").addEventListener("change", renderComposePreview);
+  $("cTransmit").addEventListener("click", composeTransmit);
 
   load();
   connect();
