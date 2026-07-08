@@ -18,6 +18,24 @@ def _photo_bytes(size: tuple[int, int] = (200, 150)) -> bytes:
     return buf.getvalue()
 
 
+def _tagged_photo(orientation: int, size: tuple[int, int] = (160, 100)) -> bytes:
+    """A JPEG with an EXIF Orientation tag over an asymmetric gradient.
+
+    The pixels are identical for every ``orientation``; only the tag differs,
+    so any output difference is attributable to orientation handling.
+    """
+    img = PIL.Image.new("RGB", size)
+    px = img.load()
+    for x in range(size[0]):
+        for y in range(size[1]):
+            px[x, y] = ((x * 7) % 256, (y * 11) % 256, 90)
+    exif = img.getexif()
+    exif[0x0112] = orientation  # 0x0112 = EXIF Orientation
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", exif=exif, quality=95)
+    return buf.getvalue()
+
+
 @pytest.fixture
 def service() -> ComposeService:
     cfg = AppConfig(callsign="W0AEZ", operator_name="Kevin", grid_square="DN70")
@@ -67,6 +85,15 @@ class TestRender:
 
         tid = service.list_templates()[0]["id"]
         assert service.render(b"x" * (MAX_PHOTO_BYTES + 1), tid, {}, "scottie_s1") is None
+
+    def test_exif_orientation_is_applied(self, service: ComposeService) -> None:
+        # Same pixels, different Orientation tag: if EXIF were ignored the two
+        # renders would be identical.  Applying it makes the rotated one differ.
+        tid = service.list_templates()[0]["id"]
+        upright = service.render(_tagged_photo(1), tid, {}, "scottie_s1")
+        rotated = service.render(_tagged_photo(6), tid, {}, "scottie_s1")
+        assert upright is not None and rotated is not None
+        assert upright.tobytes() != rotated.tobytes()
 
     def test_blank_rst_defaults(self, service: ComposeService) -> None:
         # A blank RST must not crash the renderer (QSOState default is 595).

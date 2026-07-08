@@ -102,6 +102,7 @@ class ComposeService:
         upload can't 500 the server; the HTTP layer maps that to a 4xx.
         """
         import PIL.Image  # noqa: PLC0415
+        import PIL.ImageOps  # noqa: PLC0415
 
         if not photo_bytes or len(photo_bytes) > MAX_PHOTO_BYTES:
             return None
@@ -118,6 +119,10 @@ class ComposeService:
         try:
             photo = PIL.Image.open(io.BytesIO(photo_bytes))
             photo.load()
+            # Phone photos carry their orientation in an EXIF tag rather than
+            # in the pixels; bake it in so the composited frame is upright
+            # (browsers auto-orient <img>, but Pillow does not).
+            photo = PIL.ImageOps.exif_transpose(photo)
         except Exception as exc:  # noqa: BLE001 — any decode failure → 4xx
             _log.debug("compose: undecodable photo: %s", exc)
             return None
