@@ -1452,3 +1452,27 @@ class TestExportToAudioBanner:
         # Banner overwrites the top strip — top-left pixel is now banner bg.
         assert captured[0].getpixel((0, 0)) != (100, 200, 50)
 
+
+
+class TestRemoteStatusIndicator:
+    """Phase 2: a persistent status-bar indicator reflects whether the
+    embedded remote server is running."""
+
+    def test_hidden_when_server_not_running(self, window: MainWindow) -> None:
+        assert window._remote_status_label.isVisible() is False
+
+    def test_shown_after_indicator_lit(self, window: MainWindow) -> None:
+        window.show()
+        window._show_remote_indicator("http://0.0.0.0:8730/?token=demo")
+        assert window._remote_status_label.isVisible() is True
+        # Click-through link opens on this machine (loopback), not 0.0.0.0.
+        assert "127.0.0.1:8730" in window._remote_status_label.text()
+        assert "0.0.0.0" not in window._remote_status_label.text()
+        # Tooltip preserves the real bind for LAN devices.
+        assert "0.0.0.0:8730" in window._remote_status_label.toolTip()
+
+    def test_hidden_again_after_stop(self, window: MainWindow) -> None:
+        window.show()
+        window._show_remote_indicator("http://127.0.0.1:8730/?token=demo")
+        window._stop_remote_server()
+        assert window._remote_status_label.isVisible() is False

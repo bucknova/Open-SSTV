@@ -97,6 +97,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import (
     QFileDialog,
+    QLabel,
     QMainWindow,
     QMessageBox,
     QSplitter,
@@ -549,6 +550,14 @@ class MainWindow(QMainWindow):
         self._remote_service = GalleryService(lambda: self._config)
         #: Throttle for the live RX preview push (monotonic seconds).
         self._remote_last_preview_t = 0.0
+        #: Persistent status-bar indicator, shown only while the remote
+        #: server is running.  Rich-text so it doubles as a click-to-open
+        #: link to the local gallery URL.
+        self._remote_status_label = QLabel()
+        self._remote_status_label.setTextFormat(Qt.TextFormat.RichText)
+        self._remote_status_label.setOpenExternalLinks(True)
+        self._remote_status_label.setVisible(False)
+        self.statusBar().addPermanentWidget(self._remote_status_label)
         #: v0.5: detached image gallery window, lazily created on first
         #: Tools → Gallery… (Cmd/Ctrl+G).
         self._gallery_dialog: GalleryDialog | None = None
@@ -1007,9 +1016,30 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Remote gallery server running — open {self._remote_server.url}", 10000
         )
+        self._show_remote_indicator(self._remote_server.url)
+
+    def _show_remote_indicator(self, url: str) -> None:
+        """Light the persistent status-bar indicator for a running server.
+
+        The click-through link uses a loopback host so it always opens on
+        this machine even when the server is bound to the LAN (0.0.0.0),
+        while the tooltip shows the real bind URL for phones on the network.
+        """
+        local = url.replace("0.0.0.0", "127.0.0.1")
+        self._remote_status_label.setText(
+            f'<a href="{local}" style="color:#2fa36b; text-decoration:none">'
+            "\N{LARGE GREEN CIRCLE} Remote on</a>"
+        )
+        self._remote_status_label.setToolTip(
+            f"Remote gallery server is running.\n{url}\nClick to open in a browser."
+        )
+        self._remote_status_label.setVisible(True)
 
     def _stop_remote_server(self) -> None:
         """Stop the remote server if running (safe to call unconditionally)."""
+        # Always drop the indicator, even if there's no server object left
+        # (e.g. a failed start already cleared it).
+        self._remote_status_label.setVisible(False)
         if self._remote_server is None:
             return
         try:
