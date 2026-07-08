@@ -164,6 +164,31 @@ _PAGE = """<!doctype html>
   .panel select { width:100%; margin-top:14px; background:#05090a; color:var(--ink);
     border:1px solid var(--line); border-radius:8px; padding:9px; font:inherit; }
   .panel .actions { display:flex; gap:10px; margin-top:20px; justify-content:flex-end; }
+  /* full-window ON AIR takeover while transmitting */
+  #onair { position:fixed; inset:0; z-index:40; display:none;
+    flex-direction:column; align-items:center; justify-content:center; gap:22px;
+    text-align:center; padding:28px;
+    background:radial-gradient(120% 90% at 50% 30%,
+      color-mix(in srgb,var(--tx) 22%,#0a0405) 0%, #0a0405 70%); }
+  #onair.show { display:flex; }
+  #onair .lamp { width:120px; height:120px; border-radius:50%; background:var(--tx);
+    box-shadow:0 0 60px var(--tx), 0 0 120px color-mix(in srgb,var(--tx) 60%,transparent);
+    animation:onairpulse 1.05s ease-in-out infinite; }
+  @keyframes onairpulse { 0%,100%{transform:scale(1);opacity:1}
+    50%{transform:scale(.82);opacity:.55} }
+  #onair .big { font-family:var(--mono); font-size:44px; font-weight:700;
+    letter-spacing:.18em; color:var(--tx); text-transform:uppercase; }
+  #onair .what { font-family:var(--mono); font-size:14px; color:var(--ink); }
+  #onair .hb { font-family:var(--mono); font-size:12px; color:var(--muted);
+    display:inline-flex; align-items:center; gap:8px; }
+  #onair .hb .d { width:8px; height:8px; border-radius:50%; background:var(--accent);
+    box-shadow:0 0 8px var(--accent); transition:opacity .15s; }
+  #onair .hb.stale .d { background:var(--amber); box-shadow:0 0 8px var(--amber); }
+  #onair .warn { max-width:420px; font-size:12px; color:var(--muted); line-height:1.5; }
+  #onair .abort { font-size:17px; padding:14px 40px; border-radius:12px;
+    color:#fff; background:var(--tx); border:1px solid var(--tx); cursor:pointer;
+    font-weight:600; letter-spacing:.02em; }
+  #onair .abort:hover { filter:brightness(1.12); }
 </style>
 </head>
 <body>
@@ -225,6 +250,15 @@ _PAGE = """<!doctype html>
       <button class="btn tx" id="cfConfirm">Confirm transmit</button>
     </div>
   </div>
+</div>
+<div id="onair">
+  <div class="lamp"></div>
+  <div class="big">On Air</div>
+  <div class="what" id="onairWhat">Transmitting…</div>
+  <div class="hb" id="onairHb"><span class="d"></span> Link alive</div>
+  <div class="warn">Keep this page open — if the connection drops, the station
+    unkeys automatically (dead-man's-switch).</div>
+  <button class="abort" id="onairAbort">■ Abort transmission</button>
 </div>
 <script>
   const token = new URLSearchParams(location.search).get("token") || "";
@@ -423,7 +457,7 @@ _PAGE = """<!doctype html>
     sessionStorage.setItem("sstv_client", clientId);
   }
   let txInfo = { state: "idle", lease_held: false, tx_enabled: false };
-  let iHold = false, hbTimer = null, cfImage = null;
+  let iHold = false, hbTimer = null, cfImage = null, txSendingLabel = "";
 
   async function txPost(action, extra) {
     try {
@@ -441,7 +475,11 @@ _PAGE = """<!doctype html>
     // switch during TX (< 2.5 s). Stop heartbeating → the station unkeys.
     hbTimer = setInterval(async () => {
       const r = await txPost("heartbeat");
-      if (!r.ok) { iHold = false; stopHb(); renderTx(); }
+      if (!r.ok) { iHold = false; stopHb(); renderTx(); return; }
+      // Flash the on-air heartbeat indicator so the operator sees the link
+      // is alive (and the dead-man's-switch is being fed).
+      const d = $("onairHb").querySelector(".d");
+      d.style.opacity = "0.25"; setTimeout(() => { d.style.opacity = "1"; }, 160);
     }, 1500);
   }
   function stopHb() { if (hbTimer) { clearInterval(hbTimer); hbTimer = null; } }
@@ -467,10 +505,13 @@ _PAGE = """<!doctype html>
   $("cfCancel").addEventListener("click", () => $("cfScrim").classList.remove("show"));
   $("cfConfirm").addEventListener("click", async () => {
     $("cfScrim").classList.remove("show");
+    const modeName = $("cfMode").selectedOptions[0] ? $("cfMode").selectedOptions[0].text : "";
+    txSendingLabel = (cfImage && cfImage.name ? cfImage.name + " · " : "") + modeName;
     const req = await txPost("request", { image_id: cfImage.id, mode: $("cfMode").value });
     if (!req.ok || !req.body.token) { renderTx(); return; }
     await txPost("confirm", { token: req.body.token });  // tx.state SSE flips to on-air
   });
+  $("onairAbort").addEventListener("click", abortTx);
 
   function mkbtn(text, cls, fn) {
     const b = document.createElement("button");
@@ -500,6 +541,10 @@ _PAGE = """<!doctype html>
     }
     $("txSend").style.display =
       (iHold && txInfo.state === "idle" && currentImage) ? "" : "none";
+    // Full-window ON AIR takeover while *we* are transmitting.
+    const onAir = txInfo.state === "transmitting" && iHold;
+    if (onAir) $("onairWhat").textContent = "Transmitting " + (txSendingLabel || "image");
+    $("onair").classList.toggle("show", onAir);
   }
   function onTxState(ev) {
     txInfo = { state: ev.state, lease_held: !!ev.lease_held, tx_enabled: !!ev.tx_enabled };
