@@ -71,9 +71,11 @@ threads, and finally close the rig.
 from __future__ import annotations
 
 import datetime
+import io
 import logging
 import subprocess
 import threading
+import time
 import wave
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -123,7 +125,7 @@ from open_sstv.radio.base import ManualRig, Rig, RigConnectionMode
 from open_sstv.radio.exceptions import RigError
 from open_sstv.radio.rigctld import RigctldClient, is_safe_rigctld_arg
 from open_sstv.radio.serial_rig import create_serial_rig
-from open_sstv.remote import GalleryService, RemoteServer
+from open_sstv.remote import EventHub, GalleryService, RemoteServer
 from open_sstv.templates import TokenContext, build_autosave_filename, run_migration
 from open_sstv.ui.first_launch_dialog import FirstLaunchDialog
 from open_sstv.ui.gallery_dialog import GalleryDialog
@@ -540,7 +542,13 @@ class MainWindow(QMainWindow):
         #: on launch when ``remote_enabled`` and stopped in ``closeEvent``.
         #: The lambda keeps the service reading the live config across saves.
         self._remote_server: RemoteServer | None = None
+        #: Live-event fan-out, created once and shared across server
+        #: restarts so the RX→browser bridge always publishes to the
+        #: hub the current server is draining.
+        self._remote_hub = EventHub()
         self._remote_service = GalleryService(lambda: self._config)
+        #: Throttle for the live RX preview push (monotonic seconds).
+        self._remote_last_preview_t = 0.0
         #: v0.5: detached image gallery window, lazily created on first
         #: Tools → Gallery… (Cmd/Ctrl+G).
         self._gallery_dialog: GalleryDialog | None = None
@@ -828,6 +836,12 @@ class MainWindow(QMainWindow):
         self._rx_worker.status_update.connect(self._on_rx_status_update)
         self._rx_worker.error.connect(self._on_rx_error)
         self._rx_worker.error_occurred.connect(self._handle_worker_error)
+        # v0.6 (Phase 2): mirror live RX to connected remote viewers. These
+        # publish to the event hub (a no-op when no browser is connected),
+        # so they add nothing to the decode path.  ``image_complete`` is
+        # handled inside ``_on_rx_image_complete`` after auto-save.
+        self._rx_worker.image_started.connect(self._remote_on_rx_started)
+        self._rx_worker.image_progress.connect(self._remote_on_rx_progress)
 
         # --- Wire waterfall signals ---
         # Both workers emit audio chunks that the waterfall window consumes.
@@ -977,6 +991,7 @@ class MainWindow(QMainWindow):
                 host=cfg.remote_host,
                 port=cfg.remote_port,
                 token=cfg.remote_token,
+                hub=self._remote_hub,
             )
             self._remote_server.start()
         except OSError as exc:
@@ -1003,6 +1018,44 @@ class MainWindow(QMainWindow):
             _log.warning("remote gallery server stop failed: %s", exc)
         finally:
             self._remote_server = None
+
+    # --- RX → remote live bridge (Phase 2) ---
+    # These run on the GUI thread (queued signal delivery) and only
+    # enqueue onto the event hub, so they never touch the decode path.
+
+    @staticmethod
+    def _encode_preview_png(image: object) -> bytes | None:
+        """Encode an in-progress PIL image to PNG bytes, or ``None`` on failure."""
+        try:
+            buf = io.BytesIO()
+            image.convert("RGB").save(buf, "PNG")  # type: ignore[attr-defined]
+            return buf.getvalue()
+        except Exception as exc:  # noqa: BLE001 — a bad frame must not break RX
+            _log.debug("remote preview encode failed: %s", exc)
+            return None
+
+    @Slot(object, int)
+    def _remote_on_rx_started(self, mode: object, vis_code: int) -> None:
+        self._remote_last_preview_t = 0.0  # force the first progress frame out
+        self._remote_hub.publish({"type": "rx.started", "mode": str(mode)})
+
+    @Slot(object, object, int, int, int)
+    def _remote_on_rx_progress(
+        self, image: object, mode: object, vis_code: int, lines: int, total: int
+    ) -> None:
+        # Throttle: the preview repaints a few times a second, not per line.
+        now = time.monotonic()
+        if now - self._remote_last_preview_t < 0.3:
+            return
+        self._remote_last_preview_t = now
+        png = self._encode_preview_png(image)
+        if png is not None:
+            self._remote_service.set_live_frame(png)
+        pct = int(lines / total * 100) if total else 0
+        self._remote_hub.publish(
+            {"type": "rx.progress", "mode": str(mode), "lines": lines,
+             "total": total, "pct": pct}
+        )
 
     # === Menu bar ===
 
@@ -2265,6 +2318,15 @@ class MainWindow(QMainWindow):
             audio_path = self._save_rx_audio(
                 audio_arr, mode, sr, fmt, alongside=save_path
             )
+
+        # v0.6 (Phase 2): the decode finished — clear the live preview and
+        # tell connected remote viewers.  ``gallery.new`` only fires when a
+        # file was actually written (the browser fetches it from the
+        # gallery), so it's gated on auto-save having produced a path.
+        self._remote_service.set_live_frame(None)
+        if save_path is not None:
+            self._remote_hub.publish({"type": "gallery.new"})
+        self._remote_hub.publish({"type": "rx.complete", "mode": str(mode)})
 
         # Audit #3: a stop-flush can deliver one last image_complete
         # during closeEvent's shutdown drain.  The image auto-save

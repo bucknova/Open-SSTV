@@ -38,21 +38,25 @@ The server is **embedded in the desktop app** (not a headless-engine
 refactor, not a standalone sidecar). It runs so the Qt event loop is never
 blocked:
 
-- **Async HTTP + WebSocket server on a dedicated thread** with its own
-  asyncio loop (aiohttp or Starlette). Qt owns the main thread.
+- **A stdlib `ThreadingHTTPServer` on a dedicated daemon thread** — no
+  async framework, no new dependency (Phase 1). Qt owns the main thread.
+- **Transport: SSE + POST, not WebSocket** (decided during Phase 2, see
+  §3a). The whole feature is server-push + discrete client requests;
+  nothing needs true bidirectional streaming, so it stays on the stdlib
+  server end to end.
 - **Inbound rig-touching requests marshal onto the Qt main thread via the
   app's existing internal signals** — `_request_transmit` /
   `_request_test_tone`. A `tx.confirm` handler emits the *same signal the
   GUI Send button emits*. The web is just another button on the same
   panel, so there is exactly one code path that can key the rig.
-- **A broadcast hub goes the other way:** it subscribes to
-  `RxWorker` / `TxWorker` Qt signals (one in-app subscriber) and fans
-  events out to all connected WebSocket clients.
+- **A broadcast hub goes the other way:** `EventHub` — one in-app
+  subscriber to `RxWorker` / `TxWorker` Qt signals (via GUI-thread bridge
+  slots) fans events out to all connected SSE clients.
 
 ```
-  Browser ──HTTP/WS──▶ Server thread ──Qt queued signal──▶ Qt main thread
-                          (asyncio)      (_request_transmit)    (rig I/O)
-  Browser ◀───WS──────  Broadcast hub ◀──Qt signal───────  RxWorker/TxWorker
+  Browser ──POST──────▶ Server thread ──Qt queued signal──▶ Qt main thread
+                        (stdlib http)    (_request_transmit)    (rig I/O)
+  Browser ◀──SSE───────  EventHub  ◀────Qt signal──────────  RxWorker/TxWorker
 ```
 
 **Load-bearing invariant:** web requests enter the rig *only* through the
@@ -72,9 +76,34 @@ only "request a transmit the app may refuse."
 | **Compose** | `compose.upload(photo)`, `compose.render(template, tokens)` → preview | authenticated |
 | **Control** | `tx.request` → `tx.confirm(token)` → `tx.abort` | authenticated **+ TX-enable gate + per-TX confirm + live heartbeat** |
 
-Transport: request/response over HTTP for discrete calls; a single
-per-client **WebSocket** carries the live event stream (rig state, RX
-progress, TX progress, request log, lease changes) and the TX heartbeat.
+---
+
+## 3a. Transport — SSE + POST, not WebSocket
+
+**Decision (Phase 2):** the live stream is **Server-Sent Events**, and
+client actions are **plain POSTs** — no WebSocket, no async framework,
+ever.
+
+The reflex choice was a per-client WebSocket. But walking through what the
+feature actually does, nothing needs true bidirectional streaming:
+
+- **Server → client** (RX progress, live preview, gallery updates; later
+  TX progress, awaiting-confirm, on-air state, lease changes) — that's
+  server-push, which is exactly **SSE**. One long-lived `GET /api/events`
+  per client, fed by `EventHub`.
+- **Client → server** (`tx.request`, `tx.confirm`, `tx.abort`, and the TX
+  **heartbeat**) — discrete messages. The heartbeat is a `POST` once a
+  second; the dead-man's-switch is "no heartbeat POST in 2.5 s → unkey."
+  Ordinary requests on the stdlib server.
+
+So SSE + POST covers **both planes** and keeps the whole surface on the
+Phase 1 stdlib `ThreadingHTTPServer` — no aiohttp/Starlette, nothing to
+re-port at the control-plane phase. SSE also auto-reconnects and rides the
+token gate for free. WebSocket buys only lower-latency bidirectional
+streaming, which a 1 s heartbeat and push-progress simply don't need.
+
+Latency note: SSE server-push is effectively instant; a 1 s heartbeat
+POST is well inside the 2.5 s dead-man window. No meaningful cost.
 
 ---
 
@@ -114,8 +143,9 @@ phone.
   timeout).
 - **The local GUI can always reclaim** the lease instantly — the physical
   operator at the machine is never locked out by a remote.
-- The lease is **liveness-bound**: if the holder's WebSocket drops, the
-  lease lapses (and any in-flight TX hits the dead-man's-switch, §6).
+- The lease is **liveness-bound**: if the holder's heartbeat POSTs stop
+  (or its SSE stream drops), the lease lapses — and any in-flight TX hits
+  the dead-man's-switch (§6).
 
 This prevents two operators racing for the transmitter while keeping the
 mental model simple.
@@ -131,16 +161,16 @@ logic.
 tx.request        → app checks TX-enable gate AND lease holder
                   → app renders composite (§7), returns preview + token
 tx.confirm(token) → marshal _request_transmit onto the Qt thread
-                  → TxWorker keys rig, streams tx.progress over WS
+                  → TxWorker keys rig, streams tx.progress over SSE
 heartbeat lapses  → dead-man's-switch fires
   OR socket drops → v0.4.1 unkey-retry path unkeys the rig
 tx.abort          → operator-initiated stop → same unkey path
 ```
 
-The browser holds the WS open and pings a **heartbeat** each second during
-TX. Miss the window → the app assumes the operator lost the link and
-**unkeys automatically**. This is the single most important safety
-behavior and it lives entirely in the app.
+The browser POSTs a **heartbeat** each second during TX (and holds the SSE
+stream open for progress). Miss the window → the app assumes the operator
+lost the link and **unkeys automatically**. This is the single most
+important safety behavior and it lives entirely in the app.
 
 ---
 
@@ -225,7 +255,7 @@ New **Settings → Remote** tab (all default-off):
 ## 12. Security hardening (checklist)
 
 - TLS on the control plane; TOFU or documented cert import.
-- Origin / host header checks; reject cross-origin WS upgrades.
+- Origin / host header checks on state-changing POSTs.
 - Rate-limit auth and `tx.request`.
 - Bind to the intended interface; never assume LAN = trusted for TX.
 - Per-device token revocation; short pairing-code TTL.
@@ -236,11 +266,14 @@ New **Settings → Remote** tab (all default-off):
 
 ## 13. Phasing
 
-1. **Read-only spike** — embedded server streams the real gallery to a
-   browser. Proves the threading model and the broadcast hub. No auth
-   beyond a dev token, no TX.
-2. **View plane** — pairing/tokens, live RX stream from `RxWorker`, gallery
-   + logbook read APIs, Settings → Remote (view only).
+1. **Read-only spike** ✅ *(shipped, branch)* — embedded stdlib server
+   streams the real gallery to a browser; opaque-id path fence; dev token;
+   no TX. Proved the threading model on real hardware (Mac + phone).
+2. **View plane** — *2a* ✅ *(shipped, branch)*: live RX stream via SSE
+   (`EventHub` + `/api/events`), live in-progress preview
+   (`/api/rx/preview`), auto-updating gallery. *2b (next)*: Settings →
+   Remote tab + QR pairing (replaces TOML-only config, which any Settings
+   save currently resets). *2c*: logbook read view.
 3. **Compose plane** — camera upload, server-side `compose.render`,
    template strip.
 4. **Control plane** — single-writer lease, `tx.request/confirm`,

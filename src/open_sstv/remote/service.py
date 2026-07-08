@@ -70,6 +70,13 @@ class GalleryService:
         self._thumbs = thumbnail_cache if thumbnail_cache is not None else ThumbnailCache()
         self._registry: dict[str, Path] = {}
         self._lock = threading.Lock()
+        #: Latest in-progress RX preview (PNG bytes), served by
+        #: ``/api/rx/preview`` and refreshed by the RX bridge on the GUI
+        #: thread.  ``None`` when no decode is in flight.  Guarded by its
+        #: own lock so the server thread reads it without contending on
+        #: the registry lock.
+        self._live_png: bytes | None = None
+        self._live_lock = threading.Lock()
 
     # -- config-derived paths ------------------------------------------
 
@@ -166,6 +173,18 @@ class GalleryService:
         if path is None:
             return None
         return self._thumbs.get_or_create(path)
+
+    # -- live RX preview (set by the app, served over HTTP) ------------
+
+    def set_live_frame(self, png: bytes | None) -> None:
+        """Store the current in-progress RX preview (PNG bytes), or clear it."""
+        with self._live_lock:
+            self._live_png = png
+
+    def live_frame(self) -> bytes | None:
+        """Return the latest in-progress RX preview PNG, or ``None``."""
+        with self._live_lock:
+            return self._live_png
 
 
 __all__ = ["GalleryService"]

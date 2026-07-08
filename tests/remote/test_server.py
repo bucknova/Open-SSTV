@@ -2,6 +2,7 @@
 """remote.server — embedded HTTP server endpoints, auth, and path-safety fence."""
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -131,3 +132,58 @@ class TestPathSafety:
     def test_unknown_route_is_404(self, server: RemoteServer) -> None:
         status, _, _ = _get(server, "/api/nope", token=TOKEN)
         assert status == 404
+
+
+class TestLivePreview:
+    def test_preview_204_when_no_decode(self, server: RemoteServer) -> None:
+        status, body, _ = _get(server, "/api/rx/preview", token=TOKEN)
+        assert status == 204
+        assert body == b""
+
+    def test_preview_serves_set_frame(self, server: RemoteServer) -> None:
+        # Simulate the app pushing an in-progress frame.
+        import io
+
+        buf = io.BytesIO()
+        Image.new("RGB", (16, 12), (0, 100, 0)).save(buf, "PNG")
+        server._service.set_live_frame(buf.getvalue())
+        status, body, ctype = _get(server, "/api/rx/preview", token=TOKEN)
+        assert status == 200
+        assert ctype == "image/png"
+        assert body[:8] == b"\x89PNG\r\n\x1a\n"
+
+    def test_preview_requires_token(self, server: RemoteServer) -> None:
+        status, _, _ = _get(server, "/api/rx/preview")
+        assert status == 401
+
+
+class TestEventStream:
+    def _open_stream(self, server: RemoteServer, token: str) -> http.client.HTTPResponse:
+        conn = http.client.HTTPConnection("127.0.0.1", server.port, timeout=5)
+        conn.request("GET", f"/api/events?token={token}")
+        return conn.getresponse()
+
+    def test_events_require_token(self, server: RemoteServer) -> None:
+        resp = self._open_stream(server, "wrong")
+        assert resp.status == 401
+
+    def test_events_stream_published_event(self, server: RemoteServer) -> None:
+        resp = self._open_stream(server, TOKEN)
+        assert resp.status == 200
+        assert resp.headers["Content-Type"] == "text/event-stream"
+        # Read the initial ": connected" comment — once seen, the client is
+        # subscribed, so a publish now will reach this stream.
+        first = resp.fp.readline()
+        assert first.startswith(b":")
+        server.hub.publish({"type": "rx.started", "mode": "scottie_s1"})
+        # Read forward to the data line (skips the blank line after the comment).
+        data_line = b""
+        for _ in range(5):
+            line = resp.fp.readline()
+            if line.startswith(b"data: "):
+                data_line = line
+                break
+        assert data_line, "no data frame received"
+        payload = json.loads(data_line[len(b"data: "):].decode("utf-8"))
+        assert payload == {"type": "rx.started", "mode": "scottie_s1"}
+        resp.close()

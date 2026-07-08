@@ -25,8 +25,12 @@ Security posture for this phase (a LAN dev-token surface, no TX):
 - **Read-only.**  Only ``GET`` is handled; there is no route that writes,
   deletes, or transmits.
 
-Stdlib only — no new dependency.  The async framework the design calls
-for arrives in Phase 2 when the live event stream (WebSockets) needs it.
+Phase 2 adds the live view plane on the same stdlib server: ``GET
+/api/events`` is a **Server-Sent Events** stream fed by
+:class:`~open_sstv.remote.events.EventHub`, and ``GET /api/rx/preview``
+serves the current in-progress decode.  The view plane is one-directional
+(app→browser), so SSE fits without an async framework or WebSockets —
+stdlib only, still no new dependency.
 """
 from __future__ import annotations
 
@@ -34,17 +38,28 @@ import hmac
 import json
 import logging
 import mimetypes
+import queue
 import secrets
 import threading
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
 
+from open_sstv.remote.events import EventHub
 from open_sstv.remote.page import render_page
 
 if TYPE_CHECKING:
     from open_sstv.remote.service import GalleryService
+
+#: Seconds a stalled SSE reader waits before re-checking the stop flag.
+#: Short so :meth:`RemoteServer.stop` returns promptly; the wait is idle
+#: (blocked on a queue) so a low value costs nothing.
+_SSE_POLL_S = 1.0
+#: Comment-line keep-alive cadence — proves the connection to the client
+#: (and surfaces a dead socket to us) between real events.
+_SSE_PING_S = 15.0
 
 _log = logging.getLogger(__name__)
 
@@ -63,12 +78,18 @@ class RemoteServer:
         host: str = "127.0.0.1",
         port: int = 8730,
         token: str = "",
+        hub: EventHub | None = None,
     ) -> None:
         self._service = service
         self._host = host
         self._port = port
         #: Never run unprotected: mint a token if the caller gave none.
         self._token = token or secrets.token_urlsafe(16)
+        #: Live event fan-out for the SSE stream.  The app publishes RX
+        #: progress / gallery updates here; ``/api/events`` drains it.
+        self._hub = hub if hub is not None else EventHub()
+        #: Set on stop() so in-flight SSE readers exit promptly.
+        self._stopping = threading.Event()
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -83,7 +104,9 @@ class RemoteServer:
         """
         if self._httpd is not None:
             return
+        self._stopping.clear()
         service, token = self._service, self._token
+        hub, stopping = self._hub, self._stopping
 
         class _Handler(BaseHTTPRequestHandler):
             # Route stdlib access logs through our logger at DEBUG rather
@@ -152,6 +175,18 @@ class RemoteServer:
                     self._json(HTTPStatus.OK, service.payload())
                     return
 
+                if path == "/api/events":
+                    self._sse()
+                    return
+
+                if path == "/api/rx/preview":
+                    png = service.live_frame()
+                    if png is None:
+                        self._send(HTTPStatus.NO_CONTENT, b"", "image/png")
+                        return
+                    self._send(HTTPStatus.OK, png, "image/png")
+                    return
+
                 if path.startswith("/api/thumb/"):
                     thumb = service.thumbnail_path(path[len("/api/thumb/"):])
                     if thumb is None:
@@ -171,6 +206,39 @@ class RemoteServer:
 
                 self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
+            def _sse(self) -> None:
+                """Stream live events to the client until it (or we) hang up."""
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Connection", "keep-alive")
+                self.send_header("X-Accel-Buffering", "no")  # defeat proxy buffering
+                self.end_headers()
+                q = hub.subscribe()
+                last_ping = time.monotonic()
+                try:
+                    # A first comment flushes headers so the browser's
+                    # EventSource fires `onopen` immediately.
+                    self.wfile.write(b": connected\n\n")
+                    self.wfile.flush()
+                    while not stopping.is_set():
+                        try:
+                            event = q.get(timeout=_SSE_POLL_S)
+                        except queue.Empty:
+                            if time.monotonic() - last_ping >= _SSE_PING_S:
+                                self.wfile.write(b": ping\n\n")
+                                self.wfile.flush()
+                                last_ping = time.monotonic()
+                            continue
+                        payload = json.dumps(event).encode("utf-8")
+                        self.wfile.write(b"data: " + payload + b"\n\n")
+                        self.wfile.flush()
+                        last_ping = time.monotonic()
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass  # client went away — normal
+                finally:
+                    hub.unsubscribe(q)
+
         httpd = ThreadingHTTPServer((self._host, self._port), _Handler)
         httpd.daemon_threads = True  # request threads never block shutdown
         self._httpd = httpd
@@ -188,6 +256,9 @@ class RemoteServer:
         """Stop serving and release the socket.  Safe to call when not running."""
         httpd, thread = self._httpd, self._thread
         self._httpd = self._thread = None
+        # Signal SSE readers first so they unwind out of their queue wait
+        # instead of lingering until the next keep-alive write.
+        self._stopping.set()
         if httpd is not None:
             httpd.shutdown()
             httpd.server_close()
@@ -195,6 +266,11 @@ class RemoteServer:
             thread.join(timeout=5.0)
 
     # -- introspection -------------------------------------------------
+
+    @property
+    def hub(self) -> EventHub:
+        """The event fan-out the app publishes live RX events onto."""
+        return self._hub
 
     @property
     def is_running(self) -> bool:
