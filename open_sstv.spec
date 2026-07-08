@@ -42,6 +42,9 @@ hidden_imports = [
     "sounddevice",
     # tomllib is stdlib on 3.11+; tomli_w is a pure-Python write companion.
     "tomli_w",
+    # segno renders the remote-access pairing QR (lazy import); list it so
+    # the pure-Python package is collected into the binary.
+    "segno",
 ]
 
 # platformdirs selects an OS-specific backend at runtime via __import__.

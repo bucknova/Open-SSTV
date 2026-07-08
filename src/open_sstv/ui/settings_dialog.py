@@ -506,6 +506,10 @@ class SettingsDialog(QDialog):
         self._remote_url.setStyleSheet("font-family: monospace; font-size: 11px;")
         form.addRow("Open in a browser:", self._remote_url)
 
+        self._remote_qr = QLabel()
+        self._remote_qr.setStyleSheet("color: gray; font-size: 10px;")
+        form.addRow("Scan to open:", self._remote_qr)
+
         note = QLabel(
             "The browser can view decoded images live — it cannot transmit "
             "or control the rig.  Every request needs the token.  Changes "
@@ -545,17 +549,55 @@ class SettingsDialog(QDialog):
         finally:
             s.close()
 
+    @staticmethod
+    def _render_qr(url: str) -> QPixmap | None:
+        """Render *url* to a QR-code QPixmap, or ``None`` if unavailable.
+
+        ``segno`` is imported lazily and any failure (missing dependency
+        before a reinstall, encode error) degrades to no QR rather than
+        breaking the Settings dialog.
+        """
+        try:
+            import io  # noqa: PLC0415
+
+            import segno  # noqa: PLC0415
+
+            buf = io.BytesIO()
+            segno.make(url, error="m").save(
+                buf, kind="png", scale=4, border=2, dark="#101010", light="#ffffff"
+            )
+            pix = QPixmap()
+            pix.loadFromData(buf.getvalue(), "PNG")
+            return pix
+        except Exception as exc:  # noqa: BLE001 — QR is a nicety, never fatal
+            _log.debug("remote QR render failed: %s", exc)
+            return None
+
     @Slot()
     def _update_remote_url(self) -> None:
-        """Refresh the browse-URL hint from the current Remote-tab widgets."""
+        """Refresh the browse-URL hint and QR from the Remote-tab widgets."""
         if not self._remote_enabled.isChecked():
             self._remote_url.setText("(enable above to get a link)")
+            self._remote_qr.clear()
+            self._remote_qr.setText("")
             return
         host = self._detect_lan_ip() if self._remote_lan.isChecked() else "127.0.0.1"
         port = self._remote_port.value()
         token = self._remote_token.text().strip()
         tok = token if token else "‹auto›"
         self._remote_url.setText(f"http://{host}:{port}/?token={tok}")
+        # A scannable QR needs the real token; a blank (auto) token isn't
+        # known until the server starts, so nudge toward setting one.
+        if not token:
+            self._remote_qr.clear()
+            self._remote_qr.setText("Set a token above for a scannable code")
+            return
+        pix = self._render_qr(f"http://{host}:{port}/?token={token}")
+        if pix is not None:
+            self._remote_qr.setText("")
+            self._remote_qr.setPixmap(pix)
+        else:
+            self._remote_qr.setText("(QR unavailable)")
 
     def _build_audio_tab(self) -> QWidget:
         tab = QWidget()

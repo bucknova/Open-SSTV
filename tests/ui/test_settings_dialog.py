@@ -569,3 +569,28 @@ class TestRemoteTab:
         qtbot.addWidget(dlg)
         dlg._remote_token.setText("  spaced  ")
         assert dlg.result_config().remote_token == "spaced"
+
+    def test_qr_rendered_when_enabled_with_token(self, qtbot) -> None:
+        cfg = AppConfig(
+            callsign="W0AEZ", remote_enabled=True, remote_host="0.0.0.0",
+            remote_port=8730, remote_token="demo",
+        )
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        pm = dlg._remote_qr.pixmap()
+        assert pm is not None and not pm.isNull()
+
+    def test_qr_nudges_when_token_blank(self, qtbot) -> None:
+        cfg = AppConfig(callsign="W0AEZ", remote_enabled=True, remote_token="")
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        pm = dlg._remote_qr.pixmap()
+        assert pm is None or pm.isNull()
+        assert "token" in dlg._remote_qr.text().lower()
+
+    def test_qr_cleared_when_disabled(self, qtbot) -> None:
+        cfg = AppConfig(callsign="W0AEZ", remote_enabled=False, remote_token="demo")
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        pm = dlg._remote_qr.pixmap()
+        assert pm is None or pm.isNull()
