@@ -21,9 +21,16 @@ the embedded-server threading model.
 """
 from __future__ import annotations
 
+from open_sstv.remote.compose import ComposeService
 from open_sstv.remote.control import ControlPlane
 from open_sstv.remote.events import EventHub
 from open_sstv.remote.server import RemoteServer
 from open_sstv.remote.service import GalleryService
 
-__all__ = ["ControlPlane", "EventHub", "GalleryService", "RemoteServer"]
+__all__ = [
+    "ComposeService",
+    "ControlPlane",
+    "EventHub",
+    "GalleryService",
+    "RemoteServer",
+]
