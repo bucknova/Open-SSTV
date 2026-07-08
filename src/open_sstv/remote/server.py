@@ -35,6 +35,7 @@ stdlib only, still no new dependency.
 from __future__ import annotations
 
 import hmac
+import io
 import json
 import logging
 import mimetypes
@@ -47,6 +48,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
 
+from open_sstv.remote.compose import ComposeService
 from open_sstv.remote.control import ControlPlane, Result
 from open_sstv.remote.events import EventHub
 from open_sstv.remote.page import render_page
@@ -73,6 +75,9 @@ _MAX_SSE_CLIENTS = 16
 _TICK_INTERVAL_S = 0.5
 #: Control-plane POST bodies are tiny JSON; reject anything larger.
 _MAX_BODY_BYTES = 64 * 1024
+#: Compose uploads carry a base64 photo — allow more (base64 inflates the
+#: 12 MB photo cap by ~⅓).
+_MAX_UPLOAD_BYTES = 18 * 1024 * 1024
 #: Map a ControlPlane ``Result.error`` code to an HTTP status.
 _ERR_STATUS = {
     "busy": HTTPStatus.CONFLICT,
@@ -125,8 +130,14 @@ class RemoteServer:
         hub: EventHub | None = None,
         control: ControlPlane | None = None,
         tx_enabled: Callable[[], bool] | None = None,
+        compose: ComposeService | None = None,
     ) -> None:
         self._service = service
+        #: Server-side compositor (Phase 4).  Shares the gallery service's
+        #: live config so it renders with the operator's callsign/grid.
+        self._compose = compose if compose is not None else ComposeService(
+            service.config_getter
+        )
         self._host = host
         self._port = port
         #: Remote-TX control plane (Phase 3).  Defaults to one whose enable
@@ -186,6 +197,7 @@ class RemoteServer:
         self._stopping.clear()
         service, token = self._service, self._token
         hub, stopping, control = self._hub, self._stopping, self._control
+        compose = self._compose
 
         class _Handler(BaseHTTPRequestHandler):
             # Route stdlib access logs through our logger at DEBUG rather
@@ -259,6 +271,10 @@ class RemoteServer:
                     self._json(HTTPStatus.OK, service.logbook_payload())
                     return
 
+                if path == "/api/compose/templates":
+                    self._json(HTTPStatus.OK, compose.list_templates())
+                    return
+
                 if path == "/api/events":
                     self._sse()
                     return
@@ -306,18 +322,52 @@ class RemoteServer:
                 netloc = origin.split("://", 1)[-1] if "://" in origin else ""
                 return netloc == self.headers.get("Host", "")
 
-            def _read_json(self) -> dict[str, object] | None:
+            def _read_json(
+                self, max_bytes: int = _MAX_BODY_BYTES
+            ) -> dict[str, object] | None:
                 try:
                     length = int(self.headers.get("Content-Length", "0"))
                 except ValueError:
                     return None
-                if length <= 0 or length > _MAX_BODY_BYTES:
+                if length <= 0 or length > max_bytes:
                     return None
                 try:
                     obj = json.loads(self.rfile.read(length))
                 except (ValueError, UnicodeDecodeError):
                     return None
                 return obj if isinstance(obj, dict) else None
+
+            def _do_compose(self) -> None:
+                """POST /api/compose/render — render photo+tokens+template to
+                a PNG preview.  Composing never touches the rig; putting the
+                result on air still goes through the control plane."""
+                import base64  # noqa: PLC0415
+
+                body = self._read_json(_MAX_UPLOAD_BYTES)
+                if body is None:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid or missing body"})
+                    return
+                photo_b64 = body.get("photo")
+                template_id = body.get("template_id")
+                mode = body.get("mode")
+                tokens = body.get("tokens")
+                if not isinstance(photo_b64, str) or not isinstance(template_id, str) \
+                        or not isinstance(mode, str):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "missing photo/template_id/mode"})
+                    return
+                try:
+                    photo = base64.b64decode(photo_b64, validate=True)
+                except ValueError:  # binascii.Error subclasses ValueError
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "bad base64 photo"})
+                    return
+                tok = {k: str(v) for k, v in tokens.items()} if isinstance(tokens, dict) else {}
+                img = compose.render(photo, template_id, tok, mode)
+                if img is None:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "could not render"})
+                    return
+                buf = io.BytesIO()
+                img.convert("RGB").save(buf, "PNG")
+                self._send(HTTPStatus.OK, buf.getvalue(), "image/png")
 
             def _tx_result(self, result: Result, extra: dict[str, object] | None = None) -> None:
                 # Fan the new control state to viewers, then answer the caller.
@@ -336,7 +386,7 @@ class RemoteServer:
             def do_POST(self) -> None:  # noqa: N802 — stdlib API
                 parts = urlsplit(self.path)
                 path, query = parts.path, parse_qs(parts.query)
-                if not path.startswith("/api/tx/"):
+                if path not in ("/api/compose/render",) and not path.startswith("/api/tx/"):
                     self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
                     return
                 if not self._authed(query):
@@ -344,6 +394,9 @@ class RemoteServer:
                     return
                 if not self._origin_ok():
                     self._json(HTTPStatus.FORBIDDEN, {"error": "cross-origin refused"})
+                    return
+                if path == "/api/compose/render":
+                    self._do_compose()
                     return
                 body = self._read_json()
                 if body is None:

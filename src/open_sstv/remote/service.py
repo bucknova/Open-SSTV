@@ -77,6 +77,7 @@ class GalleryService:
         self._config_getter = config_getter
         self._thumbs = thumbnail_cache if thumbnail_cache is not None else ThumbnailCache()
         self._registry: dict[str, Path] = {}
+        # (config_getter exposed below for the compose service to share.)
         self._lock = threading.Lock()
         #: ``time.monotonic()`` of the last full scan, for rescan debounce.
         self._last_scan_t = 0.0
@@ -90,6 +91,11 @@ class GalleryService:
         self._live_lock = threading.Lock()
 
     # -- config-derived paths ------------------------------------------
+
+    @property
+    def config_getter(self) -> Callable[[], AppConfig]:
+        """The live-config getter, shared with the compose service."""
+        return self._config_getter
 
     def _source_dirs(self) -> list[Path]:
         """``images_save_dir`` + any ``gallery_extra_dirs`` (same as the GUI gallery)."""

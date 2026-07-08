@@ -121,6 +121,97 @@ def tx_server(tmp_path: Path) -> Iterator[tuple[RemoteServer, _CtlSpy]]:
         srv.stop()
 
 
+def _post_raw(
+    srv: RemoteServer, path: str, body: dict, *, token: str | None = TOKEN,
+    origin: str | None = None,
+) -> tuple[int, bytes, str]:
+    url = f"http://127.0.0.1:{srv.port}{path}"
+    if token is not None:
+        url += f"?token={token}"
+    headers = {"Content-Type": "application/json"}
+    if origin is not None:
+        headers["Origin"] = origin
+    req = urllib.request.Request(  # noqa: S310 — localhost test
+        url, data=json.dumps(body).encode(), headers=headers, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:  # noqa: S310
+            return resp.status, resp.read(), resp.headers.get("Content-Type", "")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read(), exc.headers.get("Content-Type", "")
+
+
+@pytest.fixture
+def compose_server(tmp_path: Path) -> Iterator[RemoteServer]:
+    import base64
+    import io as _io
+
+    from open_sstv.remote.compose import ComposeService
+    from open_sstv.templates import manager
+
+    images = tmp_path / "images"
+    images.mkdir()
+    cfg = AppConfig(callsign="W0AEZ", images_save_dir=str(images),
+                    logbook_db_path=str(tmp_path / "l.db"))
+    svc = GalleryService(lambda: cfg, thumbnail_cache=ThumbnailCache(cache_dir=tmp_path / "t"))
+    compose = ComposeService(lambda: cfg, templates_dir=manager._bundled_templates_dir())
+    srv = RemoteServer(svc, host="127.0.0.1", port=0, token=TOKEN, compose=compose)
+    srv.start()
+    buf = _io.BytesIO()
+    Image.new("RGB", (200, 150), (30, 60, 90)).save(buf, "JPEG")
+    srv._b64_photo = base64.b64encode(buf.getvalue()).decode()  # type: ignore[attr-defined]
+    try:
+        yield srv
+    finally:
+        srv.stop()
+
+
+class TestComposeEndpoints:
+    def test_list_templates(self, compose_server: RemoteServer) -> None:
+        status, body, ctype = _get(compose_server, "/api/compose/templates", token=TOKEN)
+        assert status == 200 and ctype == "application/json"
+        tpls = json.loads(body)
+        assert len(tpls) == 8 and all(t["id"] and t["name"] for t in tpls)
+
+    def test_templates_require_token(self, compose_server: RemoteServer) -> None:
+        assert _get(compose_server, "/api/compose/templates")[0] == 401
+
+    def test_render_returns_png(self, compose_server: RemoteServer) -> None:
+        _, body, _ = _get(compose_server, "/api/compose/templates", token=TOKEN)
+        tid = json.loads(body)[0]["id"]
+        status, out, ctype = _post_raw(compose_server, "/api/compose/render", {
+            "photo": compose_server._b64_photo, "template_id": tid,
+            "mode": "scottie_s1", "tokens": {"tocall": "K1ABC", "rst": "595"},
+        })
+        assert status == 200 and ctype == "image/png"
+        assert out[:8] == b"\x89PNG\r\n\x1a\n"
+
+    def test_render_bad_base64(self, compose_server: RemoteServer) -> None:
+        status, _, _ = _post_raw(compose_server, "/api/compose/render", {
+            "photo": "!!!not base64!!!", "template_id": "x", "mode": "scottie_s1",
+        })
+        assert status == 400
+
+    def test_render_unknown_template(self, compose_server: RemoteServer) -> None:
+        status, _, _ = _post_raw(compose_server, "/api/compose/render", {
+            "photo": compose_server._b64_photo, "template_id": "deadbeef",
+            "mode": "scottie_s1",
+        })
+        assert status == 400
+
+    def test_render_requires_token(self, compose_server: RemoteServer) -> None:
+        status, _, _ = _post_raw(compose_server, "/api/compose/render",
+                                {"photo": "", "template_id": "x", "mode": "scottie_s1"},
+                                token=None)
+        assert status == 401
+
+    def test_render_cross_origin_refused(self, compose_server: RemoteServer) -> None:
+        status, _, _ = _post_raw(compose_server, "/api/compose/render",
+                                {"photo": "", "template_id": "x", "mode": "scottie_s1"},
+                                origin="http://evil.example")
+        assert status == 403
+
+
 class TestControlEndpoints:
     def test_lease_take_and_busy(self, tx_server: tuple[RemoteServer, _CtlSpy]) -> None:
         srv, _ = tx_server
