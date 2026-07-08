@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
+import tempfile
 from pathlib import Path
 
 import platformdirs
@@ -82,11 +84,23 @@ class ThumbnailCache:
                 im.draft("RGB", self._size)  # fast pre-scale for big JPEGs
                 im = im.convert("RGB")
                 im.thumbnail(self._size)  # in place, preserves aspect ratio
-                # Write to a temp sibling then rename so a concurrent
-                # reader never sees a half-written PNG.
-                tmp = thumb.with_suffix(".png.tmp")
-                im.save(tmp, "PNG")
-                tmp.replace(thumb)
+                # Write to a UNIQUE temp sibling then atomically rename, so a
+                # concurrent reader never sees a half-written PNG AND two
+                # threads generating the same thumbnail at once (e.g. a
+                # phone + desktop both loading the gallery, now that the
+                # remote server serves multiple clients) don't clobber each
+                # other's temp file.  A per-thumb fixed name would collide.
+                fd, tmp_name = tempfile.mkstemp(
+                    suffix=".png.tmp", prefix=thumb.stem + "-", dir=self._dir
+                )
+                os.close(fd)
+                tmp = Path(tmp_name)
+                try:
+                    im.save(tmp, "PNG")
+                    tmp.replace(thumb)  # atomic on the same filesystem
+                except Exception:
+                    tmp.unlink(missing_ok=True)  # don't leave an orphan temp
+                    raise
         except Exception as exc:  # noqa: BLE001 — any decode/IO failure → placeholder
             _log.debug("thumbnail generation failed for %s: %s", image_path, exc)
             return None

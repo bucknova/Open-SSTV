@@ -206,15 +206,18 @@ _PAGE = """<!doctype html>
   function card(item, fresh) {
     const el = document.createElement("div");
     el.className = "card" + (fresh ? " fresh" : "");
-    const badges = [`<span class="badge">${item.mode}</span>`];
+    // Escape every server-provided value — a filename / callsign on disk is
+    // attacker-controllable (gallery_extra_dirs may watch a shared folder).
+    const name = esc(item.name);
+    const badges = [`<span class="badge">${esc(item.mode)}</span>`];
     if (item.callsign) {
       const cls = item.direction === "TX" ? "badge call tx" : "badge call";
-      badges.push(`<span class="${cls}">${item.callsign}</span>`);
+      badges.push(`<span class="${cls}">${esc(item.callsign)}</span>`);
     }
     el.innerHTML =
-      `<img class="thumb" loading="lazy" alt="${item.name}" ` +
+      `<img class="thumb" loading="lazy" alt="${name}" ` +
         `src="${q("/api/thumb/" + item.id)}" />` +
-      `<div class="meta"><div class="name" title="${item.name}">${item.name}</div>` +
+      `<div class="meta"><div class="name" title="${name}">${name}</div>` +
       `<div class="row">${badges.join("")}</div></div>`;
     el.addEventListener("click", () => open_(item));
     return el;

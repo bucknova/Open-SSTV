@@ -77,6 +77,15 @@ class TestPage:
     def test_url_contains_token(self, server: RemoteServer) -> None:
         assert f"token={TOKEN}" in server.url
 
+    def test_responses_carry_csp(self, server: RemoteServer) -> None:
+        # CSP is defense-in-depth: connect-src 'self' blocks any injected
+        # markup from exfiltrating the token to another origin.
+        url = f"http://127.0.0.1:{server.port}/"
+        with urllib.request.urlopen(url) as resp:  # noqa: S310 — localhost test
+            csp = resp.headers.get("Content-Security-Policy", "")
+        assert "default-src 'none'" in csp
+        assert "connect-src 'self'" in csp
+
     def test_page_has_live_status_indicator(self, server: RemoteServer) -> None:
         _, body, _ = _get(server, "/")
         html = body.decode("utf-8")
@@ -86,6 +95,14 @@ class TestPage:
         _, body, _ = _get(server, "/")
         html = body.decode("utf-8")
         assert 'data-view="logbook"' in html and 'id="logBody"' in html
+
+    def test_gallery_card_escapes_server_fields(self, server: RemoteServer) -> None:
+        # Regression guard: the gallery card must route filename/mode/
+        # callsign through esc() (a malicious filename is XSS otherwise).
+        _, body, _ = _get(server, "/")
+        html = body.decode("utf-8")
+        for expr in ("esc(item.name)", "esc(item.mode)", "esc(item.callsign)"):
+            assert expr in html, expr
 
 
 class TestAuth:
@@ -162,12 +179,9 @@ class TestLivePreview:
         assert body == b""
 
     def test_preview_serves_set_frame(self, server: RemoteServer) -> None:
-        # Simulate the app pushing an in-progress frame.
-        import io
-
-        buf = io.BytesIO()
-        Image.new("RGB", (16, 12), (0, 100, 0)).save(buf, "PNG")
-        server._service.set_live_frame(buf.getvalue())
+        # Simulate the app pushing an in-progress frame (a PIL image); the
+        # server encodes it to PNG on the request thread.
+        server._service.set_live_image(Image.new("RGB", (16, 12), (0, 100, 0)))
         status, body, ctype = _get(server, "/api/rx/preview", token=TOKEN)
         assert status == 200
         assert ctype == "image/png"

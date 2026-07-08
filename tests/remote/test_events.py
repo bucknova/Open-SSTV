@@ -39,6 +39,18 @@ class TestFanOut:
     def test_publish_with_no_subscribers_is_noop(self) -> None:
         EventHub().publish({"type": "x"})  # must not raise
 
+    def test_subscribe_cap_rejects_beyond_limit(self) -> None:
+        hub = EventHub()
+        a = hub.subscribe(max_subscribers=2)
+        b = hub.subscribe(max_subscribers=2)
+        c = hub.subscribe(max_subscribers=2)  # over the cap
+        assert a is not None and b is not None
+        assert c is None
+        assert hub.subscriber_count == 2
+        # A slot frees up when one unsubscribes.
+        hub.unsubscribe(a)
+        assert hub.subscribe(max_subscribers=2) is not None
+
 
 class TestBackpressure:
     def test_full_queue_drops_oldest_not_newest(self) -> None:

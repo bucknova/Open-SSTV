@@ -37,10 +37,19 @@ class EventHub:
         self._subscribers: set[queue.Queue[dict[str, object]]] = set()
         self._lock = threading.Lock()
 
-    def subscribe(self) -> queue.Queue[dict[str, object]]:
-        """Register a new subscriber and return its event queue."""
+    def subscribe(
+        self, max_subscribers: int | None = None
+    ) -> queue.Queue[dict[str, object]] | None:
+        """Register a new subscriber and return its event queue.
+
+        Returns ``None`` (registering nothing) when *max_subscribers* is set
+        and already reached — the caller rejects the connection rather than
+        parking another unbounded request thread.
+        """
         q: queue.Queue[dict[str, object]] = queue.Queue(maxsize=_MAX_QUEUE)
         with self._lock:
+            if max_subscribers is not None and len(self._subscribers) >= max_subscribers:
+                return None
             self._subscribers.add(q)
         return q
 

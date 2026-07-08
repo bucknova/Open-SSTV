@@ -25,8 +25,10 @@ service can be unit-tested headless and called from any thread.
 from __future__ import annotations
 
 import hashlib
+import io
 import logging
 import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -38,10 +40,16 @@ from open_sstv.logbook.store import LogbookStore, default_db_path
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from PIL.Image import Image as PILImage
+
     from open_sstv.config.schema import AppConfig
     from open_sstv.gallery.model import GalleryItem
 
 _log = logging.getLogger(__name__)
+
+#: Minimum seconds between filesystem rescans triggered by an unknown-id
+#: lookup.  Bounds the work a burst of stale/probing ids can force.
+_RESCAN_DEBOUNCE_S = 1.0
 
 
 def _image_id(path: Path) -> str:
@@ -70,11 +78,14 @@ class GalleryService:
         self._thumbs = thumbnail_cache if thumbnail_cache is not None else ThumbnailCache()
         self._registry: dict[str, Path] = {}
         self._lock = threading.Lock()
-        #: Latest in-progress RX preview (PNG bytes), served by
-        #: ``/api/rx/preview`` and refreshed by the RX bridge on the GUI
-        #: thread.  ``None`` when no decode is in flight.  Guarded by its
-        #: own lock so the server thread reads it without contending on
-        #: the registry lock.
+        #: ``time.monotonic()`` of the last full scan, for rescan debounce.
+        self._last_scan_t = 0.0
+        #: Current in-progress RX frame.  The GUI thread stores the raw PIL
+        #: image (cheap); the PNG is encoded lazily on the request thread in
+        #: ``live_frame`` (and cached), so the GUI never pays the encode and
+        #: nothing is encoded when no browser is watching.  Own lock so the
+        #: server thread never contends on the registry lock.
+        self._live_img: PILImage | None = None
         self._live_png: bytes | None = None
         self._live_lock = threading.Lock()
 
@@ -120,6 +131,7 @@ class GalleryService:
                     store.close()
         with self._lock:
             self._registry = {_image_id(item.path): item.path for item in items}
+            self._last_scan_t = time.monotonic()
         return items
 
     def payload(self) -> list[dict[str, object]]:
@@ -189,13 +201,18 @@ class GalleryService:
 
         Re-scans once on a miss so a freshly-arrived image (id learned
         by the browser from a newer ``/api/gallery`` than the server has
-        cached) still resolves, without trusting the id itself.
+        cached) still resolves, without trusting the id itself.  The
+        rescan is debounced so a burst of unknown/stale ids can't force a
+        filesystem walk + DB open per request.
         """
         with self._lock:
             hit = self._registry.get(image_id)
+            last = self._last_scan_t
         if hit is not None:
             return hit
-        self.list_items()  # refresh registry, then retry once
+        if time.monotonic() - last < _RESCAN_DEBOUNCE_S:
+            return None
+        self.list_items()  # refresh registry (and _last_scan_t), then retry once
         with self._lock:
             return self._registry.get(image_id)
 
@@ -218,15 +235,42 @@ class GalleryService:
 
     # -- live RX preview (set by the app, served over HTTP) ------------
 
-    def set_live_frame(self, png: bytes | None) -> None:
-        """Store the current in-progress RX preview (PNG bytes), or clear it."""
+    def set_live_image(self, image: PILImage | None) -> None:
+        """Store the current in-progress RX frame (a PIL image), or clear it.
+
+        Called from the GUI thread — keeps only a reference and drops the
+        cached PNG.  Encoding is deferred to :meth:`live_frame` on the
+        request thread, so the GUI thread never pays the PNG cost and
+        nothing is encoded when no browser is watching.  The caller passes
+        a *private copy*: the decoder keeps mutating the original frame.
+        """
         with self._live_lock:
-            self._live_png = png
+            self._live_img = image
+            self._live_png = None
 
     def live_frame(self) -> bytes | None:
-        """Return the latest in-progress RX preview PNG, or ``None``."""
+        """PNG bytes of the current in-progress frame, or ``None``.
+
+        Encodes on first request and caches until the frame changes, so
+        repeated polls (and multiple viewers) encode each frame once.
+        """
         with self._live_lock:
-            return self._live_png
+            if self._live_png is not None:
+                return self._live_png
+            img = self._live_img
+        if img is None:
+            return None
+        try:
+            buf = io.BytesIO()
+            img.convert("RGB").save(buf, "PNG")
+            png = buf.getvalue()
+        except Exception as exc:  # noqa: BLE001 — a bad frame must not 500 the view
+            _log.debug("remote live-frame encode failed: %s", exc)
+            return None
+        with self._live_lock:
+            if self._live_img is img:  # still the current frame → cache it
+                self._live_png = png
+        return png
 
 
 __all__ = ["GalleryService"]

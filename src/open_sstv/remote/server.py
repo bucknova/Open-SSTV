@@ -60,6 +60,19 @@ _SSE_POLL_S = 1.0
 #: Comment-line keep-alive cadence — proves the connection to the client
 #: (and surfaces a dead socket to us) between real events.
 _SSE_PING_S = 15.0
+#: Ceiling on simultaneous SSE streams (each parks a request thread).
+#: A home station has a handful of viewers; this bounds thread/memory use
+#: if a client reconnect-storms or many tabs pile up.
+_MAX_SSE_CLIENTS = 16
+#: Content Security Policy.  The page is inline-everything, so script/style
+#: need ``'unsafe-inline'`` — but ``default-src 'none'`` + ``connect-src
+#: 'self'`` mean that even if markup ever slips past escaping, it can't
+#: phone the token home to another origin or pull external resources.
+_CSP = (
+    "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; "
+    "script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; "
+    "form-action 'none'"
+)
 
 _log = logging.getLogger(__name__)
 
@@ -131,6 +144,7 @@ class RemoteServer:
                 # or sniffed, and it must not be cached with its token.
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("X-Frame-Options", "DENY")
+                self.send_header("Content-Security-Policy", _CSP)
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 if self.command != "HEAD":
@@ -212,13 +226,20 @@ class RemoteServer:
 
             def _sse(self) -> None:
                 """Stream live events to the client until it (or we) hang up."""
+                # Bound concurrent streams so a reconnect-storm or a pile of
+                # tabs can't exhaust threads/memory on the host.
+                q = hub.subscribe(max_subscribers=_MAX_SSE_CLIENTS)
+                if q is None:
+                    self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "too many clients"})
+                    return
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-store")
                 self.send_header("Connection", "keep-alive")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Security-Policy", _CSP)
                 self.send_header("X-Accel-Buffering", "no")  # defeat proxy buffering
                 self.end_headers()
-                q = hub.subscribe()
                 last_ping = time.monotonic()
                 try:
                     # A first comment flushes headers so the browser's
@@ -254,7 +275,9 @@ class RemoteServer:
             daemon=True,
         )
         self._thread.start()
-        _log.info("remote gallery server listening at %s", self.url)
+        # NB: log the bind, never ``self.url`` — the URL embeds the token,
+        # and the log file rides along in diagnostics exports.
+        _log.info("remote gallery server listening on %s:%d", self._host, self._port)
 
     def stop(self) -> None:
         """Stop serving and release the socket.  Safe to call when not running."""

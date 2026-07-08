@@ -71,7 +71,6 @@ threads, and finally close the rig.
 from __future__ import annotations
 
 import datetime
-import io
 import logging
 import subprocess
 import threading
@@ -1012,7 +1011,10 @@ class MainWindow(QMainWindow):
                 10000,
             )
             return
-        _log.info("remote gallery server started: %s", self._remote_server.url)
+        # Log the bind only — the URL carries the token, and logs get
+        # bundled into diagnostics exports.  The token-bearing URL still
+        # goes to the (ephemeral, on-screen) status bar and indicator.
+        _log.info("remote gallery server started on %s:%d", cfg.remote_host, cfg.remote_port)
         self.statusBar().showMessage(
             f"Remote gallery server running — open {self._remote_server.url}", 10000
         )
@@ -1050,19 +1052,10 @@ class MainWindow(QMainWindow):
             self._remote_server = None
 
     # --- RX → remote live bridge (Phase 2) ---
-    # These run on the GUI thread (queued signal delivery) and only
-    # enqueue onto the event hub, so they never touch the decode path.
-
-    @staticmethod
-    def _encode_preview_png(image: object) -> bytes | None:
-        """Encode an in-progress PIL image to PNG bytes, or ``None`` on failure."""
-        try:
-            buf = io.BytesIO()
-            image.convert("RGB").save(buf, "PNG")  # type: ignore[attr-defined]
-            return buf.getvalue()
-        except Exception as exc:  # noqa: BLE001 — a bad frame must not break RX
-            _log.debug("remote preview encode failed: %s", exc)
-            return None
+    # These run on the GUI thread (queued signal delivery) and only take
+    # short-lived locks / enqueue onto the event hub, so they never touch
+    # or block the decode path.  The PNG encode is deferred to the request
+    # thread in GalleryService.live_frame — never done here on the GUI.
 
     @Slot(object, int)
     def _remote_on_rx_started(self, mode: object, vis_code: int) -> None:
@@ -1078,9 +1071,12 @@ class MainWindow(QMainWindow):
         if now - self._remote_last_preview_t < 0.3:
             return
         self._remote_last_preview_t = now
-        png = self._encode_preview_png(image)
-        if png is not None:
-            self._remote_service.set_live_frame(png)
+        # Hand the service a private copy — the decoder keeps mutating the
+        # original frame, and encoding happens later on the request thread.
+        try:
+            self._remote_service.set_live_image(image.copy())  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001 — a bad frame must not break RX
+            _log.debug("remote live-image copy failed: %s", exc)
         pct = int(lines / total * 100) if total else 0
         self._remote_hub.publish(
             {"type": "rx.progress", "mode": str(mode), "lines": lines,
@@ -2353,7 +2349,7 @@ class MainWindow(QMainWindow):
         # tell connected remote viewers.  ``gallery.new`` only fires when a
         # file was actually written (the browser fetches it from the
         # gallery), so it's gated on auto-save having produced a path.
-        self._remote_service.set_live_frame(None)
+        self._remote_service.set_live_image(None)
         if save_path is not None:
             self._remote_hub.publish({"type": "gallery.new"})
         self._remote_hub.publish({"type": "rx.complete", "mode": str(mode)})
