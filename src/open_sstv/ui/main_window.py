@@ -1065,6 +1065,11 @@ class MainWindow(QMainWindow):
 
     def _stop_remote_server(self) -> None:
         """Stop the remote server if running (safe to call unconditionally)."""
+        # Reclaim first: stopping the server also stops the tick thread that
+        # drives the dead-man's-switch, so any in-flight remote TX must be
+        # unkeyed and the lease dropped here rather than outliving its
+        # watchdog across a stop/restart.
+        self._remote_control.reclaim_local()
         # Always drop the indicator, even if there's no server object left
         # (e.g. a failed start already cleared it).
         self._remote_status_label.setVisible(False)
@@ -1138,24 +1143,41 @@ class MainWindow(QMainWindow):
         path = self._remote_service.image_path(image_id)
         if path is None:
             _log.warning("remote TX: image id %s no longer resolvable", image_id)
-            self._remote_control.on_tx_finished()
+            self._remote_tx_abandon()
             return
         try:
             mode_enum = Mode(mode)
         except ValueError:
             _log.warning("remote TX: rejected unknown mode %r", mode)
-            self._remote_control.on_tx_finished()
+            self._remote_tx_abandon()
             return
         try:
             img = Image.open(path)
             img.load()
         except Exception as exc:  # noqa: BLE001 — bad file must not key the rig
             _log.warning("remote TX: cannot load %s: %s", path, exc)
-            self._remote_control.on_tx_finished()
+            self._remote_tx_abandon()
+            return
+        # RE-CHECK the state a SECOND time, immediately before keying — the
+        # image load above is the widest window in which an abort / reclaim
+        # could have landed (workers.py clears its stop flag at TX entry, so
+        # a request_stop that fired during the load would otherwise be lost).
+        # Checking here shrinks that window to the microseconds between this
+        # line and the emit.  (The residual — an abort in that microsecond
+        # gap before the worker keys PTT — is bounded to a single image and
+        # requires machine-precision timing; the dead-man's-switch cannot
+        # hit it because confirm() just refreshed the heartbeat clock.)
+        if self._remote_control.status().get("state") != "transmitting":
             return
         _log.info("remote TX: transmitting %s in %s", path.name, mode)
         self._last_tx_was_test_tone = False
         self._request_transmit.emit(img, mode_enum)
+
+    def _remote_tx_abandon(self) -> None:
+        """A remote transmit couldn't proceed (bad image/mode) — return the
+        control plane to idle and tell viewers, without keying anything."""
+        self._remote_control.on_tx_finished()
+        self._remote_hub.publish({"type": "tx.state", **self._remote_control.status()})
 
     @Slot()
     def _remote_tx_ended(self) -> None:

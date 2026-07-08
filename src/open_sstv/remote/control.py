@@ -192,6 +192,12 @@ class ControlPlane:
                 return Result(False, "not_lease_holder")
             if self._state is not TxState.AWAITING_CONFIRM:
                 return Result(False, "busy")
+            # Re-check the gate at the one point that actually keys the rig,
+            # so a request made while enabled can't confirm after it's been
+            # disabled (defence-in-depth vs. relying on reclaim_local).
+            if not self._enabled():
+                self._reset_locked()
+                return Result(False, "tx_disabled")
             t = self._now()
             if self._confirm_token is None or not secrets.compare_digest(
                 token, self._confirm_token

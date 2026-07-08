@@ -216,6 +216,32 @@ enforces its side; these are the app-side obligations when it is wired):
   shared access token (two tabs share the token but must be different
   lease clients) — the browser generates one and sends it.
 
+**Adversarial review outcome (2 reviewers + own pass).** Verified solid:
+off-by-default gate, 96-bit single-use `compare_digest` confirm token (no
+replay/guess/cross-client), sound single-writer lease, and a genuinely
+GUI-independent dead-man's-switch. Fixed: `confirm()` now re-checks the
+enable gate at the keying edge (was leaning on `reclaim_local`);
+`_stop_remote_server` now `reclaim_local()`s so a remote TX can't outlive
+the tick thread across a stop/restart; the GUI `_on_remote_tx_request`
+slot re-checks state a **second** time *after* the image load (the widest
+window) and immediately before keying.
+
+**Known residual (documented, accepted for the LAN home-station model).**
+`transmit` (Qt signal → GUI slot → queued `_request_transmit` → worker)
+and `unkey` (`request_stop`, immediate) travel different-latency channels,
+and `TxWorker.transmit()` clears its stop flag at entry — so an
+abort/reclaim that lands in the **microsecond** gap between the final
+state re-check and the worker keying PTT is lost, transmitting one
+(already-confirmed) image before stopping. The **dead-man's-switch cannot
+hit this window** (confirm refreshes the heartbeat clock; DMS needs 2.5 s)
+and a **human cannot** (reaction ≫ the window; the local Send path is on
+the same GUI thread, so it can't interleave). It requires machine-
+precision confirm-then-abort and is bounded to one image. The airtight
+fix — an `authorize()` callback checked on the worker thread right before
+PTT, after the flag clear — is deferred as optional hardening (it touches
+the v0.4.1 TX worker) and is not required before the operator-present
+dummy-load shakedown.
+
 ---
 
 ## 7. Media pipeline — camera → app → air

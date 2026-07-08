@@ -131,6 +131,22 @@ class TestConfirm:
         assert cp.confirm("A", "not-the-token").error == "bad_token"
         assert spy.transmits == []
 
+    def test_confirm_rechecks_gate_disabled_after_request(self) -> None:
+        # Gate ON at request, OFF by confirm time — the confirm edge (the
+        # one point that keys the rig) must refuse, not lean on reclaim.
+        clock, spy = Clock(), Spy()
+        gate = {"on": True}
+        cp = ControlPlane(
+            now=clock, transmit=spy.transmit, unkey=spy.unkey,
+            enabled=lambda: gate["on"],
+        )
+        cp.take_lease("A")
+        tok = cp.request("A", "img1", "martin_m1").token
+        gate["on"] = False
+        r = cp.confirm("A", tok or "")
+        assert not r.ok and r.error == "tx_disabled"
+        assert spy.transmits == []
+
     def test_confirm_after_window_expires(self) -> None:
         clock, spy = Clock(), Spy()
         cp = _cp(clock, spy)
