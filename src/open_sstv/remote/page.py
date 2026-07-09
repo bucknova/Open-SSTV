@@ -219,6 +219,13 @@ _PAGE = """<!doctype html>
   #onair .big { font-family:var(--mono); font-size:44px; font-weight:700;
     letter-spacing:.18em; color:var(--tx); text-transform:uppercase; }
   #onair .what { font-family:var(--mono); font-size:14px; color:var(--ink); }
+  #onair .txbar { width:min(420px,80vw); height:8px; border-radius:6px;
+    background:color-mix(in srgb,var(--tx) 18%,#0a0405); overflow:hidden;
+    border:1px solid color-mix(in srgb,var(--tx) 30%,var(--line)); }
+  #onair .txbar .fill { display:block; height:100%; width:0%;
+    background:var(--tx); box-shadow:0 0 12px var(--tx); transition:width .25s linear; }
+  #onair .txtime { font-family:var(--mono); font-size:13px; color:var(--ink);
+    font-variant-numeric:tabular-nums; letter-spacing:.02em; }
   #onair .hb { font-family:var(--mono); font-size:12px; color:var(--muted);
     display:inline-flex; align-items:center; gap:8px; }
   #onair .hb .d { width:8px; height:8px; border-radius:50%; background:var(--accent);
@@ -339,6 +346,8 @@ _PAGE = """<!doctype html>
   <div class="lamp"></div>
   <div class="big">On Air</div>
   <div class="what" id="onairWhat">Transmitting…</div>
+  <div class="txbar"><span class="fill" id="onairFill"></span></div>
+  <div class="txtime" id="onairTime">0:00 / 0:00</div>
   <div class="hb" id="onairHb"><span class="d"></span> Link alive</div>
   <div class="warn">Keep this page open — if the connection drops, the station
     unkeys automatically (dead-man's-switch).</div>
@@ -535,6 +544,7 @@ _PAGE = """<!doctype html>
       else if (ev.type === "rx.complete") hideLive();
       else if (ev.type === "gallery.new") load();
       else if (ev.type === "tx.state") onTxState(ev);
+      else if (ev.type === "tx.progress") onTxProgress(ev);
     };
   }
 
@@ -660,9 +670,23 @@ _PAGE = """<!doctype html>
     if (onAir) $("onairWhat").textContent = "Transmitting " + (txSendingLabel || "image");
     $("onair").classList.toggle("show", onAir);
   }
+  function fmtTime(s) {
+    s = Math.max(0, Math.round(s));
+    return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+  }
+  function resetTxProgress() {
+    $("onairFill").style.width = "0%";
+    $("onairTime").textContent = "0:00 / 0:00";
+  }
+  function onTxProgress(ev) {
+    const total = ev.total_s || 0, el = Math.min(ev.elapsed_s || 0, total);
+    $("onairFill").style.width = (total > 0 ? Math.min(100, el / total * 100) : 0).toFixed(1) + "%";
+    $("onairTime").textContent = fmtTime(el) + " / " + fmtTime(total);
+  }
   function onTxState(ev) {
     const wasTx = txInfo.state === "transmitting";
     txInfo = { state: ev.state, lease_held: !!ev.lease_held, tx_enabled: !!ev.tx_enabled };
+    if (!wasTx && ev.state === "transmitting") resetTxProgress();  // fresh bar per TX
     if (!txInfo.lease_held) { iHold = false; stopHb(); }  // server released/lapsed it
     // TX ended (finished or aborted): clear the stale compose progress hint.
     if (wasTx && ev.state !== "transmitting" && /^(Transmitting|Staging)/.test($("cHint").textContent)) {

@@ -2039,7 +2039,18 @@ class MainWindow(QMainWindow):
 
     @Slot(int, int)
     def _on_tx_progress(self, samples_played: int, samples_total: int) -> None:
-        """Update the status bar countdown during a test-tone transmission."""
+        """Status-bar countdown for the test tone, and TX progress to remote
+        viewers so the browser can show an elapsed/remaining bar."""
+        # Feed the browser's ON AIR progress bar, but only for a remote-driven
+        # transmission (the control plane is TRANSMITTING only then — a local
+        # Send leaves it IDLE, so this stays quiet for local TX).
+        if samples_total > 0 and self._remote_control.status().get("state") == "transmitting":
+            rate = self._config.sample_rate or 48000
+            self._remote_hub.publish({
+                "type": "tx.progress",
+                "elapsed_s": round(samples_played / rate, 2),
+                "total_s": round(samples_total / rate, 2),
+            })
         if not self._last_tx_was_test_tone or samples_total <= 0:
             return
         remaining_s = max(
