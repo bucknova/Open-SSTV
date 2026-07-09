@@ -134,10 +134,17 @@ _PAGE = """<!doctype html>
   .cwrap { display:grid; grid-template-columns:minmax(0,1fr) 260px; gap:18px; }
   @media (max-width:640px) { .cwrap { grid-template-columns:1fr; } }
   .ccol { padding:14px; }
-  .cshot { aspect-ratio:4/3; max-height:min(58vh,460px); background:#05090a;
-    border:1px solid var(--line); border-radius:10px; overflow:hidden;
-    display:grid; place-items:center; }
-  .cshot img, .cshot video { width:100%; height:100%; object-fit:contain; display:block; }
+  .cshot { position:relative; aspect-ratio:4/3; max-height:min(58vh,460px);
+    background:#05090a; border:1px solid var(--line); border-radius:10px;
+    overflow:hidden; display:grid; place-items:center; }
+  .cshot #cPreview, .cshot video { width:100%; height:100%; object-fit:contain; display:block; }
+  /* Crop/adjust: the source image is positioned + transformed by JS, so it
+     must escape the reset's max-width and the object-fit rule above. */
+  #cCropImg { position:absolute; top:0; left:0; max-width:none; display:block;
+    transform-origin:0 0; touch-action:none; user-select:none;
+    -webkit-user-drag:none; cursor:grab; }
+  .cshot.grabbing #cCropImg { cursor:grabbing; }
+  .czoom { flex:1 1 90px; align-self:center; accent-color:var(--accent); }
   .cshot .ph { color:var(--muted); font-family:var(--mono); font-size:12px;
     padding:20px; text-align:center; }
   .crow { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
@@ -220,7 +227,7 @@ _PAGE = """<!doctype html>
 </head>
 <body>
 <header>
-  <b>Open-SSTV</b><span class="sub">remote gallery · read-only</span>
+  <b>Open-SSTV</b>
   <span class="spacer"></span>
   <span class="txchip" id="txchip"></span>
   <span class="statuspill" id="status" data-state="offline" title="live link status">
@@ -262,8 +269,9 @@ _PAGE = """<!doctype html>
   <section id="composeView" hidden>
     <div class="cwrap">
       <div class="card ccol">
-        <div class="cshot">
+        <div class="cshot" id="cShot">
           <video id="cVideo" autoplay playsinline muted style="display:none"></video>
+          <img id="cCropImg" alt="adjust framing" style="display:none" />
           <img id="cPreview" alt="composed preview" style="display:none" />
           <span class="ph" id="cPh">Take or upload a photo to compose a card</span>
         </div>
@@ -271,7 +279,14 @@ _PAGE = """<!doctype html>
           <button class="btn" id="cCamera">📷 Camera</button>
           <button class="btn" id="cCapture" style="display:none">◉ Capture</button>
           <button class="btn" id="cUpload">⬆ Upload</button>
+          <button class="btn" id="cAdjust" style="display:none">✂ Adjust</button>
           <input type="file" id="cFile" accept="image/*" style="display:none" />
+        </div>
+        <div class="crow" id="cCropTools" style="display:none">
+          <input type="range" id="cZoom" class="czoom" min="1" max="4" step="0.01" value="1"
+            aria-label="Zoom" />
+          <button class="btn tx" id="cCropUse">✓ Use photo</button>
+          <button class="btn" id="cCropCancel">↺ Retake</button>
         </div>
         <div class="chd">Template — composited by the station</div>
         <div class="ctpl" id="cTpl"></div>
@@ -453,7 +468,13 @@ _PAGE = """<!doctype html>
   }
 
   function showView(name) {
-    if (activeView === "compose" && name !== "compose") stopCamera();
+    if (activeView === "compose" && name !== "compose") {
+      stopCamera();
+      // Don't leave a live camera / crop stage frozen on screen for next time.
+      if (cStage === "camera" || cStage === "crop") {
+        composeStage(cPhoto ? "preview" : "empty");
+      }
+    }
     activeView = name;
     $("galleryView").hidden = name !== "gallery";
     $("logbookView").hidden = name !== "logbook";
@@ -617,11 +638,33 @@ _PAGE = """<!doctype html>
     renderTx();
   }
 
-  /* ---- compose (camera / upload → template → transmit) ---- */
+  /* ---- compose (camera / upload → crop → template → transmit) ---- */
   let cPhoto = null, cTemplateId = null, cStream = null, cRenderTimer = null,
-      composeInited = false;
+      composeInited = false, cStage = "empty";
+  // Crop/adjust state: cRaw is the full-resolution source (so re-adjust starts
+  // from the original, not an already-cropped copy).  cCover is the scale that
+  // makes the image exactly fill the box; cZoom multiplies it; cPanX/Y is the
+  // image's top-left offset within the box, in CSS px.
+  let cRaw = null, cImgW = 0, cImgH = 0, cCover = 1, cZoom = 1, cPanX = 0, cPanY = 0;
+  const cPtrs = new Map();       // active pointers, for drag-pan / pinch-zoom
+  let cPinch = null;             // {dist, zoom} captured when a 2nd finger lands
   function cHint(msg, err) {
     const h = $("cHint"); h.textContent = msg; h.classList.toggle("err", !!err);
+  }
+  // Show exactly the widgets that belong to the current compose stage.
+  function composeStage(s) {
+    cStage = s;
+    $("cVideo").style.display   = s === "camera"  ? "block" : "none";
+    $("cCropImg").style.display = s === "crop"    ? "block" : "none";
+    $("cPreview").style.display = s === "preview" ? "block" : "none";
+    $("cPh").style.display      = s === "empty"   ? "" : "none";
+    $("cCamera").style.display  = (s === "empty" || s === "preview") ? "" : "none";
+    $("cUpload").style.display  = (s === "empty" || s === "preview") ? "" : "none";
+    $("cCapture").style.display = s === "camera"  ? "" : "none";
+    $("cAdjust").style.display  = s === "preview" ? "" : "none";
+    // Inline display (not the `hidden` attr): `.crow{display:flex}` would
+    // otherwise override `[hidden]` and leak the crop tools into other stages.
+    $("cCropTools").style.display = s === "crop" ? "flex" : "none";
   }
   function blobToDataUrl(blob) {
     return new Promise((res, rej) => {
@@ -663,31 +706,84 @@ _PAGE = """<!doctype html>
   }
   function stopCamera() {
     if (cStream) { cStream.getTracks().forEach(t => t.stop()); cStream = null; }
-    $("cCapture").style.display = "none"; $("cCamera").style.display = "";
-    $("cVideo").style.display = "none";
   }
   async function startCamera() {
     try {
       cStream = await navigator.mediaDevices.getUserMedia(
         { video: { facingMode: "environment" }, audio: false });
-      $("cVideo").srcObject = cStream; $("cVideo").style.display = "";
-      $("cPreview").style.display = "none"; $("cPh").style.display = "none";
-      $("cCapture").style.display = ""; $("cCamera").style.display = "none";
+      $("cVideo").srcObject = cStream;
+      composeStage("camera");
     } catch { cHint("Camera unavailable — use Upload instead.", true); }
-  }
-  function setPhoto(dataUrl) {
-    cPhoto = (dataUrl.split(",")[1]) || null;   // strip the data:...;base64, prefix
-    stopCamera();
-    const img = $("cPreview"); img.src = dataUrl; img.style.display = "";
-    $("cPh").style.display = "none";
-    renderComposePreview();
   }
   function capture() {
     const v = $("cVideo"); if (!v.videoWidth) return;
     const c = document.createElement("canvas");
     c.width = v.videoWidth; c.height = v.videoHeight;
     c.getContext("2d").drawImage(v, 0, 0);
+    enterCrop(c.toDataURL("image/jpeg", 0.9));
+  }
+
+  /* --- crop / adjust: pan + pinch + zoom, output a WYSIWYG framed JPEG --- */
+  function applyCropTransform() {
+    const dw = cImgW * cCover * cZoom, dh = cImgH * cCover * cZoom;
+    const img = $("cCropImg");
+    img.style.width = dw + "px"; img.style.height = dh + "px";
+    img.style.transform = "translate(" + cPanX + "px," + cPanY + "px)";
+  }
+  function clampPan() {
+    const box = $("cShot"), bw = box.clientWidth, bh = box.clientHeight;
+    const dw = cImgW * cCover * cZoom, dh = cImgH * cCover * cZoom;
+    cPanX = Math.min(0, Math.max(bw - dw, cPanX));   // image must always cover
+    cPanY = Math.min(0, Math.max(bh - dh, cPanY));   // the box — no empty gaps
+  }
+  // Zoom to *nz*, keeping the image point under box-relative (ax,ay) fixed.
+  function zoomAround(nz, ax, ay) {
+    nz = Math.min(4, Math.max(1, nz));
+    const s = cCover * cZoom;
+    const ix = (ax - cPanX) / s, iy = (ay - cPanY) / s;   // image coord under anchor
+    cZoom = nz;
+    const s2 = cCover * cZoom;
+    cPanX = ax - ix * s2; cPanY = ay - iy * s2;
+    clampPan(); applyCropTransform();
+    $("cZoom").value = String(cZoom);
+  }
+  function enterCrop(dataUrl) {
+    stopCamera();
+    cRaw = dataUrl;
+    const img = $("cCropImg");
+    const init = () => {
+      cImgW = img.naturalWidth; cImgH = img.naturalHeight;
+      if (!cImgW || !cImgH) return;
+      const box = $("cShot"), bw = box.clientWidth, bh = box.clientHeight;
+      cCover = Math.max(bw / cImgW, bh / cImgH);   // fill the box at zoom 1
+      cZoom = 1;
+      const dw = cImgW * cCover, dh = cImgH * cCover;
+      cPanX = (bw - dw) / 2; cPanY = (bh - dh) / 2;   // centred
+      $("cZoom").value = "1";
+      applyCropTransform();
+      composeStage("crop");
+      cHint("Drag to reposition, pinch or use the slider to zoom, then Use photo.");
+    };
+    img.onload = init;
+    img.src = dataUrl;
+    if (img.complete && img.naturalWidth) init();   // cached: onload may not fire
+  }
+  function applyCrop() {
+    const box = $("cShot"), bw = box.clientWidth, bh = box.clientHeight;
+    const s = cCover * cZoom;
+    // Box → source-image rectangle, in natural pixels.
+    const sx = -cPanX / s, sy = -cPanY / s, sw = bw / s, sh = bh / s;
+    const outW = 800, outH = Math.round(800 * bh / bw);
+    const c = document.createElement("canvas");
+    c.width = outW; c.height = outH;
+    c.getContext("2d").drawImage($("cCropImg"), sx, sy, sw, sh, 0, 0, outW, outH);
     setPhoto(c.toDataURL("image/jpeg", 0.85));
+  }
+  function setPhoto(dataUrl) {
+    cPhoto = (dataUrl.split(",")[1]) || null;   // strip the data:...;base64, prefix
+    $("cPreview").src = dataUrl;                 // instant feedback until render
+    composeStage("preview");
+    renderComposePreview();
   }
   function scheduleRender() {
     clearTimeout(cRenderTimer); cRenderTimer = setTimeout(renderComposePreview, 400);
@@ -702,9 +798,7 @@ _PAGE = """<!doctype html>
       });
       if (!res.ok) { cHint("Preview failed (HTTP " + res.status + ").", true); return; }
       const url = await blobToDataUrl(await res.blob());
-      const img = $("cPreview");
-      img.src = url; img.style.display = "";
-      $("cVideo").style.display = "none"; $("cPh").style.display = "none";
+      $("cPreview").src = url;   // composeStage("preview") owns visibility
       cHint("Preview approximates the on-air image — the station renders the exact bytes.");
     } catch { cHint("Could not reach the station.", true); }
   }
@@ -739,9 +833,53 @@ _PAGE = """<!doctype html>
   $("cFile").addEventListener("change", (e) => {
     const f = e.target.files && e.target.files[0]; if (!f) return;
     const r = new FileReader();
-    r.onload = () => setPhoto(r.result);
+    r.onload = () => enterCrop(r.result);
     r.readAsDataURL(f);
+    e.target.value = "";   // allow re-selecting the same file
   });
+  $("cAdjust").addEventListener("click", () => { if (cRaw) enterCrop(cRaw); });
+  $("cCropUse").addEventListener("click", applyCrop);
+  $("cCropCancel").addEventListener("click",
+    () => composeStage(cPhoto ? "preview" : "empty"));
+  $("cZoom").addEventListener("input", () => {
+    const box = $("cShot");
+    zoomAround(parseFloat($("cZoom").value), box.clientWidth / 2, box.clientHeight / 2);
+  });
+  // Drag to pan, two fingers to pinch-zoom.  Pointer events cover mouse + touch.
+  const cbox = $("cShot");
+  cbox.addEventListener("pointerdown", (e) => {
+    if (cStage !== "crop") return;
+    cbox.setPointerCapture(e.pointerId);
+    cPtrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    cbox.classList.add("grabbing");
+    if (cPtrs.size === 2) {
+      const p = [...cPtrs.values()];
+      cPinch = { dist: Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y), zoom: cZoom };
+    }
+  });
+  cbox.addEventListener("pointermove", (e) => {
+    const prev = cPtrs.get(e.pointerId); if (!prev) return;
+    const nx = e.clientX, ny = e.clientY;
+    if (cPtrs.size >= 2 && cPinch) {
+      cPtrs.set(e.pointerId, { x: nx, y: ny });
+      const p = [...cPtrs.values()];
+      const dist = Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
+      const r = cbox.getBoundingClientRect();
+      const mx = (p[0].x + p[1].x) / 2 - r.left, my = (p[0].y + p[1].y) / 2 - r.top;
+      zoomAround(cPinch.zoom * (dist / cPinch.dist), mx, my);
+    } else {
+      cPanX += nx - prev.x; cPanY += ny - prev.y;
+      cPtrs.set(e.pointerId, { x: nx, y: ny });
+      clampPan(); applyCropTransform();
+    }
+  });
+  const cptrUp = (e) => {
+    cPtrs.delete(e.pointerId);
+    if (cPtrs.size < 2) cPinch = null;
+    if (cPtrs.size === 0) cbox.classList.remove("grabbing");
+  };
+  cbox.addEventListener("pointerup", cptrUp);
+  cbox.addEventListener("pointercancel", cptrUp);
   ["cTocall", "cRst", "cName", "cNote"].forEach(
     id => $(id).addEventListener("input", scheduleRender));
   $("cMode").addEventListener("change", renderComposePreview);
