@@ -281,6 +281,8 @@ _PAGE = """<!doctype html>
           <button class="btn" id="cUpload">⬆ Upload</button>
           <button class="btn" id="cAdjust" style="display:none">✂ Adjust</button>
           <input type="file" id="cFile" accept="image/*" style="display:none" />
+          <input type="file" id="cCapFile" accept="image/*" capture="environment"
+            style="display:none" />
         </div>
         <div class="crow" id="cCropTools" style="display:none">
           <input type="range" id="cZoom" class="czoom" min="1" max="4" step="0.01" value="1"
@@ -708,12 +710,19 @@ _PAGE = """<!doctype html>
     if (cStream) { cStream.getTracks().forEach(t => t.stop()); cStream = null; }
   }
   async function startCamera() {
+    // getUserMedia needs a secure context; over plain http on a LAN (the
+    // usual phone case) navigator.mediaDevices is undefined.  Detect that
+    // synchronously — while we still have the click's user-activation — and
+    // fall back to the OS camera via a capture file input, which works over
+    // http and gives the native (higher-quality) camera UI on a phone.
+    const md = navigator.mediaDevices;
+    if (!md || !md.getUserMedia) { $("cCapFile").click(); return; }
     try {
-      cStream = await navigator.mediaDevices.getUserMedia(
+      cStream = await md.getUserMedia(
         { video: { facingMode: "environment" }, audio: false });
       $("cVideo").srcObject = cStream;
       composeStage("camera");
-    } catch { cHint("Camera unavailable — use Upload instead.", true); }
+    } catch { cHint("Camera blocked — allow it in the browser, or use Upload.", true); }
   }
   function capture() {
     const v = $("cVideo"); if (!v.videoWidth) return;
@@ -830,13 +839,15 @@ _PAGE = """<!doctype html>
   $("cCamera").addEventListener("click", startCamera);
   $("cCapture").addEventListener("click", capture);
   $("cUpload").addEventListener("click", () => $("cFile").click());
-  $("cFile").addEventListener("change", (e) => {
-    const f = e.target.files && e.target.files[0]; if (!f) return;
+  function fileToCrop(input) {
+    const f = input.files && input.files[0]; if (!f) return;
     const r = new FileReader();
     r.onload = () => enterCrop(r.result);
     r.readAsDataURL(f);
-    e.target.value = "";   // allow re-selecting the same file
-  });
+    input.value = "";   // allow re-selecting the same file / re-shooting
+  }
+  $("cFile").addEventListener("change", (e) => fileToCrop(e.target));
+  $("cCapFile").addEventListener("change", (e) => fileToCrop(e.target));
   $("cAdjust").addEventListener("click", () => { if (cRaw) enterCrop(cRaw); });
   $("cCropUse").addEventListener("click", applyCrop);
   $("cCropCancel").addEventListener("click",
