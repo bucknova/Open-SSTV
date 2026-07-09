@@ -67,7 +67,7 @@ class TxState(StrEnum):
 class Result:
     """Outcome of a control-plane call.
 
-    ``error`` is a stable machine code (``"tx_disabled"``,
+    ``error`` is a stable machine code (``"tx_disabled"``, ``"no_rig"``,
     ``"not_lease_holder"``, ``"busy"``, ``"bad_token"``,
     ``"confirm_expired"``, ``"no_lease"``) the HTTP layer maps to a status.
     """
@@ -98,11 +98,18 @@ class ControlPlane:
         transmit: Callable[[str, str], None],
         unkey: Callable[[str], None],
         enabled: Callable[[], bool],
+        rig_ready: Callable[[], bool] | None = None,
     ) -> None:
         self._now = now
         self._transmit = transmit
         self._unkey = unkey
         self._enabled = enabled
+        #: Whether a rig that can be positively keyed is connected.  Remote
+        #: TX is unattended, so we refuse it on the no-op manual/VOX backend
+        #: where PTT isn't commanded and the dead-man's-switch could only
+        #: stop audio, not drop PTT.  Defaults to always-ready for headless
+        #: tests; the app passes "a CAT rig is connected".
+        self._rig_ready = rig_ready if rig_ready is not None else (lambda: True)
         self._lock = threading.RLock()
 
         self._state = TxState.IDLE
@@ -171,6 +178,8 @@ class ControlPlane:
         with self._lock:
             if not self._enabled():
                 return Result(False, "tx_disabled")
+            if not self._rig_ready():
+                return Result(False, "no_rig")
             if self._effective_holder() != client_id:
                 return Result(False, "not_lease_holder")
             if self._state is not TxState.IDLE:
@@ -198,6 +207,11 @@ class ControlPlane:
             if not self._enabled():
                 self._reset_locked()
                 return Result(False, "tx_disabled")
+            # Re-check at the keying edge: the rig could have been disconnected
+            # between request and confirm.
+            if not self._rig_ready():
+                self._reset_locked()
+                return Result(False, "no_rig")
             t = self._now()
             if self._confirm_token is None or not secrets.compare_digest(
                 token, self._confirm_token

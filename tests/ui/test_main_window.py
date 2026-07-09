@@ -1523,6 +1523,7 @@ class TestRemoteTxWiring:
         Image.new("RGB", (32, 24), (1, 2, 3)).save(img_path)
         window._remote_service.image_path = MagicMock(return_value=img_path)  # type: ignore[method-assign]
         window._config.remote_tx_enabled = True
+        window._rig = MagicMock()  # a connected (non-Manual) rig — remote TX gate
         cp = window._remote_control
         assert cp.take_lease("A").ok
         tok = cp.request("A", "some-id", "martin_m1").token

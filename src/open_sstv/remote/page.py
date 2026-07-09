@@ -557,6 +557,16 @@ _PAGE = """<!doctype html>
       return { ok: res.ok, body };
     } catch { return { ok: false, body: {} }; }
   }
+  function txErrorText(code) {
+    return ({
+      no_rig: "No rig connected at the station — connect a rig there to transmit.",
+      tx_disabled: "Remote transmit is off in the station's settings.",
+      busy: "The station is busy with another transmission.",
+      not_lease_holder: "You don't have control right now.",
+      confirm_expired: "The transmit request expired — try again.",
+      bad_token: "The transmit request was invalid — try again.",
+    })[code] || ("Transmit request refused" + (code ? " (" + code + ")" : "") + ".");
+  }
   function startHb() {
     if (hbTimer) return;
     // 1.5 s keeps the lease alive (< 15 s) and satisfies the dead-man's-
@@ -596,7 +606,11 @@ _PAGE = """<!doctype html>
     const modeName = $("cfMode").selectedOptions[0] ? $("cfMode").selectedOptions[0].text : "";
     txSendingLabel = (cfImage && cfImage.name ? cfImage.name + " · " : "") + modeName;
     const req = await txPost("request", { image_id: cfImage.id, mode: $("cfMode").value });
-    if (!req.ok || !req.body.token) { renderTx(); return; }
+    if (!req.ok || !req.body.token) {
+      renderTx();
+      alert(txErrorText(req.body && req.body.error));
+      return;
+    }
     await txPost("confirm", { token: req.body.token });  // tx.state SSE flips to on-air
   });
   $("onairAbort").addEventListener("click", abortTx);
@@ -835,7 +849,7 @@ _PAGE = """<!doctype html>
     if (!stage.ok) { cHint("Stage failed (HTTP " + stage.status + ").", true); return; }
     const { image_id } = await stage.json();
     const req = await txPost("request", { image_id, mode: $("cMode").value });
-    if (!req.ok || !req.body.token) { cHint("Transmit request refused.", true); return; }
+    if (!req.ok || !req.body.token) { cHint(txErrorText(req.body && req.body.error), true); return; }
     const mn = $("cMode").selectedOptions[0] ? $("cMode").selectedOptions[0].text : "";
     txSendingLabel = "composed image · " + mn;
     await txPost("confirm", { token: req.body.token });   // → ON AIR takeover

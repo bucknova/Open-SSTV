@@ -83,6 +83,7 @@ _ERR_STATUS = {
     "busy": HTTPStatus.CONFLICT,
     "not_lease_holder": HTTPStatus.FORBIDDEN,
     "tx_disabled": HTTPStatus.FORBIDDEN,
+    "no_rig": HTTPStatus.CONFLICT,
     "bad_token": HTTPStatus.BAD_REQUEST,
     "confirm_expired": HTTPStatus.CONFLICT,
 }

@@ -341,6 +341,29 @@ class TestControlGateDisabled:
         finally:
             srv.stop()
 
+    def test_request_denied_when_no_rig(self, tmp_path: Path) -> None:
+        import time as _time
+
+        images = tmp_path / "images"
+        images.mkdir()
+        _img(images / "2026-04-17_213512_scottie_s1.png")
+        cfg = AppConfig(images_save_dir=str(images), logbook_db_path=str(tmp_path / "l.db"))
+        svc = GalleryService(lambda: cfg, thumbnail_cache=ThumbnailCache(cache_dir=tmp_path / "t"))
+        control = ControlPlane(
+            now=_time.monotonic, transmit=lambda *a: None, unkey=lambda *a: None,
+            enabled=lambda: True, rig_ready=lambda: False,  # TX on, but no rig
+        )
+        srv = RemoteServer(svc, host="127.0.0.1", port=0, token=TOKEN, control=control)
+        srv.start()
+        try:
+            (iid,) = _ids(srv)
+            _post(srv, "/api/tx/lease", {"client": "A"})
+            status, body = _post(srv, "/api/tx/request",
+                                {"client": "A", "image_id": iid, "mode": "scottie_s1"})
+            assert status == 409 and body["error"] == "no_rig"
+        finally:
+            srv.stop()
+
 
 class TestPage:
     def test_root_serves_html_without_token(self, server: RemoteServer) -> None:

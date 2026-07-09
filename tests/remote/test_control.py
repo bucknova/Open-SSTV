@@ -36,9 +36,12 @@ class Spy:
         self.unkeys.append(reason)
 
 
-def _cp(clock: Clock, spy: Spy, enabled: bool = True) -> ControlPlane:
+def _cp(
+    clock: Clock, spy: Spy, enabled: bool = True, rig_ready: bool = True
+) -> ControlPlane:
     return ControlPlane(
-        now=clock, transmit=spy.transmit, unkey=spy.unkey, enabled=lambda: enabled
+        now=clock, transmit=spy.transmit, unkey=spy.unkey,
+        enabled=lambda: enabled, rig_ready=lambda: rig_ready,
     )
 
 
@@ -98,6 +101,28 @@ class TestGating:
         cp.take_lease("A")
         r = cp.request("A", "img1", "martin_m1")
         assert not r.ok and r.error == "tx_disabled"
+
+    def test_request_denied_when_no_rig(self) -> None:
+        cp = _cp(Clock(), Spy(), rig_ready=False)
+        cp.take_lease("A")
+        r = cp.request("A", "img1", "martin_m1")
+        assert not r.ok and r.error == "no_rig"
+
+    def test_confirm_denied_if_rig_disconnects_after_request(self) -> None:
+        # Rig present at request, gone by confirm → refuse at the keying edge.
+        clock, spy = Clock(), Spy()
+        ready = {"on": True}
+        cp = ControlPlane(
+            now=clock, transmit=spy.transmit, unkey=spy.unkey,
+            enabled=lambda: True, rig_ready=lambda: ready["on"],
+        )
+        cp.take_lease("A")
+        tok = cp.request("A", "img1", "martin_m1").token
+        assert tok is not None
+        ready["on"] = False
+        r = cp.confirm("A", tok)
+        assert not r.ok and r.error == "no_rig"
+        assert spy.transmits == [], "must not key with no rig"
 
     def test_request_denied_without_lease(self) -> None:
         cp = _cp(Clock(), Spy())

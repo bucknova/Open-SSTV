@@ -576,6 +576,10 @@ class MainWindow(QMainWindow):
             transmit=lambda image_id, mode: self._remote_tx_request.emit(image_id, mode),
             unkey=self._remote_tx_unkey,
             enabled=lambda: self._config.remote_tx_enabled,
+            # Remote TX is unattended: require a CAT rig that can be positively
+            # keyed/unkeyed.  The no-op manual/VOX backend doesn't qualify —
+            # the dead-man's-switch could only stop audio, not drop PTT.
+            rig_ready=lambda: not isinstance(self._rig, ManualRig),
         )
         self._remote_tx_request.connect(
             self._on_remote_tx_request, Qt.ConnectionType.QueuedConnection
