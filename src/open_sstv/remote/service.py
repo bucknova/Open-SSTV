@@ -141,9 +141,15 @@ class GalleryService:
         return items
 
     def payload(self) -> list[dict[str, object]]:
-        """JSON-serialisable list of gallery items (id + resolved display fields)."""
+        """JSON-serialisable gallery items, **newest first** (scan_dirs returns
+        oldest-first by filename; the remote gallery shows the latest on top)."""
         out: list[dict[str, object]] = []
-        for item in self.list_items():
+        items = sorted(
+            self.list_items(),
+            key=lambda it: (it.timestamp_utc, it.path.name),
+            reverse=True,
+        )
+        for item in items:
             out.append(
                 {
                     "id": _image_id(item.path),

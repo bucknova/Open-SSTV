@@ -56,6 +56,22 @@ class TestScan:
         (images / "notes.txt").write_text("nope")
         assert len(svc.payload()) == 1
 
+    def test_payload_is_newest_first(self, tmp_path: Path) -> None:
+        import os
+
+        svc = _service(tmp_path)
+        images = tmp_path / "images"
+        names = [
+            "2026-04-17_100000_scottie_s1.png",
+            "2026-04-17_110000_martin_m1.png",
+            "2026-04-17_120000_robot_36.png",
+        ]
+        for i, n in enumerate(names):
+            p = _img(images / n)
+            os.utime(p, (1_000 + i * 3600, 1_000 + i * 3600))  # ascending mtime
+        got = [p["name"] for p in svc.payload()]
+        assert got == list(reversed(names)), "gallery must list newest first"
+
 
 class TestResolve:
     def test_known_id_resolves_to_file(self, tmp_path: Path) -> None:
