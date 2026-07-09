@@ -773,10 +773,12 @@ class TestRxWatchdog:
         worker.feed_chunk(np.zeros(10, dtype=np.float32))
         post_count = len(log["status_update"])
         new_texts = log["status_update"][pre_count:post_count]
-        listening = [t for t in new_texts if "Listening" in t]
+        from open_sstv.ui.workers import RX_LISTENING
+
+        listening = [t for t in new_texts if t == RX_LISTENING]
         assert listening == [], (
-            "Listening… status should be suppressed during the "
-            f"post-trip cooldown; got: {new_texts}"
+            "Listening heartbeat should be suppressed during the "
+            f"post-trip cooldown; got: {new_texts!r}"
         )
 
     def test_wall_clock_tick_fires_watchdog_even_without_audio(

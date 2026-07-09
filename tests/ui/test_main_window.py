@@ -1002,27 +1002,33 @@ class TestAudioDeviceLostUI:
         self, window: MainWindow, qapp
     ) -> None:
         """RxWorker status_update must be suppressed after _on_rx_stopped so
-        'Listening… Xs buffered' cannot overwrite 'Not listening…'."""
+        the 'Listening' heartbeat cannot overwrite 'Not listening…'."""
+        from open_sstv.ui.workers import RX_LISTENING
+
         window._on_rx_stopped()  # sets suppress flag + "Not listening…"
-        # Simulate RxWorker emitting its periodic "Listening…" status.
-        window._on_rx_status_update("Listening… 12s buffered, waiting for signal.")
+        window._on_rx_status_update(RX_LISTENING)  # periodic heartbeat
         assert "Not listening" in window._rx_panel._status.text()
 
     def test_status_update_suppressed_after_device_lost(
         self, window: MainWindow, qapp
     ) -> None:
         """RxWorker status_update must be suppressed after device loss."""
+        from open_sstv.ui.workers import RX_LISTENING
+
         disconnect_msg = "Audio device disconnected — replug and click Start to recover"
         window._on_audio_device_lost(disconnect_msg)
-        window._on_rx_status_update("Listening… 12s buffered, waiting for signal.")
+        window._on_rx_status_update(RX_LISTENING)
         assert window._rx_panel._status.text() == disconnect_msg
 
     def test_status_update_allowed_during_capture(
         self, window: MainWindow, qapp
     ) -> None:
-        """RxWorker status_update must flow through while capture is active."""
+        """The listening heartbeat drives the animated indicator while
+        capture is active (not suppressed)."""
+        from open_sstv.ui.workers import RX_LISTENING
+
         window._on_rx_started()  # clears suppress flag
-        window._on_rx_status_update("Listening… 5s buffered, waiting for signal.")
+        window._on_rx_status_update(RX_LISTENING)
         assert "Listening" in window._rx_panel._status.text()
 
     def test_suppress_flag_cleared_on_rx_started(

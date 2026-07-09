@@ -216,6 +216,14 @@ _RX_WATCHDOG_TICK_MS: int = 2000
 #: window without stalling real user feedback indefinitely.
 _RX_POST_WATCHDOG_COOLDOWN_S: float = 10.0
 
+#: Sentinel carried on ``status_update`` for the periodic "still listening"
+#: heartbeat (fired ~1/s while capturing but not yet decoding).  It is a
+#: marker, not display text: the RX panel intercepts it to drive an
+#: activity-gated "Listening" animation instead of a ticking seconds count.
+#: Because it rides the real flush cadence, its *arrival* proves audio is
+#: still flowing — a stall (no heartbeat) is what greys the indicator.
+RX_LISTENING = "\x00rx-listening"
+
 #: Hard upper bound on the encode / banner-stamp / CW-append stage.
 #: Encoding is CPU-bound and finishes in ~100 ms even for the longest
 #: Multiplicative margin on top of the expected wall-clock playback
@@ -1894,10 +1902,9 @@ class RxWorker(QObject):
                 < _RX_POST_WATCHDOG_COOLDOWN_S
             )
             if not cooldown_active:
-                secs = self._total_samples / self._sample_rate
-                self.status_update.emit(
-                    f"Listening… {secs:.0f}s buffered, waiting for signal."
-                )
+                # Heartbeat only — the RX panel turns this into an
+                # activity-gated animation, not a ticking seconds readout.
+                self.status_update.emit(RX_LISTENING)
 
         decoded = False
         for event in events:
