@@ -1259,21 +1259,30 @@ class TxWorker(QObject):
                 )
                 playback_succeeded = not self._stop_event.is_set()
         except sd.PortAudioError as exc:
-            _log.error("TX PortAudioError: %s", exc)
-            msg = str(exc)
-            if "Blocking API not supported" in msg or "WDM-KS" in msg:
-                self.error.emit(
-                    "Output device does not support playback (Windows WDM-KS). "
-                    "Open Settings → Audio and choose a WASAPI or MME output device."
-                )
+            # An abort (Stop / dead-man's-switch) calls stream.abort(), which
+            # makes the in-flight write() raise PortAudioError.  That's the
+            # intended stop path, not a device fault — don't cry wolf.
+            if self._stop_event.is_set():
+                _log.info("TX playback aborted by stop request (%s)", exc)
             else:
-                self.error.emit(
-                    "Audio output device error during transmission — "
-                    "check Settings → Audio."
-                )
+                _log.error("TX PortAudioError: %s", exc)
+                msg = str(exc)
+                if "Blocking API not supported" in msg or "WDM-KS" in msg:
+                    self.error.emit(
+                        "Output device does not support playback (Windows WDM-KS). "
+                        "Open Settings → Audio and choose a WASAPI or MME output device."
+                    )
+                else:
+                    self.error.emit(
+                        "Audio output device error during transmission — "
+                        "check Settings → Audio."
+                    )
         except Exception as exc:  # noqa: BLE001
-            _log.error("TX playback exception: %s", exc, exc_info=True)
-            self.error.emit(f"Playback failed: {exc}")
+            if self._stop_event.is_set():
+                _log.info("TX playback aborted by stop request (%s)", exc)
+            else:
+                _log.error("TX playback exception: %s", exc, exc_info=True)
+                self.error.emit(f"Playback failed: {exc}")
         finally:
             # Stop the health monitor BEFORE unkeying so its in-flight
             # CAT ping can't interleave with set_ptt on the same

@@ -940,6 +940,32 @@ class TestUnkeyResilience:
         assert log["aborted"] == [True], "GUI must unfreeze after playback error"
         assert log["complete"] == []
 
+    def test_abort_suppresses_spurious_playback_error(
+        self,
+        qapp,
+        gradient_image: Image.Image,
+        patch_encode_and_playback: dict[str, MagicMock],
+    ) -> None:
+        """When a TX is aborted (Stop / dead-man's-switch), stream.abort()
+        makes the in-flight write() raise PortAudioError.  That is the stop
+        path working, not a device fault — no error signal, just aborted."""
+        import sounddevice as sd
+
+        worker = TxWorker(rig=ManualRig(), ptt_delay_s=0)
+
+        def play_then_abort(*a: object, **k: object) -> None:
+            worker.request_stop()   # sets _stop_event, as a real abort would
+            raise sd.PortAudioError("stream aborted")
+
+        patch_encode_and_playback["play"].side_effect = play_then_abort
+        log = _record_signals(worker)
+
+        worker.transmit(gradient_image, Mode.ROBOT_36)
+
+        assert log["error"] == [], "an intentional abort must not report a device error"
+        assert log["aborted"] == [True]
+        assert log["complete"] == []
+
     def test_test_tone_playback_error_emits_aborted(
         self,
         qapp,

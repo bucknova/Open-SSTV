@@ -635,8 +635,13 @@ _PAGE = """<!doctype html>
     $("onair").classList.toggle("show", onAir);
   }
   function onTxState(ev) {
+    const wasTx = txInfo.state === "transmitting";
     txInfo = { state: ev.state, lease_held: !!ev.lease_held, tx_enabled: !!ev.tx_enabled };
     if (!txInfo.lease_held) { iHold = false; stopHb(); }  // server released/lapsed it
+    // TX ended (finished or aborted): clear the stale compose progress hint.
+    if (wasTx && ev.state !== "transmitting" && /^(Transmitting|Staging)/.test($("cHint").textContent)) {
+      cHint("Preview approximates the on-air image — the station renders the exact bytes.");
+    }
     renderTx();
   }
 
