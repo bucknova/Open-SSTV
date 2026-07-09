@@ -134,7 +134,13 @@ _PAGE = """<!doctype html>
   .cwrap { display:grid; grid-template-columns:minmax(0,1fr) 260px; gap:18px; }
   @media (max-width:640px) { .cwrap { grid-template-columns:1fr; } }
   .ccol { padding:14px; }
-  .cshot { position:relative; aspect-ratio:4/3; max-height:min(58vh,460px);
+  /* Box tracks the selected mode's frame aspect (--fa / --fa-num set by JS).
+     width = min(column, capHeight * aspect) so tall modes (S2/M2, 160x256)
+     get a narrow upright box instead of a clamped-wide one, and the height
+     cap is honoured for landscape modes.  Centred in the column. */
+  .cshot { position:relative; aspect-ratio:var(--fa, 4 / 3);
+    width:min(100%, calc(min(58vh,460px) * var(--fa-num, 1.3333)));
+    max-height:min(58vh,460px); margin-inline:auto;
     background:#05090a; border:1px solid var(--line); border-radius:10px;
     overflow:hidden; display:grid; place-items:center; }
   .cshot #cPreview, .cshot video { width:100%; height:100%; object-fit:contain; display:block; }
@@ -533,11 +539,17 @@ _PAGE = """<!doctype html>
   }
 
   /* ---- control plane: remote transmit ---- */
+  // w/h are the mode's frame size (from MODE_TABLE) — the crop box matches
+  // this aspect so what you frame is exactly what the station composites.
+  // Note S2/M2 are 160x256 (tall/portrait).
   const MODES = [
-    { v: "scottie_s1", n: "Scottie S1" }, { v: "scottie_s2", n: "Scottie S2" },
-    { v: "martin_m1", n: "Martin M1" }, { v: "martin_m2", n: "Martin M2" },
-    { v: "pd_120", n: "PD-120" }, { v: "pd_180", n: "PD-180" },
-    { v: "robot_36", n: "Robot 36" },
+    { v: "scottie_s1", n: "Scottie S1", w: 320, h: 256 },
+    { v: "scottie_s2", n: "Scottie S2", w: 160, h: 256 },
+    { v: "martin_m1", n: "Martin M1", w: 320, h: 256 },
+    { v: "martin_m2", n: "Martin M2", w: 160, h: 256 },
+    { v: "pd_120", n: "PD-120", w: 640, h: 496 },
+    { v: "pd_180", n: "PD-180", w: 640, h: 496 },
+    { v: "robot_36", n: "Robot 36", w: 320, h: 240 },
   ];
   let clientId = sessionStorage.getItem("sstv_client");
   if (!clientId) {
@@ -698,10 +710,21 @@ _PAGE = """<!doctype html>
     return { tocall: $("cTocall").value, rst: $("cRst").value,
              name: $("cName").value, note: $("cNote").value };
   }
+  function modeDims() {
+    const m = MODES.find(x => x.v === $("cMode").value);
+    return (m && m.w) ? { w: m.w, h: m.h } : { w: 320, h: 256 };
+  }
+  // Size the shot box to the selected mode's frame aspect (WYSIWYG crop).
+  function applyModeAspect() {
+    const d = modeDims(), box = $("cShot");
+    box.style.setProperty("--fa", d.w + " / " + d.h);
+    box.style.setProperty("--fa-num", (d.w / d.h).toFixed(4));
+  }
   function initCompose() {
     if (composeInited) return;
     composeInited = true;
     $("cMode").innerHTML = MODES.map(m => `<option value="${m.v}">${m.n}</option>`).join("");
+    applyModeAspect();
     loadComposeTemplates();
   }
   async function loadComposeTemplates() {
@@ -764,6 +787,16 @@ _PAGE = """<!doctype html>
     cPanX = Math.min(0, Math.max(bw - dw, cPanX));   // image must always cover
     cPanY = Math.min(0, Math.max(bh - dh, cPanY));   // the box — no empty gaps
   }
+  // Re-fit the source to the current box (after a mode-aspect / resize change),
+  // keeping the current zoom and re-centring.
+  function refitCrop() {
+    if (!cImgW || !cImgH) return;
+    const box = $("cShot"), bw = box.clientWidth, bh = box.clientHeight;
+    cCover = Math.max(bw / cImgW, bh / cImgH);
+    const dw = cImgW * cCover * cZoom, dh = cImgH * cCover * cZoom;
+    cPanX = (bw - dw) / 2; cPanY = (bh - dh) / 2;
+    clampPan(); applyCropTransform();
+  }
   // Zoom to *nz*, keeping the image point under box-relative (ax,ay) fixed.
   function zoomAround(nz, ax, ay) {
     nz = Math.min(4, Math.max(1, nz));
@@ -777,6 +810,7 @@ _PAGE = """<!doctype html>
   }
   function enterCrop(dataUrl) {
     stopCamera();
+    applyModeAspect();   // size the box to the mode before we measure it
     cRaw = dataUrl;
     const img = $("cCropImg");
     const init = () => {
@@ -912,7 +946,13 @@ _PAGE = """<!doctype html>
   cbox.addEventListener("pointercancel", cptrUp);
   ["cTocall", "cRst", "cName", "cNote"].forEach(
     id => $(id).addEventListener("input", scheduleRender));
-  $("cMode").addEventListener("change", renderComposePreview);
+  $("cMode").addEventListener("change", () => {
+    applyModeAspect();                       // resize the box to the new frame
+    if (cStage === "crop") refitCrop();      // re-fit the source to it
+    else renderComposePreview();             // preview: re-render at the new mode
+  });
+  // Keep the crop framing correct across window / phone-orientation changes.
+  window.addEventListener("resize", () => { if (cStage === "crop") refitCrop(); });
   $("cTransmit").addEventListener("click", composeTransmit);
 
   load();
