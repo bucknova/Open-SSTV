@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "open-sstv"
-version = "0.5.0"
+version = "0.6.0"
 description = "Open-source cross-platform SSTV transceiver for amateur radio."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -40,6 +40,7 @@ dependencies = [
     "tomli-w>=1.0,<2",       # TOML write (stdlib tomllib only reads)
     "pyserial>=3.5,<4",      # Direct serial CAT/PTT without external daemons
     "websocket-client>=1.6,<2",  # TCI WebSocket transport (optional at runtime — lazy import)
+    "segno>=1.5,<2",         # QR codes for remote-access pairing (pure Python, no deps)
 ]
 
 [project.optional-dependencies]

@@ -1002,27 +1002,33 @@ class TestAudioDeviceLostUI:
         self, window: MainWindow, qapp
     ) -> None:
         """RxWorker status_update must be suppressed after _on_rx_stopped so
-        'Listening… Xs buffered' cannot overwrite 'Not listening…'."""
+        the 'Listening' heartbeat cannot overwrite 'Not listening…'."""
+        from open_sstv.ui.workers import RX_LISTENING
+
         window._on_rx_stopped()  # sets suppress flag + "Not listening…"
-        # Simulate RxWorker emitting its periodic "Listening…" status.
-        window._on_rx_status_update("Listening… 12s buffered, waiting for signal.")
+        window._on_rx_status_update(RX_LISTENING)  # periodic heartbeat
         assert "Not listening" in window._rx_panel._status.text()
 
     def test_status_update_suppressed_after_device_lost(
         self, window: MainWindow, qapp
     ) -> None:
         """RxWorker status_update must be suppressed after device loss."""
+        from open_sstv.ui.workers import RX_LISTENING
+
         disconnect_msg = "Audio device disconnected — replug and click Start to recover"
         window._on_audio_device_lost(disconnect_msg)
-        window._on_rx_status_update("Listening… 12s buffered, waiting for signal.")
+        window._on_rx_status_update(RX_LISTENING)
         assert window._rx_panel._status.text() == disconnect_msg
 
     def test_status_update_allowed_during_capture(
         self, window: MainWindow, qapp
     ) -> None:
-        """RxWorker status_update must flow through while capture is active."""
+        """The listening heartbeat drives the animated indicator while
+        capture is active (not suppressed)."""
+        from open_sstv.ui.workers import RX_LISTENING
+
         window._on_rx_started()  # clears suppress flag
-        window._on_rx_status_update("Listening… 5s buffered, waiting for signal.")
+        window._on_rx_status_update(RX_LISTENING)
         assert "Listening" in window._rx_panel._status.text()
 
     def test_suppress_flag_cleared_on_rx_started(
@@ -1452,3 +1458,87 @@ class TestExportToAudioBanner:
         # Banner overwrites the top strip — top-left pixel is now banner bg.
         assert captured[0].getpixel((0, 0)) != (100, 200, 50)
 
+
+
+class TestRemoteStatusIndicator:
+    """Phase 2: a persistent status-bar indicator reflects whether the
+    embedded remote server is running."""
+
+    def test_hidden_when_server_not_running(self, window: MainWindow) -> None:
+        assert window._remote_status_label.isVisible() is False
+
+    def test_shown_after_indicator_lit(self, window: MainWindow) -> None:
+        window.show()
+        window._show_remote_indicator("http://0.0.0.0:8730/?token=demo")
+        assert window._remote_status_label.isVisible() is True
+        # Click-through link opens on this machine (loopback), not 0.0.0.0.
+        assert "127.0.0.1:8730" in window._remote_status_label.text()
+        assert "0.0.0.0" not in window._remote_status_label.text()
+        # Tooltip preserves the real bind for LAN devices.
+        assert "0.0.0.0:8730" in window._remote_status_label.toolTip()
+
+    def test_hidden_again_after_stop(self, window: MainWindow) -> None:
+        window.show()
+        window._show_remote_indicator("http://127.0.0.1:8730/?token=demo")
+        window._stop_remote_server()
+        assert window._remote_status_label.isVisible() is False
+
+
+class TestRemoteTxWiring:
+    """Phase 3c: the control plane's key/unkey callbacks are wired to the
+    real TX worker, with the GUI-thread state guard that stops a stale key
+    from surviving an abort."""
+
+    def test_unkey_stops_the_worker(self, window: MainWindow) -> None:
+        window._tx_worker.request_stop = MagicMock()  # type: ignore[method-assign]
+        window._remote_tx_unkey("heartbeat_lost")
+        window._tx_worker.request_stop.assert_called_once()
+
+    def test_unkey_drops_ptt_directly_and_first(self, window: MainWindow) -> None:
+        # The dead-man's-switch must not rely on the audio worker unwinding
+        # to drop PTT: a worker wedged in a blocking write() would never
+        # reach its finally-block set_ptt(False).  So emergency_unkey (a
+        # direct PTT-off) fires, and BEFORE request_stop, so the transmitter
+        # unkeys even if stopping the audio hangs.
+        calls: list[str] = []
+        window._tx_worker.emergency_unkey = MagicMock(  # type: ignore[method-assign]
+            side_effect=lambda: calls.append("emergency_unkey")
+        )
+        window._tx_worker.request_stop = MagicMock(  # type: ignore[method-assign]
+            side_effect=lambda: calls.append("request_stop")
+        )
+        window._remote_tx_unkey("heartbeat_lost")
+        window._tx_worker.emergency_unkey.assert_called_once()
+        assert calls == ["emergency_unkey", "request_stop"], (
+            "PTT must be dropped directly before (and independent of) "
+            "stopping the audio worker"
+        )
+
+    def test_request_ignored_when_not_transmitting(self, window: MainWindow) -> None:
+        # The GUI-thread guard: if the control plane isn't TRANSMITTING
+        # (e.g. an abort landed first), the rig must not be keyed.
+        spy = MagicMock()
+        window._request_transmit.connect(spy)
+        window._on_remote_tx_request("some-id", "martin_m1")
+        spy.assert_not_called()
+
+    def test_request_keys_rig_when_transmitting(
+        self, window: MainWindow, tmp_path: Path
+    ) -> None:
+        img_path = tmp_path / "a.png"
+        Image.new("RGB", (32, 24), (1, 2, 3)).save(img_path)
+        window._remote_service.image_path = MagicMock(return_value=img_path)  # type: ignore[method-assign]
+        window._config.remote_tx_enabled = True
+        window._rig = MagicMock()  # a connected (non-Manual) rig — remote TX gate
+        cp = window._remote_control
+        assert cp.take_lease("A").ok
+        tok = cp.request("A", "some-id", "martin_m1").token
+        assert cp.confirm("A", tok or "").ok  # -> TRANSMITTING
+        assert cp.status()["state"] == "transmitting"
+
+        spy = MagicMock()
+        window._request_transmit.connect(spy)
+        window._on_remote_tx_request("some-id", "martin_m1")
+        assert spy.call_count == 1
+        from open_sstv.core.modes import Mode
+        assert spy.call_args[0][1] == Mode.MARTIN_M1

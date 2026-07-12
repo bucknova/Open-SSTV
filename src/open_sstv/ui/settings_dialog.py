@@ -143,6 +143,8 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._build_images_tab(), "Images")
         # v0.4: log level + log-folder access + diagnostics cross-link.
         tabs.addTab(self._build_logging_tab(), "Logging")
+        # v0.6 (Phase 2b): remote web access — enable/bind/token.
+        tabs.addTab(self._build_remote_tab(), "Remote")
         layout.addWidget(tabs)
 
         buttons = QDialogButtonBox(
@@ -464,6 +466,158 @@ class SettingsDialog(QDialog):
             )
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_dir)))
+
+    def _build_remote_tab(self) -> QWidget:
+        """Phase 2 remote web access — enable, network binding, and token.
+
+        Read-only remote viewing: a browser on the LAN can watch decoded
+        images (live) but cannot transmit or change the rig.  Adding these
+        controls also fixes the config-reset the TOML-only phase had —
+        ``result_config`` now round-trips the ``remote_*`` fields like any
+        other setting, so a Settings save no longer wipes them.
+        """
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        group = QGroupBox("Remote web access (read-only)")
+        form = QFormLayout(group)
+
+        self._remote_enabled = QCheckBox("Enable the remote gallery server")
+        self._remote_enabled.setChecked(self._config.remote_enabled)
+        form.addRow(self._remote_enabled)
+
+        self._remote_lan = QCheckBox("Allow access from other devices on my network")
+        # host "0.0.0.0" = bound to the LAN; anything else = loopback only.
+        self._remote_lan.setChecked(self._config.remote_host == "0.0.0.0")
+        form.addRow(self._remote_lan)
+
+        self._remote_port = QSpinBox()
+        self._remote_port.setRange(1, 65535)
+        self._remote_port.setValue(self._config.remote_port)
+        form.addRow("Port:", self._remote_port)
+
+        self._remote_token = QLineEdit(self._config.remote_token)
+        self._remote_token.setPlaceholderText("blank = generate a random one at launch")
+        form.addRow("Access token:", self._remote_token)
+
+        self._remote_url = QLabel()
+        self._remote_url.setWordWrap(True)
+        self._remote_url.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._remote_url.setStyleSheet("font-family: monospace; font-size: 11px;")
+        form.addRow("Open in a browser:", self._remote_url)
+
+        self._remote_qr = QLabel()
+        self._remote_qr.setStyleSheet("color: gray; font-size: 10px;")
+        form.addRow("Scan to open:", self._remote_qr)
+
+        note = QLabel(
+            "By default the browser can only <b>view</b> decoded images — it "
+            "cannot transmit or control the rig.  Every request needs the "
+            "token.  Changes take effect as soon as you click Save.  Leave "
+            "“other devices” off to keep it to this computer only."
+        )
+        note.setTextFormat(Qt.RichText)
+        note.setWordWrap(True)
+        note.setStyleSheet("color: gray; font-size: 10px;")
+        form.addRow(note)
+
+        layout.addWidget(group)
+
+        tx_group = QGroupBox("Remote transmit")
+        tx_form = QVBoxLayout(tx_group)
+        self._remote_tx = QCheckBox("Allow a paired browser to transmit (key the rig)")
+        self._remote_tx.setChecked(self._config.remote_tx_enabled)
+        tx_form.addWidget(self._remote_tx)
+        tx_note = QLabel(
+            "⚠ This lets a remote browser key your transmitter over the "
+            "network — you remain the control operator and are responsible "
+            "for every emission (FCC Part 97).  It stays off unless you turn "
+            "it on here.  Even then, a remote must take exclusive control and "
+            "confirm each transmission, and the rig unkeys automatically if "
+            "the browser stops responding (dead-man's-switch).  You can "
+            "reclaim control at the radio at any time."
+        )
+        tx_note.setWordWrap(True)
+        tx_note.setStyleSheet("color: gray; font-size: 10px;")
+        tx_form.addWidget(tx_note)
+        layout.addWidget(tx_group)
+        layout.addStretch(1)
+
+        self._remote_enabled.toggled.connect(self._update_remote_url)
+        self._remote_lan.toggled.connect(self._update_remote_url)
+        self._remote_port.valueChanged.connect(self._update_remote_url)
+        self._remote_token.textChanged.connect(self._update_remote_url)
+        self._update_remote_url()
+        return tab
+
+    @staticmethod
+    def _detect_lan_ip() -> str:
+        """Best-effort primary LAN IPv4 for the browse-URL hint.
+
+        Uses a UDP socket to a public address to learn which local
+        interface would route out; nothing is actually sent.  Falls back
+        to ``0.0.0.0`` when detection fails (offline, odd routing).
+        """
+        import socket  # noqa: PLC0415
+
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("192.0.2.1", 9))  # TEST-NET-1, never actually reached
+            return s.getsockname()[0]
+        except OSError:
+            return "0.0.0.0"
+        finally:
+            s.close()
+
+    @staticmethod
+    def _render_qr(url: str) -> QPixmap | None:
+        """Render *url* to a QR-code QPixmap, or ``None`` if unavailable.
+
+        ``segno`` is imported lazily and any failure (missing dependency
+        before a reinstall, encode error) degrades to no QR rather than
+        breaking the Settings dialog.
+        """
+        try:
+            import io  # noqa: PLC0415
+
+            import segno  # noqa: PLC0415
+
+            buf = io.BytesIO()
+            segno.make(url, error="m").save(
+                buf, kind="png", scale=4, border=2, dark="#101010", light="#ffffff"
+            )
+            pix = QPixmap()
+            pix.loadFromData(buf.getvalue(), "PNG")
+            return pix
+        except Exception as exc:  # noqa: BLE001 — QR is a nicety, never fatal
+            _log.debug("remote QR render failed: %s", exc)
+            return None
+
+    @Slot()
+    def _update_remote_url(self) -> None:
+        """Refresh the browse-URL hint and QR from the Remote-tab widgets."""
+        if not self._remote_enabled.isChecked():
+            self._remote_url.setText("(enable above to get a link)")
+            self._remote_qr.clear()
+            self._remote_qr.setText("")
+            return
+        host = self._detect_lan_ip() if self._remote_lan.isChecked() else "127.0.0.1"
+        port = self._remote_port.value()
+        token = self._remote_token.text().strip()
+        tok = token if token else "‹auto›"
+        self._remote_url.setText(f"http://{host}:{port}/?token={tok}")
+        # A scannable QR needs the real token; a blank (auto) token isn't
+        # known until the server starts, so nudge toward setting one.
+        if not token:
+            self._remote_qr.clear()
+            self._remote_qr.setText("Set a token above for a scannable code")
+            return
+        pix = self._render_qr(f"http://{host}:{port}/?token={token}")
+        if pix is not None:
+            self._remote_qr.setText("")
+            self._remote_qr.setPixmap(pix)
+        else:
+            self._remote_qr.setText("(QR unavailable)")
 
     def _build_audio_tab(self) -> QWidget:
         tab = QWidget()
@@ -1798,6 +1952,15 @@ class SettingsDialog(QDialog):
             rx_capture_prompt=self._rx_capture_combo.currentData() or "always",
             logbook_db_path=self._config.logbook_db_path,
             log_level=self._log_level_combo.currentData() or "INFO",
+            # v0.6 (Phase 2b): remote web access.  These MUST be carried
+            # through or a settings save resets them to defaults (the
+            # TOML-only-phase bug).  The LAN checkbox maps to the bind
+            # address; anything but "0.0.0.0" is loopback-only.
+            remote_enabled=self._remote_enabled.isChecked(),
+            remote_host="0.0.0.0" if self._remote_lan.isChecked() else "127.0.0.1",
+            remote_port=self._remote_port.value(),
+            remote_token=self._remote_token.text().strip(),
+            remote_tx_enabled=self._remote_tx.isChecked(),
         )
 
     @property

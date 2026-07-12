@@ -74,6 +74,7 @@ import datetime
 import logging
 import subprocess
 import threading
+import time
 import wave
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -95,6 +96,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import (
     QFileDialog,
+    QLabel,
     QMainWindow,
     QMessageBox,
     QSplitter,
@@ -123,6 +125,13 @@ from open_sstv.radio.base import ManualRig, Rig, RigConnectionMode
 from open_sstv.radio.exceptions import RigError
 from open_sstv.radio.rigctld import RigctldClient, is_safe_rigctld_arg
 from open_sstv.radio.serial_rig import create_serial_rig
+from open_sstv.remote import (
+    ComposeService,
+    ControlPlane,
+    EventHub,
+    GalleryService,
+    RemoteServer,
+)
 from open_sstv.templates import TokenContext, build_autosave_filename, run_migration
 from open_sstv.ui.first_launch_dialog import FirstLaunchDialog
 from open_sstv.ui.gallery_dialog import GalleryDialog
@@ -394,6 +403,11 @@ class MainWindow(QMainWindow):
     #: Direct method calls from the GUI thread would run on the wrong thread.
     _request_transmit = Signal(object, object)  # (PIL.Image, Mode)
     _request_test_tone = Signal()
+    #: v0.6 (Phase 3c): a remote confirm() marshals here (from a request
+    #: thread) onto the GUI thread, which re-checks the control-plane state
+    #: and then keys the rig via ``_request_transmit`` — the "web is just
+    #: another Send button" seam.  Carries (image_id, mode-value).
+    _remote_tx_request = Signal(str, str)
     #: Gates the RX decoder on/off during TX (queued → RxWorker thread).
     _request_rx_gate = Signal(bool)
     #: Settings-change dispatchers — queued to RxWorker so decoder rebuilds
@@ -535,6 +549,49 @@ class MainWindow(QMainWindow):
         #: a direct reference would go stale.
         self._logbook_coordinator = LogbookCoordinator(lambda: self._config)
         self._logbook_dialog: LogbookDialog | None = None
+        #: v0.6 (Phase 1): embedded read-only remote gallery server, started
+        #: on launch when ``remote_enabled`` and stopped in ``closeEvent``.
+        #: The lambda keeps the service reading the live config across saves.
+        self._remote_server: RemoteServer | None = None
+        #: Live-event fan-out, created once and shared across server
+        #: restarts so the RX→browser bridge always publishes to the
+        #: hub the current server is draining.
+        self._remote_hub = EventHub()
+        self._remote_service = GalleryService(lambda: self._config)
+        #: v0.6 (Phase 4): server-side compositor + in-memory staging store.
+        #: Created here (not in RemoteServer) so the stage endpoint and the
+        #: transmit path below share the same staged images.
+        self._remote_compose = ComposeService(lambda: self._config)
+        #: Throttle for the live RX preview push (monotonic seconds).
+        self._remote_last_preview_t = 0.0
+        #: v0.6 (Phase 3c): remote-TX control plane — the reference monitor
+        #: for keying the rig from a browser.  Callbacks reference workers
+        #: lazily (called at runtime, after they exist).  ``unkey`` is the
+        #: thread-safe ``request_stop`` so the dead-man's-switch works even
+        #: if the GUI loop stalls; ``transmit`` marshals onto the GUI thread
+        #: via ``_remote_tx_request`` so the key-down is re-checked there.
+        #: The RemoteServer's tick thread drives its dead-man's-switch.
+        self._remote_control = ControlPlane(
+            now=time.monotonic,
+            transmit=lambda image_id, mode: self._remote_tx_request.emit(image_id, mode),
+            unkey=self._remote_tx_unkey,
+            enabled=lambda: self._config.remote_tx_enabled,
+            # Remote TX is unattended: require a CAT rig that can be positively
+            # keyed/unkeyed.  The no-op manual/VOX backend doesn't qualify —
+            # the dead-man's-switch could only stop audio, not drop PTT.
+            rig_ready=lambda: not isinstance(self._rig, ManualRig),
+        )
+        self._remote_tx_request.connect(
+            self._on_remote_tx_request, Qt.ConnectionType.QueuedConnection
+        )
+        #: Persistent status-bar indicator, shown only while the remote
+        #: server is running.  Rich-text so it doubles as a click-to-open
+        #: link to the local gallery URL.
+        self._remote_status_label = QLabel()
+        self._remote_status_label.setTextFormat(Qt.TextFormat.RichText)
+        self._remote_status_label.setOpenExternalLinks(True)
+        self._remote_status_label.setVisible(False)
+        self.statusBar().addPermanentWidget(self._remote_status_label)
         #: v0.5: detached image gallery window, lazily created on first
         #: Tools → Gallery… (Cmd/Ctrl+G).
         self._gallery_dialog: GalleryDialog | None = None
@@ -755,6 +812,10 @@ class MainWindow(QMainWindow):
         self._tx_worker.transmission_progress.connect(self._on_tx_progress)
         self._tx_worker.transmission_complete.connect(self._on_tx_complete)
         self._tx_worker.transmission_aborted.connect(self._on_tx_aborted)
+        # v0.6 (Phase 3c): whenever a transmission ends, return the remote
+        # control plane to idle (a no-op unless a remote TX was in flight).
+        self._tx_worker.transmission_complete.connect(self._remote_tx_ended)
+        self._tx_worker.transmission_aborted.connect(self._remote_tx_ended)
         # v0.2.8: stash the composited TX image (banner already applied) so
         # ``_on_tx_complete`` can auto-save it when ``autosave_tx`` is on.
         self._tx_worker.tx_image_prepared.connect(self._on_tx_image_prepared)
@@ -822,6 +883,12 @@ class MainWindow(QMainWindow):
         self._rx_worker.status_update.connect(self._on_rx_status_update)
         self._rx_worker.error.connect(self._on_rx_error)
         self._rx_worker.error_occurred.connect(self._handle_worker_error)
+        # v0.6 (Phase 2): mirror live RX to connected remote viewers. These
+        # publish to the event hub (a no-op when no browser is connected),
+        # so they add nothing to the decode path.  ``image_complete`` is
+        # handled inside ``_on_rx_image_complete`` after auto-save.
+        self._rx_worker.image_started.connect(self._remote_on_rx_started)
+        self._rx_worker.image_progress.connect(self._remote_on_rx_progress)
 
         # --- Wire waterfall signals ---
         # Both workers emit audio chunks that the waterfall window consumes.
@@ -925,6 +992,242 @@ class MainWindow(QMainWindow):
             # Fresh installs trigger the check from _show_first_launch_dialog
             # after the user dismisses the welcome dialog.
             QTimer.singleShot(2000, self._trigger_update_check)
+
+        # v0.6 (Phase 1): bring up the read-only remote gallery server if
+        # the operator opted in via TOML.  Never blocks launch.
+        self._apply_remote_server()
+
+    # === Remote gallery server (Phase 1) ===
+
+    def _apply_remote_server(self) -> None:
+        """Start / stop the embedded remote server to match the live config.
+
+        Called at startup and again after every settings apply so toggling
+        ``remote_enabled`` (or changing host/port/token) takes effect
+        without a relaunch.  A bind failure (port in use, permission) is
+        logged and surfaced to the status bar but never blocks the app —
+        the desktop side keeps working with or without the server.
+        """
+        cfg = self._config
+        want = bool(cfg.remote_enabled)
+        running = self._remote_server is not None
+
+        # Stop first if disabled, or if a running server's binding params
+        # changed (simplest correct behaviour: stop-and-recreate).  The
+        # configured token "" means "mint a random one", which never
+        # equals the server's resolved token — so an unchanged blank token
+        # must not count as a change, or the server would restart on every
+        # settings save and churn the URL.
+        srv = self._remote_server
+        token_changed = bool(cfg.remote_token) and srv is not None and srv.token != cfg.remote_token
+        if running and srv is not None and (
+            not want
+            or srv.host != cfg.remote_host
+            or srv.port != cfg.remote_port
+            or token_changed
+        ):
+            self._stop_remote_server()
+            running = False
+
+        if not want or running:
+            return
+
+        try:
+            self._remote_server = RemoteServer(
+                self._remote_service,
+                host=cfg.remote_host,
+                port=cfg.remote_port,
+                token=cfg.remote_token,
+                hub=self._remote_hub,
+                control=self._remote_control,
+                compose=self._remote_compose,
+            )
+            self._remote_server.start()
+        except OSError as exc:
+            self._remote_server = None
+            _log.warning("remote gallery server could not start: %s", exc)
+            self.statusBar().showMessage(
+                f"Remote gallery server failed to start on "
+                f"{cfg.remote_host}:{cfg.remote_port} — {exc}",
+                10000,
+            )
+            return
+        # Log the bind only — the URL carries the token, and logs get
+        # bundled into diagnostics exports.  The token-bearing URL still
+        # goes to the (ephemeral, on-screen) status bar and indicator.
+        _log.info("remote gallery server started on %s:%d", cfg.remote_host, cfg.remote_port)
+        self.statusBar().showMessage(
+            f"Remote gallery server running — open {self._remote_server.url}", 10000
+        )
+        self._show_remote_indicator(self._remote_server.url)
+
+    def _show_remote_indicator(self, url: str) -> None:
+        """Light the persistent status-bar indicator for a running server.
+
+        The click-through link uses a loopback host so it always opens on
+        this machine even when the server is bound to the LAN (0.0.0.0),
+        while the tooltip shows the real bind URL for phones on the network.
+        """
+        local = url.replace("0.0.0.0", "127.0.0.1")
+        self._remote_status_label.setText(
+            f'<a href="{local}" style="color:#2fa36b; text-decoration:none">'
+            "\N{LARGE GREEN CIRCLE} Remote on</a>"
+        )
+        self._remote_status_label.setToolTip(
+            f"Remote gallery server is running.\n{url}\nClick to open in a browser."
+        )
+        self._remote_status_label.setVisible(True)
+
+    def _stop_remote_server(self) -> None:
+        """Stop the remote server if running (safe to call unconditionally)."""
+        # Reclaim first: stopping the server also stops the tick thread that
+        # drives the dead-man's-switch, so any in-flight remote TX must be
+        # unkeyed and the lease dropped here rather than outliving its
+        # watchdog across a stop/restart.
+        self._remote_control.reclaim_local()
+        # Always drop the indicator, even if there's no server object left
+        # (e.g. a failed start already cleared it).
+        self._remote_status_label.setVisible(False)
+        if self._remote_server is None:
+            return
+        try:
+            self._remote_server.stop()
+        except Exception as exc:  # noqa: BLE001 — teardown must not raise
+            _log.warning("remote gallery server stop failed: %s", exc)
+        finally:
+            self._remote_server = None
+
+    # --- RX → remote live bridge (Phase 2) ---
+    # These run on the GUI thread (queued signal delivery) and only take
+    # short-lived locks / enqueue onto the event hub, so they never touch
+    # or block the decode path.  The PNG encode is deferred to the request
+    # thread in GalleryService.live_frame — never done here on the GUI.
+
+    @Slot(object, int)
+    def _remote_on_rx_started(self, mode: object, vis_code: int) -> None:
+        self._remote_last_preview_t = 0.0  # force the first progress frame out
+        self._remote_hub.publish({"type": "rx.started", "mode": str(mode)})
+
+    @Slot(object, object, int, int, int)
+    def _remote_on_rx_progress(
+        self, image: object, mode: object, vis_code: int, lines: int, total: int
+    ) -> None:
+        # Throttle: the preview repaints a few times a second, not per line.
+        now = time.monotonic()
+        if now - self._remote_last_preview_t < 0.3:
+            return
+        self._remote_last_preview_t = now
+        # Hand the service a private copy — the decoder keeps mutating the
+        # original frame, and encoding happens later on the request thread.
+        try:
+            self._remote_service.set_live_image(image.copy())  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001 — a bad frame must not break RX
+            _log.debug("remote live-image copy failed: %s", exc)
+        pct = int(lines / total * 100) if total else 0
+        self._remote_hub.publish(
+            {"type": "rx.progress", "mode": str(mode), "lines": lines,
+             "total": total, "pct": pct}
+        )
+
+    # --- remote TX control bridge (Phase 3c) ---
+
+    def _remote_tx_unkey(self, reason: str) -> None:
+        """ControlPlane ``unkey`` callback — drop PTT and stop the rig.
+
+        Ordering matters for safety.  We command PTT **off directly first**
+        via ``emergency_unkey`` and only then ask the audio worker to stop.
+
+        Why not rely on ``request_stop`` alone?  ``request_stop`` sets the
+        stop flag and aborts PortAudio, then trusts the TX worker thread to
+        unwind out of ``play_blocking`` and drop PTT in its ``finally``.  If
+        that worker is wedged in a blocking ``stream.write()`` that the
+        cross-thread ``abort()`` fails to interrupt (observed on a real USB
+        CODEC), the ``finally`` never runs and the rig stays keyed until app
+        close — the worst failure this app has.  The wedged worker holds no
+        rig lock, so ``emergency_unkey`` can command the CAT backend
+        directly, under its own lock, from this thread and unkey the
+        transmitter within one tick regardless of the audio thread's state.
+
+        Both calls are thread-safe and independent of the GUI event loop, so
+        the dead-man's-switch fires even if the UI or the worker has stalled.
+        ``request_stop`` still runs so the audio actually stops in the common
+        (non-wedged) case; a redundant second ``set_ptt(False)`` from the
+        worker's own unwind is harmless (idempotent).
+        """
+        _log.warning("remote TX unkey (%s) — dropping PTT + stopping TX", reason)
+        self._tx_worker.emergency_unkey()  # PTT off NOW, independent of audio
+        self._tx_worker.request_stop()     # then stop the audio (best-effort)
+
+    @Slot(str, str)
+    def _on_remote_tx_request(self, image_id: str, mode: str) -> None:
+        """ControlPlane ``transmit`` landing on the GUI thread → key the rig.
+
+        Re-checks the control-plane state here: if an abort or the dead-
+        man's-switch moved it out of TRANSMITTING between confirm and now,
+        we must NOT key.  Then resolve the id → gallery image and dispatch
+        through the very same ``_request_transmit`` the local Send uses.
+        """
+        from PIL import Image  # noqa: PLC0415
+
+        if self._remote_control.status().get("state") != "transmitting":
+            return  # superseded by an abort / dead-man's-switch — don't key
+        try:
+            mode_enum = Mode(mode)
+        except ValueError:
+            _log.warning("remote TX: rejected unknown mode %r", mode)
+            self._remote_tx_abandon()
+            return
+        if self._remote_compose.is_staged_id(image_id):
+            # A browser-composed image, held in memory (no gallery/disk).
+            img = self._remote_compose.staged_image(image_id)
+            if img is None:
+                _log.warning("remote TX: staged image %s expired", image_id)
+                self._remote_tx_abandon()
+                return
+            what = "composed image"
+        else:
+            path = self._remote_service.image_path(image_id)
+            if path is None:
+                _log.warning("remote TX: image id %s no longer resolvable", image_id)
+                self._remote_tx_abandon()
+                return
+            try:
+                img = Image.open(path)
+                img.load()
+            except Exception as exc:  # noqa: BLE001 — bad file must not key the rig
+                _log.warning("remote TX: cannot load %s: %s", path, exc)
+                self._remote_tx_abandon()
+                return
+            what = path.name
+        # RE-CHECK the state a SECOND time, immediately before keying — the
+        # image load above is the widest window in which an abort / reclaim
+        # could have landed (workers.py clears its stop flag at TX entry, so
+        # a request_stop that fired during the load would otherwise be lost).
+        # Checking here shrinks that window to the microseconds between this
+        # line and the emit.  (The residual — an abort in that microsecond
+        # gap before the worker keys PTT — is bounded to a single image and
+        # requires machine-precision timing; the dead-man's-switch cannot
+        # hit it because confirm() just refreshed the heartbeat clock.)
+        if self._remote_control.status().get("state") != "transmitting":
+            return
+        _log.info("remote TX: transmitting %s in %s", what, mode)
+        self._last_tx_was_test_tone = False
+        self._request_transmit.emit(img, mode_enum)
+
+    def _remote_tx_abandon(self) -> None:
+        """A remote transmit couldn't proceed (bad image/mode) — return the
+        control plane to idle and tell viewers, without keying anything."""
+        self._remote_control.on_tx_finished()
+        self._remote_hub.publish({"type": "tx.state", **self._remote_control.status()})
+
+    @Slot()
+    def _remote_tx_ended(self) -> None:
+        """Any transmission ended → return the control plane to idle.
+
+        Idempotent: a no-op unless a remote TX was in flight.  Normal
+        completion does not unkey (the worker already stopped).
+        """
+        self._remote_control.on_tx_finished()
 
     # === Menu bar ===
 
@@ -1702,18 +2005,31 @@ class MainWindow(QMainWindow):
         # TX panel needs the rate too so the progress-bar elapsed/total
         # seconds label is correct at 44.1 kHz (OP-06).
         self._tx_panel.set_sample_rate(self._config.sample_rate)
+        # v0.6 (Phase 3c): if remote transmit was just turned off, reclaim
+        # control now (unkeying any in-flight remote TX) instead of waiting
+        # for the control plane's continuous gate check to catch it.
+        if not self._config.remote_tx_enabled:
+            self._remote_control.reclaim_local()
+        # v0.6 (Phase 1): start/stop/restart the remote server to match
+        # the freshly-saved config (the service reads the live config, so
+        # host/port/token changes are picked up on restart).
+        self._apply_remote_server()
 
     # === TX slots ===
 
     @Slot(object, object)
     def _on_transmit_requested(self, image: PILImage, mode: Mode) -> None:
         """Set the test-tone flag and dispatch via queued signal to TX thread."""
+        # The operator at the radio always wins: taking the local Send
+        # reclaims control from any remote holder (and unkeys a remote TX).
+        self._remote_control.reclaim_local()
         self._last_tx_was_test_tone = False
         self._request_transmit.emit(image, mode)
 
     @Slot()
     def _on_test_tone_requested(self) -> None:
         """Set the test-tone flag and dispatch via queued signal to TX thread."""
+        self._remote_control.reclaim_local()  # local keying wins over remote
         self._last_tx_was_test_tone = True
         self._request_test_tone.emit()
 
@@ -1723,7 +2039,18 @@ class MainWindow(QMainWindow):
 
     @Slot(int, int)
     def _on_tx_progress(self, samples_played: int, samples_total: int) -> None:
-        """Update the status bar countdown during a test-tone transmission."""
+        """Status-bar countdown for the test tone, and TX progress to remote
+        viewers so the browser can show an elapsed/remaining bar."""
+        # Feed the browser's ON AIR progress bar, but only for a remote-driven
+        # transmission (the control plane is TRANSMITTING only then — a local
+        # Send leaves it IDLE, so this stays quiet for local TX).
+        if samples_total > 0 and self._remote_control.status().get("state") == "transmitting":
+            rate = self._config.sample_rate or 48000
+            self._remote_hub.publish({
+                "type": "tx.progress",
+                "elapsed_s": round(samples_played / rate, 2),
+                "total_s": round(samples_total / rate, 2),
+            })
         if not self._last_tx_was_test_tone or samples_total <= 0:
             return
         remaining_s = max(
@@ -2183,6 +2510,15 @@ class MainWindow(QMainWindow):
             audio_path = self._save_rx_audio(
                 audio_arr, mode, sr, fmt, alongside=save_path
             )
+
+        # v0.6 (Phase 2): the decode finished — clear the live preview and
+        # tell connected remote viewers.  ``gallery.new`` only fires when a
+        # file was actually written (the browser fetches it from the
+        # gallery), so it's gated on auto-save having produced a path.
+        self._remote_service.set_live_image(None)
+        if save_path is not None:
+            self._remote_hub.publish({"type": "gallery.new"})
+        self._remote_hub.publish({"type": "rx.complete", "mode": str(mode)})
 
         # Audit #3: a stop-flush can deliver one last image_complete
         # during closeEvent's shutdown drain.  The image auto-save
@@ -3221,6 +3557,12 @@ class MainWindow(QMainWindow):
         # the capture flow checks this and stands down instead of
         # opening dialogs / re-opening the logbook store mid-teardown.
         self._closing = True
+
+        # v0.6 (Phase 3c): reclaim control first — unkeys any in-flight
+        # remote TX and drops the lease — then stop the read-only server.
+        # Both are independent of the rig/worker teardown below.
+        self._remote_control.reclaim_local()
+        self._stop_remote_server()
 
         # Abort any in-flight rig connect first — the QThread is a child of
         # this window and Qt calls fatal() if it is still running when the

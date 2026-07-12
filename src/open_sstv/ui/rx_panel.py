@@ -38,9 +38,10 @@ rx_image_selected(PIL.Image.Image):
 """
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -53,6 +54,12 @@ from PySide6.QtWidgets import (
 
 from open_sstv.core.modes import Mode
 from open_sstv.ui.image_gallery import ImageGalleryWidget, _pil_to_pixmap
+from open_sstv.ui.workers import RX_LISTENING
+
+#: How long without a "still listening" heartbeat before the indicator
+#: greys to a stalled state.  The heartbeat rides the ~1 s idle flush, so
+#: ~2 missed beats means audio has actually stopped flowing.
+_LISTEN_STALL_S: float = 2.6
 
 if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
@@ -141,6 +148,18 @@ class RxPanel(QWidget):
         self._status.setWordWrap(True)
         layout.addWidget(self._status)
 
+        # Activity-gated "Listening" animation (replaces the old ticking
+        # "Xs buffered" count).  A fixed ~400 ms timer pulses the indicator
+        # for smooth motion; each RX heartbeat refreshes ``_last_listen``,
+        # and the timer greys the dot if no heartbeat arrives for
+        # ``_LISTEN_STALL_S`` — so the motion tracks real audio flow.
+        self._listening: bool = False
+        self._listen_frame: int = 0
+        self._last_listen: float = 0.0
+        self._listen_timer = QTimer(self)
+        self._listen_timer.setInterval(400)
+        self._listen_timer.timeout.connect(self._advance_listen)
+
         # --- Gallery strip ---
         self._gallery = ImageGalleryWidget(self)
         self._gallery.image_activated.connect(self.image_saved.emit)
@@ -172,16 +191,75 @@ class RxPanel(QWidget):
         self._start_btn.setEnabled(True)
         self._start_btn.setText("Stop Capture" if capturing else "Start Capture")
         if capturing:
-            self._status.setText("Capturing… waiting for VIS header.")
+            self._start_listening()  # animate immediately, before the first beat
+        else:
+            self._stop_listening()
 
     def set_status(self, text: str) -> None:
+        """Show a status message, or drive the listening animation.
+
+        ``RX_LISTENING`` is a heartbeat sentinel (see workers.py), not text:
+        it keeps the animation alive.  Any real message stops the animation
+        and is shown verbatim.
+        """
+        if text == RX_LISTENING:
+            self._tick_listening()
+        else:
+            self._set_status_text(text)
+
+    # --- listening animation (activity-gated) -------------------------
+
+    def _set_status_text(self, text: str) -> None:
+        """Set a real status line, stopping any listening animation first."""
+        self._stop_listening()
         self._status.setText(text)
+
+    def _start_listening(self) -> None:
+        self._listening = True
+        self._listen_frame = 0
+        self._last_listen = time.monotonic()  # grace period before "stalled"
+        if not self._listen_timer.isActive():
+            self._listen_timer.start()
+        self._render_listen()
+
+    def _tick_listening(self) -> None:
+        """A heartbeat arrived — audio is still flowing."""
+        self._last_listen = time.monotonic()
+        if not self._listening:
+            self._start_listening()
+
+    def _stop_listening(self) -> None:
+        self._listening = False
+        self._listen_timer.stop()
+
+    def _advance_listen(self) -> None:
+        if not self._listening:
+            self._listen_timer.stop()
+            return
+        self._listen_frame += 1
+        self._render_listen()
+
+    def _render_listen(self) -> None:
+        stale = (time.monotonic() - self._last_listen) > _LISTEN_STALL_S
+        if stale:
+            # No heartbeat — audio flow stopped; freeze a grey dot.
+            self._status.setText(
+                '<span style="color:#9a9a9a">●</span>&nbsp; '
+                "Listening — waiting for audio…"
+            )
+            return
+        # Pulse the dot bright↔dim so motion reads without shifting layout.
+        ramp = ["#1c7a54", "#2ec38a", "#57e0ad", "#2ec38a"]
+        colour = ramp[self._listen_frame % len(ramp)]
+        self._status.setText(
+            f'<span style="color:{colour}">●</span>&nbsp; Listening…'
+        )
 
     @Slot(object, int)
     def show_image_started(self, mode: Mode, vis_code: int) -> None:
         """Announce a detected VIS header in the status line."""
         self._current_mode = mode
-        self._status.setText(
+        self._set_status_text(
             f"Decoding {mode.value} (VIS 0x{vis_code:02X})…"
         )
 
@@ -204,7 +282,7 @@ class RxPanel(QWidget):
         self._update_preview_pixmap()
         self._preview.setText("")
         pct = lines_decoded * 100 // lines_total if lines_total else 0
-        self._status.setText(
+        self._set_status_text(
             f"Decoding {mode.value}… {lines_decoded}/{lines_total} lines ({pct}%)"
         )
         self._current_mode = mode
@@ -223,7 +301,7 @@ class RxPanel(QWidget):
         self._update_preview_pixmap()
         self._preview.setText("")
         self._gallery.add_image(image, mode)
-        self._status.setText(
+        self._set_status_text(
             f"Decoded {mode.value} ({image.width}×{image.height}, "
             f"VIS 0x{vis_code:02X})"
         )
@@ -282,7 +360,7 @@ class RxPanel(QWidget):
         self._current_mode = mode_enum
         self._current_pil_image = image
         self._save_btn.setEnabled(True)
-        self._status.setText(
+        self._set_status_text(
             f"Viewing {mode_enum.value} ({image.width}×{image.height})"
         )
         # Selecting a thumbnail also pins it as the active "RX image" for

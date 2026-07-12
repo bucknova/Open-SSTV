@@ -265,8 +265,9 @@ class TestGeneralTabIsFirst:
         from PySide6.QtWidgets import QTabWidget
         tabs = dialog.findChild(QTabWidget)
         labels = [tabs.tabText(i) for i in range(tabs.count())]
-        # v0.4 appends the Logging tab after the four domain tabs.
-        assert labels == ["General", "Audio", "Radio", "Images", "Logging"]
+        # v0.4 appends the Logging tab after the four domain tabs;
+        # v0.6 (Phase 2b) appends Remote after that.
+        assert labels == ["General", "Audio", "Radio", "Images", "Logging", "Remote"]
 
 
 class TestIdentityGroupOnGeneralTab:
@@ -513,3 +514,98 @@ class TestLogbookSettings:
         qtbot.addWidget(dlg)
         # __post_init__ already normalised it.
         assert dlg._rx_capture_combo.currentData() == "always"
+
+
+class TestRemoteTab:
+    """Phase 2b: the Remote tab enables remote access and — critically —
+    round-trips the remote_* fields so a settings save no longer resets
+    them to defaults."""
+
+    def test_remote_tab_present(self, dialog: SettingsDialog) -> None:
+        from PySide6.QtWidgets import QTabWidget
+
+        tabs = dialog.findChild(QTabWidget)
+        titles = [tabs.tabText(i) for i in range(tabs.count())]
+        assert "Remote" in titles
+
+    def test_prepopulated_from_config(self, qtbot) -> None:
+        cfg = AppConfig(
+            callsign="W0AEZ", remote_enabled=True, remote_host="0.0.0.0",
+            remote_port=8899, remote_token="secret",
+        )
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        assert dlg._remote_enabled.isChecked() is True
+        assert dlg._remote_lan.isChecked() is True  # 0.0.0.0 -> LAN
+        assert dlg._remote_port.value() == 8899
+        assert dlg._remote_token.text() == "secret"
+
+    def test_enabled_config_round_trips(self, qtbot) -> None:
+        # The reset bug: a save used to drop these back to defaults.
+        cfg = AppConfig(
+            callsign="W0AEZ", remote_enabled=True, remote_host="0.0.0.0",
+            remote_port=8730, remote_token="demo",
+        )
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        out = dlg.result_config()
+        assert out.remote_enabled is True
+        assert out.remote_host == "0.0.0.0"
+        assert out.remote_port == 8730
+        assert out.remote_token == "demo"
+
+    def test_lan_checkbox_maps_to_bind_address(self, qtbot) -> None:
+        cfg = AppConfig(callsign="W0AEZ", remote_enabled=True, remote_host="127.0.0.1")
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        assert dlg._remote_lan.isChecked() is False
+        assert dlg.result_config().remote_host == "127.0.0.1"
+        dlg._remote_lan.setChecked(True)
+        assert dlg.result_config().remote_host == "0.0.0.0"
+
+    def test_token_stripped(self, qtbot) -> None:
+        cfg = AppConfig(callsign="W0AEZ")
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        dlg._remote_token.setText("  spaced  ")
+        assert dlg.result_config().remote_token == "spaced"
+
+    def test_qr_rendered_when_enabled_with_token(self, qtbot) -> None:
+        cfg = AppConfig(
+            callsign="W0AEZ", remote_enabled=True, remote_host="0.0.0.0",
+            remote_port=8730, remote_token="demo",
+        )
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        pm = dlg._remote_qr.pixmap()
+        assert pm is not None and not pm.isNull()
+
+    def test_qr_nudges_when_token_blank(self, qtbot) -> None:
+        cfg = AppConfig(callsign="W0AEZ", remote_enabled=True, remote_token="")
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        pm = dlg._remote_qr.pixmap()
+        assert pm is None or pm.isNull()
+        assert "token" in dlg._remote_qr.text().lower()
+
+    def test_qr_cleared_when_disabled(self, qtbot) -> None:
+        cfg = AppConfig(callsign="W0AEZ", remote_enabled=False, remote_token="demo")
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        pm = dlg._remote_qr.pixmap()
+        assert pm is None or pm.isNull()
+
+    def test_remote_tx_enabled_round_trips(self, qtbot) -> None:
+        cfg = AppConfig(callsign="W0AEZ", remote_tx_enabled=True)
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        assert dlg._remote_tx.isChecked() is True
+        assert dlg.result_config().remote_tx_enabled is True
+        dlg._remote_tx.setChecked(False)
+        assert dlg.result_config().remote_tx_enabled is False
+
+    def test_remote_tx_defaults_off(self, qtbot) -> None:
+        dlg = SettingsDialog(config=AppConfig(callsign="W0AEZ"), rig_connected=False)
+        qtbot.addWidget(dlg)
+        assert dlg._remote_tx.isChecked() is False
+        assert dlg.result_config().remote_tx_enabled is False

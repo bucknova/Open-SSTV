@@ -11,6 +11,59 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.6.0] — 2026-07-11
+
+Remote station — drive Open-SSTV from a phone or laptop browser.  An
+embedded, **opt-in** web server (off by default; loopback + token) lets a
+paired browser watch RX live, browse the gallery and logbook, and —
+behind an explicit gate and a connected CAT rig — compose and transmit
+SSTV images.  Server-push over SSE, control over POST; the only new
+dependency is ``segno`` (pure-Python QR) for pairing.  Design notes:
+``design/remote/architecture.md``.
+
+### Added
+
+- **Remote view** — a read-only gallery + a **live RX stream** (SSE) that
+  repaints as frames decode, a read-only logbook, and **Settings →
+  Remote** to enable it with host / port / token and a scannable pairing
+  **QR**.  A status pill in the browser and a "Remote on" indicator in
+  the desktop app.
+- **Remote transmit** — a Qt-free reference-monitor control plane is the
+  sole authority for keying: **off by default**, single-writer lease,
+  per-transmit confirm token, a **dead-man's-switch** (browser heartbeat;
+  a dedicated tick thread unkeys if it lapses), and it **requires a
+  connected CAT rig** (refuses the no-op manual/VOX backend).  A
+  full-window **ON AIR** takeover shows a progress bar and
+  elapsed / remaining timer.
+- **Remote compose** — the browser takes a **photo (camera or upload)**,
+  **crops/adjusts** it (pan · pinch · zoom, matched to the selected
+  mode's frame aspect — including the tall Scottie S2 / Martin M2), picks
+  a station template, and transmits.  The station re-renders the exact
+  on-air bytes with the desktop compositor; composed images are staged in
+  memory, never written to the gallery.
+- The remote gallery lists **newest first**.
+- **Desktop:** the RX "Listening" indicator is now an activity-gated
+  animation (pulses while audio flows, greys on a stall) instead of a
+  ticking "Xs buffered" counter.
+
+### Fixed
+
+- **Dead-man's-switch stuck-PTT (safety):** the unkey dropped PTT via the
+  audio worker's unwind, so a worker wedged in a blocking PortAudio write
+  could leave the rig keyed.  It now commands PTT off **directly**,
+  independent of the audio thread.  Dummy-load verified on a real rig.
+- Composed photos honour **EXIF orientation** (phones store rotation as a
+  tag).
+- Aborting a transmission no longer reports a spurious "audio output
+  device error" (that error *was* the abort); the compose status no
+  longer sticks on "Transmitting…".
+
+### Dependencies
+
+- Added ``segno`` (pure-Python QR codes) for remote-access pairing.
+
+---
+
 ## [0.5.0] — 2026-07-07
 
 The image gallery — completing the v0.4 logging workflow.  A built-in

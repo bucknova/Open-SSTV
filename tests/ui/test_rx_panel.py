@@ -55,3 +55,51 @@ def test_decode_audio_button_always_enabled(panel: RxPanel) -> None:
     assert panel._decode_audio_btn.isEnabled()
     panel.set_capturing(False)
     assert panel._decode_audio_btn.isEnabled()
+
+
+class TestListeningAnimation:
+    """The 'Listening' indicator animates while audio flows and greys on a
+    stall, instead of counting up seconds."""
+
+    def test_capturing_starts_the_animation(self, panel: RxPanel) -> None:
+        panel.set_capturing(True)
+        assert panel._listening and panel._listen_timer.isActive()
+        text = panel._status.text()
+        assert "Listening" in text and "●" in text
+
+    def test_heartbeat_keeps_it_alive(self, panel: RxPanel) -> None:
+        from open_sstv.ui.workers import RX_LISTENING
+
+        panel.set_status(RX_LISTENING)  # a heartbeat with no prior capture
+        assert panel._listening
+        assert "Listening" in panel._status.text()
+
+    def test_advance_cycles_dot_without_layout_shift(self, panel: RxPanel) -> None:
+        panel.set_capturing(True)
+        before = panel._listen_frame
+        panel._advance_listen()
+        assert panel._listen_frame == before + 1
+        # Always the same label text ("Listening…") — only the dot colour
+        # changes, so the line never reflows.
+        assert "Listening…" in panel._status.text()
+
+    def test_stall_greys_to_waiting(self, panel: RxPanel) -> None:
+        import time
+
+        from open_sstv.ui.rx_panel import _LISTEN_STALL_S
+
+        panel.set_capturing(True)
+        panel._last_listen = time.monotonic() - (_LISTEN_STALL_S + 1)
+        panel._advance_listen()
+        assert "waiting for audio" in panel._status.text()
+
+    def test_real_status_stops_animation(self, panel: RxPanel) -> None:
+        panel.set_capturing(True)
+        panel.set_status("Decoded scottie_s1 (320×256)")
+        assert not panel._listening and not panel._listen_timer.isActive()
+        assert panel._status.text() == "Decoded scottie_s1 (320×256)"
+
+    def test_stop_capture_stops_animation(self, panel: RxPanel) -> None:
+        panel.set_capturing(True)
+        panel.set_capturing(False)
+        assert not panel._listening and not panel._listen_timer.isActive()

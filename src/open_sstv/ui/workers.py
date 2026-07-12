@@ -216,6 +216,14 @@ _RX_WATCHDOG_TICK_MS: int = 2000
 #: window without stalling real user feedback indefinitely.
 _RX_POST_WATCHDOG_COOLDOWN_S: float = 10.0
 
+#: Sentinel carried on ``status_update`` for the periodic "still listening"
+#: heartbeat (fired ~1/s while capturing but not yet decoding).  It is a
+#: marker, not display text: the RX panel intercepts it to drive an
+#: activity-gated "Listening" animation instead of a ticking seconds count.
+#: Because it rides the real flush cadence, its *arrival* proves audio is
+#: still flowing — a stall (no heartbeat) is what greys the indicator.
+RX_LISTENING = "\x00rx-listening"
+
 #: Hard upper bound on the encode / banner-stamp / CW-append stage.
 #: Encoding is CPU-bound and finishes in ~100 ms even for the longest
 #: Multiplicative margin on top of the expected wall-clock playback
@@ -640,15 +648,24 @@ class TxWorker(QObject):
         self._tx_banner_size = size
 
     def emergency_unkey(self) -> None:
-        """Best-effort PTT-off for the shutdown path.
+        """Best-effort direct PTT-off, independent of the playback thread.
 
-        Called from closeEvent if the TX thread doesn't join within the
-        timeout.  Runs on the GUI thread; ignores all errors so we never
-        block the exit path.
+        Two callers, both needing an unkey that does NOT wait on the TX
+        worker unwinding out of ``play_blocking``:
 
-        Failures still emit ``error_occurred`` so a debug build (or a test
-        sitting on the queue) records them — a stuck-keyed rig at shutdown
-        is a real safety concern even if the GUI itself is going away.
+        * closeEvent, if the TX thread doesn't join within the timeout;
+        * the remote dead-man's-switch (``_remote_tx_unkey``), so a worker
+          wedged in a blocking ``stream.write()`` — where ``request_stop``'s
+          abort can't reach it — still can't leave the rig keyed.
+
+        Thread-safe: takes ``_rig_lock`` to snapshot the backend and calls
+        ``set_ptt(False)``, whose own serial lock serialises against any
+        concurrent rig I/O.  Safe to call from the GUI thread, the tick
+        thread, or a request thread.  A wedged worker holds no rig lock, so
+        this never contends with it.  Ignores all errors so it never blocks
+        the caller; failures still emit ``error_occurred`` so a debug build
+        (or a test on the queue) records them — a stuck-keyed rig is a real
+        safety concern regardless of who is unkeying.
         """
         try:
             with self._rig_lock:
@@ -1250,21 +1267,30 @@ class TxWorker(QObject):
                 )
                 playback_succeeded = not self._stop_event.is_set()
         except sd.PortAudioError as exc:
-            _log.error("TX PortAudioError: %s", exc)
-            msg = str(exc)
-            if "Blocking API not supported" in msg or "WDM-KS" in msg:
-                self.error.emit(
-                    "Output device does not support playback (Windows WDM-KS). "
-                    "Open Settings → Audio and choose a WASAPI or MME output device."
-                )
+            # An abort (Stop / dead-man's-switch) calls stream.abort(), which
+            # makes the in-flight write() raise PortAudioError.  That's the
+            # intended stop path, not a device fault — don't cry wolf.
+            if self._stop_event.is_set():
+                _log.info("TX playback aborted by stop request (%s)", exc)
             else:
-                self.error.emit(
-                    "Audio output device error during transmission — "
-                    "check Settings → Audio."
-                )
+                _log.error("TX PortAudioError: %s", exc)
+                msg = str(exc)
+                if "Blocking API not supported" in msg or "WDM-KS" in msg:
+                    self.error.emit(
+                        "Output device does not support playback (Windows WDM-KS). "
+                        "Open Settings → Audio and choose a WASAPI or MME output device."
+                    )
+                else:
+                    self.error.emit(
+                        "Audio output device error during transmission — "
+                        "check Settings → Audio."
+                    )
         except Exception as exc:  # noqa: BLE001
-            _log.error("TX playback exception: %s", exc, exc_info=True)
-            self.error.emit(f"Playback failed: {exc}")
+            if self._stop_event.is_set():
+                _log.info("TX playback aborted by stop request (%s)", exc)
+            else:
+                _log.error("TX playback exception: %s", exc, exc_info=True)
+                self.error.emit(f"Playback failed: {exc}")
         finally:
             # Stop the health monitor BEFORE unkeying so its in-flight
             # CAT ping can't interleave with set_ptt on the same
@@ -1876,10 +1902,9 @@ class RxWorker(QObject):
                 < _RX_POST_WATCHDOG_COOLDOWN_S
             )
             if not cooldown_active:
-                secs = self._total_samples / self._sample_rate
-                self.status_update.emit(
-                    f"Listening… {secs:.0f}s buffered, waiting for signal."
-                )
+                # Heartbeat only — the RX panel turns this into an
+                # activity-gated animation, not a ticking seconds readout.
+                self.status_update.emit(RX_LISTENING)
 
         decoded = False
         for event in events:
