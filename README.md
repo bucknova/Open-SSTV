@@ -7,10 +7,11 @@ radio. Receives and decodes SSTV images live off your radio, and encodes and
 transmits images back, with optional Hamlib, direct serial, or TCI (ExpertSDR2 /
 SunSDR2 / AetherSDR) rig control.
 
-**Status: Beta (v0.5.0) — ready for user testing and feedback.** TX and RX paths work
-end-to-end across all 22 supported modes, and v0.4 adds a built-in QSO logbook with
-ADIF import/export. Rig control via rigctld or direct serial CAT is functional.
-Weak-signal decode is usable down to roughly 0 dB SNR on Robot 36.
+**Status: Beta (v0.6.0) — ready for user testing and feedback.** TX and RX paths work
+end-to-end across all 22 supported modes, with a built-in QSO logbook (v0.4), an image
+gallery (v0.5), and opt-in remote control from a phone or laptop browser (v0.6). Rig
+control via rigctld or direct serial CAT is functional. Weak-signal decode is usable
+down to roughly 0 dB SNR on Robot 36.
 
 Open-SSTV is looking for testers — on-air reports, audio captures of problem decodes,
 and UI feedback all welcome. Please
@@ -200,6 +201,18 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
   eQSL, Club Log, and QRZ.com. Exports stamp your station identity per
   record; imports dedupe on (callsign, time, mode). See
   [docs/logbook.md](docs/logbook.md) for the full guide.
+
+### Remote Access (v0.6)
+- **Control from a browser** -- an embedded, **opt-in** web server (off by
+  default; loopback + token) lets a paired phone or laptop watch RX live,
+  browse the gallery and logbook, and — behind an explicit gate and a
+  connected CAT rig — compose and transmit. Enable it in Settings → Remote
+  and pair by scanning the QR.
+- **Compose & transmit** -- take a photo (camera or upload), crop and frame
+  it to the selected mode, add a station template, and send. Safety is
+  layered: off by default, a single-writer control lease, per-transmit
+  confirmation, and a dead-man's-switch that unkeys the rig if the browser
+  goes silent.
 
 ### Image Gallery (v0.5)
 - **Built-in image browser** -- browse received (and opt-in transmitted)
