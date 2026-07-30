@@ -44,6 +44,9 @@ class RigConnectionMode(StrEnum):
     SERIAL = "serial"
     RIGCTLD = "rigctld"
     TCI = "tci"
+    #: v0.6.1: FlexRadio 6000-series over the SmartSDR TCP API — direct,
+    #: no rigctld and no virtual serial port in between.
+    FLEX = "flex"
 
 
 @runtime_checkable

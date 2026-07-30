@@ -293,3 +293,52 @@ def test_read_until_rprt_raises_on_oversized_response(fake: FakeRigctld) -> None
         client.get_freq()
     client.close()
     srv.close()
+
+
+# === backend-formatting tolerance (v0.6.1 bug report) ===================
+#
+# A FlexRadio user's rigctld made the connection test do *nothing* and
+# Connect Rig drop to "Connection lost".  Root cause: numeric values were
+# parsed with a bare int(), so an unexpected format raised ValueError —
+# not a RigError — and escaped every handler in the app.
+
+
+class TestNumericFormatTolerance:
+    def test_float_formatted_frequency_parses(
+        self, client: RigctldClient, fake: FakeRigctld
+    ) -> None:
+        # Some backends/Hamlib builds render freq as a float.
+        fake.freq = "14074000.000000"  # type: ignore[assignment]
+        assert client.get_freq() == 14_074_000
+
+    def test_float_formatted_passband_parses(
+        self, client: RigctldClient, fake: FakeRigctld
+    ) -> None:
+        fake.passband_hz = "2400.000000"  # type: ignore[assignment]
+        assert client.get_mode() == (fake.mode_name, 2400)
+
+    def test_blank_passband_falls_back_to_zero(
+        self, client: RigctldClient, fake: FakeRigctld
+    ) -> None:
+        # Passband is advisory (Hamlib reads 0 as "backend default"), so a
+        # backend that can't report it must not fail the whole call.
+        fake.passband_hz = ""  # type: ignore[assignment]
+        mode, passband = client.get_mode()
+        assert mode == fake.mode_name
+        assert passband == 0
+
+    def test_unparseable_frequency_raises_rigerror_not_valueerror(
+        self, client: RigctldClient, fake: FakeRigctld
+    ) -> None:
+        # A frequency we can't read IS fatal — but it must arrive as a
+        # RigError so the app's handlers actually catch it.
+        fake.freq = "not-a-number"  # type: ignore[assignment]
+        with pytest.raises(RigCommandError, match="frequency"):
+            client.get_freq()
+
+    def test_unparseable_strength_raises_rigerror(
+        self, client: RigctldClient, fake: FakeRigctld
+    ) -> None:
+        fake.strength_db = "n/a"  # type: ignore[assignment]
+        with pytest.raises(RigCommandError, match="strength"):
+            client.get_strength()

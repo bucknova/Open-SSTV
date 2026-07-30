@@ -2805,6 +2805,8 @@ class MainWindow(QMainWindow):
             self._connect_serial()
         elif mode == RigConnectionMode.TCI:
             self._connect_tci()
+        elif mode == RigConnectionMode.FLEX:
+            self._connect_flex()
         else:
             self._connect_rigctld()
 
@@ -3172,6 +3174,56 @@ class MainWindow(QMainWindow):
             self._radio_panel.set_connection_error()
             self.statusBar().showMessage(
                 f"TCI connection failed at {host}:{port} — {message}", 5000
+            )
+
+        self._start_rig_connect_thread(rig, _on_success, _on_error)
+
+    def _connect_flex(self) -> None:
+        """Connect a FlexRadio directly over the SmartSDR TCP API.
+
+        Unlike TCI this is CAT only — the Flex's audio still arrives via
+        DAX (or any sound device), so the audio worker is left alone.
+        """
+        from open_sstv.radio.flex import FlexRig
+
+        host = self._config.flex_host.strip()
+        port = self._config.flex_port
+        slice_index = self._config.flex_slice
+        if not host:
+            self._radio_panel.set_connection_error()
+            self.statusBar().showMessage(
+                "No FlexRadio address configured — set it in Settings → Radio.",
+                5000,
+            )
+            return
+
+        rig = FlexRig(host, port, slice_index=slice_index)
+        self._radio_panel.set_connecting()
+        self.statusBar().showMessage(f"Connecting to FlexRadio at {host}:{port}…")
+
+        def _on_success(connected_rig: object) -> None:
+            if not self.isVisible():
+                try:
+                    connected_rig.close()  # type: ignore[union-attr]
+                except Exception:  # noqa: BLE001
+                    pass
+                return
+            self._rig = connected_rig  # type: ignore[assignment]
+            self._tx_worker.set_rig(connected_rig)  # type: ignore[arg-type]
+            self._rig_poll_worker.set_rig(connected_rig)  # type: ignore[arg-type]
+            self._radio_panel.set_connected(True)
+            self._rig_poll_timer.start()
+            self.statusBar().showMessage(
+                f"Connected to FlexRadio at {host}:{port} (slice {slice_index})",
+                3000,
+            )
+
+        def _on_error(message: str) -> None:
+            if not self.isVisible():
+                return
+            self._radio_panel.set_connection_error()
+            self.statusBar().showMessage(
+                f"FlexRadio connection failed at {host}:{port} — {message}", 5000
             )
 
         self._start_rig_connect_thread(rig, _on_success, _on_error)

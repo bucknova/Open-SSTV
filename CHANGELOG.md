@@ -9,6 +9,43 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **FlexRadio direct control** — a new Radio connection mode that talks the
+  SmartSDR TCP API straight to a 6000-series radio, so a Flex no longer
+  needs ``rigctld`` or a virtual serial port in between.  Enter the radio's
+  IP, pick a slice, and PTT / frequency / mode work directly; there's a
+  *Test FlexRadio Connection* button beside it.  Audio still comes from
+  your sound device (DAX or otherwise).  The S-meter is not implemented —
+  Flex streams meters over VITA-49/UDP — and reads as 0.
+
+### Fixed
+
+- **rigctld: the connection test could do nothing at all.**  Numeric
+  responses were parsed with a bare ``int()``, so any unexpected
+  formatting raised ``ValueError`` — not a ``RigError`` — and escaped every
+  handler in the app.  In the Settings connection test that meant no dialog
+  whatsoever (and on a packaged Windows build the traceback goes to a
+  stderr that doesn't exist).  Float-formatted values are now accepted, an
+  unreadable passband falls back to Hamlib's "default width" (0), and every
+  parse failure surfaces as a proper ``RigError``.  The test button also
+  catches everything now, so it can never fail silently again.
+- **rigctld: an unsupported S-meter dropped the whole rig.**  The 1 Hz poll
+  read frequency, mode, and signal strength in one block, and three
+  consecutive failures trigger auto-disconnect — so a backend without a
+  ``STRENGTH`` level (answers ``RPRT -11``) showed "Connection lost" about
+  three seconds after connecting, on a rig whose PTT and frequency control
+  were working fine.  The S-meter is cosmetic: it can no longer disconnect
+  the radio.
+
+### Changed
+
+- The app version is now written to the **log file** (it was printed only to
+  stderr, which is discarded on a packaged Windows GUI build — so no bug
+  report ever showed which version produced it), and rig connect
+  success/failure is logged.  ``rigctld`` gained DEBUG-level tracing of
+  every command and response, to pair with rigctld's own ``-vv``.
+
 ---
 
 ## [0.6.0] — 2026-07-11

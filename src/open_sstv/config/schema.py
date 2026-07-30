@@ -77,6 +77,13 @@ class AppConfig:
     rigctld_port: int = 4532
     tci_host: str = "127.0.0.1"
     tci_port: int = 40001
+    #: FlexRadio direct control (SmartSDR TCP API).  Host is the radio's
+    #: own IP — not localhost — because we talk to the radio, not to a
+    #: daemon on this machine.  ``flex_slice`` picks which receiver to
+    #: follow (0 = slice A).
+    flex_host: str = ""
+    flex_port: int = 4992
+    flex_slice: int = 0
     ptt_delay_s: float = 0.2
     rig_model_id: int = 0
     rig_serial_port: str = ""
@@ -426,7 +433,7 @@ class AppConfig:
         # as the fields above.
 
         # TCP ports: [1, 65535].
-        for attr in ("rigctld_port", "tci_port", "remote_port"):
+        for attr in ("rigctld_port", "tci_port", "remote_port", "flex_port"):
             v = int(getattr(self, attr))
             clamped_port = max(1, min(65535, v))
             if clamped_port != v:

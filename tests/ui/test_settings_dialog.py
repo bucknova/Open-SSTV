@@ -609,3 +609,47 @@ class TestRemoteTab:
         qtbot.addWidget(dlg)
         assert dlg._remote_tx.isChecked() is False
         assert dlg.result_config().remote_tx_enabled is False
+
+
+class TestFlexRadioDirect:
+    """v0.6.1: FlexRadio 6000-series direct control (SmartSDR TCP API)."""
+
+    def test_flex_is_offered_as_a_connection_mode(self, qtbot) -> None:
+        from open_sstv.radio.base import RigConnectionMode
+
+        dlg = SettingsDialog(AppConfig())
+        qtbot.addWidget(dlg)
+        assert dlg._conn_mode_combo.findData(RigConnectionMode.FLEX.value) >= 0
+
+    def test_only_the_selected_backend_group_is_shown(self, qtbot) -> None:
+        from open_sstv.radio.base import RigConnectionMode
+
+        dlg = SettingsDialog(AppConfig())
+        qtbot.addWidget(dlg)
+        combo = dlg._conn_mode_combo
+
+        combo.setCurrentIndex(combo.findData(RigConnectionMode.FLEX.value))
+        assert not dlg._flex_group.isHidden()
+        assert dlg._rigctld_group.isHidden() and dlg._tci_group.isHidden()
+
+        # ...and selecting another backend hides it again.
+        combo.setCurrentIndex(combo.findData(RigConnectionMode.RIGCTLD.value))
+        assert dlg._flex_group.isHidden()
+        assert not dlg._rigctld_group.isHidden()
+
+    def test_flex_settings_round_trip(self, qtbot) -> None:
+        from open_sstv.radio.base import RigConnectionMode
+
+        dlg = SettingsDialog(AppConfig())
+        qtbot.addWidget(dlg)
+        combo = dlg._conn_mode_combo
+        combo.setCurrentIndex(combo.findData(RigConnectionMode.FLEX.value))
+        dlg._flex_host.setText("192.168.11.65")
+        dlg._flex_port.setValue(4992)
+        dlg._flex_slice.setValue(1)
+
+        out = dlg.result_config()
+        assert out.rig_connection_mode == RigConnectionMode.FLEX.value
+        assert out.flex_host == "192.168.11.65"
+        assert out.flex_port == 4992
+        assert out.flex_slice == 1

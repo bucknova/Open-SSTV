@@ -240,6 +240,11 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
   `ws://host:port` connection (default `127.0.0.1:40001`) carries both CAT
   control and binary PCM audio, so rig control and RX/TX audio share one
   transport with no virtual audio cables required.
+- **FlexRadio direct** -- control a 6000-series Flex over the SmartSDR TCP
+  API with no `rigctld` and no virtual serial port: enter the radio's IP,
+  pick a slice, and PTT / frequency / mode work directly. Audio still comes
+  from your sound device (e.g. DAX). The S-meter is not available over this
+  path (Flex streams meters as VITA-49/UDP) and reads as 0.
 - **Band Plan (v0.3.6)** -- one-click "Band Plan" popup button on the radio
   panel tunes the connected rig to any standard SSTV calling frequency.
   Twelve entries covering HF (80/40/20/17/15/10 m), VHF (2 m), and UHF
