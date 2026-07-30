@@ -1472,13 +1472,21 @@ class SettingsDialog(QDialog):
                 f"Frequency: {freq / 1_000_000:.6f} MHz\n"
                 f"Mode: {mode}",
             )
-        except RigError as exc:
+        except Exception as exc:  # noqa: BLE001
+            # Catch *everything*, not just RigError: a non-RigError escaping
+            # this slot leaves the button looking completely dead (no dialog,
+            # and on a Windows GUI build the traceback goes to a stderr that
+            # doesn't exist).  A diagnostic button must always say something.
+            _log.warning(
+                "rigctld connection test to %s:%d failed", host, port, exc_info=True
+            )
             QMessageBox.warning(
                 self,
                 "Connection failed",
                 f"Could not connect to rigctld at {host}:{port}.\n\n"
-                f"Error: {exc}\n\n"
-                "Make sure rigctld is running, or use the launcher above.",
+                f"Error: {type(exc).__name__}: {exc}\n\n"
+                "Make sure rigctld is running, or use the launcher above.\n"
+                "Enable diagnostics logging for the full details.",
             )
 
     def _launch_rigctld(self) -> None:

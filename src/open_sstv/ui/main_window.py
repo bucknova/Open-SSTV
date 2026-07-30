@@ -210,11 +210,15 @@ class _RigPollWorker(QObject):
         super().__init__()
         self._rig: Rig = ManualRig()
         self._consecutive_errors: int = 0
+        #: Latches once per rig so an unsupported S-meter is logged a single
+        #: time instead of once per second.
+        self._strength_unsupported: bool = False
 
     def set_rig(self, rig: Rig) -> None:
         """Swap the rig reference. GIL-safe for a plain attribute store."""
         self._rig = rig
         self._consecutive_errors = 0
+        self._strength_unsupported = False
 
     @Slot()
     def poll(self) -> None:
@@ -222,13 +226,27 @@ class _RigPollWorker(QObject):
         try:
             freq = self._rig.get_freq()
             mode_name, _ = self._rig.get_mode()
-            strength = self._rig.get_strength()
         except Exception:  # noqa: BLE001 — catch RigError + any raw OSError/termios.error
             self._consecutive_errors += 1
             self.poll_error.emit()
             if self._consecutive_errors == self._POLL_FAIL_THRESHOLD:
                 self.radio_disconnected.emit()
             return
+        # The S-meter is cosmetic and not every backend implements it (a
+        # rigctld backend without a STRENGTH level answers ``RPRT -11``).
+        # Polling it in the same try as freq/mode meant an unsupported
+        # S-meter tripped the 3-strike auto-disconnect and dropped a rig
+        # whose PTT and frequency control were working fine.  Failure here
+        # is now non-fatal: report 0 and keep the connection.
+        try:
+            strength = self._rig.get_strength()
+        except Exception as exc:  # noqa: BLE001 — optional reading, never fatal
+            if not self._strength_unsupported:
+                self._strength_unsupported = True
+                _log.info(
+                    "rig S-meter unavailable (%s) — continuing without it", exc
+                )
+            strength = 0
         self._consecutive_errors = 0
         self.poll_result.emit(freq, mode_name, strength)
 
@@ -311,8 +329,12 @@ class _RigConnectWorker(QObject):
             if self._cancel.is_set():
                 self._close_quietly()
                 return
+            # Log the outcome: a successful connect left no trace at all, so
+            # a bug report's log couldn't show whether the rig ever attached.
+            _log.info("rig connected: %s", getattr(self._rig, "name", self._rig))
             self.succeeded.emit(self._rig)
         except RigError as exc:
+            _log.warning("rig connect failed: %s", exc, exc_info=True)
             try:
                 self._rig.close()
             except Exception:  # noqa: BLE001
@@ -320,6 +342,7 @@ class _RigConnectWorker(QObject):
             if not self._cancel.is_set():
                 self.failed.emit(str(exc))
         except Exception as exc:  # noqa: BLE001
+            _log.warning("rig connect failed (unexpected): %s", exc, exc_info=True)
             try:
                 self._rig.close()
             except Exception:  # noqa: BLE001
