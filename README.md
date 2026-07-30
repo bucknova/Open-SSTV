@@ -495,9 +495,19 @@ open-sstv-decode in.wav -o out.png                    # CLI decoder
 
 ## Testing focus areas
 
-If you're kicking the tyres on the v0.3.13 beta, these are the surfaces we'd most
+If you're kicking the tyres on the v0.6 beta, these are the surfaces we'd most
 like eyes on. File an [issue](https://github.com/bucknova/Open-SSTV/issues)
 with what you tried and what happened.
+
+- **Remote station** (v0.6) — the newest and least-proven path, and the one
+  that can key your transmitter. Pair a phone, watch a live decode, then try
+  composing and sending **into a dummy load first**. Confirm the
+  dead-man's-switch: start a transmission, then close the tab or walk out of
+  Wi-Fi range, and check the rig unkeys. Reports on phones/browsers we
+  haven't tried are especially useful.
+- **Logbook and gallery** (v0.4 / v0.5) — capture a QSO from a decode, export
+  ADIF into your usual logger, and check the gallery↔logbook cross-links land
+  on the right contact.
 
 - **Weak-signal RX**. Decode quality on fading / noisy signals; the weak-signal
   mode toggle (Settings → Audio → Receive); false-positive VIS detections (expected
@@ -524,17 +534,17 @@ with what you tried and what happened.
 - **macOS privacy prompts**. If you see Music / iCloud / unexpected access
   requests on launch, note which ones and when — we have a hunch this is PortAudio
   device enumeration but haven't nailed it yet.
-- **Windows**. Open-SSTV has not been tested on real Windows hardware yet.
-  Installation instructions are in [Install](#install-development); first-launch
-  reports very welcome.
+- **Windows**. Now in real use, and the CI matrix builds and tests on Windows,
+  but it sees far less on-air mileage than macOS and Linux — audio device
+  quirks (MME vs WASAPI) and rig-control paths are where problems have
+  surfaced so far. Reports very welcome.
 
 ## Roadmap
 
-### Post-beta / v0.3
+### Next
 - **Remaining SSTV modes** -- Robot 8/12/24/72 (4 modes needing custom YCbCr 4:2:2
   encoders not yet in PySSTV).
 - **Raspberry Pi 4/5 validation** -- Linux arm64 binaries already ship; on-hardware testing still pending.
-- **Windows support** -- full validation on real hardware (experimental binaries shipping since v0.2.x).
 - **Digital VOX** -- auto-detect incoming SSTV and start decoding without manual
   capture start.
 - **Drag-and-drop** image loading in the TX panel.
