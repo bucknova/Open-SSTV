@@ -1,6 +1,6 @@
 # Open-SSTV User Guide
 
-**For the v0.3.x series (Beta)** — exact version: see Help → About | Created by Kevin (W0AEZ) | GPL-3.0-or-later
+**For the v0.6.x series (Beta)** — exact version: see Help → About | Created by Kevin (W0AEZ) | GPL-3.0-or-later
 
 ---
 
@@ -66,7 +66,8 @@
 17. [Troubleshooting](#17-troubleshooting)
 18. [The Logbook (v0.4)](#18-the-logbook-v04)
 19. [The Gallery (v0.5)](#19-the-gallery-v05)
-20. [Glossary](#20-glossary)
+20. [Remote Station (v0.6)](#20-remote-station-v06)
+21. [Glossary](#21-glossary)
 
 ---
 
@@ -346,7 +347,7 @@ When you click **Transmit**, the selected template is composited at the chosen m
 
 For full editor coverage, layer types, and the token cheat sheet, see [Section 13: Templates In Depth](#13-templates-in-depth-v03).
 
-![Template Gallery](docs/screenshots/qso-templates.png)
+![Template editor](docs/screenshots/template-editor.png)
 
 ### 8.5 Sending the Transmission
 
@@ -1090,7 +1091,72 @@ editing an image regenerates its thumbnail automatically.
 
 ---
 
-## 20. Glossary
+## 20. Remote Station (v0.6)
+
+Open-SSTV v0.6 can serve a small web page from the machine running the
+app, so a phone or laptop on the same network can watch receptions live,
+browse the gallery and logbook, and — with a separate opt-in — compose
+and transmit.  This is the short tour; the full guide is
+[docs/remote.md](docs/remote.md).
+
+Everything below is **off by default**.
+
+### 20.1 Turning it on
+
+**Settings → Remote → Enable the remote gallery server.**  Set **Host** to
+`0.0.0.0` if you want to reach it from another device (the default,
+`127.0.0.1`, serves only the machine itself), pick a **Port** (default
+`8730`), and note the **access token** — it's required on every request.
+
+The Remote tab shows the resulting URL and a **QR code**; scanning it with
+your phone carries the token along automatically.  While the server is
+running the main window shows a persistent "Remote on" indicator.
+
+> Use this only on a network you trust.  The token keeps out casual
+> visitors, but the connection is plain HTTP — don't expose the port to
+> the internet.
+
+### 20.2 What the browser gives you
+
+- **Gallery** — received images, newest first.
+- **Live** — the current decode painting in line by line.
+- **Logbook** — your contacts, read-only.
+- **Compose** — shoot or upload a photo, frame it (drag to move, pinch or
+  slide to zoom), pick a template and mode, and transmit.  The crop box
+  matches the chosen mode's frame shape, so what you frame is what goes
+  out — narrow modes like Scottie S2 included.
+
+The desktop renders the transmitted image, not the phone: your browser
+sends the photo plus the text fields, and the station composites the
+exact bytes it sends.
+
+### 20.3 Transmitting safely
+
+Remote transmit is a **second switch** (Settings → Remote → Remote
+transmit), off by default even when the server is on, and it requires a
+**connected CAT rig** — it is refused on the manual/VOX backend, where PTT
+isn't actually commanded.
+
+Every remote transmission is wrapped in:
+
+- **a single-operator lease** — one browser at a time, and the desktop can
+  always take control back;
+- **a per-transmission confirmation** that expires in 30 seconds;
+- **a dead-man's-switch** — if the browser stops sending its heartbeat
+  (tab closed, Wi-Fi dropped, battery dead) the station **unkeys the rig
+  automatically**;
+- **a full-screen ON AIR takeover** with progress, elapsed/remaining time
+  and an Abort button.
+
+> Keep the page open and the screen awake while transmitting.  A phone
+> that locks mid-transmission can stop the heartbeat, and the station will
+> unkey — that's the safety net working, but it cuts the picture off
+> partway.  Enabling your rig's own TX time-out timer is worthwhile as an
+> independent backstop.
+
+---
+
+## 21. Glossary
 
 **CAT (Computer Aided Transceiver)**: A protocol for controlling a radio from a computer, typically over a serial or USB connection. Allows reading and setting frequency, mode, and PTT state.
 
