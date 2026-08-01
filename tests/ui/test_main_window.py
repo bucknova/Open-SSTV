@@ -624,6 +624,39 @@ class TestRigPollWorkerErrorCounter:
 
         assert worker._consecutive_errors == 0
 
+    def test_unsupported_s_meter_does_not_disconnect(self, qapp) -> None:
+        """An S-meter that isn't supported must NOT drop the rig.
+
+        A rigctld backend with no STRENGTH level answers RPRT -11.  That
+        used to share a try-block with freq/mode, so it tripped the
+        3-strike auto-disconnect and killed a rig whose PTT and frequency
+        control were working fine (reported by a FlexRadio user).
+        """
+        from open_sstv.radio.exceptions import RigCommandError
+
+        worker = self._make_worker()
+        rig = MagicMock()
+        rig.get_freq.return_value = 14_074_000
+        rig.get_mode.return_value = ("USB", 2400)
+        rig.get_strength.side_effect = RigCommandError(
+            "'l STRENGTH' returned RPRT -11", command="l STRENGTH"
+        )
+        worker.set_rig(rig)
+
+        results: list[tuple] = []
+        disconnects: list[int] = []
+        worker.poll_result.connect(lambda *a: results.append(a))
+        worker.radio_disconnected.connect(lambda: disconnects.append(1))
+
+        for _ in range(5):  # well past the 3-strike threshold
+            worker.poll()
+
+        assert worker._consecutive_errors == 0, "S-meter must not count as a failure"
+        assert disconnects == [], "an unsupported S-meter must not disconnect the rig"
+        assert len(results) == 5, "freq/mode must still be reported"
+        assert results[0][0] == 14_074_000
+        assert results[0][2] == 0, "unavailable strength reads as 0"
+
     def test_failed_poll_increments_counter(self, qapp) -> None:
         """Each failing poll increments the counter by 1."""
         worker = self._make_worker()

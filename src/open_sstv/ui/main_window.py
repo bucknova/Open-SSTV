@@ -210,11 +210,15 @@ class _RigPollWorker(QObject):
         super().__init__()
         self._rig: Rig = ManualRig()
         self._consecutive_errors: int = 0
+        #: Latches once per rig so an unsupported S-meter is logged a single
+        #: time instead of once per second.
+        self._strength_unsupported: bool = False
 
     def set_rig(self, rig: Rig) -> None:
         """Swap the rig reference. GIL-safe for a plain attribute store."""
         self._rig = rig
         self._consecutive_errors = 0
+        self._strength_unsupported = False
 
     @Slot()
     def poll(self) -> None:
@@ -222,13 +226,27 @@ class _RigPollWorker(QObject):
         try:
             freq = self._rig.get_freq()
             mode_name, _ = self._rig.get_mode()
-            strength = self._rig.get_strength()
         except Exception:  # noqa: BLE001 — catch RigError + any raw OSError/termios.error
             self._consecutive_errors += 1
             self.poll_error.emit()
             if self._consecutive_errors == self._POLL_FAIL_THRESHOLD:
                 self.radio_disconnected.emit()
             return
+        # The S-meter is cosmetic and not every backend implements it (a
+        # rigctld backend without a STRENGTH level answers ``RPRT -11``).
+        # Polling it in the same try as freq/mode meant an unsupported
+        # S-meter tripped the 3-strike auto-disconnect and dropped a rig
+        # whose PTT and frequency control were working fine.  Failure here
+        # is now non-fatal: report 0 and keep the connection.
+        try:
+            strength = self._rig.get_strength()
+        except Exception as exc:  # noqa: BLE001 — optional reading, never fatal
+            if not self._strength_unsupported:
+                self._strength_unsupported = True
+                _log.info(
+                    "rig S-meter unavailable (%s) — continuing without it", exc
+                )
+            strength = 0
         self._consecutive_errors = 0
         self.poll_result.emit(freq, mode_name, strength)
 
@@ -311,8 +329,12 @@ class _RigConnectWorker(QObject):
             if self._cancel.is_set():
                 self._close_quietly()
                 return
+            # Log the outcome: a successful connect left no trace at all, so
+            # a bug report's log couldn't show whether the rig ever attached.
+            _log.info("rig connected: %s", getattr(self._rig, "name", self._rig))
             self.succeeded.emit(self._rig)
         except RigError as exc:
+            _log.warning("rig connect failed: %s", exc, exc_info=True)
             try:
                 self._rig.close()
             except Exception:  # noqa: BLE001
@@ -320,6 +342,7 @@ class _RigConnectWorker(QObject):
             if not self._cancel.is_set():
                 self.failed.emit(str(exc))
         except Exception as exc:  # noqa: BLE001
+            _log.warning("rig connect failed (unexpected): %s", exc, exc_info=True)
             try:
                 self._rig.close()
             except Exception:  # noqa: BLE001
@@ -2782,6 +2805,8 @@ class MainWindow(QMainWindow):
             self._connect_serial()
         elif mode == RigConnectionMode.TCI:
             self._connect_tci()
+        elif mode == RigConnectionMode.FLEX:
+            self._connect_flex()
         else:
             self._connect_rigctld()
 
@@ -3149,6 +3174,56 @@ class MainWindow(QMainWindow):
             self._radio_panel.set_connection_error()
             self.statusBar().showMessage(
                 f"TCI connection failed at {host}:{port} — {message}", 5000
+            )
+
+        self._start_rig_connect_thread(rig, _on_success, _on_error)
+
+    def _connect_flex(self) -> None:
+        """Connect a FlexRadio directly over the SmartSDR TCP API.
+
+        Unlike TCI this is CAT only — the Flex's audio still arrives via
+        DAX (or any sound device), so the audio worker is left alone.
+        """
+        from open_sstv.radio.flex import FlexRig
+
+        host = self._config.flex_host.strip()
+        port = self._config.flex_port
+        slice_index = self._config.flex_slice
+        if not host:
+            self._radio_panel.set_connection_error()
+            self.statusBar().showMessage(
+                "No FlexRadio address configured — set it in Settings → Radio.",
+                5000,
+            )
+            return
+
+        rig = FlexRig(host, port, slice_index=slice_index)
+        self._radio_panel.set_connecting()
+        self.statusBar().showMessage(f"Connecting to FlexRadio at {host}:{port}…")
+
+        def _on_success(connected_rig: object) -> None:
+            if not self.isVisible():
+                try:
+                    connected_rig.close()  # type: ignore[union-attr]
+                except Exception:  # noqa: BLE001
+                    pass
+                return
+            self._rig = connected_rig  # type: ignore[assignment]
+            self._tx_worker.set_rig(connected_rig)  # type: ignore[arg-type]
+            self._rig_poll_worker.set_rig(connected_rig)  # type: ignore[arg-type]
+            self._radio_panel.set_connected(True)
+            self._rig_poll_timer.start()
+            self.statusBar().showMessage(
+                f"Connected to FlexRadio at {host}:{port} (slice {slice_index})",
+                3000,
+            )
+
+        def _on_error(message: str) -> None:
+            if not self.isVisible():
+                return
+            self._radio_panel.set_connection_error()
+            self.statusBar().showMessage(
+                f"FlexRadio connection failed at {host}:{port} — {message}", 5000
             )
 
         self._start_rig_connect_thread(rig, _on_success, _on_error)

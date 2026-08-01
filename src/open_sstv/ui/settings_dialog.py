@@ -873,6 +873,9 @@ class SettingsDialog(QDialog):
         self._conn_mode_combo.addItem(
             "TCI (ExpertSDR2 / SunSDR)", RigConnectionMode.TCI.value,
         )
+        self._conn_mode_combo.addItem(
+            "FlexRadio (direct, SmartSDR)", RigConnectionMode.FLEX.value,
+        )
         idx = self._conn_mode_combo.findData(self._config.rig_connection_mode)
         if idx >= 0:
             self._conn_mode_combo.setCurrentIndex(idx)
@@ -1082,6 +1085,43 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(self._tci_group)
 
+        # --- FlexRadio direct (SmartSDR TCP API) ---
+        self._flex_group = QGroupBox("FlexRadio — direct SmartSDR control")
+        flex_form = QFormLayout(self._flex_group)
+
+        flex_help = QLabel(
+            "Control a FlexRadio 6000-series radio directly over the SmartSDR "
+            "TCP API — no rigctld and no virtual serial port. Enter the "
+            "radio's own IP address (not this computer's). Audio still comes "
+            "from your sound device (e.g. DAX), configured on the Audio tab."
+        )
+        flex_help.setWordWrap(True)
+        flex_form.addRow(flex_help)
+
+        self._flex_host = QLineEdit(self._config.flex_host)
+        self._flex_host.setPlaceholderText("192.168.1.50")
+        flex_form.addRow("Radio IP:", self._flex_host)
+
+        self._flex_port = QSpinBox()
+        self._flex_port.setRange(1, 65535)
+        self._flex_port.setValue(self._config.flex_port)
+        flex_form.addRow("API port:", self._flex_port)
+
+        self._flex_slice = QSpinBox()
+        self._flex_slice.setRange(0, 7)
+        self._flex_slice.setValue(self._config.flex_slice)
+        self._flex_slice.setToolTip(
+            "Which receiver slice to follow: 0 = A, 1 = B, and so on. "
+            "The slice must be active in SmartSDR."
+        )
+        flex_form.addRow("Slice:", self._flex_slice)
+
+        self._flex_test_btn = QPushButton("Test FlexRadio Connection")
+        self._flex_test_btn.clicked.connect(self._test_flex_connection)
+        flex_form.addRow(self._flex_test_btn)
+
+        layout.addWidget(self._flex_group)
+
         # --- PTT (always visible) ---
         # v0.3.4: Callsign moved to the General tab.  This group is now
         # PTT-only; it stays on the Radio tab because PTT delay is a
@@ -1160,6 +1200,7 @@ class SettingsDialog(QDialog):
         self._serial_group.setVisible(mode == RigConnectionMode.SERIAL)
         self._rigctld_group.setVisible(mode == RigConnectionMode.RIGCTLD)
         self._tci_group.setVisible(mode == RigConnectionMode.TCI)
+        self._flex_group.setVisible(mode == RigConnectionMode.FLEX)
         if mode == RigConnectionMode.SERIAL:
             self._on_serial_protocol_changed()
 
@@ -1472,14 +1513,65 @@ class SettingsDialog(QDialog):
                 f"Frequency: {freq / 1_000_000:.6f} MHz\n"
                 f"Mode: {mode}",
             )
-        except RigError as exc:
+        except Exception as exc:  # noqa: BLE001
+            # Catch *everything*, not just RigError: a non-RigError escaping
+            # this slot leaves the button looking completely dead (no dialog,
+            # and on a Windows GUI build the traceback goes to a stderr that
+            # doesn't exist).  A diagnostic button must always say something.
+            _log.warning(
+                "rigctld connection test to %s:%d failed", host, port, exc_info=True
+            )
             QMessageBox.warning(
                 self,
                 "Connection failed",
                 f"Could not connect to rigctld at {host}:{port}.\n\n"
-                f"Error: {exc}\n\n"
-                "Make sure rigctld is running, or use the launcher above.",
+                f"Error: {type(exc).__name__}: {exc}\n\n"
+                "Make sure rigctld is running, or use the launcher above.\n"
+                "Enable diagnostics logging for the full details.",
             )
+
+    def _test_flex_connection(self) -> None:
+        """Open a real SmartSDR session and report what the radio says."""
+        from open_sstv.radio.flex import FlexRig
+
+        host = self._flex_host.text().strip()
+        port = self._flex_port.value()
+        slice_index = self._flex_slice.value()
+        if not host:
+            QMessageBox.warning(
+                self, "No radio address",
+                "Enter the FlexRadio's IP address first.",
+            )
+            return
+        rig = FlexRig(host, port, slice_index=slice_index)
+        try:
+            rig.open()
+            freq = rig.get_freq()
+            mode, _ = rig.get_mode()
+            QMessageBox.information(
+                self,
+                "Connection successful",
+                f"Connected to FlexRadio at {host}:{port}.\n\n"
+                f"Slice {slice_index}: {freq / 1_000_000:.6f} MHz {mode}",
+            )
+        except Exception as exc:  # noqa: BLE001 — never fail silently
+            _log.warning(
+                "FlexRadio connection test to %s:%d failed", host, port,
+                exc_info=True,
+            )
+            QMessageBox.warning(
+                self,
+                "Connection failed",
+                f"Could not connect to the FlexRadio at {host}:{port}.\n\n"
+                f"Error: {type(exc).__name__}: {exc}\n\n"
+                "Check the radio's IP address, that SmartSDR is running, and "
+                f"that slice {slice_index} is active.",
+            )
+        finally:
+            try:
+                rig.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _launch_rigctld(self) -> None:
         """Spawn a rigctld process with the current radio settings."""
@@ -1907,6 +1999,9 @@ class SettingsDialog(QDialog):
             rigctld_port=self._rigctld_port.value(),
             tci_host=self._tci_host.text().strip(),
             tci_port=self._tci_port.value(),
+            flex_host=self._flex_host.text().strip(),
+            flex_port=self._flex_port.value(),
+            flex_slice=self._flex_slice.value(),
             show_waterfall=self._config.show_waterfall,
             ptt_delay_s=self._ptt_delay.value(),
             rig_model_id=self._custom_model_id.value(),

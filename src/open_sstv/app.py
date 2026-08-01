@@ -244,6 +244,12 @@ def main(argv: list[str] | None = None) -> int:
         file=sys.stderr,
         flush=True,
     )
+    # ...and into the *log file* too.  The print above goes to stderr, which
+    # on a packaged Windows GUI build is discarded — so every bug report
+    # arrived with a log that never said which version produced it.
+    logging.getLogger("open_sstv").info(
+        "Open-SSTV v%s starting — module loaded from %s", __version__, _pkg.__file__
+    )
 
     # Cross-OS process-name fix.  When Open-SSTV is launched via the
     # ``open-sstv`` console script from a venv (the canonical source /

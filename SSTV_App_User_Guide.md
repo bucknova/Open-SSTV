@@ -35,8 +35,10 @@
     - [Manual Mode (No Rig Control)](#101-manual-mode-no-rig-control)
     - [rigctld (Hamlib Daemon)](#102-rigctld-hamlib-daemon)
     - [Direct Serial (Built-In CAT)](#103-direct-serial-built-in-cat)
-    - [Supported Radios and Protocols](#104-supported-radios-and-protocols)
-    - [PTT Delay](#105-ptt-delay)
+    - [TCI (ExpertSDR / SunSDR)](#104-tci-expertsdr--sunsdr)
+    - [FlexRadio (Direct SmartSDR)](#105-flexradio-direct-smartsdr)
+    - [Supported Radios and Protocols](#106-supported-radios-and-protocols)
+    - [PTT Delay](#107-ptt-delay)
 11. [Audio Setup](#11-audio-setup)
     - [Choosing Audio Devices](#111-choosing-audio-devices)
     - [Sample Rate](#112-sample-rate)
@@ -470,7 +472,48 @@ Select **"Direct Serial (built-in)"** to have Open-SSTV communicate directly wit
 7. Click **Test Serial Connection** to verify. A successful test displays the radio's frequency and mode (or just confirms PTT line toggling for PTT-only mode).
 8. Click OK, then click **Connect Rig** in the main window.
 
-### 10.4 Supported Radios and Protocols
+### 10.4 TCI (ExpertSDR / SunSDR)
+
+TCI is a WebSocket protocol spoken by ExpertSDR2 / ExpertSDR3, the SunSDR2
+family, and the AetherSDR. It is the only backend that carries **both**
+rig control **and** audio over a single connection — with TCI selected you
+do not need a virtual audio cable or a second sound device.
+
+1. Start your SDR software and enable its TCI server (default port `40001`).
+2. **Settings → Radio → Mode: TCI (ExpertSDR2 / SunSDR)**.
+3. Enter the **TCI host** (`127.0.0.1` if the SDR software runs on this
+   machine) and **port**.
+4. Click OK, then **Connect Rig**.
+
+RX audio arrives over the same connection and replaces the sound-card
+input automatically, so the Audio tab's input device is ignored while TCI
+is connected.
+
+### 10.5 FlexRadio (Direct SmartSDR)
+
+FlexRadio 6000-series radios can be controlled **directly** over the
+SmartSDR TCP API — no `rigctld` and no virtual serial port in between.
+
+1. **Settings → Radio → Mode: FlexRadio (direct, SmartSDR)**.
+2. Enter the **radio's own IP address** — not this computer's. (Find it in
+   SmartSDR, or on the radio's front panel.)
+3. Leave the **API port** at `4992` unless you have changed it.
+4. Choose the **Slice** to follow: `0` is slice A, `1` is slice B, and so
+   on. The slice must be **active in SmartSDR** — if it isn't, the
+   connection test says so rather than silently reading 0.000 MHz.
+5. Click **Test FlexRadio Connection** to confirm, then OK and
+   **Connect Rig**.
+
+Unlike TCI this is **CAT only** — audio still comes from your sound
+device, so set DAX (or whatever you use) as the input and output on the
+Audio tab as usual.
+
+> **S-meter:** not available on this path. FlexRadio streams meter values
+> as VITA-49 packets over a separate UDP socket, which Open-SSTV does not
+> implement; the S-meter reads 0. Frequency, mode, and PTT all work
+> normally.
+
+### 10.6 Supported Radios and Protocols
 
 The following radios have been tested or have built-in presets in the settings dialog.
 
@@ -479,6 +522,10 @@ The following radios have been tested or have built-in presets in the settings d
 **Via Direct Serial (Kenwood)**: TS-590SG, TS-890S, TS-480, TS-2000, and Elecraft K3, KX3, KX2, K4.
 
 **Via Direct Serial (Yaesu)**: FT-991A, FT-891, FT-710, FTDX10, FTDX101, FT-950.
+
+**Via TCI**: Expert Electronics SunSDR2 family (PRO / DX / MB1) and the AetherSDR, through ExpertSDR2 / ExpertSDR3.
+
+**Via FlexRadio direct**: the 6000 series — FLEX-6300/6400/6500/6600/6700 and the 6400M/6600M — over the SmartSDR TCP API.
 
 **Via rigctld (Hamlib)**: Hundreds of additional models — any radio supported by Hamlib. Run `rigctld --list` in a terminal for the full list. Common models included in the Open-SSTV dropdown are (Hamlib model IDs as of v4.5+):
 
@@ -492,7 +539,7 @@ If your radio isn't in the Open-SSTV preset list, enter the Hamlib model number 
 
 **PTT-only serial**: Works with any radio that has a serial PTT interface — no CAT protocol required.
 
-### 10.5 PTT Delay
+### 10.7 PTT Delay
 
 When transmitting with rig control, the app keys PTT and then waits for a configurable delay before playing audio. This gives your radio's transmit relay time to engage so the beginning of the SSTV signal is not clipped.
 

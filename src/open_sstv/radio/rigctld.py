@@ -96,7 +96,9 @@ class RigctldClient:
     def get_freq(self) -> int:
         # +f → "Frequency: 14070000\nRPRT 0"
         body = self._send_recv("f")
-        return int(_parse_value(body[0]))
+        if not body:
+            raise RigCommandError("empty frequency response", command="f")
+        return _parse_int(body[0], field="frequency", command="f")
 
     def set_freq(self, hz: int) -> None:
         self._send_recv(f"F {hz}")
@@ -108,7 +110,19 @@ class RigctldClient:
             raise RigCommandError(
                 f"unexpected mode response: {body!r}", command="m"
             )
-        return (_parse_value(body[0]), int(_parse_value(body[1])))
+        # The passband is advisory — we only echo it back on set_mode, and
+        # Hamlib reads 0 as "use the backend's default width".  A backend
+        # that reports it blank or in some unexpected shape must therefore
+        # not take the whole rig connection down: fall back to 0.
+        try:
+            passband = _parse_int(body[1], field="passband", command="m")
+        except RigCommandError:
+            _log.debug(
+                "%s: unparseable passband %r — using 0 (backend default)",
+                self.name, body[1],
+            )
+            passband = 0
+        return (_parse_value(body[0]), passband)
 
     def set_mode(self, mode: str, passband_hz: int) -> None:
         self._send_recv(f"M {mode} {passband_hz}")
@@ -124,7 +138,9 @@ class RigctldClient:
     def get_strength(self) -> int:
         # +l STRENGTH → "STRENGTH: -73\nRPRT 0"
         body = self._send_recv("l STRENGTH")
-        return int(_parse_value(body[0]))
+        if not body:
+            raise RigCommandError("empty STRENGTH response", command="l STRENGTH")
+        return _parse_int(body[0], field="strength", command="l STRENGTH")
 
     def ping(self) -> None:
         """Cheapest round-trip we can do — verifies the daemon is alive."""
@@ -209,9 +225,14 @@ class RigctldClient:
         # ``+`` activates rigctld's extended response mode for this command,
         # so the response is always terminated by an ``RPRT N`` line.
         wire = f"+{command}\n".encode("ascii")
+        # Verbose wire tracing at DEBUG: with rigctld's own -vv output this
+        # gives both halves of the conversation when diagnosing a backend
+        # that answers in an unexpected shape.
+        _log.debug("%s: >>> %s", self.name, wire.decode("ascii").rstrip())
         self._sock.sendall(wire)
 
         lines = self._read_until_rprt()
+        _log.debug("%s: <<< %r", self.name, lines)
         if not lines or not lines[-1].startswith("RPRT "):
             raise RigCommandError(
                 f"malformed response to {command!r}: {lines!r}",
@@ -284,6 +305,37 @@ class RigctldClient:
         if lines and lines[-1] == "":
             lines.pop()  # drop trailing empty from final \n
         return lines
+
+
+def _parse_int(line: str, *, field: str, command: str) -> int:
+    """Parse a numeric extended-response value into an ``int``.
+
+    Deliberately lenient about *formatting* while staying strict about
+    *type*, because rigctld's numeric formatting is backend-dependent:
+
+    - plain integers (``"14074000"``) — the common case;
+    - float-formatted values (``"14074000.000000"``), which some backends
+      and Hamlib builds emit for frequency / passband;
+    - stray whitespace and the ``"Label: value"`` prefix.
+
+    A bare ``int()`` raises :class:`ValueError`, which is **not** a
+    :class:`RigError` — so it escaped every ``except RigError`` handler in
+    the app and surfaced as a silently dead button (the rigctld
+    connection-test did nothing at all).  Every failure here is converted
+    to :class:`RigCommandError` so callers can only ever see ``RigError``.
+    """
+    raw = _parse_value(line)
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+    try:
+        # Backends that format numerics as floats ("14074000.000000").
+        return int(float(raw))
+    except (ValueError, OverflowError) as exc:
+        raise RigCommandError(
+            f"could not parse {field} from {line!r}", command=command
+        ) from exc
 
 
 def _parse_value(line: str) -> str:
