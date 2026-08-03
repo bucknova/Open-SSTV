@@ -3727,9 +3727,19 @@ class MainWindow(QMainWindow):
             except (RuntimeError, TypeError):
                 pass
         if not _stop_done.is_set():
+            # Name the backend: this fires on every quit for some
+            # Windows/MME setups, and the old message blamed TCI even for
+            # PortAudio users, which sent at least one bug report down the
+            # wrong path.  input_stream.stop() now logs which blocking call
+            # ran long, so the two lines together identify the culprit.
+            _backend = type(self._audio_worker).__name__
             _log.warning(
-                "closeEvent: audio worker stop() did not complete in 2 s — "
-                "proceeding; TCI audio_stop may not have reached the server"
+                "closeEvent: audio worker stop() did not complete in 2 s "
+                "(worker=%s) — proceeding with shutdown anyway. See the "
+                "'input stream teardown slow' line above for which PortAudio "
+                "call blocked; on TCI this may mean audio_stop never reached "
+                "the server.",
+                _backend,
             )
         # Same reasoning for RxWorker's wall-clock watchdog QTimer —
         # it lives on the RX decode thread (created lazily in

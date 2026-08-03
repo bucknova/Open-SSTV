@@ -47,6 +47,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -323,9 +324,30 @@ class InputStreamWorker(QObject):
         # another grace period.
         self._first_chunk_seen = False
 
+        # Time these two individually.  Both are blocking PortAudio calls
+        # with no timeout parameter, and on some Windows/MME setups they
+        # take longer than closeEvent's 2 s budget — which is what surfaces
+        # as "audio worker stop() did not complete in 2 s" on every quit.
+        # Logging which call ran long, and for how long, makes that report
+        # actionable instead of a mystery.
         try:
+            _t0 = time.monotonic()
             self._stream.stop()
+            _t1 = time.monotonic()
             self._stream.close()
+            _t2 = time.monotonic()
+            if (_t2 - _t0) > 1.0:
+                _log.warning(
+                    "input stream teardown slow: stop() %.0f ms, close() %.0f ms "
+                    "(total %.1f s) — a slow audio backend (Windows MME is the "
+                    "usual culprit) can push app shutdown past its 2 s budget",
+                    (_t1 - _t0) * 1000, (_t2 - _t1) * 1000, _t2 - _t0,
+                )
+            else:
+                _log.debug(
+                    "input stream teardown: stop() %.0f ms, close() %.0f ms",
+                    (_t1 - _t0) * 1000, (_t2 - _t1) * 1000,
+                )
         except Exception as exc:  # noqa: BLE001
             self.error.emit(f"Error closing input stream: {exc}")
         finally:

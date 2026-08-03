@@ -497,6 +497,9 @@ class TxWorker(QObject):
         #: worker was still mid-unkey when the thread was quit.
         self._idle_event = threading.Event()
         self._idle_event.set()
+        #: Latches after the first MME warning so the advice is logged once
+        #: per worker rather than on every transmission.
+        self._mme_warned: bool = False
         # When set, TX audio is routed via this TCI connection instead of
         # PortAudio.  Accepts any object with a send_tx_audio_chunk() method
         # (duck-typed so workers.py doesn't import from radio.tci).
@@ -1244,12 +1247,28 @@ class TxWorker(QObject):
                 )
             else:
                 _log.info(
-                    "TX via PortAudio: device=%r samples=%d rate=%d dtype=%s",
+                    "TX via PortAudio: device=%r samples=%d rate=%d dtype=%s "
+                    "duration=%.1fs",
                     self._output_device,
                     len(samples),
                     self._sample_rate,
                     samples.dtype,
+                    len(samples) / self._sample_rate if self._sample_rate else 0.0,
                 )
+                # One-time nudge: MME is the legacy Windows backend and its
+                # blocking write is where the TX audio wedge has been seen.
+                # WASAPI does not exhibit it.  Warn once per worker so the
+                # log points at a fix the operator can actually apply.
+                _api = getattr(self._output_device, "host_api", "") or ""
+                if "mme" in _api.lower() and not self._mme_warned:
+                    self._mme_warned = True
+                    _log.warning(
+                        "TX output device uses the MME host API. MME is the "
+                        "legacy Windows audio backend and is the one where TX "
+                        "audio has been observed to stall and not respond to "
+                        "abort(). If transmissions hang, pick the same device "
+                        "under WASAPI in Settings → Audio.",
+                    )
                 output_stream.play_blocking(
                     samples,
                     self._sample_rate,
