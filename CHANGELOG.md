@@ -9,6 +9,14 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.6.1] — 2026-07-30
+
+Rig-control and audio-path robustness, driven by a FlexRadio operator's
+bug report.  No new SSTV features; everything here is about the paths
+that were failing quietly.
+
 ### Added
 
 - **FlexRadio direct control** — a new Radio connection mode that talks the
@@ -38,13 +46,38 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   were working fine.  The S-meter is cosmetic: it can no longer disconnect
   the radio.
 
+- **TX audio wedge — recovery and diagnosis.**  On some Windows/MME setups
+  the TX audio device stops draining mid-transmission and ``abort()``,
+  called from another thread, does not unblock the writer — leaking the TX
+  worker thread, so further transmissions failed until the app was
+  restarted.  (Safety was never affected: PTT is dropped directly and
+  independently of the audio path.)  Stopping playback now **escalates**:
+  after ``abort()``, a watchdog checks whether the writer has actually made
+  progress and, if not, closes the stream outright.  Whether or not the
+  escalation succeeds, the wedge is now logged explicitly instead of
+  vanishing.
+  *This one could not be reproduced here — it needs the affected hardware —
+  so treat it as an attempted fix with much better instrumentation behind
+  it.*
+
 ### Changed
 
-- The app version is now written to the **log file** (it was printed only to
-  stderr, which is discarded on a packaged Windows GUI build — so no bug
-  report ever showed which version produced it), and rig connect
-  success/failure is logged.  ``rigctld`` gained DEBUG-level tracing of
-  every command and response, to pair with rigctld's own ``-vv``.
+- **Much more diagnostic logging around audio and rig control**, because
+  the last bug report's log couldn't answer basic questions:
+  - the app version is now written to the **log file** (it was printed only
+    to stderr, discarded on a packaged Windows GUI build — so no report
+    ever showed which version produced it);
+  - rig connect success/failure is logged;
+  - ``rigctld`` traces every command and response at DEBUG, to pair with
+    rigctld's own ``-vv``;
+  - every TX audio chunk write is timed, and a stalling device is called
+    out by name and host API;
+  - input-stream teardown times ``stop()`` and ``close()`` separately, so
+    the "audio worker stop() did not complete in 2 s" warning on shutdown
+    now says *which* call blocked and for how long — and no longer blames
+    TCI on setups that aren't using it;
+  - a TX output device on the **MME** host API logs a one-time warning
+    recommending WASAPI, since MME is where the audio wedge has been seen.
 
 ---
 

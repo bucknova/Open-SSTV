@@ -994,6 +994,21 @@ If either file is missing or empty, the app creates it with default values on fi
 - Wrong colors may indicate a mode mismatch. The app auto-detects mode via the VIS header, but if the VIS was corrupted by noise, the wrong decoder may be applied. Try decoding from a saved WAV file using `open-sstv-decode`.
 - If you are receiving from a station using an unusual Robot 36 variant, the app auto-detects between the two common Robot 36 layouts (PySSTV single-line and canonical broadcast line-pair).
 
+**A transmission stalls partway, or the app hangs for a couple of seconds when quitting (Windows)**
+
+- Both point at the audio device rather than the radio. On Windows, prefer a
+  **WASAPI** output device over the same device's **MME** entry in
+  Settings → Audio. MME is the legacy Windows audio backend, and it is where
+  transmissions have been seen to stop draining mid-image and where app
+  shutdown blocks long enough to log *"audio worker stop() did not complete
+  in 2 s"*.
+- Your rig is **not** left keyed by this: PTT is dropped independently of the
+  audio path. If a transmission does stall, the log records it explicitly —
+  look for *"TX audio write stalled"* or *"TX audio appears WEDGED"*.
+- If it happens on WASAPI too, please file an issue with an exported
+  diagnostics bundle (Settings → Diagnostics → *Export Diagnostics…*) — the
+  log now names the device, host API, and which call blocked.
+
 **Rig not connecting (rigctld)**
 
 - Make sure `rigctld` is running. If you are not using auto-launch, start it manually: `rigctld -m MODEL -r /dev/ttyUSB0 -s 19200 &`

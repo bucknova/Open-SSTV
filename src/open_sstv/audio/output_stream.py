@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections.abc import Callable
 
 import numpy as np
@@ -58,6 +59,37 @@ _log = logging.getLogger(__name__)
 _tx_state_lock = threading.Lock()
 _active_stream: sd.OutputStream | None = None
 _tx_active_count: int = 0
+
+#: Monotonically increasing count of completed chunk writes.  ``stop()``
+#: samples it, waits, and samples again: if it hasn't moved the writer is
+#: still stuck inside one ``stream.write()`` and ``abort()`` did not take.
+_write_seq: int = 0
+#: Human-readable description of the device the live stream is writing to,
+#: so a wedge report names the device and host API without the caller
+#: having to plumb it through.
+_active_device_desc: str = "?"
+
+#: A single ~100 ms chunk taking longer than this to write means the device
+#: is not draining at real-time speed — the leading indicator of the wedge
+#: this module's escalation path exists to survive.
+_SLOW_WRITE_WARN_S: float = 1.0
+#: How long ``stop()`` gives ``abort()`` to actually unblock the writer
+#: before escalating to ``close()``.
+_ABORT_GRACE_S: float = 1.5
+
+
+def _describe_device(device: object) -> str:
+    """Best-effort ``name (host API)`` for logs.  Never raises."""
+    try:
+        if isinstance(device, AudioDevice):
+            return f"{device.name!r} via {device.host_api}"
+        if device is None:
+            return "system default"
+        info = sd.query_devices(device)
+        api = sd.query_hostapis(int(info["hostapi"]))["name"]
+        return f"{info['name']!r} via {api}"
+    except Exception:  # noqa: BLE001 — diagnostics must never break TX
+        return f"device={device!r}"
 
 
 def is_tx_active() -> bool:
@@ -193,7 +225,8 @@ def play_blocking(
         _CHECK_INTERVAL = 10
         _check_counter = 0
 
-        global _active_stream
+        global _active_stream, _active_device_desc, _write_seq
+        desc = _describe_device(device)
         with sd.OutputStream(
             samplerate=sample_rate,
             channels=1,
@@ -205,6 +238,10 @@ def play_blocking(
             # ``stream.write()`` on a stalled USB driver.
             with _tx_state_lock:
                 _active_stream = stream
+                _active_device_desc = desc
+            _log.debug(
+                "TX playback opening: %s, %d samples @ %d Hz", desc, total, sample_rate
+            )
             try:
                 written = 0
                 while written < total:
@@ -249,7 +286,20 @@ def play_blocking(
                                 ).astype(chunk.dtype)
                     if chunk_callback is not None:
                         chunk_callback(chunk)
+                    # Time every write.  A ~100 ms chunk that takes seconds
+                    # means the device has stopped draining — the leading
+                    # edge of the wedge where abort() may not reach us.
+                    _w0 = time.monotonic()
                     stream.write(chunk.reshape(-1, 1))
+                    _elapsed = time.monotonic() - _w0
+                    with _tx_state_lock:
+                        _write_seq += 1
+                    if _elapsed > _SLOW_WRITE_WARN_S:
+                        _log.warning(
+                            "TX audio write stalled %.1f s on a %.0f ms chunk "
+                            "(%s) — device is not draining in real time",
+                            _elapsed, (end - written) / sample_rate * 1000, desc,
+                        )
                     written = end
                     if progress_callback is not None:
                         progress_callback(written, total)
@@ -299,11 +349,60 @@ def stop() -> None:
     sd.stop()
     with _tx_state_lock:
         stream = _active_stream
-    if stream is not None:
-        try:
-            stream.abort()
-        except Exception as exc:  # noqa: BLE001
-            _log.warning("output_stream.stop: abort failed: %s", exc)
+        seq_before = _write_seq
+        desc = _active_device_desc
+    if stream is None:
+        return
+    t0 = time.monotonic()
+    try:
+        stream.abort()
+        _log.info(
+            "output_stream.stop: abort() returned in %.0f ms (%s)",
+            (time.monotonic() - t0) * 1000, desc,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("output_stream.stop: abort failed: %s (%s)", exc, desc)
+    # Escalation.  ``abort()`` is documented as safe from the stream-owning
+    # thread only; called cross-thread it is best-effort, and on Windows MME
+    # in particular it has been observed not to unblock a wedged write().
+    # Watch from a throwaway thread (never block the caller — this runs on
+    # the GUI thread and on the remote dead-man's-switch tick) and, if the
+    # writer still hasn't advanced, close the stream outright as a stronger
+    # lever.  Logged either way so a wedge is legible in the next report.
+    threading.Thread(
+        target=_escalate_if_stuck,
+        args=(stream, seq_before, desc),
+        name="sstv-tx-abort-escalate",
+        daemon=True,
+    ).start()
+
+
+def _escalate_if_stuck(
+    stream: sd.OutputStream, seq_before: int, desc: str
+) -> None:
+    """If ``abort()`` didn't unblock the writer, escalate to ``close()``."""
+    time.sleep(_ABORT_GRACE_S)
+    with _tx_state_lock:
+        still_live = _active_stream is stream
+        seq_now = _write_seq
+    if not still_live:
+        return  # playback unwound normally — nothing to escalate
+    if seq_now != seq_before:
+        # Writes are still completing, so the loop is alive and will notice
+        # the stop flag at the next chunk boundary. Not a wedge.
+        return
+    _log.error(
+        "TX audio appears WEDGED: no write progress %.1f s after abort() on %s. "
+        "Escalating to stream.close(). PTT has already been dropped "
+        "independently, so this is an audio-path problem, not a stuck "
+        "transmitter. On Windows, prefer a WASAPI output device over MME.",
+        _ABORT_GRACE_S, desc,
+    )
+    try:
+        stream.close()
+        _log.info("output_stream: escalated close() returned")
+    except Exception as exc:  # noqa: BLE001 — last resort, never raise
+        _log.error("output_stream: escalated close() also failed: %s", exc)
 
 
 __all__ = ["is_tx_active", "play_blocking", "run_if_tx_idle", "stop"]

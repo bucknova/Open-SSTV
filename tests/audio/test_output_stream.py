@@ -10,7 +10,9 @@ playback is exercised by hand during release smoke testing — see
 """
 from __future__ import annotations
 
-from unittest.mock import patch
+import logging
+import time
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -388,3 +390,80 @@ def test_periodic_check_not_called_when_none() -> None:
 
     assert len(fake_stream.writes) == 5
     assert not stop_event.is_set()
+
+
+# === wedge survival (v0.6.1) ===========================================
+#
+# A FlexRadio user on Windows/MME hit a TX audio path that stopped
+# draining; abort() called cross-thread did not unblock the writer, so the
+# worker thread leaked. stop() now escalates to close() when the writer
+# makes no progress, and says so in the log.
+
+
+class TestWedgeEscalation:
+    def test_escalates_to_close_when_writer_makes_no_progress(
+        self, monkeypatch: pytest.MonkeyPatch, caplog
+    ) -> None:
+        from open_sstv.audio import output_stream as os_mod
+
+        monkeypatch.setattr(os_mod, "_ABORT_GRACE_S", 0.05)
+        stream = MagicMock()
+        monkeypatch.setattr(os_mod, "_active_stream", stream)
+        monkeypatch.setattr(os_mod, "_active_device_desc", "'DAX TX' via MME")
+        monkeypatch.setattr(os_mod, "_write_seq", 7)  # frozen: no progress
+        monkeypatch.setattr(os_mod.sd, "stop", lambda: None)
+
+        with caplog.at_level(logging.ERROR):
+            os_mod.stop()
+            time.sleep(0.3)  # let the escalation thread run
+
+        stream.abort.assert_called_once()
+        stream.close.assert_called_once(), "a wedged writer must escalate to close()"
+        assert any("WEDGED" in r.message for r in caplog.records)
+
+    def test_no_escalation_when_writes_are_progressing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A slow-but-alive device must not have its stream closed."""
+        from open_sstv.audio import output_stream as os_mod
+
+        monkeypatch.setattr(os_mod, "_ABORT_GRACE_S", 0.05)
+        stream = MagicMock()
+        monkeypatch.setattr(os_mod, "_active_stream", stream)
+        monkeypatch.setattr(os_mod, "_write_seq", 1)
+        monkeypatch.setattr(os_mod.sd, "stop", lambda: None)
+
+        os_mod.stop()
+        # Writer advances during the grace window → still alive.
+        os_mod._write_seq = 2
+        time.sleep(0.3)
+
+        stream.abort.assert_called_once()
+        stream.close.assert_not_called()
+
+    def test_no_escalation_when_playback_unwound(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If play_blocking finished normally, don't touch the old stream."""
+        from open_sstv.audio import output_stream as os_mod
+
+        monkeypatch.setattr(os_mod, "_ABORT_GRACE_S", 0.05)
+        stream = MagicMock()
+        monkeypatch.setattr(os_mod, "_active_stream", stream)
+        monkeypatch.setattr(os_mod, "_write_seq", 3)
+        monkeypatch.setattr(os_mod.sd, "stop", lambda: None)
+
+        os_mod.stop()
+        os_mod._active_stream = None  # playback unwound cleanly
+        time.sleep(0.3)
+
+        stream.close.assert_not_called()
+
+    def test_stop_is_safe_with_no_active_stream(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from open_sstv.audio import output_stream as os_mod
+
+        monkeypatch.setattr(os_mod, "_active_stream", None)
+        monkeypatch.setattr(os_mod.sd, "stop", lambda: None)
+        os_mod.stop()  # must not raise
