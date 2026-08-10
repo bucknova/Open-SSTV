@@ -559,6 +559,8 @@ Open **File > Settings > Audio** to configure audio input and output devices.
 
 The device list is refreshed each time you open the Settings dialog, so hot-plugged USB devices will appear.
 
+**Linux (PipeWire) note:** if you route TX audio through a virtual PipeWire sink — for example a "Radio" null-sink you've set up with `pactl`, `qpwgraph`, or `pavucontrol` to keep SSTV audio separate from your desktop sound — it appears in the Output Device list labelled **(PipeWire)**, alongside the regular sound-card entries. Selecting it moves Open-SSTV's transmit audio onto that sink specifically; every other application's audio stays wherever it already goes.
+
 ### 11.2 Sample Rate
 
 Choose between **48,000 Hz** (48 kHz) and **44,100 Hz** (44.1 kHz). The default is 48 kHz, which is the standard for SSTV applications and matches the encoder's native sample rate. Most USB audio interfaces support both rates. Use 44.1 kHz only if your audio device does not support 48 kHz.
@@ -597,12 +599,12 @@ Open the settings dialog via **File > Settings** (or the menu shortcut). It has 
 | Input Gain | Digital gain for received audio, 0–200% | 100% |
 | Output Gain | Digital gain for transmitted audio, 0–100% (extend to 200% with overdrive) | 100% |
 | Enable overdrive | Expands TX Output Gain ceiling from 100% to 200% | Off |
-| Test Tone | Transmit a 700 Hz + 1900 Hz two-tone signal for 5 s (enabled when a rig is connected) | — |
+| Test Tone | Transmit a 700 Hz + 1900 Hz two-tone signal for 5 s (enabled whenever no transmission is already in flight — no rig connection required) | — |
 | Weak-signal mode | Relaxes VIS leader detection (40% → 25%) and start-bit minimum (20 ms → 15 ms) | Off |
 | Apply slant correction to final image | Re-decodes the completed image with a global least-squares timing correction. Helpful for clean signals with clock drift; can corrupt weak/marginal signals. | Off |
 | Per-line incremental decode (all modes) | Decodes each scan line as its sync pulse arrives instead of reprocessing the full audio buffer on every flush. Default since v0.1.24. Uncheck to fall back to the legacy batch decoder. | On |
 
-**TX gain calibration workflow:** With a rig connected, raise Output Gain → click Test Tone → watch your radio's ALC meter → adjust Output Gain up or down → repeat until ALC just barely flickers on peaks. The gain slider remains live while the tone is playing so you can tune without stopping. For typical IC-7300 / USB-audio setups, ~10–15% is the sweet spot.
+**TX gain calibration workflow:** Raise Output Gain → click Test Tone → watch your radio's ALC meter → adjust Output Gain up or down → repeat until ALC just barely flickers on peaks. The gain slider remains live while the tone is playing so you can tune without stopping. For typical IC-7300 / USB-audio setups, ~10–15% is the sweet spot. Test Tone doesn't require a rig connection — VOX/manual-PTT operators can use it too; watch the radio's own ALC meter and key it however you normally key transmissions (rigctld/serial PTT, or your radio's VOX detecting the tone).
 
 > **Enable overdrive** only if ALC won't move at 100%. Most setups don't need it. When you tick the checkbox, the slider ceiling expands from 100% to 200%.
 
@@ -1038,6 +1040,7 @@ If either file is missing or empty, the app creates it with default values on fi
 - Increase the output gain if the level is very low.
 - If using a USB audio interface, make sure it is selected as the output device — not your computer's built-in speakers.
 - On macOS, check System Settings > Sound to ensure the correct output device is active.
+- On Linux with PipeWire, if you route audio to your radio through a virtual sink, select that named sink (labelled "(PipeWire)") rather than "System default" — see [11.1 Choosing Audio Devices](#111-choosing-audio-devices). If transmission audio doesn't reach the sink, confirm `pactl` is installed (part of any standard PipeWire desktop) and check the log for a "routed" or "no new sink-input appeared" message.
 
 **ALC doesn't move during Test Tone or transmission**
 

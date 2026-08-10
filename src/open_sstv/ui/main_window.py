@@ -114,6 +114,7 @@ from open_sstv.audio.input_stream import (
     DEFAULT_BLOCKSIZE,
     InputStreamWorker,
 )
+from open_sstv.audio.pipewire_route import PipeWireSink, find_pipewire_sink_by_name
 from open_sstv.audio.tci_input_stream import TciInputStreamWorker
 from open_sstv.config.schema import AppConfig
 from open_sstv.config.store import last_corrupt_backup, load_config, save_config
@@ -455,7 +456,7 @@ class MainWindow(QMainWindow):
     def __init__(
         self,
         rig: Rig | None = None,
-        output_device: AudioDevice | int | None = None,
+        output_device: AudioDevice | PipeWireSink | int | None = None,
         input_device: AudioDevice | int | None = None,
         config: AppConfig | None = None,
         parent: QMainWindow | None = None,
@@ -494,6 +495,16 @@ class MainWindow(QMainWindow):
             output_device = find_output_device_by_name(
                 self._config.audio_output_device
             )
+            # Not a PortAudio/ALSA device by that name — try a PipeWire
+            # sink (e.g. a user's virtual "Radio" routing sink). PortAudio
+            # only exposes those under its JACK host API, which is unsafe
+            # to write to directly (see audio/pipewire_route.py); TxWorker
+            # routes a PipeWireSink via pactl instead of opening it as a
+            # PortAudio device.
+            if output_device is None:
+                output_device = find_pipewire_sink_by_name(
+                    self._config.audio_output_device
+                )
             if output_device is None and self._config.audio_output_device:
                 self._missing_devices.append(
                     f"output '{self._config.audio_output_device}'"
@@ -1986,7 +1997,9 @@ class MainWindow(QMainWindow):
         # v0.3: push full config so template gallery can re-render thumbnails
         # with updated callsign / grid / op-name token values.
         self._tx_panel.set_app_config(self._config)
-        new_output = find_output_device_by_name(self._config.audio_output_device)
+        new_output = find_output_device_by_name(
+            self._config.audio_output_device
+        ) or find_pipewire_sink_by_name(self._config.audio_output_device)
         self._tx_worker.set_output_device(new_output)
         self._tx_worker.set_output_gain(self._config.audio_output_gain)
         self._tx_worker.set_ptt_delay(self._config.ptt_delay_s)

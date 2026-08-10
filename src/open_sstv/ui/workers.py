@@ -87,6 +87,7 @@ _log = logging.getLogger(__name__)
 
 from open_sstv.audio import output_stream
 from open_sstv.audio.devices import AudioDevice
+from open_sstv.audio.pipewire_route import PipeWireSink
 from open_sstv.core.cw import make_cw
 from open_sstv.core.decoder import (
     DecodeError,
@@ -444,7 +445,7 @@ class TxWorker(QObject):
     def __init__(
         self,
         rig: Rig | None = None,
-        output_device: AudioDevice | int | None = None,
+        output_device: AudioDevice | PipeWireSink | int | None = None,
         sample_rate: int = DEFAULT_SAMPLE_RATE,
         ptt_delay_s: float = DEFAULT_PTT_DELAY_S,
         parent: QObject | None = None,
@@ -547,7 +548,7 @@ class TxWorker(QObject):
         """
         self._waterfall_active = bool(active)
 
-    def set_output_device(self, device: AudioDevice | int | None) -> None:
+    def set_output_device(self, device: AudioDevice | PipeWireSink | int | None) -> None:
         """Change the output device at runtime (e.g. after settings save)."""
         self._output_device = device
 
@@ -1269,10 +1270,16 @@ class TxWorker(QObject):
                         "abort(). If transmissions hang, pick the same device "
                         "under WASAPI in Settings → Audio.",
                     )
+                # A PipeWireSink target never goes through PortAudio's
+                # JACK host API directly (verified to corrupt real audio —
+                # see audio/pipewire_route.py); play_blocking opens the
+                # safe system default and moves that stream onto the sink
+                # via pactl instead.
+                is_pipewire_sink = isinstance(self._output_device, PipeWireSink)
                 output_stream.play_blocking(
                     samples,
                     self._sample_rate,
-                    device=self._output_device,
+                    device=None if is_pipewire_sink else self._output_device,
                     progress_callback=lambda played, total: self.transmission_progress.emit(played, total),
                     stop_event=self._stop_event,
                     gain_provider=(
@@ -1282,6 +1289,9 @@ class TxWorker(QObject):
                     chunk_callback=(
                         (lambda chunk: self.tx_audio_chunk.emit(chunk))
                         if self._waterfall_active else None
+                    ),
+                    route_to_pipewire_sink=(
+                        self._output_device if is_pipewire_sink else None
                     ),
                 )
                 playback_succeeded = not self._stop_event.is_set()

@@ -55,13 +55,18 @@ class RadioPanel(QWidget):
         self._connect_btn.clicked.connect(self._on_connect_clicked)
         layout.addWidget(self._connect_btn)
 
-        # Test Tone button — disabled until a real rig is connected
+        # Test Tone button — disabled only while a TX is already in flight.
+        # Deliberately independent of rig-connection state: PTT keying goes
+        # through whatever backend is configured, including the no-op
+        # ManualRig for VOX/manual-PTT operators who never click "Connect
+        # Rig" at all — they still need a way to key up and calibrate ALC.
         self._test_tone_btn = QPushButton("Test Tone")
         self._test_tone_btn.setToolTip(
             "Transmit a 700 Hz + 1900 Hz two-tone signal for 5 s.\n"
             "Adjust mic/RF gain so ALC just barely lights on peaks."
         )
-        self._test_tone_btn.setEnabled(False)
+        # Starts enabled — see _update_test_tone_btn: only an in-flight TX
+        # disables it, and none is in flight at construction time.
         self._test_tone_btn.clicked.connect(self.test_tone_requested.emit)
         layout.addWidget(self._test_tone_btn)
 
@@ -228,8 +233,13 @@ class RadioPanel(QWidget):
         self._connect_btn.setEnabled(not self._tx_active)
 
     def _update_test_tone_btn(self) -> None:
-        """Enable the Test Tone button only when a rig is connected and idle."""
-        self._test_tone_btn.setEnabled(self._connected and not self._tx_active)
+        """Enable the Test Tone button whenever no TX is already in flight.
+
+        Not gated on rig connection — VOX/manual-PTT operators never
+        connect a rig at all, and Test Tone works fine through the no-op
+        ManualRig backend (see ``TxWorker._run_tx``).
+        """
+        self._test_tone_btn.setEnabled(not self._tx_active)
 
     def _update_band_btn(self) -> None:
         """Enable the Band Plan button only when a rig is connected and idle."""

@@ -653,3 +653,34 @@ class TestFlexRadioDirect:
         assert out.flex_host == "192.168.11.65"
         assert out.flex_port == 4992
         assert out.flex_slice == 1
+
+
+# ---------------------------------------------------------------------------
+# Test Tone button: enabled independent of rig connection
+# ---------------------------------------------------------------------------
+#
+# VOX/manual-PTT operators never connect a rig at all — PTT keying goes
+# through the no-op ManualRig backend (see TxWorker._run_tx). Test Tone
+# must stay usable for them; only an in-flight TX should disable it. Twin
+# of the same fix in RadioPanel (tests/ui/test_radio_panel.py).
+
+
+class TestTestToneButtonRigIndependence:
+    def test_enabled_with_rig_connected_false(self, dialog: SettingsDialog) -> None:
+        assert dialog._test_tone_btn.isEnabled()
+
+    def test_enabled_even_when_rig_connected_true(self, qtbot, default_config: AppConfig) -> None:
+        dlg = SettingsDialog(config=default_config, rig_connected=True)
+        qtbot.addWidget(dlg)
+        assert dlg._test_tone_btn.isEnabled()
+
+    def test_disabled_during_tx(self, dialog: SettingsDialog) -> None:
+        dialog.on_tx_started()
+        assert not dialog._test_tone_btn.isEnabled()
+        assert dialog._test_tone_btn.text() == "Testing…"
+
+    def test_re_enabled_after_tx_ends(self, dialog: SettingsDialog) -> None:
+        dialog.on_tx_started()
+        dialog.on_tx_ended()
+        assert dialog._test_tone_btn.isEnabled()
+        assert dialog._test_tone_btn.text() == "Test Tone"
