@@ -9,6 +9,12 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.6.4] — 2026-08-11
+
+Receive robustness under fading conditions.
+
 ### Fixed
 
 - **Deep QSB could cut a decode short no matter how patient you told it to
