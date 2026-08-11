@@ -11,6 +11,87 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.6.2] — 2026-08-11
+
+Linux audio: PipeWire sink routing, and a crash fix that supersedes the
+v0.6.1 TX-wedge workaround.  Contributed by [@dacrhu](https://github.com/dacrhu).
+
+**Linux users on v0.6.1 should update:** pressing Stop mid-transmission
+could segfault the application on that release.
+
+### Added
+
+- **TX audio can now target a specific PipeWire sink on Linux** (e.g. a
+  user-created virtual "Radio" routing sink), listed in Settings → Audio →
+  Output alongside the regular PortAudio device list, labelled "(PipeWire)".
+  PortAudio only exposes PipeWire's own named sinks under its JACK host
+  API, and writing to that host API directly via PortAudio's blocking
+  `OutputStream.write()` was found to corrupt real audio (confirmed via
+  spectrogram comparison: a WAV export of the exact TX buffer is clean, the
+  same buffer played over the ALSA "default" pass-through is clean, only
+  writing to the JACK-hostapi device directly produces broadband noise —
+  `sd.play()`'s callback-based path does not exhibit this). Instead,
+  Open-SSTV now always opens the safe ALSA "default" stream and uses
+  `pactl move-sink-input` to move that specific, already-open stream onto
+  the chosen sink after the fact — every other application's audio is
+  unaffected, unlike changing PipeWire's system-wide default sink would be.
+  New module: `audio/pipewire_route.py`. Everything degrades gracefully
+  (plays on the system default, as before) if `pactl` is unavailable, no
+  PipeWire session is running, or the routing call fails for any reason —
+  a routing failure never aborts a transmission.
+
+### Fixed
+
+- **Test Tone was disabled unless a rig was connected.** Both the Radio
+  panel and Settings → Audio's "Test Tone" buttons required an active
+  rigctld/serial/TCI/FlexRadio connection before they could be clicked —
+  but PTT keying already went through the no-op `ManualRig` backend
+  without a rig connected, so the gating served no functional purpose and
+  just blocked VOX/manual-PTT operators (who never connect a rig at all)
+  from calibrating ALC. Both buttons are now enabled whenever no
+  transmission is already in flight, regardless of rig-connection state.
+- **Pressing Stop mid-transmission could segfault the whole application.**
+  Root-caused with `faulthandler` and a clean-worktree comparison: once
+  PortAudio's blocking `OutputStream.write()` genuinely wedged on a real
+  Linux/PipeWire system, nothing could safely unblock it — `stream.abort()`
+  from another thread returned without actually interrupting the write;
+  the existing wedge-escalation fallback (`stream.close()` from a third
+  thread, added in v0.6.1 for a Windows/MME hang) corrupted the heap inside
+  PortAudio's ALSA XRUN-recovery path while that write was still blocked;
+  and even leaving the wedged stream alone didn't help, since `sounddevice`
+  closes every open stream at interpreter exit, re-triggering the same
+  crash the next time the app quit. Confirmed unrelated to the PipeWire
+  routing feature above — it reproduced identically on the plain "System
+  default" device. `play_blocking` now drives TX audio entirely through
+  PortAudio's callback API (the same mechanism RX already used safely, and
+  the one the old fast path was quietly built on) instead of a blocking
+  write loop, eliminating the wedge by construction: there is no longer a
+  blocking write() call anywhere in the hot path for a stream to get stuck
+  in. Stress-tested at ~20 varied Stop timings — cross-thread, with and
+  without PipeWire-sink routing live, through the real TX worker — with
+  zero wedges and zero crashes. The now-unreachable escalate-to-`close()`
+  machinery has been removed from `audio/output_stream.py`.
+- **Worked around a `sounddevice` internal that could crash a long TX under
+  test instrumentation.** While validating the fix above, a *different*
+  segfault turned up during a ~2-minute real-audio integration test (not
+  part of this project's own CI selection, which excludes `gui`-marked
+  tests): `sounddevice`'s own callback-wrapping code builds each buffer via
+  an in-place `ndarray.shape = ...` assignment deprecated since NumPy 2.5,
+  firing on *every* callback — tens of thousands of times over a real
+  transmission. Python's default warning filter dedupes these harmlessly in
+  normal use, but a warning-*capturing* context (pytest's default per-test
+  capture) disables that dedup, and the warnings module isn't thread-safe
+  against that volume from PortAudio's real-time callback thread. Patched
+  `sounddevice._array()` at import time to build the same buffer via
+  `np.reshape` (an equivalent zero-copy view, never deprecated) instead —
+  confirmed via a forced `simplefilter("always")` check that the warning no
+  longer fires at all, and via repeated clean runs of the previously-
+  crashing scenario. Not a real-world risk for users (the default filter
+  already made this harmless outside a test-capture context), but cheap
+  insurance now that it's been seen.
+
+---
+
 ## [0.6.1] — 2026-07-30
 
 Rig-control and audio-path robustness, driven by a FlexRadio operator's

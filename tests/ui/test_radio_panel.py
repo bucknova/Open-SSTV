@@ -153,3 +153,35 @@ class TestBandMenuStructure:
             assert emitted == [(entry.freq_hz, entry.rig_mode, entry.passband_hz)], (
                 f"{action.text()!r} emitted {emitted}"
             )
+
+
+# === Test Tone button: enabled independent of rig connection ===
+#
+# VOX/manual-PTT operators never click "Connect Rig" at all — PTT keying
+# goes through the no-op ManualRig backend (see TxWorker._run_tx). Test
+# Tone must stay usable for them; only an in-flight TX should disable it.
+
+
+def test_test_tone_enabled_by_default_with_no_rig_connected(panel: RadioPanel) -> None:
+    assert panel._test_tone_btn.isEnabled()
+
+
+def test_test_tone_stays_enabled_after_disconnected_state(panel: RadioPanel) -> None:
+    panel.set_connected(False)
+    assert panel._test_tone_btn.isEnabled()
+
+
+def test_test_tone_enabled_when_connected_too(panel: RadioPanel) -> None:
+    panel.set_connected(True)
+    assert panel._test_tone_btn.isEnabled()
+
+
+def test_test_tone_disabled_during_tx(panel: RadioPanel) -> None:
+    panel.set_tx_active(True)
+    assert not panel._test_tone_btn.isEnabled()
+
+
+def test_test_tone_re_enabled_after_tx_ends(panel: RadioPanel) -> None:
+    panel.set_tx_active(True)
+    panel.set_tx_active(False)
+    assert panel._test_tone_btn.isEnabled()

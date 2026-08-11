@@ -50,6 +50,7 @@ from open_sstv.audio.devices import (
     list_input_devices,
     list_output_devices,
 )
+from open_sstv.audio.pipewire_route import list_pipewire_sinks
 from open_sstv.config.schema import VALID_BAUD_RATES, AppConfig
 from open_sstv.core.banner import apply_tx_banner, scaled_banner_params
 from open_sstv.core.modes import Mode
@@ -647,6 +648,20 @@ class SettingsDialog(QDialog):
                 self._output_combo.setCurrentIndex(
                     self._output_combo.count() - 1
                 )
+        # PipeWire's own named sinks (e.g. a user's virtual "Radio" routing
+        # sink) — empty list on macOS/Windows/no-PipeWire, so this is a
+        # no-op there. Not part of the PortAudio list above: PortAudio only
+        # exposes them via its JACK host API, which TxWorker deliberately
+        # never writes to directly (see audio/pipewire_route.py) because
+        # doing so corrupts real audio. Selecting one here instead routes
+        # a normally-opened stream onto the sink via pactl.
+        for sink in sorted(list_pipewire_sinks(), key=lambda s: s.description.lower()):
+            label = f"{sink.description} (PipeWire)"
+            self._output_combo.addItem(label, sink.description)
+            if sink.description == self._config.audio_output_device:
+                self._output_combo.setCurrentIndex(
+                    self._output_combo.count() - 1
+                )
         form.addRow("Output device:", self._output_combo)
 
         # Sample rate
@@ -710,8 +725,13 @@ class SettingsDialog(QDialog):
         gain_layout.addRow("", self._overdrive_check)
 
         # Test Tone button — triggers a 5 s calibration transmission.
-        # Only enabled when a rig is connected (enforced via _rig_connected /
-        # _tx_active flags kept in sync with TxWorker TX lifecycle signals).
+        # Disabled only while a TX is already in flight (_tx_active, kept in
+        # sync with TxWorker's lifecycle signals) — deliberately independent
+        # of rig-connection state, same reasoning as the Radio panel's
+        # button: VOX/manual-PTT operators never connect a rig and still
+        # need to key up and calibrate ALC. ``_rig_connected`` no longer
+        # gates this; kept as a constructor param for callers/tests that
+        # still pass it.
         self._test_tone_btn = QPushButton("Test Tone")
         self._test_tone_btn.setToolTip(
             "Transmit the configured two-tone signal for 5 s.\n"
@@ -1910,9 +1930,13 @@ class SettingsDialog(QDialog):
         self.test_tone_requested.emit()
 
     def _update_test_tone_btn(self) -> None:
-        """Enable Test Tone only when a rig is connected and no TX is active."""
-        enabled = self._rig_connected and not self._tx_active
-        self._test_tone_btn.setEnabled(enabled)
+        """Enable Test Tone whenever no TX is already in flight.
+
+        Not gated on rig connection — see the comment where this button is
+        built, and ``RadioPanel._update_test_tone_btn`` for the Radio-panel
+        twin of this same button.
+        """
+        self._test_tone_btn.setEnabled(not self._tx_active)
         self._test_tone_btn.setText("Testing…" if self._tx_active else "Test Tone")
 
     # === TX lifecycle slots (connected by MainWindow before exec()) ===
