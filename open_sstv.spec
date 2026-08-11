@@ -215,5 +215,17 @@ if sys.platform == "darwin":
             "NSPrincipalClass": "NSApplication",
             "NSHighResolutionCapable": True,
             "LSMinimumSystemVersion": "11.0",
+            # Required for RX.  macOS gates *all* audio input behind TCC —
+            # including virtual loopback devices like BlackHole that never
+            # touch a real microphone.  Without this key macOS refuses to
+            # even show the permission prompt, and a denied app still opens
+            # its input stream and receives pure silence, so capture appears
+            # to run while nothing ever decodes (issue #35).  Pairs with the
+            # com.apple.security.device.audio-input entitlement in
+            # packaging/macos-entitlements.plist.
+            "NSMicrophoneUsageDescription": (
+                "Open-SSTV needs access to audio input devices to receive "
+                "and decode SSTV signals from your radio in real time."
+            ),
         },
     )

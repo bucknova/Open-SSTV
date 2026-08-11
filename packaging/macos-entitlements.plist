@@ -36,5 +36,21 @@
     <true/>
     <key>com.apple.security.cs.allow-dyld-environment-variables</key>
     <true/>
+    <!--
+      Audio input (RX).  Under the hardened runtime, macOS refuses to even
+      prompt for microphone access without this entitlement — the TCC log
+      says so outright:
+
+          Prompting policy for hardened runtime; service:
+          kTCCServiceMicrophone requires entitlement
+          com.apple.security.device.audio-input but it is missing
+
+      and the denial is silent from the app's side: the input stream opens
+      fine and delivers nothing but zeroes.  Applies to every audio input,
+      including virtual loopback devices like BlackHole (issue #35).
+      Pairs with NSMicrophoneUsageDescription in open_sstv.spec.
+    -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
 </dict>
 </plist>

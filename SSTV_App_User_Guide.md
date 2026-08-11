@@ -996,6 +996,19 @@ If either file is missing or empty, the app creates it with default values on fi
 - Wrong colors may indicate a mode mismatch. The app auto-detects mode via the VIS header, but if the VIS was corrupted by noise, the wrong decoder may be applied. Try decoding from a saved WAV file using `open-sstv-decode`.
 - If you are receiving from a station using an unusual Robot 36 variant, the app auto-detects between the two common Robot 36 layouts (PySSTV single-line and canonical broadcast line-pair).
 
+**macOS: capture starts but decodes nothing — the waterfall stays black**
+
+- Almost always microphone permission. macOS gates **every** audio input
+  behind privacy control, *including virtual loopback devices like
+  BlackHole and Loopback* that never touch a real microphone — and a
+  blocked app still opens its input stream successfully and simply receives
+  silence, so the app looks like it's capturing.
+- Open **System Settings → Privacy & Security → Microphone** and enable
+  Open-SSTV, then start capture again. From v0.6.3 the app detects this and
+  says so instead of pretending to capture.
+- If Open-SSTV isn't listed there at all, launch it and click **Start
+  Capture** once — that's what triggers the system prompt.
+
 **A transmission stalls partway, or the app hangs for a couple of seconds when quitting (Windows)**
 
 - Both point at the audio device rather than the radio. On Windows, prefer a
