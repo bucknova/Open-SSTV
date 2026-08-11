@@ -9,6 +9,16 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.6.2] — 2026-08-11
+
+Linux audio: PipeWire sink routing, and a crash fix that supersedes the
+v0.6.1 TX-wedge workaround.  Contributed by [@dacrhu](https://github.com/dacrhu).
+
+**Linux users on v0.6.1 should update:** pressing Stop mid-transmission
+could segfault the application on that release.
+
 ### Added
 
 - **TX audio can now target a specific PipeWire sink on Linux** (e.g. a
