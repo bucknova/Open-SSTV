@@ -11,6 +11,27 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.6.4] — 2026-08-11
+
+Receive robustness under fading conditions.
+
+### Fixed
+
+- **Deep QSB could cut a decode short no matter how patient you told it to
+  be.**  The receive watchdog has always had two independent guards — one
+  for "no new line in N seconds", one for total elapsed time — but
+  Settings → Receive → *No-progress timeout* only ever moved the first.
+  The second stayed pinned at ``mode duration × 1.5``, so a Scottie S1 was
+  abandoned after 164 s however long a fade the operator said to tolerate,
+  and raising the setting appeared to do nothing.  The total budget now
+  also scales with that setting (``duration + timeout × 4``), so a decode
+  can ride out several fades of the length you asked for.  Modes longer
+  than 40 s keep their previous default budget exactly; the three short
+  modes gain 2–5 s.  Reported by
+  [@dacrhu](https://github.com/dacrhu) (#40).
+
+---
+
 ## [0.6.3] — 2026-08-11
 
 macOS live capture fix.

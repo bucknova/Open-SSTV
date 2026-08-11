@@ -794,9 +794,12 @@ class SettingsDialog(QDialog):
         self._watchdog_spin.setSuffix(" s")
         self._watchdog_spin.setValue(self._config.rx_watchdog_timeout_s)
         self._watchdog_spin.setToolTip(
-            "How many seconds without a new decoded line before the decoder\n"
-            "gives up and saves the partial image. The overall transmission\n"
-            "timeout (mode duration × 1.5) still applies regardless.\n"
+            "How long the decoder waits without a new decoded line before\n"
+            "giving up and saving the partial image.\n\n"
+            "Raising this also extends the overall per-transmission budget,\n"
+            "so a decode can ride out several fades of this length — under\n"
+            "deep QSB the overall limit used to cut the decode short no\n"
+            "matter what you set here.\n\n"
             "Default: 5 s. Increase for slow/fading HF conditions."
         )
         rx_layout.addRow("No-progress timeout:", self._watchdog_spin)
