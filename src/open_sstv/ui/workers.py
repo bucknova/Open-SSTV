@@ -187,13 +187,38 @@ _RX_WATCHDOG_TOTAL_FLOOR_S: float = 15.0
 _RX_WATCHDOG_LINE_MULTIPLIER: float = 5.0
 
 #: Minimum absolute "no-progress" timeout regardless of mode.
-#: Default is 10 s — enough to ride out a brief signal dip without
+#: Default is 5 s — enough to ride out a brief signal dip without
 #: keeping a decode alive so long that the resulting image is useless.
 #: Users can raise this via Settings → Receive → No-progress timeout
 #: if their propagation conditions have longer QSB fading cycles.
-#: The total-elapsed watchdog (mode duration × 1.5, 15 s floor) still
-#: fires independently regardless of this value.
+#: See ``_RX_WATCHDOG_STALL_ALLOWANCE`` for how raising it also extends
+#: the total-elapsed budget — it used to be ignored there, which made
+#: the setting look broken under deep QSB (issue #40).
 _RX_WATCHDOG_LINE_FLOOR_S: float = 5.0
+
+#: How many full-length stalls the total-elapsed budget tolerates on top
+#: of the mode's natural duration.
+#:
+#: Issue #40: the two watchdogs were fully independent, so raising the
+#: user-facing no-progress timeout moved only the per-line guard while
+#: the total-elapsed guard stayed pinned at ``duration × 1.5``.  Under
+#: deep QSB the total guard fired first and the setting appeared to do
+#: nothing — a Scottie S1 was capped at 164 s no matter what the operator
+#: chose.  A decode that legitimately survives N stalls of the length the
+#: operator said to tolerate needs room for them, so the total budget now
+#: also considers ``duration + line_budget × this``.
+#:
+#: 4 is deliberately generous: someone who raises the timeout is telling
+#: us conditions are bad.
+#:
+#: At the 5 s default this term is ``duration + 20 s``, which is below
+#: ``duration × 1.5`` for every mode longer than 40 s — so stock
+#: behaviour is untouched for 19 of the 22 modes.  The three short ones
+#: (Robot 36, Martin M4, Scottie S4) gain 2–5 s, which is the same
+#: intent as ``_RX_WATCHDOG_TOTAL_FLOOR_S``: the bare multiplier trips
+#: too eagerly on short modes.  Raising the setting is what produces the
+#: large increases, e.g. Scottie S1 164 s → 230 s at a 30 s timeout.
+_RX_WATCHDOG_STALL_ALLOWANCE: float = 4.0
 
 #: Wall-clock tick interval for the independent watchdog check, in
 #: milliseconds.  The original v0.1.36 watchdog only ran inside
@@ -1987,13 +2012,18 @@ class RxWorker(QObject):
         if spec is None:
             return
 
-        total_budget_s = max(
-            _RX_WATCHDOG_TOTAL_FLOOR_S,
-            spec.total_duration_s * _RX_WATCHDOG_TOTAL_MULTIPLIER,
-        )
         line_budget_s = max(
             self._watchdog_line_floor_s,
             _RX_WATCHDOG_LINE_MULTIPLIER * spec.line_time_ms / 1000.0,
+        )
+        # The total-elapsed budget now honours the operator's patience
+        # setting too (issue #40).  The third term only ever *raises* the
+        # budget — at the default line floor it sits below duration × 1.5
+        # for every supported mode, so stock behaviour is untouched.
+        total_budget_s = max(
+            _RX_WATCHDOG_TOTAL_FLOOR_S,
+            spec.total_duration_s * _RX_WATCHDOG_TOTAL_MULTIPLIER,
+            spec.total_duration_s + line_budget_s * _RX_WATCHDOG_STALL_ALLOWANCE,
         )
 
         elapsed_total = now - self._decoding_start_time

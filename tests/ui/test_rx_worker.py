@@ -910,3 +910,81 @@ def test_set_incremental_decode_clears_scratch(qapp) -> None:
 
     assert worker._scratch_samples == 0
     assert worker._scratch == []
+
+
+# === QSB patience: the no-progress setting must extend BOTH budgets =====
+#
+# Issue #40: the per-line and total-elapsed watchdogs were independent, so
+# raising Settings → Receive → No-progress timeout moved only the line
+# guard. Under deep QSB the total guard fired first and the setting looked
+# broken — a Scottie S1 was capped at 164 s however patient the operator
+# asked to be.
+
+
+class TestWatchdogBudgetsHonourTheSetting:
+    @staticmethod
+    def _budgets(mode, line_floor_s: float) -> tuple[float, float]:
+        """Recompute what _check_rx_watchdog would use, for one mode."""
+        from open_sstv.core.modes import MODE_TABLE
+        from open_sstv.ui.workers import (
+            _RX_WATCHDOG_LINE_MULTIPLIER,
+            _RX_WATCHDOG_STALL_ALLOWANCE,
+            _RX_WATCHDOG_TOTAL_FLOOR_S,
+            _RX_WATCHDOG_TOTAL_MULTIPLIER,
+        )
+
+        spec = MODE_TABLE[mode]
+        line = max(
+            line_floor_s, _RX_WATCHDOG_LINE_MULTIPLIER * spec.line_time_ms / 1000.0
+        )
+        total = max(
+            _RX_WATCHDOG_TOTAL_FLOOR_S,
+            spec.total_duration_s * _RX_WATCHDOG_TOTAL_MULTIPLIER,
+            spec.total_duration_s + line * _RX_WATCHDOG_STALL_ALLOWANCE,
+        )
+        return total, line
+
+    def test_raising_the_setting_raises_the_total_budget(self) -> None:
+        """The bug: this used to be flat regardless of the setting."""
+        from open_sstv.core.modes import Mode
+
+        at_default, _ = self._budgets(Mode.SCOTTIE_S1, 5.0)
+        at_30, _ = self._budgets(Mode.SCOTTIE_S1, 30.0)
+        at_60, _ = self._budgets(Mode.SCOTTIE_S1, 60.0)
+
+        assert at_30 > at_default, "raising patience must extend the total budget"
+        assert at_60 > at_30, "and keep extending it"
+        # Sanity: the budget still exceeds the mode's own natural length.
+        from open_sstv.core.modes import MODE_TABLE
+
+        assert at_30 > MODE_TABLE[Mode.SCOTTIE_S1].total_duration_s
+
+    def test_long_modes_keep_their_stock_budget_at_the_default(self) -> None:
+        """Only an operator who opts in gets the longer leash."""
+        from open_sstv.core.modes import MODE_TABLE
+        from open_sstv.ui.workers import (
+            _RX_WATCHDOG_TOTAL_FLOOR_S,
+            _RX_WATCHDOG_TOTAL_MULTIPLIER,
+        )
+
+        for mode, spec in MODE_TABLE.items():
+            if spec.total_duration_s <= 40:
+                continue  # short modes gain 2-5 s by design; see the constant
+            stock = max(
+                _RX_WATCHDOG_TOTAL_FLOOR_S,
+                spec.total_duration_s * _RX_WATCHDOG_TOTAL_MULTIPLIER,
+            )
+            total, _ = self._budgets(mode, 5.0)
+            assert total == pytest.approx(stock), (
+                f"{mode.value}: default budget changed ({stock:.0f} -> {total:.0f})"
+            )
+
+    def test_total_budget_always_exceeds_the_line_budget(self) -> None:
+        """A decode must never be killed by the total guard before the line
+        guard has had a chance to fire — otherwise the setting is moot."""
+        from open_sstv.core.modes import MODE_TABLE
+
+        for floor in (5.0, 30.0, 60.0, 300.0):
+            for mode in MODE_TABLE:
+                total, line = self._budgets(mode, floor)
+                assert total > line, f"{mode.value} @ {floor}s: total <= line"
