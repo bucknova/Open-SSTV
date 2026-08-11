@@ -56,6 +56,7 @@ from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
 _log = logging.getLogger(__name__)
 
+from open_sstv.audio import macos_permissions
 from open_sstv.audio.devices import AudioDevice
 
 if TYPE_CHECKING:
@@ -244,6 +245,19 @@ class InputStreamWorker(QObject):
         # way to flush PortAudio's internal device cache after a USB unplug.
         self._pa_reset()
         self._device_lost = False
+
+        # macOS gates every audio input behind TCC — including virtual
+        # loopback devices like BlackHole.  A denied app still opens its
+        # stream successfully and just receives silence forever, so without
+        # this check the UI reports "Capturing…" while nothing can ever
+        # decode (issue #35).  Refuse up front with an actionable message
+        # rather than pretending.  Any other status (including "unknown" on
+        # a platform or build where we can't read it) proceeds normally.
+        if macos_permissions.microphone_authorization() == macos_permissions.DENIED:
+            _log.warning("microphone access denied by macOS — capture refused")
+            self.error.emit(macos_permissions.DENIED_MESSAGE)
+            self.stopped.emit()
+            return
 
         try:
             self._stream = sd.InputStream(

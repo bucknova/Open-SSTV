@@ -11,6 +11,29 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.6.3] — 2026-08-11
+
+macOS live capture fix.
+
+### Fixed
+
+- **macOS: live capture received only silence** because the app bundle was
+  missing its microphone permission.  macOS gates *every* audio input
+  behind TCC — including virtual loopback devices like BlackHole that never
+  touch a real microphone — and under the hardened runtime it refuses to
+  even show the prompt unless the bundle carries the
+  ``com.apple.security.device.audio-input`` entitlement.  Worse, the denial
+  is invisible from the app's side: the input stream opens successfully and
+  delivers nothing but zeroes, so the UI reported "Capturing… / Listening…"
+  while nothing could ever decode.  The bundle now ships
+  ``NSMicrophoneUsageDescription`` and the audio-input entitlement, and
+  Open-SSTV checks the authorization status before starting capture —
+  refusing with a message that names the exact System Settings pane rather
+  than pretending to listen.  Reported, root-caused, and independently
+  verified by [@y1feng200156](https://github.com/y1feng200156) (#35).
+
+---
+
 ## [0.6.2] — 2026-08-11
 
 Linux audio: PipeWire sink routing, and a crash fix that supersedes the
