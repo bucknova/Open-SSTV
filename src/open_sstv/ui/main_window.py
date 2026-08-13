@@ -650,6 +650,13 @@ class MainWindow(QMainWindow):
         #: the capture flow must not run against a closing window /
         #: closed store.
         self._closing: bool = False
+        #: Set by ``closeEvent`` only once its teardown has actually run to
+        #: completion.  Deliberately NOT ``_closing``: that one means "we are
+        #: shutting down, stand down from new work" and is set by other code
+        #: paths (and by tests) well before any teardown happens, so reusing
+        #: it as the re-entry guard would skip teardown entirely and leave
+        #: worker threads running into window destruction — a qFatal abort.
+        self._teardown_complete: bool = False
         #: Source file of the in-flight offline decode (audit #4): its
         #: mtime stamps the logbook draft instead of "now", and the
         #: draft gets no rig frequency.
@@ -3640,6 +3647,19 @@ class MainWindow(QMainWindow):
             setattr(self, attr_worker, None)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 — Qt API
+        # closeEvent fires twice in ordinary use: once for the window's own
+        # close, once from ``app.aboutToQuit`` (wired in app.py).  The first
+        # pass stops the worker threads and deletes the worker QObjects, so
+        # the second reaches freed C++ objects.  Individual statements below
+        # carry ``except RuntimeError`` for this, but they cannot cover
+        # everything — the disconnect loop resolves ``self._tx_worker`` while
+        # building its iterable, outside the guard — and the error escaped as
+        # a SystemError out of the Qt virtual override.  Nothing remains to
+        # do on a second pass, so return before touching any of it.
+        if self._teardown_complete:
+            event.accept()
+            return
+
         # Audit #3: flag first.  The shutdown drain below can deliver
         # one final queued image_complete (stop-flush, RX watchdog);
         # the capture flow checks this and stands down instead of
@@ -3859,6 +3879,9 @@ class MainWindow(QMainWindow):
             # leaving the app hung and the rigctld child orphaned.
             _log.warning("closeEvent: rig.close() failed", exc_info=True)
         self._kill_rigctld()
+        # Teardown really did run to completion — only now is a second pass
+        # safe to skip.
+        self._teardown_complete = True
         super().closeEvent(event)
 
 

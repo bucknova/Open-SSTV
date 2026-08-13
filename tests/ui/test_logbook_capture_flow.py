@@ -379,6 +379,42 @@ class TestShutdownGuard:
         assert not window._logbook_coordinator.store_is_open
         assert not (tmp_path / "logbook.db").exists()
 
+    def test_close_is_idempotent(
+        self, qtbot, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, patched_audio
+    ) -> None:
+        """closeEvent fires twice in normal use — window close, then
+        app.aboutToQuit — and the second pass must not touch the worker
+        QObjects the first one freed.  It used to raise a SystemError out
+        of the Qt virtual override."""
+        window = _make_window(qtbot, monkeypatch, tmp_path)
+        window.close()
+        assert window._teardown_complete is True
+        window.close()  # must not raise
+
+    def test_closing_flag_does_not_skip_teardown(
+        self, qtbot, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, patched_audio
+    ) -> None:
+        """``_closing`` means "stand down from new work", NOT "teardown has
+        run".  Other code paths (and test_closing_flag_blocks_capture right
+        above) set it well before any close.  Guarding re-entry on it would
+        skip teardown entirely, leaving worker threads running into window
+        destruction — which Qt turns into a qFatal process abort.  So the
+        re-entry guard has its own flag, and setting _closing must leave
+        teardown fully armed."""
+        window = _make_window(qtbot, monkeypatch, tmp_path)
+        window._closing = True          # as the capture-guard test does
+        assert window._teardown_complete is False
+
+        window.close()
+
+        assert window._teardown_complete is True, (
+            "_closing must not short-circuit teardown"
+        )
+        for attr in ("_tx_thread", "_rx_thread", "_audio_thread", "_rig_poll_thread"):
+            thread = getattr(window, attr, None)
+            if thread is not None:
+                assert not thread.isRunning(), f"{attr} still running after close"
+
     def test_close_sets_flag(
         self, qtbot, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, patched_audio
     ) -> None:

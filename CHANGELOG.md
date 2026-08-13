@@ -9,6 +9,17 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Quitting could raise an error on the way out.**  ``closeEvent`` fires
+  twice in ordinary use — once for the window's own close, once from
+  ``app.aboutToQuit`` — and the second pass reached worker objects the
+  first had already freed, escaping as a ``SystemError`` out of the Qt
+  override.  It is now a no-op the second time.  The app still exited, so
+  this was noise rather than a crash, but it also masked two long-standing
+  teardown errors in the test suite (one of which prevented a test from
+  ever running).
+
 ---
 
 ## [0.6.5] — 2026-08-13
