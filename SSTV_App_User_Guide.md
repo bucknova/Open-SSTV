@@ -1137,6 +1137,26 @@ is a single SQLite file in the platform data directory — back it up
 like any file.  It is excluded from diagnostics zips unless you
 explicitly opt in.
 
+### 18.4 External Log (UDP, v0.7)
+
+The **[External Log]** button on the TX panel's QSO bar, next to
+**[Logbook…]**, broadcasts the current QSO over UDP so a companion
+logging program (QLog, JTAlert, GridTracker, Log4OM, N1MM…) can pick
+it up automatically — the same convention WSJT-X uses. It's a
+deliberately separate, manual action: an SSTV QSO is usually several
+images, and this sends exactly *one* record for the whole contact
+when you click it, whatever is currently in the ToCall / RSTs / RSTr
+/ Name / QTH / Grid / Note fields, with the click's UTC time, mode
+fixed to `SSTV`, and frequency read from the Radio panel's **Freq:**
+field. It never touches the local logbook database — sending has no
+effect on your logged rows, and vice versa.
+
+**Settings → Logging → UDP QSO log** sets the destination host/port
+(default `127.0.0.1:2237`, WSJT-X's own default) and the wire format:
+the framed **WSJT-X protocol** (default; what QLog/JTAlert/GridTracker/
+N1MM expect) or **Raw ADIF** (Log4OM-style, unframed). See
+[docs/logbook.md](docs/logbook.md) for the full details.
+
 ---
 
 ## 19. The Gallery (v0.5)

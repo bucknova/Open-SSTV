@@ -201,6 +201,11 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
   eQSL, Club Log, and QRZ.com. Exports stamp your station identity per
   record; imports dedupe on (callsign, time, mode). See
   [docs/logbook.md](docs/logbook.md) for the full guide.
+- **External Log over UDP (v0.7)** -- an **[External Log]** button next to
+  **[Logbook…]** on the TX panel's QSO bar broadcasts the current contact to
+  companion logging software (QLog, JTAlert, GridTracker, Log4OM, N1MM…) the
+  moment you're done working it, in raw-ADIF or WSJT-X's own framed
+  protocol -- independent of the local logbook database.
 
 ### Remote Access (v0.6)
 - **Control from a browser** -- an embedded, **opt-in** web server (off by

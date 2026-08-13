@@ -131,6 +131,69 @@ create duplicate rows.  Mode names are normalised back to Open-SSTV's
 display forms where they're recognised; unknown modes (RTTY, a future
 SSTV mode) are kept verbatim rather than dropped.
 
+## Broadcasting to a companion logger (UDP)
+
+*New in v0.7.*  Besides the SQLite logbook and file-based ADIF export
+above, Open-SSTV can also broadcast a single QSO over UDP the instant
+you finish working it — the same "UDP logging" convention WSJT-X
+popularized, so QLog, JTAlert, GridTracker, Log4OM, N1MM, and similar
+companion loggers can pick the contact up automatically without you
+ever touching a file.
+
+### Why this is a separate button
+
+An SSTV QSO is usually several images (yours, theirs, maybe a
+follow-up), but the capture flow above writes one row **per image** —
+right for the local logbook (which wants every picture), wrong for a
+one-shot broadcast to another program (which wants exactly one
+contact). So this is a deliberately separate, manual action:
+
+- **[External Log]** — a button on the TX panel's QSO bar, right next
+  to **[Logbook…]**.
+- Click it once, when the QSO is actually done, and it sends exactly
+  one UDP datagram built from whatever is currently in the bar.
+- It **never touches the local SQLite logbook** — sending (or failing
+  to send) has no effect on your logbook rows, and vice versa. Use
+  both, either, or neither per QSO as you like.
+
+### What goes into the datagram
+
+The QSO bar now has two rows of fields:
+
+- **ToCall**, **RSTs** (sent), **RSTr** (received) — top row.
+- **Name**, **QTH**, **Grid** — second row. Grid is upper-cased as you
+  type, same as ToCall.
+- **Note** — third row, same free-form field the local logbook uses.
+
+Everything else is filled in automatically at the moment you click:
+**time** is the click's UTC timestamp, **mode** is always `SSTV`, and
+**frequency** is whatever the Radio panel's **Freq:** field currently
+shows (blank/`—` when no rig is connected, in which case the record
+simply omits BAND and FREQ rather than sending a bogus `0`). Your
+station identity (callsign, grid, QTH, name from Settings → General)
+rides along the same way it does in ADIF export.
+
+### Format and destination
+
+**Settings → Logging → UDP QSO log** configures where the datagram
+goes:
+
+- **Host** / **Port** — default `127.0.0.1:2237`, which is WSJT-X's
+  own default UDP port; most companion loggers already listen there
+  out of the box.
+- **Format** — two wire formats, because two incompatible real-world
+  conventions exist:
+  - **WSJT-X protocol** *(default)* — the same framed binary "Logged
+    ADIF" message WSJT-X itself sends. QLog, JTAlert, GridTracker, and
+    N1MM all expect this specifically.
+  - **Raw ADIF** — a bare ADIF record with no framing, the format
+    Log4OM-style listeners expect.
+
+Each click opens a fresh UDP socket, sends one datagram, and closes it
+— fire-and-forget, no acknowledgement, no persistent connection to
+manage. If the send fails (nothing listening, bad host), the status
+bar reports it; nothing else in the app is affected.
+
 ## Where the data lives
 
 The logbook is a single SQLite file:
