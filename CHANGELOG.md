@@ -9,6 +9,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.6.6] — 2026-08-13
+
 ### Fixed
 
 - **Quitting could raise an error on the way out.**  ``closeEvent`` fires
