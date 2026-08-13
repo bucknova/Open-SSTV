@@ -243,6 +243,8 @@ def test_schema_validates_hand_edited_fields() -> None:
         rig_serial_protocol="Morse by hand",
         rig_ptt_line="XYZ",
         tx_banner_size="enormous",
+        udp_log_port=0,
+        udp_log_format="syslog",
     )
     assert cfg.rigctld_port == 1
     assert cfg.tci_port == 65535
@@ -253,6 +255,8 @@ def test_schema_validates_hand_edited_fields() -> None:
     assert cfg.rig_serial_protocol == "PTT Only (DTR/RTS)"
     assert cfg.rig_ptt_line == "DTR"
     assert cfg.tx_banner_size == "small"
+    assert cfg.udp_log_port == 1
+    assert cfg.udp_log_format == "wsjtx"
 
 
 def test_schema_accepts_valid_values_unchanged() -> None:
@@ -265,6 +269,8 @@ def test_schema_accepts_valid_values_unchanged() -> None:
         default_tx_mode="scottie_s1",
         rig_ptt_line="rts",  # case-normalised, not rejected
         tx_banner_size="large",
+        udp_log_port=2237,
+        udp_log_format="adif",
     )
     assert cfg.rigctld_port == 4533
     assert cfg.rig_baud_rate == 38_400
@@ -273,6 +279,8 @@ def test_schema_accepts_valid_values_unchanged() -> None:
     assert cfg.default_tx_mode == "scottie_s1"
     assert cfg.rig_ptt_line == "RTS"
     assert cfg.tx_banner_size == "large"
+    assert cfg.udp_log_port == 2237
+    assert cfg.udp_log_format == "adif"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="chmod read-only unreliable on Windows")

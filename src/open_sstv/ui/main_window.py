@@ -120,7 +120,7 @@ from open_sstv.config.schema import AppConfig
 from open_sstv.config.store import last_corrupt_backup, load_config, save_config
 from open_sstv.config.templates import load_templates
 from open_sstv.core.modes import Mode
-from open_sstv.logbook import QSO, LogbookCoordinator
+from open_sstv.logbook import QSO, LogbookCoordinator, QsoLoggingError, UdpQsoLogger
 from open_sstv.radio.band_plan import mode_family
 from open_sstv.radio.base import ManualRig, Rig, RigConnectionMode
 from open_sstv.radio.exceptions import RigError
@@ -843,6 +843,9 @@ class MainWindow(QMainWindow):
         # v0.4: [Logbook…] button on the QSO bar — same destination as
         # Tools → Logbook… (Cmd/Ctrl+L).
         self._tx_panel.logbook_requested.connect(self._open_logbook)
+        # v0.7: [External Log] button — UDP-only QSO broadcast, does not touch
+        # the local logbook database.
+        self._tx_panel.udp_log_requested.connect(self._on_udp_log_requested)
         self._radio_panel.test_tone_requested.connect(self._on_test_tone_requested)
         # Private dispatch signals → worker slots (QueuedConnection across thread)
         self._request_transmit.connect(self._tx_worker.transmit)
@@ -1384,6 +1387,48 @@ class MainWindow(QMainWindow):
         self._logbook_dialog.show()
         self._logbook_dialog.raise_()
         self._logbook_dialog.activateWindow()
+
+    @Slot()
+    def _on_udp_log_requested(self) -> None:
+        """[External Log] button: broadcast the current QSO bar over UDP.
+
+        UDP-only — never touches the local logbook database (that's
+        ``save_draft``'s per-image auto-capture flow, a separate
+        concern).  Time is the moment of the click (UTC); mode is fixed
+        to "SSTV" since this bar only ever describes an SSTV contact.
+        """
+        qso_state = self._tx_panel.get_qso_state()
+        callsign = qso_state.tocall.strip().upper()
+        if not callsign:
+            self.statusBar().showMessage(
+                "UDP log: enter a ToCall on the QSO bar first", 5000
+            )
+            return
+        rst_received, qth, grid = self._tx_panel.get_udp_log_fields()
+        qso = QSO(
+            direction="TX",
+            callsign=callsign,
+            time_utc=datetime.datetime.now(datetime.UTC),
+            mode="SSTV",
+            frequency_hz=self._last_rig_freq_hz,
+            rsv_sent=qso_state.rst,
+            rsv_received=rst_received,
+            name=qso_state.tocall_name,
+            qth=qth,
+            grid=grid,
+            comment=qso_state.note,
+        )
+        logger = UdpQsoLogger(
+            self._config.udp_log_host,
+            self._config.udp_log_port,
+            format=self._config.udp_log_format,
+        )
+        try:
+            logger.log_qso(qso, self._logbook_coordinator.station_info())
+        except QsoLoggingError as exc:
+            self.statusBar().showMessage(f"UDP log failed: {exc}", 8000)
+            return
+        self.statusBar().showMessage(f"UDP log sent for {callsign}.", 5000)
 
     def _refresh_logbook_if_open(self) -> None:
         if self._logbook_dialog is not None and self._logbook_dialog.isVisible():

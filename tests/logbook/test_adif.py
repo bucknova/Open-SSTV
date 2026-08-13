@@ -11,6 +11,7 @@ from open_sstv.logbook.adif import (
     datetime_to_qso_date,
     datetime_to_time_on,
     export_adif,
+    format_qso_record,
     hz_to_band,
     hz_to_mhz_str,
     import_adif,
@@ -258,6 +259,25 @@ class TestExport:
         qsos = [_q(callsign="W0AEZ"), _q(callsign="K1ABC"), _q(callsign="N0CALL")]
         text = export_adif(qsos)
         assert text.count("<EOR>") == 3
+
+
+class TestFormatQsoRecord:
+    """format_qso_record() was factored out of export_adif()'s per-QSO
+    loop body (v0.7, for the UDP QSO-log sender) — its output must stay
+    byte-for-byte identical to what export_adif() puts on a record line."""
+
+    def test_matches_export_adif_single_record_line(self) -> None:
+        station = StationInfo(callsign="W0AEZ", grid="EM48", qth="St Louis", name="Kevin")
+        qso = _q()
+        record_line = format_qso_record(qso, station)
+        full_text = export_adif([qso], station=station)
+        # The record is the last non-empty line of the exported document.
+        assert full_text.rstrip("\n").endswith(record_line)
+
+    def test_defaults_station_to_empty_when_omitted(self) -> None:
+        record_line = format_qso_record(_q())
+        assert "STATION_CALLSIGN" not in record_line
+        assert record_line.endswith("<EOR>")
 
 
 # ---------------------------------------------------------------------------

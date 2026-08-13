@@ -148,6 +148,9 @@ class TxPanel(QWidget):
     #: the logbook window, so the request bubbles up the same way
     #: transmit_requested does.
     logbook_requested = Signal()
+    #: v0.7: relay of the QSO bar's [UDP Log] button.  MainWindow builds
+    #: the QSO and owns the UDP send, same relay pattern as above.
+    udp_log_requested = Signal()
 
     def __init__(
         self,
@@ -220,6 +223,7 @@ class TxPanel(QWidget):
         self._qso_widget = QSOStateWidget(self)
         self._qso_widget.state_changed.connect(self._on_qso_state_changed)
         self._qso_widget.logbook_requested.connect(self.logbook_requested)
+        self._qso_widget.udp_log_requested.connect(self.udp_log_requested)
         layout.addWidget(self._qso_widget)
 
         # --- Mode picker ---
@@ -342,6 +346,10 @@ class TxPanel(QWidget):
     def get_qso_state(self) -> QSOState:
         """Return the current QSO state from the QSO widget."""
         return self._qso_widget.get_state()
+
+    def get_udp_log_fields(self) -> tuple[str, str, str]:
+        """Return ``(rst_received, qth, grid)`` from the QSO widget."""
+        return self._qso_widget.get_udp_log_fields()
 
     def load_image(self, path: Path) -> None:
         """Load an image from disk into the preview."""

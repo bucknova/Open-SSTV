@@ -10,6 +10,11 @@ different callsign (heuristic: new callsign → new QSO).
 
 The ``state_changed`` signal is debounced 300 ms so live-preview
 re-renders don't fire on every keypress.
+
+v0.7 adds RST-received / QTH / Grid plus an [External Log] button: these feed
+the UDP QSO-log broadcast (``logbook.udp_log``), sent once per QSO —
+independent of the ``QSOState`` template tokens above, so they're kept
+off the ``QSOState`` dataclass and exposed through a separate accessor.
 """
 from __future__ import annotations
 
@@ -53,10 +58,17 @@ class QSOStateWidget(QWidget):
         Emitted when the [Logbook…] button is clicked.  Relayed up
         through TxPanel to MainWindow, which owns the logbook window —
         this widget stays standalone-testable with no logbook import.
+    udp_log_requested():
+        Emitted when the [External Log] button is clicked.  Relayed up
+        through TxPanel to MainWindow, which builds a QSO from
+        ``get_state()`` + ``get_udp_log_fields()`` and sends it via
+        ``logbook.udp_log.UdpQsoLogger`` — this widget stays free of
+        any logbook/network import.
     """
 
     state_changed = Signal(object)  # QSOState
     logbook_requested = Signal()
+    udp_log_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -73,7 +85,7 @@ class QSOStateWidget(QWidget):
         layout.setContentsMargins(0, 4, 0, 0)
         layout.setSpacing(2)
 
-        # --- Row 1: ToCall + RST ---
+        # --- Row 1: ToCall + RST sent/received ---
         row1 = QHBoxLayout()
         row1.setSpacing(6)
 
@@ -84,7 +96,7 @@ class QSOStateWidget(QWidget):
         self._tocall.textChanged.connect(self._on_tocall_changed)
         row1.addWidget(self._tocall)
 
-        row1.addWidget(QLabel("RST:"))
+        row1.addWidget(QLabel("RSTs:"))
         self._rst = QComboBox()
         self._rst.setEditable(True)
         self._rst.setMaximumWidth(70)
@@ -94,12 +106,16 @@ class QSOStateWidget(QWidget):
         self._rst.currentTextChanged.connect(self._on_field_changed)
         row1.addWidget(self._rst)
 
-        row1.addWidget(QLabel("Name:"))
-        self._name = QLineEdit()
-        self._name.setPlaceholderText("Optional")
-        self._name.setMaximumWidth(100)
-        self._name.textChanged.connect(self._on_field_changed)
-        row1.addWidget(self._name)
+        # v0.7: RST received sits right next to RST sent — feeds the
+        # UDP QSO log only (see module docstring), not a template token.
+        row1.addWidget(QLabel("RSTr:"))
+        self._rst_received = QComboBox()
+        self._rst_received.setEditable(True)
+        self._rst_received.setMaximumWidth(70)
+        for r in _RST_PRESETS:
+            self._rst_received.addItem(r)
+        self._rst_received.setCurrentText("")
+        row1.addWidget(self._rst_received)
 
         row1.addStretch(1)
         self._clear_btn = QPushButton("Clear QSO")
@@ -115,19 +131,58 @@ class QSOStateWidget(QWidget):
         self._logbook_btn.clicked.connect(self.logbook_requested)
         row1.addWidget(self._logbook_btn)
 
+        # v0.7: one-click UDP QSO-log broadcast — sent once per QSO from
+        # whatever is currently in this bar, independent of the local
+        # logbook database.  See ``logbook.udp_log``.
+        self._udp_log_btn = QPushButton("External Log")
+        self._udp_log_btn.setMaximumWidth(100)
+        self._udp_log_btn.setToolTip(
+            "Send this QSO as a UDP log message to a companion logging "
+            "app (Settings → Logging)"
+        )
+        self._udp_log_btn.clicked.connect(self.udp_log_requested)
+        row1.addWidget(self._udp_log_btn)
+
         layout.addLayout(row1)
 
-        # --- Row 2: free-form note (unhidden in v0.4) ---
-        # Resolves the {note} template token and pre-fills the Notes
-        # field of the v0.4 log-QSO capture dialog.
+        # --- Row 2: Name / QTH / Grid (v0.7 adds QTH + Grid) ---
+        # Name still resolves the {tocall_name} template token; QTH/Grid
+        # are UDP-QSO-log-only (see module docstring).
         row2 = QHBoxLayout()
         row2.setSpacing(6)
-        row2.addWidget(QLabel("Note:"))
+        row2.addWidget(QLabel("Name:"))
+        self._name = QLineEdit()
+        self._name.setPlaceholderText("Optional")
+        self._name.setMaximumWidth(100)
+        self._name.textChanged.connect(self._on_field_changed)
+        row2.addWidget(self._name)
+
+        row2.addWidget(QLabel("QTH:"))
+        self._qth = QLineEdit()
+        self._qth.setPlaceholderText("Optional")
+        self._qth.setMaximumWidth(100)
+        row2.addWidget(self._qth)
+
+        row2.addWidget(QLabel("Grid:"))
+        self._grid = QLineEdit()
+        self._grid.setPlaceholderText("EN34")
+        self._grid.setMaximumWidth(70)
+        self._grid.textChanged.connect(self._on_grid_changed)
+        row2.addWidget(self._grid)
+        row2.addStretch(1)
+        layout.addLayout(row2)
+
+        # --- Row 3: free-form note (unhidden in v0.4) ---
+        # Resolves the {note} template token and pre-fills the Notes
+        # field of the v0.4 log-QSO capture dialog.
+        row3 = QHBoxLayout()
+        row3.setSpacing(6)
+        row3.addWidget(QLabel("Note:"))
         self._note = QLineEdit()
         self._note.setPlaceholderText("Optional — logged with the QSO")
         self._note.textChanged.connect(self._on_field_changed)
-        row2.addWidget(self._note, stretch=1)
-        layout.addLayout(row2)
+        row3.addWidget(self._note, stretch=1)
+        layout.addLayout(row3)
 
     # === Public API ===
 
@@ -138,6 +193,18 @@ class QSOStateWidget(QWidget):
             rst=self._rst.currentText().strip() or "595",
             tocall_name=self._name.text().strip(),
             note=self._note.text().strip(),
+        )
+
+    def get_udp_log_fields(self) -> tuple[str, str, str]:
+        """Return ``(rst_received, qth, grid)`` for the UDP QSO log.
+
+        Kept separate from ``get_state()``/``QSOState`` — these aren't
+        template tokens, they only feed ``logbook.udp_log``.
+        """
+        return (
+            self._rst_received.currentText().strip(),
+            self._qth.text().strip(),
+            self._grid.text().strip().upper(),
         )
 
     @Slot()
@@ -153,6 +220,9 @@ class QSOStateWidget(QWidget):
             self._rst.setCurrentText("595")
             self._name.clear()
             self._note.clear()
+            self._rst_received.setCurrentText("")
+            self._qth.clear()
+            self._grid.clear()
         finally:
             self._tocall.blockSignals(False)
             self._rst.blockSignals(False)
@@ -174,6 +244,18 @@ class QSOStateWidget(QWidget):
             self._tocall.setCursorPosition(cursor)
             self._tocall.blockSignals(False)
         self._on_field_changed(upper)
+
+    @Slot(str)
+    def _on_grid_changed(self, text: str) -> None:
+        # Uppercase-on-type, same as ToCall — grid squares are
+        # conventionally written upper-case (e.g. "EN34").
+        upper = text.upper()
+        if upper != text:
+            cursor = self._grid.cursorPosition()
+            self._grid.blockSignals(True)
+            self._grid.setText(upper)
+            self._grid.setCursorPosition(cursor)
+            self._grid.blockSignals(False)
 
     @Slot()
     @Slot(str)

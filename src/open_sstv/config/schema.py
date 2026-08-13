@@ -272,6 +272,20 @@ class AppConfig:
     # still forces DEBUG regardless of this field.
     log_level: str = "INFO"
 
+    # --- UDP QSO log (v0.7) ---
+    # Fire-and-forget UDP broadcast of a single logged contact, for
+    # third-party ham-radio logging tools (QLog, JTAlert, GridTracker,
+    # Log4OM, N1MM…) — triggered manually from the "External Log" button on
+    # the TX panel's QSO-state bar, independent of the local SQLite
+    # logbook.  Ported from the ``cwrobot`` sister project.
+    udp_log_host: str = "127.0.0.1"
+    # Default matches WSJT-X's own UDP logging port — most third-party
+    # loggers already listen here out of the box.
+    udp_log_port: int = 2237
+    # "adif" = bare ADIF record (Log4OM-style); "wsjtx" = WSJT-X's framed
+    # binary Network Message protocol (QLog, JTAlert, GridTracker, N1MM).
+    udp_log_format: str = "wsjtx"
+
     def __post_init__(self) -> None:
         # v0.1.12: slider ceiling reverted from 500% to 200%.
         # Clamp any stored value so users who raised it to ≤500% on v0.1.11
@@ -425,6 +439,20 @@ class AppConfig:
             lvl = "INFO"
         self.log_level = lvl
 
+        # v0.7: same fallback pattern for the UDP QSO-log wire format —
+        # an unrecognised value would otherwise reach UdpQsoLogger and
+        # silently send the wrong datagram shape.
+        fmt_original = self.udp_log_format
+        fmt = (self.udp_log_format or "").strip().lower()
+        if fmt not in ("adif", "wsjtx"):
+            if fmt_original and fmt:
+                _log.warning(
+                    "AppConfig: unknown udp_log_format %r — falling back to 'wsjtx'",
+                    fmt_original,
+                )
+            fmt = "wsjtx"
+        self.udp_log_format = fmt
+
         # M1 (v0.3 audit): the remaining hand-editable fields had no
         # validation at all — a bad value loaded fine and then failed
         # later (socket/serial errors at connect time) or silently
@@ -433,7 +461,9 @@ class AppConfig:
         # as the fields above.
 
         # TCP ports: [1, 65535].
-        for attr in ("rigctld_port", "tci_port", "remote_port", "flex_port"):
+        for attr in (
+            "rigctld_port", "tci_port", "remote_port", "flex_port", "udp_log_port",
+        ):
             v = int(getattr(self, attr))
             clamped_port = max(1, min(65535, v))
             if clamped_port != v:
