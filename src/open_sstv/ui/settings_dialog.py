@@ -274,6 +274,29 @@ class SettingsDialog(QDialog):
         logbook_form.addRow("RX capture:", self._rx_capture_combo)
         layout.addWidget(logbook_group)
 
+        # ── Templates (v0.6.5) ───────────────────────────────────────────
+        # Deleting a starter template is now permanent (issue #42 — it
+        # used to come back on the next launch), so there has to be a way
+        # back.  This is that way.
+        tpl_group = QGroupBox("Templates")
+        tpl_layout = QVBoxLayout(tpl_group)
+        tpl_help = QLabel(
+            "Templates you delete stay deleted. Use this to put the bundled "
+            "starter templates back — your own templates and any edits you've "
+            "made to a starter are never overwritten."
+        )
+        tpl_help.setWordWrap(True)
+        tpl_layout.addWidget(tpl_help)
+
+        self._restore_templates_btn = QPushButton("Restore Default Templates")
+        self._restore_templates_btn.setToolTip(
+            "Re-install any of the eight bundled starter templates that are\n"
+            "missing. Existing files are left exactly as they are."
+        )
+        self._restore_templates_btn.clicked.connect(self._on_restore_templates)
+        tpl_layout.addWidget(self._restore_templates_btn)
+        layout.addWidget(tpl_group)
+
         # ── Diagnostics (v0.3.21) ────────────────────────────────────────
         # User-friendly diagnostics export.  Without this, the only way
         # to capture log output from a Windows GUI build (where the
@@ -299,6 +322,50 @@ class SettingsDialog(QDialog):
         return tab
 
     @Slot()
+    def _on_restore_templates(self) -> None:
+        """Re-install any missing bundled starter templates.
+
+        Never overwrites: ``install_starter_pack`` skips files that already
+        exist, so a starter the user has edited keeps their version and
+        only genuinely missing ones are restored.
+        """
+        from open_sstv.templates.manager import (  # noqa: PLC0415
+            STARTER_TEMPLATE_FILENAMES,
+            default_templates_dir,
+            install_starter_pack,
+        )
+
+        try:
+            written = install_starter_pack()
+        except Exception as exc:  # noqa: BLE001 — never let this crash Settings
+            _log.warning("restore default templates failed", exc_info=True)
+            QMessageBox.warning(
+                self,
+                "Could not restore templates",
+                f"Restoring the default templates failed.\n\n"
+                f"Error: {type(exc).__name__}: {exc}\n\n"
+                f"Templates folder: {default_templates_dir()}",
+            )
+            return
+
+        if written:
+            _log.info("restored %d default template(s)", len(written))
+            names = "\n".join(f"  • {p.name}" for p in written)
+            QMessageBox.information(
+                self,
+                "Templates restored",
+                f"Restored {len(written)} of {len(STARTER_TEMPLATE_FILENAMES)} "
+                f"default templates:\n\n{names}\n\n"
+                "They'll appear in the TX panel's template gallery.",
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Nothing to restore",
+                "All eight default templates are already present, so nothing "
+                "was changed.\n\nAny edits you've made to them are untouched.",
+            )
+
     def _on_export_diagnostics(self) -> None:
         """Save a diagnostics zip via QFileDialog and notify the user.
 

@@ -996,6 +996,15 @@ If either file is missing or empty, the app creates it with default values on fi
 - Wrong colors may indicate a mode mismatch. The app auto-detects mode via the VIS header, but if the VIS was corrupted by noise, the wrong decoder may be applied. Try decoding from a saved WAV file using `open-sstv-decode`.
 - If you are receiving from a station using an unusual Robot 36 variant, the app auto-detects between the two common Robot 36 layouts (PySSTV single-line and canonical broadcast line-pair).
 
+**I deleted a default template and want it back**
+
+- **Settings → General → Restore Default Templates** re-installs any of the
+  eight bundled starters that are missing. Your own templates, and any edits
+  you've made to a starter, are never overwritten — only genuinely missing
+  files are restored.
+- Deleting a starter is permanent from v0.6.5 onward. Before that they came
+  back by themselves on the next launch if you removed all eight.
+
 **macOS: capture starts but decodes nothing — the waterfall stays black**
 
 - Almost always microphone permission. macOS gates **every** audio input

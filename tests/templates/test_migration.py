@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from open_sstv.templates.manager import STARTER_TEMPLATE_FILENAMES
+from open_sstv.templates.manager import STARTER_PACK_MARKER, STARTER_TEMPLATE_FILENAMES
 from open_sstv.templates.migration import _V2_DEFAULT_TEXTS, run_migration
 from open_sstv.templates.toml_io import load_template
 
@@ -433,19 +433,31 @@ class TestReRunSafety:
         for starter in tdir.glob("*.toml"):
             if starter != migrated:
                 starter.unlink()
-        # Next launch: gate 1 fails (no starters), but the marker stops
-        # the legacy re-migration — edits survive, starters reinstall.
+        # Next launch: the marker stops the legacy re-migration, so the
+        # user's edits survive.  Since v0.6.5 (issue #42) the curated-away
+        # starters also stay away — the starter-pack marker records that
+        # they were installed once, so an empty dir is no longer mistaken
+        # for a fresh install.  Settings → General → Restore Default
+        # Templates is the deliberate way back.
         result = run_migration(templates_dir=tdir, user_config_dir=cfg)
-        assert result == "starter_pack_installed"
+        assert result == "already_populated"
         assert "EDITED BY USER" in migrated.read_text()
+        assert not (tdir / "cqsstv.toml").exists(), (
+            "a deliberately deleted starter must not silently return"
+        )
 
     def test_pre_marker_rerun_never_overwrites_existing_file(
         self, tmp_path: Path
     ) -> None:
         # Users who migrated under pre-v0.4.1 code have no marker: the
         # exists-skip is their protection on the one re-run that writes it.
+        # Such an install predates the v0.6.5 starter-pack marker too, so
+        # remove both to model that state honestly — leaving the newer one
+        # behind would short-circuit at gate 1 and never exercise the
+        # legacy path this test is about.
         tdir, cfg = self._first_run(tmp_path)
         (tdir / ".v2_migration_done").unlink()
+        (tdir / STARTER_PACK_MARKER).unlink()
         migrated = tdir / "my_custom.toml"
         migrated.write_text(migrated.read_text().replace("CQ CQ de W0AEZ", "KEEP ME"))
         for starter in tdir.glob("*.toml"):

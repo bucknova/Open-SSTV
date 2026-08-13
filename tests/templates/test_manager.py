@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from open_sstv.templates.manager import (
+    STARTER_PACK_MARKER,
     STARTER_TEMPLATE_FILENAMES,
     delete,
     get_templates_by_role,
@@ -316,3 +317,77 @@ class TestDelete:
     def test_raises_file_not_found(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError):
             delete(tmp_path / "nonexistent.toml")
+
+
+# === deleting starters must stick (issue #42) ==========================
+#
+# The guard used to answer "are starters present?" when the question that
+# matters is "have we ever installed them?". Deleting all eight looked
+# identical to a fresh install, so the pack returned on the next launch.
+
+
+class TestStarterDeletionSticks:
+    def test_deleting_every_starter_is_remembered(self, tmp_path: Path) -> None:
+        tdir = tmp_path / "templates"
+        install_starter_pack(tdir)
+        assert starter_pack_installed(tdir)
+
+        for name in STARTER_TEMPLATE_FILENAMES:
+            (tdir / name).unlink()
+
+        assert starter_pack_installed(tdir), (
+            "deleting every starter must not look like a fresh install"
+        )
+
+    def test_deleting_one_still_respected(self, tmp_path: Path) -> None:
+        tdir = tmp_path / "templates"
+        install_starter_pack(tdir)
+        (tdir / STARTER_TEMPLATE_FILENAMES[0]).unlink()
+        assert starter_pack_installed(tdir)
+
+    def test_fresh_directory_still_installs(self, tmp_path: Path) -> None:
+        """The marker must not break first-run installation."""
+        tdir = tmp_path / "templates"
+        assert starter_pack_installed(tdir) is False
+        written = install_starter_pack(tdir)
+        assert len(written) == len(STARTER_TEMPLATE_FILENAMES)
+
+    def test_marker_is_written_and_hidden_from_scans(self, tmp_path: Path) -> None:
+        tdir = tmp_path / "templates"
+        install_starter_pack(tdir)
+        marker = tdir / STARTER_PACK_MARKER
+        assert marker.exists()
+        # Dot-prefixed and not a .toml, so template discovery ignores it.
+        assert marker.name.startswith(".")
+        assert marker.suffix != ".toml"
+
+    def test_pre_marker_install_is_grandfathered_and_backfilled(
+        self, tmp_path: Path
+    ) -> None:
+        """A user who installed before this version has templates but no
+        marker: the filename fallback keeps them working, and the next
+        install back-fills the marker so deletion works from then on."""
+        tdir = tmp_path / "templates"
+        install_starter_pack(tdir)
+        (tdir / STARTER_PACK_MARKER).unlink()          # simulate old install
+
+        assert starter_pack_installed(tdir), "must not re-install for them"
+
+        install_starter_pack(tdir)                      # next launch
+        assert (tdir / STARTER_PACK_MARKER).exists()
+
+    def test_restore_never_overwrites_an_edited_starter(
+        self, tmp_path: Path
+    ) -> None:
+        """What the Restore button relies on: a starter the user edited
+        keeps their version; only missing ones come back."""
+        tdir = tmp_path / "templates"
+        install_starter_pack(tdir)
+        edited = tdir / STARTER_TEMPLATE_FILENAMES[0]
+        edited.write_text("# my edits\n", encoding="utf-8")
+        (tdir / STARTER_TEMPLATE_FILENAMES[1]).unlink()
+
+        written = install_starter_pack(tdir)
+
+        assert [p.name for p in written] == [STARTER_TEMPLATE_FILENAMES[1]]
+        assert edited.read_text(encoding="utf-8") == "# my edits\n"
