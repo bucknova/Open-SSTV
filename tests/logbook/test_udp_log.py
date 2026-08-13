@@ -149,10 +149,21 @@ class TestUdpQsoLogger:
         assert "<BAND:" not in text
         assert "<FREQ:" not in text
 
-    def test_unreachable_host_raises_qso_logging_error(self) -> None:
-        # Port 0 is never a valid destination — sendto() must fail fast
-        # with a normalised QsoLoggingError, not a bare OSError.
-        logger = UdpQsoLogger("127.0.0.1", 0, format="adif")
+    def test_send_failure_raises_qso_logging_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A bare OSError from sendto() (unreachable host, no route, a
+        # firewall rejection, ...) must come out as a normalised
+        # QsoLoggingError, not the raw OSError. Forced via monkeypatch
+        # rather than an actually-invalid destination (e.g. port 0)
+        # since real OS network stacks disagree on whether/when that
+        # fails synchronously — Windows' Winsock, unlike Linux, does
+        # not reject a sendto() to port 0.
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            raise OSError("network is unreachable")
+
+        monkeypatch.setattr(socket.socket, "sendto", _raise)
+        logger = UdpQsoLogger("127.0.0.1", 2237, format="adif")
         with pytest.raises(QsoLoggingError):
             logger.log_qso(_qso())
 
