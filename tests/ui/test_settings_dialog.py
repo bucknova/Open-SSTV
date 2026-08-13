@@ -684,3 +684,85 @@ class TestTestToneButtonRigIndependence:
         dialog.on_tx_ended()
         assert dialog._test_tone_btn.isEnabled()
         assert dialog._test_tone_btn.text() == "Test Tone"
+
+
+class TestRestoreDefaultTemplates:
+    """v0.6.5 (issue #42): deleting a starter template is now permanent,
+    so Settings has to offer a deliberate way back."""
+
+    def _dialog(self, qtbot):
+        dlg = SettingsDialog(AppConfig())
+        qtbot.addWidget(dlg)
+        return dlg
+
+    def test_button_exists_and_is_labelled(self, qtbot) -> None:
+        dlg = self._dialog(qtbot)
+        assert dlg._restore_templates_btn.text() == "Restore Default Templates"
+        assert dlg._restore_templates_btn.isEnabled()
+
+    def test_restores_only_missing_templates(
+        self, qtbot, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
+        from open_sstv.templates.manager import (
+            STARTER_TEMPLATE_FILENAMES,
+            install_starter_pack,
+        )
+
+        tdir = tmp_path / "templates"
+        install_starter_pack(tdir)
+        edited = tdir / STARTER_TEMPLATE_FILENAMES[0]
+        edited.write_text("# mine\n", encoding="utf-8")
+        (tdir / STARTER_TEMPLATE_FILENAMES[1]).unlink()
+
+        monkeypatch.setattr(
+            "open_sstv.templates.manager.default_templates_dir", lambda: tdir
+        )
+        shown: list[str] = []
+        monkeypatch.setattr(
+            QMessageBox, "information", lambda *a, **k: shown.append(a[2])
+        )
+
+        self._dialog(qtbot)._on_restore_templates()
+
+        assert (tdir / STARTER_TEMPLATE_FILENAMES[1]).exists(), "missing one restored"
+        assert edited.read_text(encoding="utf-8") == "# mine\n", "edit preserved"
+        assert shown and "Restored 1 of" in shown[0]
+
+    def test_reports_when_nothing_to_restore(
+        self, qtbot, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
+        from open_sstv.templates.manager import install_starter_pack
+
+        tdir = tmp_path / "templates"
+        install_starter_pack(tdir)
+        monkeypatch.setattr(
+            "open_sstv.templates.manager.default_templates_dir", lambda: tdir
+        )
+        shown: list[str] = []
+        monkeypatch.setattr(
+            QMessageBox, "information", lambda *a, **k: shown.append(a[2])
+        )
+
+        self._dialog(qtbot)._on_restore_templates()
+        assert shown and "already present" in shown[0]
+
+    def test_failure_is_reported_not_raised(
+        self, qtbot, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
+        monkeypatch.setattr(
+            "open_sstv.templates.manager.install_starter_pack",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+        )
+        warned: list[str] = []
+        monkeypatch.setattr(
+            QMessageBox, "warning", lambda *a, **k: warned.append(a[2])
+        )
+
+        self._dialog(qtbot)._on_restore_templates()  # must not raise
+        assert warned and "disk full" in warned[0]

@@ -39,6 +39,12 @@ _last_skipped: list[tuple[str, str]] = []
 
 _APP_NAME = "open_sstv"
 
+#: Marker recording that the starter pack has been installed into a
+#: templates directory at least once.  Without it, deleting every starter
+#: looks identical to a fresh install and the pack returns on the next
+#: launch (issue #42).  Dot-prefixed so template scans ignore it.
+STARTER_PACK_MARKER = ".starter_pack_installed"
+
 # Filenames of the starter templates bundled in assets/templates/, in
 # install order (determines gallery display order on first launch).
 STARTER_TEMPLATE_FILENAMES: tuple[str, ...] = (
@@ -321,18 +327,35 @@ def starter_pack_installed(templates_dir: Path | None = None) -> bool:
       * Fresh install / dir doesn't exist        → False → install.
       * v0.2.x upgrade with old cq.toml only     → False → install.
       * Post-v0.3 user who deleted one template  → True  → respect it.
+      * Post-v0.3 user who deleted ALL of them   → True  → respect it.
       * Truly populated v0.3 user                → True  → no-op.
 
     The "respect a deletion" property matters because
     ``install_starter_pack`` doesn't overwrite existing files
     (``overwrite=False`` is the default), so calling it every launch
     would *not* clobber user edits — but it would noisily re-install
-    a template the user deliberately deleted.  Returning True the
-    moment any starter is present preserves that intent.
+    a template the user deliberately deleted.
+
+    v0.6.5 (issue #42): the fourth case above used to fail.  Deleting
+    *every* starter left the directory indistinguishable from a fresh
+    install, so the pack came straight back on the next launch and the
+    deletion could not be made to stick.  The filename check answers
+    "are starters present?", but the question that actually needs
+    answering is "have we ever installed them?" — a historical fact, so
+    it is now recorded as one, in a marker file.  Same approach the
+    legacy v0.2 migration already uses for the identical class of bug
+    (v0.4.0 audit high #8).
+
+    Users who installed before the marker existed are grandfathered by
+    the filename check, and ``install_starter_pack`` back-fills the
+    marker for them.  Settings → General → *Restore default templates*
+    re-installs the pack deliberately.
     """
     tdir = templates_dir if templates_dir is not None else default_templates_dir()
     if not tdir.is_dir():
         return False
+    if (tdir / STARTER_PACK_MARKER).exists():
+        return True
     return any((tdir / filename).exists() for filename in STARTER_TEMPLATE_FILENAMES)
 
 
@@ -374,6 +397,19 @@ def install_starter_pack(
         dst.write_bytes(src.read_bytes())
         _log.info("Installed starter template: %s", filename)
         written.append(dst)
+
+    # Record that the pack has been installed here at least once, so a
+    # user who later deletes every starter isn't mistaken for a fresh
+    # install on the next launch (issue #42).  Touched unconditionally:
+    # a run that wrote nothing because the files were already present is
+    # exactly the pre-marker user we want to back-fill.  Failure to write
+    # it is non-fatal — worst case is the old re-install behaviour.
+    marker = tdir / STARTER_PACK_MARKER
+    if not marker.exists():
+        try:
+            marker.touch()
+        except OSError as exc:
+            _log.warning("Could not write starter-pack marker %s: %s", marker, exc)
 
     return written
 

@@ -11,6 +11,29 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.6.5] — 2026-08-13
+
+### Fixed
+
+- **Deleted default templates came back on the next launch.**  The startup
+  check asked "are any starter templates present?" and treated *none* as a
+  fresh install — so removing one or two stuck, but curating away all eight
+  silently reinstalled the lot.  Whether the pack has ever been installed
+  is a historical fact, and is now recorded as one (a marker file, the same
+  approach the v0.2 legacy migration already used).  Deleting every starter
+  now sticks.  Existing installs are grandfathered — nobody's templates
+  reappear or vanish on upgrade.  Reported by
+  [@dacrhu](https://github.com/dacrhu) (#42).
+
+### Added
+
+- **Settings → General → Restore Default Templates.**  Since deleting a
+  starter is now permanent, there is a deliberate way back.  It re-installs
+  only the templates that are actually missing — your own templates, and
+  any edits you have made to a starter, are never overwritten.
+
+---
+
 ## [0.6.4] — 2026-08-11
 
 Receive robustness under fading conditions.
