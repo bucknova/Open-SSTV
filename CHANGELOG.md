@@ -9,6 +9,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.6.7] — 2026-08-14
+
 ### Added
 
 - **External Log: broadcast a QSO over UDP to companion logging software.**
@@ -26,8 +30,12 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `SSTV`. **Settings → Logging → UDP QSO log** configures the destination
   host/port (default `127.0.0.1:2237`, WSJT-X's own default) and picks
   between the framed **WSJT-X protocol** (QLog/JTAlert/GridTracker/N1MM)
-  and unframed **Raw ADIF** (Log4OM-style). See
+  and unframed **Raw ADIF** (Log4OM-style). The status bar reports
+  "sent (not confirmed)" on purpose — UDP has no acknowledgement, so a
+  successful send only means the datagram left your machine, never that
+  the companion program received it. See
   [docs/logbook.md](docs/logbook.md#broadcasting-to-a-companion-logger-udp).
+  Contributed by [@dacrhu](https://github.com/dacrhu).
 
 ---
 
