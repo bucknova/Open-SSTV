@@ -492,6 +492,32 @@ class SettingsDialog(QDialog):
         files_layout.addWidget(open_folder_btn)
         layout.addWidget(files_group)
 
+        udp_group = QGroupBox("UDP QSO log")
+        udp_form = QFormLayout(udp_group)
+        self._udp_log_host = QLineEdit(self._config.udp_log_host)
+        self._udp_log_host.setPlaceholderText("127.0.0.1")
+        udp_form.addRow("Host:", self._udp_log_host)
+        self._udp_log_port = QSpinBox()
+        self._udp_log_port.setRange(1, 65535)
+        self._udp_log_port.setValue(self._config.udp_log_port)
+        udp_form.addRow("Port:", self._udp_log_port)
+        self._udp_log_format = QComboBox()
+        self._udp_log_format.addItem(
+            "WSJT-X protocol (QLog, JTAlert, GridTracker, N1MM…)", "wsjtx"
+        )
+        self._udp_log_format.addItem("Raw ADIF (Log4OM-style)", "adif")
+        fmt_idx = self._udp_log_format.findData(self._config.udp_log_format)
+        self._udp_log_format.setCurrentIndex(fmt_idx if fmt_idx >= 0 else 0)
+        udp_form.addRow("Format:", self._udp_log_format)
+        udp_note = QLabel(
+            "Sent once per QSO from the [External Log] button next to [Logbook…] "
+            "on the TX panel — independent of the local logbook database."
+        )
+        udp_note.setWordWrap(True)
+        udp_note.setStyleSheet("color: gray; font-size: 10px;")
+        udp_form.addRow(udp_note)
+        layout.addWidget(udp_group)
+
         diag_group = QGroupBox("Diagnostics")
         diag_layout = QVBoxLayout(diag_group)
         diag_help = QLabel(
@@ -2141,6 +2167,10 @@ class SettingsDialog(QDialog):
             rx_capture_prompt=self._rx_capture_combo.currentData() or "always",
             logbook_db_path=self._config.logbook_db_path,
             log_level=self._log_level_combo.currentData() or "INFO",
+            # v0.6.7: UDP QSO log broadcast (ported from cwrobot).
+            udp_log_host=self._udp_log_host.text().strip() or "127.0.0.1",
+            udp_log_port=self._udp_log_port.value(),
+            udp_log_format=self._udp_log_format.currentData() or "wsjtx",
             # v0.6 (Phase 2b): remote web access.  These MUST be carried
             # through or a settings save resets them to defaults (the
             # TOML-only-phase bug).  The LAN checkbox maps to the bind

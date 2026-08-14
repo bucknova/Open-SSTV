@@ -80,6 +80,13 @@ class TestClearQSO:
         assert s.tocall_name == ""
         assert s.note == ""
 
+    def test_clear_wipes_udp_log_fields(self, widget: QSOStateWidget) -> None:
+        widget._rst_received.setCurrentText("589")
+        widget._qth.setText("Springfield")
+        widget._grid.setText("EN34")
+        widget.clear()
+        assert widget.get_udp_log_fields() == ("", "", "")
+
     def test_clear_emits_state_changed(
         self, qtbot, widget: QSOStateWidget
     ) -> None:
@@ -130,4 +137,47 @@ class TestLogbookButton:
     def test_click_does_not_touch_qso_state(self, qtbot, widget: QSOStateWidget) -> None:
         widget._tocall.setText("K1ABC")
         widget._logbook_btn.click()
+        assert widget.get_state().tocall == "K1ABC"
+
+
+class TestUdpLogFields:
+    """v0.6.7: RST-received / QTH / Grid feed the UDP QSO log only — they
+    are deliberately kept off ``QSOState`` (see module docstring)."""
+
+    def test_default_fields_are_empty(self, widget: QSOStateWidget) -> None:
+        assert widget.get_udp_log_fields() == ("", "", "")
+
+    def test_reflects_field_values(self, widget: QSOStateWidget) -> None:
+        widget._rst_received.setCurrentText("589")
+        widget._qth.setText("Springfield")
+        widget._grid.setText("en34")
+        assert widget.get_udp_log_fields() == ("589", "Springfield", "EN34")
+
+    def test_grid_is_uppercased_on_type(self, widget: QSOStateWidget) -> None:
+        widget._grid.setText("en34")
+        assert widget._grid.text() == "EN34"
+
+    def test_not_present_on_qsostate(self, widget: QSOStateWidget) -> None:
+        widget._rst_received.setCurrentText("589")
+        widget._qth.setText("Springfield")
+        widget._grid.setText("EN34")
+        s = widget.get_state()
+        assert not hasattr(s, "rsv_received")
+        assert not hasattr(s, "qth")
+        assert not hasattr(s, "grid")
+
+
+class TestUdpLogButton:
+    """v0.6.7: the [External Log] button relays a udp_log_requested signal."""
+
+    def test_button_present_next_to_logbook(self, widget: QSOStateWidget) -> None:
+        assert widget._udp_log_btn.text() == "External Log"
+
+    def test_click_emits_udp_log_requested(self, qtbot, widget: QSOStateWidget) -> None:
+        with qtbot.waitSignal(widget.udp_log_requested, timeout=1000):
+            widget._udp_log_btn.click()
+
+    def test_click_does_not_touch_qso_state(self, qtbot, widget: QSOStateWidget) -> None:
+        widget._tocall.setText("K1ABC")
+        widget._udp_log_btn.click()
         assert widget.get_state().tocall == "K1ABC"

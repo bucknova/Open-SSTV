@@ -11,6 +11,8 @@ Package layout
 - ``model``       — ``QSO`` dataclass + ``StationInfo`` for ADIF export.
 - ``store``       — ``LogbookStore`` — SQLite-backed CRUD + queries.
 - ``adif``        — ADIF 3.1.5 reader/writer.  Pure-Python, no deps.
+- ``udp_log``     — UDP QSO-log broadcast (ADIF / WSJT-X protocol) for
+                     third-party logging tools.  Pure-Python, no deps.
 
 - ``coordinator``  — builds draft QSOs at TX/RX completion; owns the
                      app's store instance; ADIF import dedupe.
@@ -23,6 +25,7 @@ from __future__ import annotations
 from open_sstv.logbook.adif import (
     AdifParseError,
     export_adif,
+    format_qso_record,
     import_adif,
 )
 from open_sstv.logbook.coordinator import (
@@ -37,6 +40,7 @@ from open_sstv.logbook.store import (
     SchemaTooNewError,
     default_db_path,
 )
+from open_sstv.logbook.udp_log import QsoLoggingError, UdpLogFormat, UdpQsoLogger
 
 __all__ = [
     "DIRECTIONS",
@@ -46,10 +50,14 @@ __all__ = [
     "LogbookCoordinator",
     "LogbookStore",
     "QSO",
+    "QsoLoggingError",
     "SchemaTooNewError",
     "StationInfo",
+    "UdpLogFormat",
+    "UdpQsoLogger",
     "default_db_path",
     "export_adif",
+    "format_qso_record",
     "import_adif",
     "mode_display_name",
     "qso_dedupe_key",

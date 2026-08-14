@@ -220,6 +220,51 @@ def _adif_field(tag: str, value: str | None) -> str:
 # Export
 # ---------------------------------------------------------------------------
 
+def format_qso_record(qso: QSO, station: StationInfo | None = None) -> str:
+    """Render one QSO as a single ADIF record line (no header, no ``<EOH>``).
+
+    Shared by ``export_adif`` (one call per QSO) and the UDP QSO-log
+    sender (``logbook.udp_log``), which needs the exact same field set
+    for a single contact without the multi-record document wrapper.
+    """
+    station = station or StationInfo()
+    record_parts: list[str] = []
+    # Contact identity — required.
+    record_parts.append(_adif_field("CALL", qso.callsign.strip().upper()))
+    record_parts.append(_adif_field("QSO_DATE", datetime_to_qso_date(qso.time_utc)))
+    record_parts.append(_adif_field("TIME_ON", datetime_to_time_on(qso.time_utc)))
+    # Mode is always SSTV for us; submode carries the specific mode.
+    record_parts.append(_adif_field("MODE", "SSTV"))
+    if qso.mode:
+        record_parts.append(_adif_field("SUBMODE", mode_to_submode(qso.mode)))
+    # Band + frequency.
+    band = hz_to_band(qso.frequency_hz)
+    if band:
+        record_parts.append(_adif_field("BAND", band))
+    mhz = hz_to_mhz_str(qso.frequency_hz)
+    if mhz:
+        record_parts.append(_adif_field("FREQ", mhz))
+    # Signal reports.
+    record_parts.append(_adif_field("RST_SENT", qso.rsv_sent))
+    record_parts.append(_adif_field("RST_RCVD", qso.rsv_received))
+    # Contact metadata.
+    record_parts.append(_adif_field("NAME", qso.name))
+    record_parts.append(_adif_field("QTH", qso.qth))
+    record_parts.append(_adif_field("GRIDSQUARE", qso.grid))
+    record_parts.append(_adif_field("COMMENT", qso.comment))
+    # Operator's identity.
+    record_parts.append(_adif_field("STATION_CALLSIGN", station.callsign))
+    record_parts.append(_adif_field("MY_GRIDSQUARE", station.grid))
+    record_parts.append(_adif_field("MY_CITY", station.qth))
+    record_parts.append(_adif_field("OPERATOR", station.name))
+    # Our extension: RX direction (TX/two-way is the implicit default).
+    if qso.direction == "RX":
+        record_parts.append(_adif_field("APP_OPENSSTV_DIRECTION", "RX"))
+    # Filter out blanks and join with spaces (one record per line).
+    line = " ".join(p for p in record_parts if p)
+    return f"{line} <EOR>"
+
+
 def export_adif(
     qsos: Iterable[QSO],
     *,
@@ -257,41 +302,7 @@ def export_adif(
     for qso in qsos:
         if not include_drafts and not qso.callsign.strip():
             continue
-        record_parts: list[str] = []
-        # Contact identity — required.
-        record_parts.append(_adif_field("CALL", qso.callsign.strip().upper()))
-        record_parts.append(_adif_field("QSO_DATE", datetime_to_qso_date(qso.time_utc)))
-        record_parts.append(_adif_field("TIME_ON", datetime_to_time_on(qso.time_utc)))
-        # Mode is always SSTV for us; submode carries the specific mode.
-        record_parts.append(_adif_field("MODE", "SSTV"))
-        if qso.mode:
-            record_parts.append(_adif_field("SUBMODE", mode_to_submode(qso.mode)))
-        # Band + frequency.
-        band = hz_to_band(qso.frequency_hz)
-        if band:
-            record_parts.append(_adif_field("BAND", band))
-        mhz = hz_to_mhz_str(qso.frequency_hz)
-        if mhz:
-            record_parts.append(_adif_field("FREQ", mhz))
-        # Signal reports.
-        record_parts.append(_adif_field("RST_SENT", qso.rsv_sent))
-        record_parts.append(_adif_field("RST_RCVD", qso.rsv_received))
-        # Contact metadata.
-        record_parts.append(_adif_field("NAME", qso.name))
-        record_parts.append(_adif_field("QTH", qso.qth))
-        record_parts.append(_adif_field("GRIDSQUARE", qso.grid))
-        record_parts.append(_adif_field("COMMENT", qso.comment))
-        # Operator's identity.
-        record_parts.append(_adif_field("STATION_CALLSIGN", station.callsign))
-        record_parts.append(_adif_field("MY_GRIDSQUARE", station.grid))
-        record_parts.append(_adif_field("MY_CITY", station.qth))
-        record_parts.append(_adif_field("OPERATOR", station.name))
-        # Our extension: RX direction (TX/two-way is the implicit default).
-        if qso.direction == "RX":
-            record_parts.append(_adif_field("APP_OPENSSTV_DIRECTION", "RX"))
-        # Filter out blanks and join with spaces (one record per line).
-        line = " ".join(p for p in record_parts if p)
-        lines.append(f"{line} <EOR>")
+        lines.append(format_qso_record(qso, station))
 
     lines.append("")  # trailing newline
     return "\n".join(lines)

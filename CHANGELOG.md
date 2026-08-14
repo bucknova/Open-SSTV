@@ -9,6 +9,26 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **External Log: broadcast a QSO over UDP to companion logging software.**
+  A new **[External Log]** button next to **[Logbook…]** on the TX panel's
+  QSO bar sends the current contact as a single UDP datagram, so QLog,
+  JTAlert, GridTracker, Log4OM, N1MM, and similar programs can pick it up
+  automatically — the same "UDP logging" convention WSJT-X popularized.
+  Deliberately separate from the existing per-image auto-capture flow (an
+  SSTV QSO is usually several images; this sends exactly one record, once,
+  for the whole contact) and from the local SQLite logbook (sending never
+  writes a row, and logging never sends a datagram). The QSO bar gained an
+  **RSTr** field next to the renamed **RSTs**, plus **QTH** and **Grid**
+  (upper-cased as you type); frequency comes from the Radio panel's
+  **Freq:** field, time is the click's UTC timestamp, and mode is always
+  `SSTV`. **Settings → Logging → UDP QSO log** configures the destination
+  host/port (default `127.0.0.1:2237`, WSJT-X's own default) and picks
+  between the framed **WSJT-X protocol** (QLog/JTAlert/GridTracker/N1MM)
+  and unframed **Raw ADIF** (Log4OM-style). See
+  [docs/logbook.md](docs/logbook.md#broadcasting-to-a-companion-logger-udp).
+
 ---
 
 ## [0.6.6] — 2026-08-13
