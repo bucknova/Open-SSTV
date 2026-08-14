@@ -40,8 +40,15 @@ CLIENT_ID = "Open-SSTV"
 #: Header written ahead of the single record for the "wsjtx" format's
 #: embedded ADIF text — WSJT-X expects a complete little ADIF file
 #: fragment (header + ``<EOH>`` + record), not a bare record.
+#:
+#: PROGRAMID's length is computed from CLIENT_ID (UTF-8 byte count, per
+#: the ADIF ``<TAG:length>value`` spec) rather than hardcoded, so it can
+#: never drift out of sync the way a literal ``:8>`` did against the
+#: 9-byte "Open-SSTV" (a strict parser would then read "Open-SST" and
+#: leave a stray "V" dangling before ``<EOH>``).
 _ADIF_MINI_HEADER = (
-    "Open-SSTV ADIF export\n<ADIF_VER:5>3.1.5<PROGRAMID:8>Open-SSTV<EOH>\n"
+    "Open-SSTV ADIF export\n"
+    f"<ADIF_VER:5>3.1.5<PROGRAMID:{len(CLIENT_ID.encode('utf-8'))}>{CLIENT_ID}<EOH>\n"
 )
 
 UdpLogFormat = Literal["adif", "wsjtx"]

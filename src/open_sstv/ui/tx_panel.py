@@ -148,7 +148,7 @@ class TxPanel(QWidget):
     #: the logbook window, so the request bubbles up the same way
     #: transmit_requested does.
     logbook_requested = Signal()
-    #: v0.7: relay of the QSO bar's [UDP Log] button.  MainWindow builds
+    #: v0.6.7: relay of the QSO bar's [External Log] button.  MainWindow builds
     #: the QSO and owns the UDP send, same relay pattern as above.
     udp_log_requested = Signal()
 

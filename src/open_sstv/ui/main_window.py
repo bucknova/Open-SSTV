@@ -843,7 +843,7 @@ class MainWindow(QMainWindow):
         # v0.4: [Logbook…] button on the QSO bar — same destination as
         # Tools → Logbook… (Cmd/Ctrl+L).
         self._tx_panel.logbook_requested.connect(self._open_logbook)
-        # v0.7: [External Log] button — UDP-only QSO broadcast, does not touch
+        # v0.6.7: [External Log] button — UDP-only QSO broadcast, does not touch
         # the local logbook database.
         self._tx_panel.udp_log_requested.connect(self._on_udp_log_requested)
         self._radio_panel.test_tone_requested.connect(self._on_test_tone_requested)
@@ -1428,7 +1428,14 @@ class MainWindow(QMainWindow):
         except QsoLoggingError as exc:
             self.statusBar().showMessage(f"UDP log failed: {exc}", 8000)
             return
-        self.statusBar().showMessage(f"UDP log sent for {callsign}.", 5000)
+        # UDP is fire-and-forget: a successful sendto() only means the
+        # datagram left this machine, not that anything received it
+        # (no ack, and an unconnected socket never sees ICMP
+        # port-unreachable). "Sent" alone would read as delivery
+        # confirmation the operator doesn't actually have.
+        self.statusBar().showMessage(
+            f"UDP log sent for {callsign} (not confirmed).", 5000
+        )
 
     def _refresh_logbook_if_open(self) -> None:
         if self._logbook_dialog is not None and self._logbook_dialog.isVisible():

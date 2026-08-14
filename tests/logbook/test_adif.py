@@ -263,7 +263,7 @@ class TestExport:
 
 class TestFormatQsoRecord:
     """format_qso_record() was factored out of export_adif()'s per-QSO
-    loop body (v0.7, for the UDP QSO-log sender) — its output must stay
+    loop body (v0.6.7, for the UDP QSO-log sender) — its output must stay
     byte-for-byte identical to what export_adif() puts on a record line."""
 
     def test_matches_export_adif_single_record_line(self) -> None:

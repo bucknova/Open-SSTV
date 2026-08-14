@@ -11,7 +11,7 @@ different callsign (heuristic: new callsign → new QSO).
 The ``state_changed`` signal is debounced 300 ms so live-preview
 re-renders don't fire on every keypress.
 
-v0.7 adds RST-received / QTH / Grid plus an [External Log] button: these feed
+v0.6.7 adds RST-received / QTH / Grid plus an [External Log] button: these feed
 the UDP QSO-log broadcast (``logbook.udp_log``), sent once per QSO —
 independent of the ``QSOState`` template tokens above, so they're kept
 off the ``QSOState`` dataclass and exposed through a separate accessor.
@@ -106,7 +106,7 @@ class QSOStateWidget(QWidget):
         self._rst.currentTextChanged.connect(self._on_field_changed)
         row1.addWidget(self._rst)
 
-        # v0.7: RST received sits right next to RST sent — feeds the
+        # v0.6.7: RST received sits right next to RST sent — feeds the
         # UDP QSO log only (see module docstring), not a template token.
         row1.addWidget(QLabel("RSTr:"))
         self._rst_received = QComboBox()
@@ -131,7 +131,7 @@ class QSOStateWidget(QWidget):
         self._logbook_btn.clicked.connect(self.logbook_requested)
         row1.addWidget(self._logbook_btn)
 
-        # v0.7: one-click UDP QSO-log broadcast — sent once per QSO from
+        # v0.6.7: one-click UDP QSO-log broadcast — sent once per QSO from
         # whatever is currently in this bar, independent of the local
         # logbook database.  See ``logbook.udp_log``.
         self._udp_log_btn = QPushButton("External Log")
@@ -145,7 +145,7 @@ class QSOStateWidget(QWidget):
 
         layout.addLayout(row1)
 
-        # --- Row 2: Name / QTH / Grid (v0.7 adds QTH + Grid) ---
+        # --- Row 2: Name / QTH / Grid (v0.6.7 adds QTH + Grid) ---
         # Name still resolves the {tocall_name} template token; QTH/Grid
         # are UDP-QSO-log-only (see module docstring).
         row2 = QHBoxLayout()

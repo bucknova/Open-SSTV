@@ -2167,7 +2167,7 @@ class SettingsDialog(QDialog):
             rx_capture_prompt=self._rx_capture_combo.currentData() or "always",
             logbook_db_path=self._config.logbook_db_path,
             log_level=self._log_level_combo.currentData() or "INFO",
-            # v0.7: UDP QSO log broadcast (ported from cwrobot).
+            # v0.6.7: UDP QSO log broadcast (ported from cwrobot).
             udp_log_host=self._udp_log_host.text().strip() or "127.0.0.1",
             udp_log_port=self._udp_log_port.value(),
             udp_log_format=self._udp_log_format.currentData() or "wsjtx",

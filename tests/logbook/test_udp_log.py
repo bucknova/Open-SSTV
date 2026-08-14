@@ -134,6 +134,22 @@ class TestUdpQsoLogger:
         assert "<FREQ:9>14.230000" in adif_text
         assert offset == len(data)
 
+    def test_mini_header_programid_length_matches_client_id(
+        self, udp_listener: socket.socket
+    ) -> None:
+        # Regression: PROGRAMID's length prefix must be "Open-SSTV"'s
+        # actual UTF-8 byte count (9), not a stale hardcoded value — a
+        # wrong length makes a strict parser read a truncated/garbled
+        # id and leave stray bytes dangling before <EOH>.
+        port = udp_listener.getsockname()[1]
+        logger = UdpQsoLogger("127.0.0.1", port, format="wsjtx")
+        logger.log_qso(_qso())
+
+        data, _addr = udp_listener.recvfrom(65536)
+        _client_id, offset = _read_utf8_field(data, 12)
+        adif_text, _offset = _read_utf8_field(data, offset)
+        assert "<PROGRAMID:9>Open-SSTV<EOH>" in adif_text
+
     def test_no_frequency_omits_band_and_freq(self, udp_listener: socket.socket) -> None:
         # No rig connected → frequency_hz=None (mirrors "Freq:" showing
         # "—" on the main page) — BAND/FREQ must simply be absent, not

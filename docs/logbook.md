@@ -133,7 +133,7 @@ SSTV mode) are kept verbatim rather than dropped.
 
 ## Broadcasting to a companion logger (UDP)
 
-*New in v0.7.*  Besides the SQLite logbook and file-based ADIF export
+*New in v0.6.7.*  Besides the SQLite logbook and file-based ADIF export
 above, Open-SSTV can also broadcast a single QSO over UDP the instant
 you finish working it — the same "UDP logging" convention WSJT-X
 popularized, so QLog, JTAlert, GridTracker, Log4OM, N1MM, and similar
@@ -190,9 +190,17 @@ goes:
     Log4OM-style listeners expect.
 
 Each click opens a fresh UDP socket, sends one datagram, and closes it
-— fire-and-forget, no acknowledgement, no persistent connection to
-manage. If the send fails (nothing listening, bad host), the status
-bar reports it; nothing else in the app is affected.
+— fire-and-forget, no persistent connection to manage. **The status
+bar's confirmation only means the datagram left your machine, not
+that the companion program received it** — UDP has no acknowledgement,
+so a companion logger that isn't running yet, or is listening on a
+different port, still gets a "sent" message with nothing arriving on
+the other end (this is inherent to UDP, not a bug — nothing in the
+app can tell the difference). The status bar only reports an actual
+*local* failure, such as an unparseable host address; it can't tell
+you whether anyone was listening. If a contact isn't showing up in
+your companion logger, double-check that program is running and its
+UDP listener matches the host/port/format configured here.
 
 ## Where the data lives
 

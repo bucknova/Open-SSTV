@@ -272,7 +272,7 @@ class AppConfig:
     # still forces DEBUG regardless of this field.
     log_level: str = "INFO"
 
-    # --- UDP QSO log (v0.7) ---
+    # --- UDP QSO log (v0.6.7) ---
     # Fire-and-forget UDP broadcast of a single logged contact, for
     # third-party ham-radio logging tools (QLog, JTAlert, GridTracker,
     # Log4OM, N1MM…) — triggered manually from the "External Log" button on
@@ -439,7 +439,7 @@ class AppConfig:
             lvl = "INFO"
         self.log_level = lvl
 
-        # v0.7: same fallback pattern for the UDP QSO-log wire format —
+        # v0.6.7: same fallback pattern for the UDP QSO-log wire format —
         # an unrecognised value would otherwise reach UdpQsoLogger and
         # silently send the wrong datagram shape.
         fmt_original = self.udp_log_format

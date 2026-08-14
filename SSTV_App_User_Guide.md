@@ -1137,7 +1137,7 @@ is a single SQLite file in the platform data directory — back it up
 like any file.  It is excluded from diagnostics zips unless you
 explicitly opt in.
 
-### 18.4 External Log (UDP, v0.7)
+### 18.4 External Log (UDP, v0.6.7)
 
 The **[External Log]** button on the TX panel's QSO bar, next to
 **[Logbook…]**, broadcasts the current QSO over UDP so a companion

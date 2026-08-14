@@ -141,7 +141,7 @@ class TestLogbookButton:
 
 
 class TestUdpLogFields:
-    """v0.7: RST-received / QTH / Grid feed the UDP QSO log only — they
+    """v0.6.7: RST-received / QTH / Grid feed the UDP QSO log only — they
     are deliberately kept off ``QSOState`` (see module docstring)."""
 
     def test_default_fields_are_empty(self, widget: QSOStateWidget) -> None:
@@ -168,7 +168,7 @@ class TestUdpLogFields:
 
 
 class TestUdpLogButton:
-    """v0.7: the [External Log] button relays a udp_log_requested signal."""
+    """v0.6.7: the [External Log] button relays a udp_log_requested signal."""
 
     def test_button_present_next_to_logbook(self, widget: QSOStateWidget) -> None:
         assert widget._udp_log_btn.text() == "External Log"
