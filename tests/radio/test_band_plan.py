@@ -9,10 +9,12 @@ from __future__ import annotations
 import pytest
 
 from open_sstv.radio.band_plan import (
+    DATA_MODE_BY_PROTOCOL,
     SSTV_BAND_PLAN,
     BandEntry,
     mode_family,
     primary_entry,
+    resolve_tune_mode,
 )
 
 # ---------------------------------------------------------------------------
@@ -268,3 +270,57 @@ class TestModeFamily:
     def test_pktusb_to_usb_target_same_family_preserves_pkt(self) -> None:
         """Hamlib-mediated PKTUSB → picking a USB band must preserve PKTUSB."""
         assert mode_family("PKTUSB") == mode_family("USB")
+
+
+# ---------------------------------------------------------------------------
+# resolve_tune_mode() — WSJT-X-style None/Voice/Data tune-mode policy
+# ---------------------------------------------------------------------------
+
+class TestResolveTuneMode:
+    """The band-plan entry's mode is always a plain "USB"/"LSB"/"FM" literal;
+    ``resolve_tune_mode`` translates it per the user's SSTV-mode policy
+    before it's ever sent to ``Rig.set_mode()``.
+    """
+
+    # --- "none" policy: never touch the rig's mode -------------------------
+
+    def test_none_policy_returns_empty_string(self) -> None:
+        assert resolve_tune_mode("USB", "Yaesu CAT", "none") == ""
+
+    def test_none_policy_ignores_protocol(self) -> None:
+        """"none" always skips set_mode, regardless of protocol."""
+        assert resolve_tune_mode("LSB", "Icom CI-V", "none") == ""
+
+    # --- "voice" policy: today's behavior, unchanged ------------------------
+
+    def test_voice_policy_passes_through_usb(self) -> None:
+        assert resolve_tune_mode("USB", "Yaesu CAT", "voice") == "USB"
+
+    def test_voice_policy_passes_through_fm(self) -> None:
+        assert resolve_tune_mode("FM", "Yaesu CAT", "voice") == "FM"
+
+    # --- "data" policy: Yaesu is the one verified mapping -------------------
+
+    def test_data_policy_resolves_yaesu_usb_to_data_u(self) -> None:
+        assert resolve_tune_mode("USB", "Yaesu CAT", "data") == "DATA-U"
+
+    def test_data_policy_resolves_yaesu_lsb_to_data_l(self) -> None:
+        assert resolve_tune_mode("LSB", "Yaesu CAT", "data") == "DATA-L"
+
+    def test_data_policy_fm_has_no_variant_and_passes_through(self) -> None:
+        assert resolve_tune_mode("FM", "Yaesu CAT", "data") == "FM"
+
+    def test_data_policy_falls_back_to_voice_for_unmapped_protocol(self) -> None:
+        """Kenwood/Icom/PTT-only have no verified data-mode CAT string —
+        "data" must not invent one, it falls back to the plain literal."""
+        assert resolve_tune_mode("USB", "Kenwood / Elecraft", "data") == "USB"
+        assert resolve_tune_mode("USB", "Icom CI-V", "data") == "USB"
+        assert resolve_tune_mode("USB", "PTT Only (DTR/RTS)", "data") == "USB"
+
+    def test_data_policy_falls_back_to_voice_for_unknown_protocol_string(self) -> None:
+        assert resolve_tune_mode("USB", "Some Future Rig", "data") == "USB"
+
+    def test_data_map_only_lists_verified_protocols(self) -> None:
+        """Guard against silently "supporting" a protocol whose data-mode
+        CAT command was never verified against real hardware."""
+        assert set(DATA_MODE_BY_PROTOCOL) == {"Yaesu CAT"}

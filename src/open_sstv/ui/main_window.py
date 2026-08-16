@@ -121,9 +121,9 @@ from open_sstv.config.store import last_corrupt_backup, load_config, save_config
 from open_sstv.config.templates import load_templates
 from open_sstv.core.modes import Mode
 from open_sstv.logbook import QSO, LogbookCoordinator, QsoLoggingError, UdpQsoLogger
-from open_sstv.radio.band_plan import mode_family
+from open_sstv.radio.band_plan import mode_family, resolve_tune_mode
 from open_sstv.radio.base import ManualRig, Rig, RigConnectionMode
-from open_sstv.radio.exceptions import RigError
+from open_sstv.radio.exceptions import RigCommandError, RigError
 from open_sstv.radio.rigctld import RigctldClient, is_safe_rigctld_arg
 from open_sstv.radio.serial_rig import create_serial_rig
 from open_sstv.remote import (
@@ -203,6 +203,10 @@ class _RigPollWorker(QObject):
     #: Emitted exactly once when ``_POLL_FAIL_THRESHOLD`` consecutive polls
     #: fail.  ``MainWindow`` stops the timer and reverts to disconnected state.
     radio_disconnected = Signal()
+    #: Emitted when a band-plan ``tune()`` call fails — a rejected/timed-out
+    #: CAT command, or a frequency readback that doesn't match what was
+    #: requested.  Payload is a human-readable reason for the status bar.
+    tune_failed = Signal(str)
 
     #: How many consecutive poll failures trigger the auto-disconnect signal.
     _POLL_FAIL_THRESHOLD: int = 3
@@ -257,8 +261,9 @@ class _RigPollWorker(QObject):
 
         Runs on the rig-poll thread (queued from ``MainWindow._request_tune``
         signal) so it cannot race with the 1 Hz ``poll`` slot — both live on
-        the same event loop.  Errors are swallowed silently; the poll cycle
-        will surface any persistent connection problem within 3 s.
+        the same event loop.  Failures emit ``tune_failed`` so the GUI thread
+        can surface them; the poll cycle still catches any persistent
+        connection problem within 3 s independently.
 
         Mode is only re-sent if the current mode's **sideband family** differs
         from the target's.  This preserves data-variant modes (IC-7300
@@ -268,9 +273,24 @@ class _RigPollWorker(QObject):
         routing and re-enable the speech processor.  Band-edge crossings
         that flip sideband (e.g. 20 m USB → 40 m LSB) still switch correctly
         because the family changes.
+
+        Frequency is verified with a readback: ``KenwoodRig``/``YaesuRig``
+        set commands are fire-and-forget (the radio sends no response, so
+        the CAT write itself can't detect a rejection — dial/VFO lock,
+        memory-mode display, TX-inhibit/band edge, …), so without this check
+        a rejected frequency change is silently indistinguishable from
+        success.  A readback of ``0`` means the backend doesn't report
+        frequency at all (e.g. ``SerialPttRig``) and is not treated as a
+        mismatch.
         """
         try:
             self._rig.set_freq(freq_hz)
+            actual_freq = self._rig.get_freq()
+            if actual_freq and actual_freq != freq_hz:
+                raise RigCommandError(
+                    f"radio still at {actual_freq} Hz — frequency change rejected "
+                    "(check VFO/dial lock, memory mode, or band-edge limits)"
+                )
             if mode:
                 try:
                     current_mode, _ = self._rig.get_mode()
@@ -280,13 +300,16 @@ class _RigPollWorker(QObject):
                 if mode_family(current_mode) != mode_family(mode):
                     self._rig.set_mode(mode, passband_hz)
         except Exception as exc:  # noqa: BLE001 — same tolerance as poll()
-            # M10: log so failures are visible in OPEN_SSTV_DEBUG=1.  Persistent
-            # connection loss is still surfaced via the next poll cycle within
-            # ~3 s; this just makes transient errors (band-edge reject, brief
-            # CAT timeout) observable instead of vanishing.
+            # M10: log so failures are visible in OPEN_SSTV_DEBUG=1, and emit
+            # tune_failed so the GUI thread can also show it to the user —
+            # previously this was logged only, and the "Tuning to…" status
+            # message wasn't corrected, so a rejected tune looked identical
+            # to a successful one.  Persistent connection loss is still
+            # surfaced via the next poll cycle within ~3 s.
             _log.warning(
                 "tune to %d Hz (%s) failed: %s", freq_hz, mode or "mode unchanged", exc
             )
+            self.tune_failed.emit(str(exc))
 
 
 class _RigConnectWorker(QObject):
@@ -963,6 +986,7 @@ class MainWindow(QMainWindow):
         self._rig_poll_worker.poll_result.connect(self._on_poll_result)
         self._rig_poll_worker.poll_error.connect(self._radio_panel.set_connection_error)
         self._rig_poll_worker.radio_disconnected.connect(self._on_radio_disconnected)
+        self._rig_poll_worker.tune_failed.connect(self._on_tune_failed)
         # Band-plan tune relay: GUI thread emits _request_tune → rig-poll thread
         # executes tune().  Cross-thread → auto QueuedConnection.
         self._request_tune.connect(self._rig_poll_worker.tune)
@@ -3630,13 +3654,35 @@ class MainWindow(QMainWindow):
         Shows a brief status-bar message on the GUI thread, then relays the
         command via ``_request_tune`` (a queued cross-thread signal) so the
         actual CAT write runs on the rig-poll thread alongside ``poll()``.
+
+        The band-plan entry's *mode* is a plain ``"USB"``/``"LSB"``/``"FM"``
+        literal; it's resolved through ``resolve_tune_mode`` against the
+        user's "SSTV mode" policy (Settings → Radio → Direct Serial) before
+        being sent, so a "data" policy asks the rig for its data-mode variant
+        (e.g. Yaesu ``DATA-U``/``DATA-L``) instead of forcing plain USB/LSB.
+        Only applies to Direct Serial connections — the policy is keyed by
+        ``rig_serial_protocol``, which other connection modes don't use.
         """
         if freq_hz >= 1_000_000:
             freq_str = f"{freq_hz / 1_000_000:.3f} MHz"
         else:
             freq_str = f"{freq_hz / 1_000:.3f} kHz"
-        self.statusBar().showMessage(f"Tuning to {freq_str} ({mode})…", 3000)
+        if self._config.rig_connection_mode == RigConnectionMode.SERIAL:
+            mode = resolve_tune_mode(
+                mode, self._config.rig_serial_protocol, self._config.rig_tune_mode_policy
+            )
+        self.statusBar().showMessage(f"Tuning to {freq_str} ({mode or 'mode unchanged'})…", 3000)
         self._request_tune.emit(freq_hz, mode, passband_hz)
+
+    @Slot(str)
+    def _on_tune_failed(self, reason: str) -> None:
+        """Show a band-plan tune failure on the GUI thread.
+
+        Connected to ``_RigPollWorker.tune_failed`` (cross-thread queued
+        connection). Replaces the transient "Tuning to…" message — without
+        this, a rejected frequency/mode change looked identical to success.
+        """
+        self.statusBar().showMessage(f"Tune failed: {reason}", 6000)
 
     # === lifecycle ===
 

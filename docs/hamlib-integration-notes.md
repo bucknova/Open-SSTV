@@ -35,9 +35,24 @@ The radio layer is already swappable-by-design. Adding Hamlib direct is a parall
 | `SerialPttRig` | DTR/RTS line keying only (no CAT) | PTT only |
 | `IcomCIVRig` | CI-V (IC-7300, IC-9700, etc.) | freq, mode, PTT, S-meter |
 | `KenwoodRig` | Kenwood/Elecraft text protocol | freq, mode, PTT, S-meter |
-| `YaesuRig` | Yaesu modern CAT (FT-991, FT-710, FTDX10, …) | freq, mode, PTT, S-meter |
+| `YaesuRig` | Yaesu text CAT (FT-991, FT-710, FTDX10, FT-450/450D, …) | freq, mode, PTT, S-meter |
 
 A factory at `serial_rig.py:841` (`create_serial_rig(protocol, port, baud, …)`) dispatches the four protocols by string name from settings. Each backend uses `pyserial` and a `threading.Lock` to serialize I/O.
+
+> **Gotcha (v0.6.x):** Yaesu's `FA` (set-frequency) command uses a
+> **model-dependent digit width** — FT-450/450D wants 8 digits, no leading
+> zero (`FA14230000;`); FT-991A and the other "modern CAT" rigs above want
+> 9, zero-padded (`FA014230000;`). Sending the wrong width isn't ignored,
+> it's rejected outright with `?;` — and since Yaesu/Kenwood *set* commands
+> are otherwise fire-and-forget (no response at all), that rejection was
+> previously invisible: frequency silently didn't change while `MD`
+> (single-digit mode) kept working fine, since it isn't sensitive to a
+> digit-width mismatch. `YaesuRig` now detects the width from a live
+> `get_freq()` read (which is lenient about either length) and caches it
+> per connection instead of hardcoding 9. If a Hamlib-direct backend is
+> ever built, Hamlib's own per-model tables already handle this — it's
+> only a footgun for a from-scratch text-protocol implementation like this
+> one's `serial_rig.py`.
 
 ### rigctld TCP client — `src/open_sstv/radio/rigctld.py`
 

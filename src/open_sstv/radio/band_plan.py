@@ -207,4 +207,55 @@ def mode_family(mode: str) -> str:
     return m
 
 
-__all__ = ["BandEntry", "SSTV_BAND_PLAN", "mode_family", "primary_entry"]
+#: Per-protocol CAT mode strings for the "data" tune policy, keyed by the
+#: ``rig_serial_protocol`` name (see ``serial_rig.SERIAL_RIG_PROTOCOLS``)
+#: and then by sideband family (``mode_family()`` output).  Only protocols
+#: with a verified single-command data-mode selector are listed here —
+#: ``YaesuRig.set_mode()`` already accepts ``"DATA-U"``/``"DATA-L"``
+#: directly.  Icom's data mode is not a mode-select byte at all (base
+#: sideband plus a separate CI-V ``0x1A 0x06`` "DATA ON" sub-command) and
+#: Kenwood/Elecraft's is model-specific (e.g. the K3 uses a separate ``DT``
+#: sub-command) — both are intentionally left out and fall back to
+#: ``"voice"`` in ``resolve_tune_mode`` rather than guess a wrong CAT
+#: string untested against real hardware.
+DATA_MODE_BY_PROTOCOL: dict[str, dict[str, str]] = {
+    "Yaesu CAT": {"USB": "DATA-U", "LSB": "DATA-L"},
+}
+
+
+def resolve_tune_mode(rig_mode: str, protocol: str, policy: str) -> str:
+    """Resolve the actual ``Rig.set_mode()`` target for a band-plan tune.
+
+    Mirrors WSJT-X's rig "Mode" setting (None / USB / Data-Pkt) so users
+    don't have to know or type vendor-specific CAT mode strings themselves.
+
+    * ``"none"`` — return ``""``; ``_RigPollWorker.tune()`` treats an empty
+      mode as "don't touch the rig's mode at all", for operators who
+      already have their own data mode dialed in.
+    * ``"voice"`` — return *rig_mode* unchanged (today's behavior: the
+      band-plan entry's plain ``"USB"``/``"LSB"``/``"FM"`` literal).
+    * ``"data"`` — look up *protocol*'s data-mode variant for *rig_mode*'s
+      sideband family in ``DATA_MODE_BY_PROTOCOL``.  ``"FM"`` has no data
+      variant and always passes through unchanged.  A protocol/family
+      combination with no known mapping (Kenwood, Icom, PTT-only, or any
+      unrecognised *protocol* string) falls back to the voice literal —
+      the same value used today — so an unsupported "data" request never
+      picks a worse mode than before, it just doesn't improve on it.
+    """
+    if policy == "none":
+        return ""
+    if policy == "data":
+        variant = DATA_MODE_BY_PROTOCOL.get(protocol, {}).get(mode_family(rig_mode))
+        if variant:
+            return variant
+    return rig_mode
+
+
+__all__ = [
+    "BandEntry",
+    "DATA_MODE_BY_PROTOCOL",
+    "SSTV_BAND_PLAN",
+    "mode_family",
+    "primary_entry",
+    "resolve_tune_mode",
+]

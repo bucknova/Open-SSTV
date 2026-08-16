@@ -54,6 +54,7 @@ from open_sstv.audio.pipewire_route import list_pipewire_sinks
 from open_sstv.config.schema import VALID_BAUD_RATES, AppConfig
 from open_sstv.core.banner import apply_tx_banner, scaled_banner_params
 from open_sstv.core.modes import Mode
+from open_sstv.radio.band_plan import DATA_MODE_BY_PROTOCOL
 from open_sstv.radio.base import RigConnectionMode
 from open_sstv.radio.exceptions import RigError
 from open_sstv.radio.rigctld import RigctldClient, is_safe_rigctld_arg
@@ -1081,6 +1082,20 @@ class SettingsDialog(QDialog):
             self._ptt_line_combo.setCurrentIndex(idx)
         serial_form.addRow(self._ptt_line_row_label, self._ptt_line_combo)
 
+        # SSTV mode policy — mirrors WSJT-X's rig "Mode" setting (None / USB /
+        # Data-Pkt) so the Band Plan button can select a data-mode variant
+        # (e.g. Yaesu DATA-U/DATA-L) instead of always forcing plain USB/LSB.
+        self._tune_mode_combo = QComboBox()
+        self._tune_mode_combo.addItem("Don't change mode", "none")
+        self._tune_mode_combo.addItem("Voice (USB/LSB)", "voice")
+        self._tune_mode_combo.addItem("Data/Pkt (recommended for SSTV)", "data")
+        idx = self._tune_mode_combo.findData(self._config.rig_tune_mode_policy)
+        if idx >= 0:
+            self._tune_mode_combo.setCurrentIndex(idx)
+        self._tune_mode_combo.currentIndexChanged.connect(self._on_tune_mode_policy_changed)
+        serial_form.addRow("SSTV mode:", self._tune_mode_combo)
+        self._on_tune_mode_policy_changed()  # set the initial tooltip
+
         # Test button for serial
         self._serial_test_btn = QPushButton("Test Serial Connection")
         self._serial_test_btn.clicked.connect(self._test_serial_connection)
@@ -1334,6 +1349,32 @@ class SettingsDialog(QDialog):
         # user-initiated changes (not during initial dialog construction).
         if getattr(self, "_protocol_init_done", False):
             self._suggest_baud_for_protocol(proto)
+        # "Data" support depends on the protocol too — refresh the tooltip.
+        self._on_tune_mode_policy_changed()
+
+    def _on_tune_mode_policy_changed(self) -> None:
+        """Update the SSTV-mode tooltip with what "Data" resolves to.
+
+        ``DATA_MODE_BY_PROTOCOL`` only covers protocols with a verified
+        single-command data-mode selector (currently Yaesu CAT); other
+        protocols silently fall back to Voice at tune time
+        (``band_plan.resolve_tune_mode``) — spelling that out here so the
+        limitation is visible instead of surprising.
+        """
+        proto = self._serial_protocol_combo.currentText()
+        variants = DATA_MODE_BY_PROTOCOL.get(proto)
+        if variants:
+            data_hint = " / ".join(f"{fam}→{cat}" for fam, cat in variants.items())
+            tooltip = (
+                "Applies to Band Plan tuning only.\n"
+                f"Data/Pkt on {proto}: {data_hint}."
+            )
+        else:
+            tooltip = (
+                "Applies to Band Plan tuning only.\n"
+                f"Data/Pkt is not yet supported for {proto} — falls back to Voice."
+            )
+        self._tune_mode_combo.setToolTip(tooltip)
 
     # Typical baud rates for each serial protocol. Exposed as a class-level
     # constant so tests and the "Test Connection" path can reference them.
@@ -2131,6 +2172,7 @@ class SettingsDialog(QDialog):
             rig_serial_protocol=self._serial_protocol_combo.currentText(),
             rig_civ_address=self._civ_address_spin.value(),
             rig_ptt_line=self._ptt_line_combo.currentData() or "DTR",
+            rig_tune_mode_policy=self._tune_mode_combo.currentData() or "voice",
             audio_input_gain=self._input_gain_slider.value() / 100.0,
             audio_output_gain=self._output_gain_slider.value() / 100.0,
             tx_output_overdrive=self._overdrive_check.isChecked(),

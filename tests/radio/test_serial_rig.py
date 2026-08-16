@@ -289,6 +289,7 @@ def _make_yaesu_rig() -> YaesuRig:
     r._baud_rate = 38400
     r._lock = threading.Lock()
     r._ser = None
+    r._freq_digits = None
     return r
 
 
@@ -469,8 +470,14 @@ class TestKenwoodSetFreqAndMode:
 
 class TestYaesuSetFreqAndMode:
     def test_set_freq_no_response_succeeds(self) -> None:
-        """FA{9d}; is a set command; must not block waiting for a response."""
+        """FA{Nd}; is a set command; must not block waiting for a response.
+
+        Digit width is already known here (as it would be after the poll
+        loop's first get_freq()) so this exercises only the write path —
+        see TestYaesuFreqDigitWidth for the detection/probe behavior.
+        """
         r = _make_yaesu_rig()
+        r._freq_digits = 9
         r._ser = MagicMock()
         r.set_freq(14_230_000)
         r._ser.write.assert_called_once_with(b"FA014230000;")
@@ -490,6 +497,83 @@ class TestYaesuSetFreqAndMode:
         r._ser = MagicMock()
         r.set_mode("OLIVIA", 0)
         r._ser.write.assert_called_once_with(b"MD02;")
+
+
+# ---------------------------------------------------------------------------
+# Y-6 — YaesuRig FA frequency field width is model-dependent.
+#
+# FT-450/450D (HF+6m only) expects/reports 8 digits, no leading zero
+# (e.g. "FA14230000;"); FT-991A and other "modern CAT" rigs (FTDX10,
+# FT-891, FT-710, FTDX101, FT-950) use 9, zero-padded.  Sending the wrong
+# width is rejected outright with "?;" — not just ignored — so set_freq()
+# must detect and match the width rather than hardcode one.
+# ---------------------------------------------------------------------------
+
+
+class TestYaesuFreqDigitWidth:
+    def test_get_freq_detects_8_digit_width(self) -> None:
+        """FT-450D-style response: no leading zero, 8 digits total."""
+        r = _make_yaesu_rig()
+        with patch.object(r, "_command", return_value="FA14230000"):
+            freq = r.get_freq()
+        assert freq == 14_230_000
+        assert r._freq_digits == 8
+
+    def test_get_freq_detects_9_digit_width(self) -> None:
+        """FT-991A-style response: zero-padded, 9 digits total."""
+        r = _make_yaesu_rig()
+        with patch.object(r, "_command", return_value="FA014230000"):
+            freq = r.get_freq()
+        assert freq == 14_230_000
+        assert r._freq_digits == 9
+
+    def test_set_freq_uses_previously_detected_8_digit_width(self) -> None:
+        """FT-450D scenario: a prior get_freq() (e.g. from the 1 Hz poll
+        loop) detected 8 digits — set_freq must match it exactly, no
+        leading zero, or the radio rejects the command with "?;"."""
+        r = _make_yaesu_rig()
+        r._freq_digits = 8
+        r._ser = MagicMock()
+        r.set_freq(14_230_000)
+        r._ser.write.assert_called_once_with(b"FA14230000;")
+
+    def test_set_freq_uses_previously_detected_9_digit_width(self) -> None:
+        r = _make_yaesu_rig()
+        r._freq_digits = 9
+        r._ser = MagicMock()
+        r.set_freq(14_230_000)
+        r._ser.write.assert_called_once_with(b"FA014230000;")
+
+    def test_set_freq_probes_width_when_unknown(self) -> None:
+        """No get_freq() has run yet (e.g. a Band Plan tune racing the 1 Hz
+        poll loop right after Connect) — set_freq() must probe once via a
+        live read, then send the newly-detected width, not the 9-digit
+        default."""
+        r = _make_yaesu_rig()
+        r._ser = MagicMock()
+        assert r._freq_digits is None
+
+        with patch.object(r, "_command", return_value="FA14230000") as mock_cmd:
+            r.set_freq(14_230_000)
+
+        mock_cmd.assert_called_once()
+        assert r._freq_digits == 8
+        r._ser.write.assert_called_once_with(b"FA14230000;")
+
+    def test_set_freq_falls_back_to_9_digits_when_probe_fails(self) -> None:
+        """If the probe itself fails (timeout, I/O error, …), set_freq
+        must not raise — it falls through to today's 9-digit default and
+        sends anyway, same as before this width-detection existed."""
+        from open_sstv.radio.exceptions import RigConnectionError
+
+        r = _make_yaesu_rig()
+        r._ser = MagicMock()
+
+        with patch.object(r, "_command", side_effect=RigConnectionError("timeout")):
+            r.set_freq(14_230_000)
+
+        assert r._freq_digits is None
+        r._ser.write.assert_called_once_with(b"FA014230000;")
 
 
 # ---------------------------------------------------------------------------

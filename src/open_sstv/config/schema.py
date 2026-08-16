@@ -34,6 +34,15 @@ _VALID_BANNER_SIZES: tuple[str, ...] = ("small", "medium", "large")
 #: Valid values for ``rig_ptt_line`` (SerialPttRig control lines).
 _VALID_PTT_LINES: tuple[str, ...] = ("DTR", "RTS")
 
+#: Valid values for ``rig_tune_mode_policy`` — how Band Plan tuning picks
+#: the CAT mode to send, mirroring WSJT-X's rig "Mode" setting:
+#: "none" leaves the rig's mode alone, "voice" sends the band-plan
+#: entry's plain USB/LSB/FM literal (today's behavior, and the default so
+#: upgrades don't change anyone's setup), "data" resolves the protocol's
+#: data-mode variant (e.g. Yaesu DATA-U/DATA-L) via
+#: ``radio.band_plan.resolve_tune_mode``.
+_VALID_TUNE_MODE_POLICIES: tuple[str, ...] = ("none", "voice", "data")
+
 
 def _default_images_dir() -> str:
     """XDG-correct pictures directory, e.g. ``~/Pictures/open_sstv``."""
@@ -95,6 +104,9 @@ class AppConfig:
     rig_serial_protocol: str = "PTT Only (DTR/RTS)"
     rig_civ_address: int = 0x94
     rig_ptt_line: str = "DTR"
+    #: Band-plan tuning mode policy: "none" / "voice" / "data" — see
+    #: ``_VALID_TUNE_MODE_POLICIES`` and ``radio.band_plan.resolve_tune_mode``.
+    rig_tune_mode_policy: str = "voice"
 
     # --- Audio gain ---
     audio_input_gain: float = 1.0
@@ -530,6 +542,14 @@ class AppConfig:
                 self.rig_serial_protocol, list(SERIAL_RIG_PROTOCOLS),
             )
             self.rig_serial_protocol = "PTT Only (DTR/RTS)"
+
+        if self.rig_tune_mode_policy not in _VALID_TUNE_MODE_POLICIES:
+            _log.warning(
+                "AppConfig: unknown rig_tune_mode_policy %r (valid: %s) — "
+                "falling back to 'voice'",
+                self.rig_tune_mode_policy, list(_VALID_TUNE_MODE_POLICIES),
+            )
+            self.rig_tune_mode_policy = "voice"
 
         ptt_line = (self.rig_ptt_line or "").upper()
         if ptt_line not in _VALID_PTT_LINES:

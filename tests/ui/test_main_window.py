@@ -747,6 +747,99 @@ class TestRigPollWorkerErrorCounter:
         assert disconnected == [True]
 
 
+class TestRigPollWorkerTune:
+    """Unit tests for _RigPollWorker.tune() — the Band Plan CAT write path.
+
+    ``set_freq()`` on Kenwood/Yaesu direct-serial rigs is fire-and-forget
+    (the radio sends no response, so a rejected frequency change is
+    otherwise indistinguishable from success) — ``tune()`` now verifies
+    with a ``get_freq()`` readback and emits ``tune_failed`` on mismatch.
+    """
+
+    def _make_worker(self):  # type: ignore[no-untyped-def]
+        from open_sstv.ui.main_window import _RigPollWorker  # type: ignore[attr-defined]
+        return _RigPollWorker()
+
+    def test_tune_sets_freq_and_mode_when_family_differs(self, qapp) -> None:
+        worker = self._make_worker()
+        rig = MagicMock()
+        rig.get_freq.return_value = 14_230_000  # matches the requested freq
+        rig.get_mode.return_value = ("CW", 0)  # different family than USB
+        worker.set_rig(rig)
+
+        failures: list[str] = []
+        worker.tune_failed.connect(lambda reason: failures.append(reason))
+
+        worker.tune(14_230_000, "USB", 2700)
+
+        rig.set_freq.assert_called_once_with(14_230_000)
+        rig.set_mode.assert_called_once_with("USB", 2700)
+        assert failures == []
+
+    def test_tune_skips_mode_when_family_matches(self, qapp) -> None:
+        """User already on a data variant (e.g. Yaesu DATA-U) — same
+        family as the target, so set_mode must not be re-sent."""
+        worker = self._make_worker()
+        rig = MagicMock()
+        rig.get_freq.return_value = 14_230_000
+        rig.get_mode.return_value = ("DATA-U", 0)
+        worker.set_rig(rig)
+
+        worker.tune(14_230_000, "USB", 2700)
+
+        rig.set_freq.assert_called_once_with(14_230_000)
+        rig.set_mode.assert_not_called()
+
+    def test_tune_emits_tune_failed_on_freq_readback_mismatch(self, qapp) -> None:
+        """set_freq() reported success but the radio is still on the old
+        frequency (dial lock, band-edge reject, …) — must be surfaced."""
+        worker = self._make_worker()
+        rig = MagicMock()
+        rig.get_freq.return_value = 7_100_000  # unchanged, not the requested freq
+        worker.set_rig(rig)
+
+        failures: list[str] = []
+        worker.tune_failed.connect(lambda reason: failures.append(reason))
+
+        worker.tune(14_230_000, "USB", 2700)
+
+        assert len(failures) == 1
+        assert "7100000" in failures[0] or "7_100_000" in failures[0]
+        # A failed freq change must not proceed to set_mode.
+        rig.set_mode.assert_not_called()
+
+    def test_tune_zero_freq_readback_is_not_treated_as_mismatch(self, qapp) -> None:
+        """PTT-only rigs never report frequency (get_freq() always 0) —
+        that must not be flagged as a failed tune."""
+        worker = self._make_worker()
+        rig = MagicMock()
+        rig.get_freq.return_value = 0
+        rig.get_mode.return_value = ("", 0)
+        worker.set_rig(rig)
+
+        failures: list[str] = []
+        worker.tune_failed.connect(lambda reason: failures.append(reason))
+
+        worker.tune(14_230_000, "USB", 2700)
+
+        assert failures == []
+
+    def test_tune_emits_tune_failed_on_set_freq_exception(self, qapp) -> None:
+        from open_sstv.radio.exceptions import RigCommandError
+
+        worker = self._make_worker()
+        rig = MagicMock()
+        rig.set_freq.side_effect = RigCommandError("Radio rejected command (?)")
+        worker.set_rig(rig)
+
+        failures: list[str] = []
+        worker.tune_failed.connect(lambda reason: failures.append(reason))
+
+        worker.tune(14_230_000, "USB", 2700)
+
+        assert len(failures) == 1
+
+
 class TestOnRadioDisconnected:
     """Integration: _on_radio_disconnected reverts MainWindow to idle state."""
 

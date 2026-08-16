@@ -15,7 +15,7 @@ directly over their serial (USB-serial) port. Supports three families:
   Kenwood (TS-590, TS-890, TS-2000, TS-480) and Elecraft (K3, KX3, K4).
 
 * **Yaesu** (``YaesuRig``) — Yaesu CAT protocol used by FT-991A,
-  FT-891, FT-710, FTDX10, FTDX101, FT-950, FT-817/818.
+  FT-891, FT-710, FTDX10, FTDX101, FT-950, FT-450/450D.
 
 All classes are drop-in replacements for ``RigctldClient`` — they
 implement the same ``Rig`` protocol and can be swapped in the
@@ -742,16 +742,25 @@ class YaesuRig:
     """Direct CAT control for Yaesu radios.
 
     Modern Yaesu radios (FT-991, FT-991A, FT-891, FT-710, FTDX10,
-    FTDX101, FT-950) use a Kenwood-like text protocol with ``;``-terminated
-    commands. Older radios (FT-817/818, FT-857) use a binary protocol;
-    this class targets the modern text variant.
+    FTDX101, FT-950) and the older FT-450/450D use a Kenwood-like text
+    protocol with ``;``-terminated commands. Older radios (FT-817/818,
+    FT-857) use a binary protocol; this class targets the text variant.
 
     .. note::
-        Yaesu *set* commands (e.g. ``TX1;``, ``TX0;``, ``FA{9d};``,
+        Yaesu *set* commands (e.g. ``TX1;``, ``TX0;``, ``FA{Nd};``,
         ``MD0{digit};``) execute silently — the radio sends **no response**.
         Read commands (e.g. ``TX;``, ``FA;``, ``MD0;``) respond with the
         current value.  All set methods use ``_write_command`` to avoid a
         1-second timeout waiting for a response that will never arrive.
+
+    .. note::
+        The ``FA`` frequency field width (``N`` digits above) is
+        model-dependent, and sending the wrong width is rejected outright
+        with ``?;`` — not just ignored.  FT-450/450D (HF+6m only) uses 8
+        digits, no leading zero (e.g. ``FA14230000;``); FT-991A and other
+        "modern CAT" rigs use 9, zero-padded.  ``set_freq``/``get_freq``
+        detect and cache the width from a live read rather than hardcoding
+        one, so both families work through the same class.
     """
 
     def __init__(
@@ -763,6 +772,10 @@ class YaesuRig:
         self._baud_rate = baud_rate
         self._ser: serial.Serial | None = None
         self._lock = threading.Lock()
+        #: FA frequency field width in digits, detected from a live
+        #: get_freq() response — see set_freq()/get_freq() for why this
+        #: can't just be a fixed constant.
+        self._freq_digits: int | None = None
 
     @property
     def name(self) -> str:
@@ -795,17 +808,36 @@ class YaesuRig:
 
     def get_freq(self) -> int:
         resp = self._command("FA", deadline_s=_DIAG_DEADLINE_S)
-        # Response: "FAnnnnnnnn;" — 8 or 9 digit frequency in Hz
+        # Response: "FAnnnnnnnn;" — the digit count is model-dependent:
+        # FT-450/450D (HF+6m only) reports/expects 8 digits with no
+        # leading zero (e.g. "FA14230000;"); FT-991A and other "modern
+        # CAT" rigs (FTDX10, FT-891, FT-710, FTDX101, FT-950) use 9,
+        # zero-padded.  Remember the width here so set_freq() can match
+        # it — sending the wrong width is rejected outright with "?;"
+        # even though this read is lenient about either length.
         if resp.startswith("FA") and len(resp) >= 10:
             try:
+                self._freq_digits = len(resp) - 2
                 return int(resp[2:])
             except ValueError:
                 return 0
         return 0
 
     def set_freq(self, hz: int) -> None:
-        # FA{9d}; is a set command — Yaesu sends no response.
-        self._write_command(f"FA{hz:09d}")
+        if self._freq_digits is None:
+            # Digit width not known yet (no get_freq() has succeeded on
+            # this connection) — probe once with a live read before the
+            # very first set, so a Band Plan tune right after Connect
+            # doesn't race the 1 Hz poll loop for this detection.
+            # Best-effort: if the probe itself fails, fall through to the
+            # 9-digit default below and try anyway.
+            try:
+                self.get_freq()
+            except Exception:  # noqa: BLE001 — probe only, must not block set_freq
+                pass
+        digits = self._freq_digits or 9
+        # FA{Nd}; is a set command — Yaesu sends no response.
+        self._write_command(f"FA{hz:0{digits}d}")
 
     def get_mode(self) -> tuple[str, int]:
         resp = self._command("MD0", deadline_s=_DIAG_DEADLINE_S)
