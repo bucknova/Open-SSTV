@@ -814,13 +814,18 @@ class YaesuRig:
         # CAT" rigs (FTDX10, FT-891, FT-710, FTDX101, FT-950) use 9,
         # zero-padded.  Remember the width here so set_freq() can match
         # it — sending the wrong width is rejected outright with "?;"
-        # even though this read is lenient about either length.
+        # even though this read is lenient about either length.  The width
+        # is cached only after int() confirms the digits actually parse —
+        # caching it first would let a noise-garbled but "FA"-prefixed,
+        # ";"-terminated response poison the width for the rest of the
+        # connection while still returning 0 here.
         if resp.startswith("FA") and len(resp) >= 10:
             try:
-                self._freq_digits = len(resp) - 2
-                return int(resp[2:])
+                freq = int(resp[2:])
             except ValueError:
                 return 0
+            self._freq_digits = len(resp) - 2
+            return freq
         return 0
 
     def set_freq(self, hz: int) -> None:

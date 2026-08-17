@@ -527,6 +527,27 @@ class TestYaesuFreqDigitWidth:
         assert freq == 14_230_000
         assert r._freq_digits == 9
 
+    def test_get_freq_garbled_response_does_not_poison_width_cache(self) -> None:
+        """A noise-garbled but "FA"-prefixed, correct-length response must
+        not cache a bogus digit width for the rest of the connection —
+        only a successfully-parsed frequency may set ``_freq_digits``
+        (PR #47 review #2)."""
+        r = _make_yaesu_rig()
+        with patch.object(r, "_command", return_value="FAxxxxxxxx"):
+            freq = r.get_freq()
+        assert freq == 0
+        assert r._freq_digits is None
+
+    def test_get_freq_garbled_response_does_not_overwrite_known_width(self) -> None:
+        """Same, but with a width already cached from an earlier good read —
+        a later garbled response must not clobber it."""
+        r = _make_yaesu_rig()
+        r._freq_digits = 9
+        with patch.object(r, "_command", return_value="FAxxxxxxxx"):
+            freq = r.get_freq()
+        assert freq == 0
+        assert r._freq_digits == 9
+
     def test_set_freq_uses_previously_detected_8_digit_width(self) -> None:
         """FT-450D scenario: a prior get_freq() (e.g. from the 1 Hz poll
         loop) detected 8 digits — set_freq must match it exactly, no

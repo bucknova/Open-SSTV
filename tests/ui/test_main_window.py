@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -752,9 +752,20 @@ class TestRigPollWorkerTune:
 
     ``set_freq()`` on Kenwood/Yaesu direct-serial rigs is fire-and-forget
     (the radio sends no response, so a rejected frequency change is
-    otherwise indistinguishable from success) — ``tune()`` now verifies
-    with a ``get_freq()`` readback and emits ``tune_failed`` on mismatch.
+    otherwise indistinguishable from success) — ``tune()`` verifies with a
+    ``get_freq()`` readback and emits ``tune_failed`` on mismatch. The
+    readback retries briefly (``_verify_freq_settled``) because on TCI/
+    FlexRadio ``get_freq()`` reflects an async server push rather than
+    ``set_freq()`` itself, so an immediate readback can read the pre-tune
+    value — see PR #47 review. The mode change runs independently of the
+    frequency verdict either way.
     """
+
+    @pytest.fixture(autouse=True)
+    def _no_sleep(self):  # type: ignore[no-untyped-def]
+        """Patch out the settle-retry delay so these tests run at full speed."""
+        with patch("open_sstv.ui.main_window.time.sleep"):
+            yield
 
     def _make_worker(self):  # type: ignore[no-untyped-def]
         from open_sstv.ui.main_window import _RigPollWorker  # type: ignore[attr-defined]
@@ -792,10 +803,12 @@ class TestRigPollWorkerTune:
 
     def test_tune_emits_tune_failed_on_freq_readback_mismatch(self, qapp) -> None:
         """set_freq() reported success but the radio is still on the old
-        frequency (dial lock, band-edge reject, …) — must be surfaced."""
+        frequency after the settle-retry budget (dial lock, band-edge
+        reject, …) — must be surfaced. The mode change still runs: a
+        frequency failure must never block it (PR #47 review #1)."""
         worker = self._make_worker()
         rig = MagicMock()
-        rig.get_freq.return_value = 7_100_000  # unchanged, not the requested freq
+        rig.get_freq.return_value = 7_100_000  # never catches up to the target
         worker.set_rig(rig)
 
         failures: list[str] = []
@@ -805,8 +818,26 @@ class TestRigPollWorkerTune:
 
         assert len(failures) == 1
         assert "7100000" in failures[0] or "7_100_000" in failures[0]
-        # A failed freq change must not proceed to set_mode.
-        rig.set_mode.assert_not_called()
+        rig.set_mode.assert_called_once_with("USB", 2700)
+
+    def test_tune_settles_after_async_backend_catches_up(self, qapp) -> None:
+        """TCI/FlexRadio scenario: get_freq() reads stale (pre-tune) values
+        for the first couple of reads, then reflects the async push once it
+        arrives — the retry must absorb this without reporting failure."""
+        worker = self._make_worker()
+        rig = MagicMock()
+        rig.get_freq.side_effect = [7_100_000, 7_100_000, 14_230_000]
+        rig.get_mode.return_value = ("CW", 0)
+        worker.set_rig(rig)
+
+        failures: list[str] = []
+        worker.tune_failed.connect(lambda reason: failures.append(reason))
+
+        worker.tune(14_230_000, "USB", 2700)
+
+        assert failures == []
+        assert rig.get_freq.call_count == 3
+        rig.set_mode.assert_called_once_with("USB", 2700)
 
     def test_tune_zero_freq_readback_is_not_treated_as_mismatch(self, qapp) -> None:
         """PTT-only rigs never report frequency (get_freq() always 0) —
@@ -825,6 +856,9 @@ class TestRigPollWorkerTune:
         assert failures == []
 
     def test_tune_emits_tune_failed_on_set_freq_exception(self, qapp) -> None:
+        """set_freq() itself raises — the mode change still runs
+        independently, but frequency verification is skipped (nothing
+        meaningful to verify when the set never went out)."""
         from open_sstv.radio.exceptions import RigCommandError
 
         worker = self._make_worker()
@@ -838,6 +872,8 @@ class TestRigPollWorkerTune:
         worker.tune(14_230_000, "USB", 2700)
 
         assert len(failures) == 1
+        rig.set_mode.assert_called_once_with("USB", 2700)
+        rig.get_freq.assert_not_called()
 
 
 class TestOnRadioDisconnected:

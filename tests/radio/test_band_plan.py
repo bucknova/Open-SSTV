@@ -324,3 +324,38 @@ class TestResolveTuneMode:
         """Guard against silently "supporting" a protocol whose data-mode
         CAT command was never verified against real hardware."""
         assert set(DATA_MODE_BY_PROTOCOL) == {"Yaesu CAT"}
+
+    # --- "data" fallback must be logged, not silent (PR #47 review #3) -----
+
+    def test_data_policy_fallback_logs_a_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A user who picks Data/Pkt on an unsupported protocol and
+        silently gets plain USB has no way to tell the request didn't
+        take without a log line — this is the exact silent-fallback shape
+        the PR's own thesis is about."""
+        with caplog.at_level("WARNING", logger="open_sstv.radio.band_plan"):
+            resolve_tune_mode("USB", "Icom CI-V", "data")
+        assert len(caplog.records) == 1
+        assert "Icom CI-V" in caplog.records[0].message
+
+    def test_data_policy_fallback_logs_for_lsb_too(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level("WARNING", logger="open_sstv.radio.band_plan"):
+            resolve_tune_mode("LSB", "Kenwood / Elecraft", "data")
+        assert len(caplog.records) == 1
+
+    def test_data_policy_fm_fallback_does_not_log(self, caplog: pytest.LogCaptureFixture) -> None:
+        """FM has no data-mode concept at all — passing it through
+        unchanged isn't a missing mapping, so it shouldn't warn."""
+        with caplog.at_level("WARNING", logger="open_sstv.radio.band_plan"):
+            resolve_tune_mode("FM", "Icom CI-V", "data")
+        assert caplog.records == []
+
+    def test_data_policy_known_mapping_does_not_log(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level("WARNING", logger="open_sstv.radio.band_plan"):
+            resolve_tune_mode("USB", "Yaesu CAT", "data")
+        assert caplog.records == []
+
+    def test_voice_and_none_policies_never_log(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level("WARNING", logger="open_sstv.radio.band_plan"):
+            resolve_tune_mode("USB", "Icom CI-V", "voice")
+            resolve_tune_mode("USB", "Icom CI-V", "none")
+        assert caplog.records == []

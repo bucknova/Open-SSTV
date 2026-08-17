@@ -13,7 +13,10 @@ References
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -236,18 +239,28 @@ def resolve_tune_mode(rig_mode: str, protocol: str, policy: str) -> str:
       band-plan entry's plain ``"USB"``/``"LSB"``/``"FM"`` literal).
     * ``"data"`` — look up *protocol*'s data-mode variant for *rig_mode*'s
       sideband family in ``DATA_MODE_BY_PROTOCOL``.  ``"FM"`` has no data
-      variant and always passes through unchanged.  A protocol/family
-      combination with no known mapping (Kenwood, Icom, PTT-only, or any
+      variant and always passes through unchanged, silently — it's not a
+      missing mapping, there's nothing to map.  A USB/LSB family with no
+      known mapping for *protocol* (Kenwood, Icom, PTT-only, or any
       unrecognised *protocol* string) falls back to the voice literal —
-      the same value used today — so an unsupported "data" request never
-      picks a worse mode than before, it just doesn't improve on it.
+      the same value used today, so an unsupported "data" request never
+      picks a worse mode than before — but logs a warning, since a user
+      who picked "Data/Pkt" and silently got plain USB has no way to tell
+      the request didn't take without one.
     """
     if policy == "none":
         return ""
     if policy == "data":
-        variant = DATA_MODE_BY_PROTOCOL.get(protocol, {}).get(mode_family(rig_mode))
+        family = mode_family(rig_mode)
+        variant = DATA_MODE_BY_PROTOCOL.get(protocol, {}).get(family)
         if variant:
             return variant
+        if family in ("USB", "LSB"):
+            _log.warning(
+                "resolve_tune_mode: no data-mode mapping for protocol %r "
+                "(family %r) — falling back to voice mode %r",
+                protocol, family, rig_mode,
+            )
     return rig_mode
 
 
