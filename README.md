@@ -238,7 +238,10 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
 - **Direct serial** -- connect to your rig without an external daemon:
   - **Icom CI-V** -- with preset picker for common models (IC-7300, IC-9700, etc.)
   - **Kenwood / Elecraft** -- standard Kenwood command protocol
-  - **Yaesu CAT** -- Yaesu serial protocol
+  - **Yaesu CAT** -- FT-991/991A, FT-891, FT-710, FTDX10, FTDX101, FT-950,
+    and FT-450/450D. The frequency command's digit width differs between
+    the FT-450/450D (8 digits) and the newer rigs (9, zero-padded); it's
+    auto-detected from the radio's own response, no per-model setting needed.
   - **PTT Only (DTR/RTS)** -- simple serial PTT via DTR or RTS line
 - **TCI (v0.3.5)** -- WebSocket-based control for the Expert Electronics
   SunSDR2 family (ExpertSDR2 / ExpertSDR3) and the AetherSDR. A single
@@ -255,7 +258,18 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
   Twelve entries covering HF (80/40/20/17/15/10 m), VHF (2 m), and UHF
   (70 cm) with the correct mode (LSB below 10 MHz, USB above, FM on
   VHF/UHF). The 20 m 14.230 MHz USB primary is shown in bold. Button is
-  disabled when no rig is connected or TX is in progress.
+  disabled when no rig is connected or TX is in progress. A rejected
+  frequency/mode change (VFO lock, band-edge, an unsupported CAT command)
+  is now surfaced as a status-bar message instead of failing silently.
+- **SSTV mode policy (Direct Serial only)** -- Settings → Radio → Direct
+  Serial → "SSTV mode" controls what the Band Plan button sends for the
+  mode half of a tune, mirroring WSJT-X's rig Mode setting: **Voice**
+  (default; sends the band-plan entry's plain USB/LSB/FM, unchanged from
+  before), **Data/Pkt** (asks for the protocol's data-mode variant instead
+  -- e.g. Yaesu `DATA-U`/`DATA-L` -- so SSTV doesn't land on plain USB with
+  the speech processor still engaged; currently mapped for Yaesu CAT only,
+  other protocols fall back to Voice), or **Don't change mode** (frequency
+  only, for operators who already have their data mode set up manually).
 - **Configurable baud rate** -- 4800, 9600, 19200, 38400, 57600, or 115200 baud.
 - **Rig status bar** -- frequency, mode, and S-meter polled at 1 Hz when connected.
   Graceful disconnect: non-modal status bar message, auto-reconnect on next poll.
