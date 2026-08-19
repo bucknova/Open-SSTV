@@ -350,6 +350,13 @@ Robot 12, Robot 24, Robot 72. Planned for a future release.
 
 *Logbook window (v0.4) — filterable QSO table, image preview with full contact details, and one-click ADIF import/export*
 
+### Remote station (v0.6) — your station in a phone browser
+
+| | |
+|---|---|
+| <img src="docs/screenshots/remote-gallery.png" alt="Remote gallery on a phone" width="330"> | <img src="docs/screenshots/remote-compose.png" alt="Remote compose and transmit on a phone" width="330"> |
+| *Gallery — received images stream in live over SSE. **Take control** claims the single-operator lease; the **LIVE** badge shows the event stream is connected.* | *Compose — shoot or upload a photo, frame it to the selected mode, pick a station template, fill the QSO fields, and transmit. Transmit stays disabled until remote TX is enabled **and** a CAT rig is connected.* |
+
 | | |
 |---|---|
 | ![Template editor](docs/screenshots/template-editor.png) | ![Image editor](docs/screenshots/image-editor.png) |

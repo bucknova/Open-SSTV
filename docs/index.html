@@ -383,6 +383,13 @@
       object-fit: cover;
     }
 
+    /* Phone screenshots are portrait — letterbox them into the same 16/10
+       cell so the grid stays aligned instead of cropping to a sliver. */
+    .screenshot-item.portrait img {
+      object-fit: contain;
+      background: var(--bg);
+    }
+
     .screenshot-placeholder {
       aspect-ratio: 16/10;
       background: var(--bg);
@@ -889,9 +896,24 @@
 
     <div class="screenshots-grid">
 
+      <div class="screenshot-item portrait" onclick="openLightbox('screenshots/remote-gallery.png')">
+        <img src="screenshots/remote-gallery.png" alt="Remote station gallery in a phone browser" />
+        <div class="screenshot-caption">Remote Station — received images in a phone browser, streamed live</div>
+      </div>
+
+      <div class="screenshot-item portrait" onclick="openLightbox('screenshots/remote-compose.png')">
+        <img src="screenshots/remote-compose.png" alt="Remote compose and transmit in a phone browser" />
+        <div class="screenshot-caption">Remote Station — compose a card and transmit, from the phone</div>
+      </div>
+
+      <div class="screenshot-item" onclick="openLightbox('screenshots/logbook.png')">
+        <img src="screenshots/logbook.png" alt="Logbook window" />
+        <div class="screenshot-caption">Logbook — filterable QSO table with ADIF import/export</div>
+      </div>
+
       <div class="screenshot-item" onclick="openLightbox('screenshots/main-window.png')">
         <img src="screenshots/main-window.png" alt="Main Window" />
-        <div class="screenshot-caption">Main Window — TX &amp; RX with v0.3 Template Gallery</div>
+        <div class="screenshot-caption">Main Window — TX &amp; RX with the template gallery</div>
       </div>
 
       <div class="screenshot-item" onclick="openLightbox('screenshots/template-editor.png')">
@@ -921,7 +943,7 @@
 
       <div class="screenshot-item" onclick="openLightbox('screenshots/about-dialog.png')">
         <img src="screenshots/about-dialog.png" alt="About Dialog" />
-        <div class="screenshot-caption">About — v0.3, 22 Modes</div>
+        <div class="screenshot-caption">About — 22 Modes, GPL-3.0-or-later</div>
       </div>
 
     </div>
