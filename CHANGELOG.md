@@ -11,6 +11,41 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.6.8] — 2026-08-17
+
+### Fixed
+
+- **Band Plan tuning silently failed on the Yaesu FT-450/450D.** Yaesu's
+  `FA` set-frequency command uses a model-dependent digit width — the
+  FT-450/450D wants 8 digits, the FT-991A and other modern-CAT rigs want 9
+  — and the wrong width is rejected outright by the radio. Because Yaesu
+  set commands are fire-and-forget (a legitimate set gets no reply at all),
+  the rejection was invisible: mode changes worked while the frequency
+  never moved. Open-SSTV now detects the width from a live read and caches
+  it per connection instead of hardcoding one.
+- **Band Plan tuning now verifies that the frequency actually changed**
+  rather than assuming it did, and reports failures in the status bar
+  instead of only the debug log. Verification tolerates a brief settle
+  delay, because some backends (TCI, FlexRadio) report frequency from a
+  cache updated by an async push rather than from the set itself.
+  Frequency and mode are applied independently, so a verification problem
+  can never suppress the mode change.
+
+### Added
+
+- **SSTV mode policy for Band Plan tuning** (**Settings → Radio → Direct
+  Serial**), mirroring WSJT-X's rig mode setting: **Don't change mode** /
+  **Voice (USB/LSB)** (default, unchanged behavior) / **Data/Pkt**. Band
+  Plan previously always forced plain USB/LSB with no way to ask for a
+  data-mode variant. Data/Pkt currently resolves for Yaesu CAT
+  (`DATA-U`/`DATA-L`); Icom and Kenwood/Elecraft fall back to Voice with a
+  logged warning, since their data modes need model-specific commands we
+  haven't verified against real hardware.
+
+Both contributed by [@dacrhu](https://github.com/dacrhu).
+
+---
+
 ## [0.6.7] — 2026-08-14
 
 ### Added
