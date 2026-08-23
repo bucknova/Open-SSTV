@@ -16,7 +16,7 @@ What we support
 - **Export**: CALL, QSO_DATE, TIME_ON, MODE=SSTV, SUBMODE (compact
   SSTV mode form like ``MartinM1``), BAND (derived from FREQ),
   FREQ (MHz), RST_SENT, RST_RCVD, NAME, QTH, GRIDSQUARE, COMMENT,
-  STATION_CALLSIGN, MY_GRIDSQUARE, MY_CITY, OPERATOR.  Plus our own
+  STATION_CALLSIGN, MY_GRIDSQUARE, MY_CITY, OPERATOR, MY_NAME.  Plus our own
   ``APP_OPENSSTV_DIRECTION`` for RX-only entries (default TX/two-way
   is implicit).
 - **Import**: same fields, lenient about whitespace, line endings,
@@ -256,7 +256,8 @@ def format_qso_record(qso: QSO, station: StationInfo | None = None) -> str:
     record_parts.append(_adif_field("STATION_CALLSIGN", station.callsign))
     record_parts.append(_adif_field("MY_GRIDSQUARE", station.grid))
     record_parts.append(_adif_field("MY_CITY", station.qth))
-    record_parts.append(_adif_field("OPERATOR", station.name))
+    record_parts.append(_adif_field("OPERATOR", station.callsign))
+    record_parts.append(_adif_field("MY_NAME", station.name))
     # Our extension: RX direction (TX/two-way is the implicit default).
     if qso.direction == "RX":
         record_parts.append(_adif_field("APP_OPENSSTV_DIRECTION", "RX"))

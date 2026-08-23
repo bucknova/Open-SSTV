@@ -9,6 +9,17 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **ADIF `OPERATOR` field now contains the station callsign, not the
+  configured operator name**, matching the ADIF 3.1.5 definition ("the
+  call sign of the operator(s) in control of the station"). This
+  affects both file-based ADIF export and the UDP companion-logger
+  broadcast — some cloud QSL services (eQSL, LoTW, ClubLog) use this
+  field for operator matching, and a non-callsign value could cause a
+  QSO to silently fail to auto-upload. The operator's configured
+  display name now goes into the correct field, `MY_NAME`.
+
 ---
 
 ## [0.6.8] — 2026-08-17

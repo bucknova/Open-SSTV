@@ -107,6 +107,11 @@ class TestUdpQsoLogger:
         assert "<RST_SENT:3>595" in text
         assert "<RST_RCVD:3>589" in text
         assert "<STATION_CALLSIGN:6>N0CALL" in text
+        # OPERATOR is the callsign, not the station's configured display
+        # name ("Op") — per ADIF 3.1.5, OPERATOR is a call sign, and
+        # companion loggers key cloud-QSL account matching off it.
+        assert "<OPERATOR:6>N0CALL" in text
+        assert "<OPERATOR:2>Op" not in text
         # Frequency (from _qso()'s frequency_hz=14_230_000, the same value
         # MainWindow reads from the "Freq:" field on the main page) must
         # ride along as both BAND and FREQ.
