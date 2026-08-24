@@ -11,6 +11,11 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The remote web UI no longer scrolls sideways on narrower phones.** The
+  header's own controls added up to about 408 px and flex items refuse to
+  shrink below their content, so on a 375 or 390 px screen — iPhone SE, 12/13
+  mini, 14 — the page was forced wider than the display and the **Refresh**
+  button sat off the right edge. The header now wraps to a second row instead.
 - **QSO-bar RSTr / QTH / Grid now reach the logbook, not just the UDP
   broadcast.** The three fields added to the TX panel's QSO bar in v0.6.7
   fed only the **[External Log]** datagram, so typing a QTH and grid and
