@@ -235,7 +235,11 @@ class TestExport:
         assert "<STATION_CALLSIGN:5>W0AEZ" in text
         assert "<MY_GRIDSQUARE:4>EM48" in text
         assert "<MY_CITY:8>St Louis" in text
-        assert "<OPERATOR:5>Kevin" in text
+        # OPERATOR is the callsign per the ADIF 3.1.5 definition ("the
+        # call sign of the operator(s) in control of the station"); the
+        # configured display name goes in MY_NAME instead.
+        assert "<OPERATOR:5>W0AEZ" in text
+        assert "<MY_NAME:5>Kevin" in text
 
     def test_empty_fields_omitted(self) -> None:
         # name/qth/grid/comment are blank — corresponding tags should NOT appear
