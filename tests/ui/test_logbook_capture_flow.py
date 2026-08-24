@@ -183,6 +183,11 @@ class TestTxCapture:
         qso_bar._rst.setCurrentText("575")
         qso_bar._name.setText("Sam")
         qso_bar._note.setText("portable on a hill")
+        # RSTr / QTH / Grid live off QSOState; they must reach the draft
+        # too, not just the UDP External Log broadcast.
+        qso_bar._rst_received.setCurrentText("589")
+        qso_bar._qth.setText("Springfield")
+        qso_bar._grid.setText("en34")
         window._on_tx_image_prepared(_rx_image(), Mode.SCOTTIE_S1)
         window._on_tx_complete()
         assert window._capture_context is not None
@@ -193,13 +198,20 @@ class TestTxCapture:
         assert q.mode == "Scottie 1"
         assert q.frequency_hz == 7_171_000
         assert q.rsv_sent == "575"
+        assert q.rsv_received == "589"
         assert q.name == "Sam"
+        assert q.qth == "Springfield"
+        assert q.grid == "EN34"
         assert q.comment == "portable on a hill"
         dlg.accept()
         rows = window._logbook_coordinator.store.list_qsos()
         assert len(rows) == 1
         assert rows[0].callsign == "K1ABC"
         assert rows[0].direction == "TX"
+        # ...and survive the round trip through SQLite.
+        assert rows[0].rsv_received == "589"
+        assert rows[0].qth == "Springfield"
+        assert rows[0].grid == "EN34"
 
     def test_test_tone_never_captures(
         self, qtbot, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, patched_audio

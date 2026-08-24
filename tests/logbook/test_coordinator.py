@@ -175,10 +175,33 @@ class TestDraftBuilders:
         assert draft.id is None
         assert draft.time_utc.tzinfo is not None
 
+    def test_tx_draft_carries_contact_fields(self, tmp_path: Path) -> None:
+        """RSTr / QTH / Grid from the QSO bar must reach the draft.
+
+        Regression: these were added to the bar in v0.6.7 for the UDP
+        External Log and wired only to that path, so typing a QTH and
+        grid then logging the QSO silently dropped both — even though
+        the capture dialog has rows for them.
+        """
+        draft = _coordinator(tmp_path).build_tx_draft(
+            mode=Mode.MARTIN_M1,
+            tocall="k1abc",
+            rst_sent="595",
+            rst_received="589",
+            qth="Springfield",
+            grid="en34",
+        )
+        assert draft.rsv_received == "589"
+        assert draft.qth == "Springfield"
+        assert draft.grid == "EN34"  # upper-cased like the bar does
+
     def test_tx_draft_minimal(self, tmp_path: Path) -> None:
         draft = _coordinator(tmp_path).build_tx_draft(mode="scottie_s1")
         assert draft.mode == "Scottie 1"
         assert draft.callsign == ""
+        assert draft.rsv_received == ""
+        assert draft.qth == ""
+        assert draft.grid == ""
         assert draft.frequency_hz is None
         assert draft.image_path is None
 
