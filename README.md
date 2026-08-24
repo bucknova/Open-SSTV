@@ -342,22 +342,54 @@ Robot 12, Robot 24, Robot 72. Planned for a future release.
 
 ## Screenshots
 
+Rendered on Qt's cross-platform style rather than any one OS's window chrome,
+so they look like what Linux, macOS, and Windows users all get. Generated with
+`scripts/capture_screenshots.py` against synthetic contacts and testcards — no
+real log data.
+
 ![Open-SSTV main window](docs/screenshots/main-window.png)
 
-*Main window — TX panel with the v0.3 template gallery filtered by role, QSO state widget, mode selector, and the live RX panel waiting for a signal*
+*Main window — TX panel with the template gallery filtered by role, the QSO bar
+(ToCall / RSTs / RSTr / Name / QTH / Grid / Note), mode selector with timing, and
+the RX panel waiting for a signal*
 
-![Logbook window](docs/screenshots/logbook.png)
+### Remote station (v0.6) — your station in a phone browser
 
-*Logbook window (v0.4) — filterable QSO table, image preview with full contact details, and one-click ADIF import/export*
+| | | |
+|---|---|---|
+| <img src="docs/screenshots/remote-gallery.png" alt="Remote gallery on a phone" width="240"> | <img src="docs/screenshots/remote-compose.png" alt="Remote compose and transmit on a phone" width="240"> | <img src="docs/screenshots/remote-logbook.png" alt="Remote logbook on a phone" width="240"> |
+| *Gallery — decodes stream in live over SSE. **Take control** claims the single-operator lease; **LIVE** means the event stream is connected.* | *Compose — shoot or upload a photo, frame it to the mode, pick a template, fill the QSO fields, transmit. Disabled until remote TX is enabled **and** a CAT rig is connected.* | *Logbook — the same contacts as the desktop log, each with its image and direction.* |
+
+### Logbook and gallery
 
 | | |
 |---|---|
-| ![Template editor](docs/screenshots/template-editor.png) | ![Image editor](docs/screenshots/image-editor.png) |
-| *Template editor — three-panel form (Layers / Live preview / Properties) with sample QSO state for token previews* | *Image editor — crop, rotate, flip, and text overlays before encode* |
-| ![Audio settings](docs/screenshots/settings-audio.png) | ![Radio settings](docs/screenshots/settings-radio.png) |
-| *Audio tab — device, gain sliders, weak-signal mode, incremental decode* | *Radio tab — Direct Serial / Icom CI-V, PTT delay, CW Station ID* |
-| ![Images settings](docs/screenshots/settings-images.png) | ![About dialog](docs/screenshots/about-dialog.png) |
-| *Images tab — auto-save, TX banner with live preview, update-check opt-in* | *About dialog — v0.3, 22 modes, GPL-3.0-or-later* |
+| ![Logbook window](docs/screenshots/logbook.png) | ![Gallery window](docs/screenshots/gallery.png) |
+| *Logbook (v0.4) — filterable QSO table, image preview with full contact details, ADIF import/export* | *Gallery (v0.5) — thumbnail grid joined to the logbook; filter by callsign, mode, or date, then re-send to TX* |
+| ![Log QSO dialog](docs/screenshots/log-qso-dialog.png) | ![Image editor](docs/screenshots/image-editor.png) |
+| *Capture dialog — pre-filled from the QSO bar at TX/RX completion, with the image that was sent or received* | *Image editor — crop, rotate, flip, and text overlays before encode* |
+
+### Settings
+
+| | |
+|---|---|
+| ![General settings](docs/screenshots/settings-general.png) | ![Audio settings](docs/screenshots/settings-audio.png) |
+| *General — station identity, default TX mode, logbook capture behaviour, restore default templates* | *Audio — devices, gain, weak-signal mode, incremental decode* |
+| ![Radio settings](docs/screenshots/settings-radio.png) | ![Remote settings](docs/screenshots/settings-remote.png) |
+| *Radio — rigctld / Direct Serial / TCI / FlexRadio, PTT, and the SSTV mode policy for Band Plan tuning* | *Remote — the opt-in web server, LAN binding, pairing QR, and the separate remote-TX gate* |
+| ![Images settings](docs/screenshots/settings-images.png) | ![Logging settings](docs/screenshots/settings-logging.png) |
+| *Images — auto-save, TX banner with live preview, update-check opt-in* | *Logging — log level, log files, UDP QSO log destination, diagnostics export* |
+
+### Editors and dialogs
+
+| | |
+|---|---|
+| ![Template editor](docs/screenshots/template-editor.png) | ![First launch](docs/screenshots/first-launch.png) |
+| *Template editor — Layers / Live preview / Properties, with sample QSO state for token previews* | *First launch — the one-time setup prompt for callsign and audio devices* |
+
+![About dialog](docs/screenshots/about-dialog.png)
+
+*About — version, the 22 supported modes, and licence*
 
 ## Architecture
 
