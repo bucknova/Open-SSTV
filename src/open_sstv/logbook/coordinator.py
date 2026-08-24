@@ -190,12 +190,21 @@ class LogbookCoordinator:
         rst_sent: str = "",
         to_name: str = "",
         note: str = "",
+        rst_received: str = "",
+        qth: str = "",
+        grid: str = "",
     ) -> QSO:
         """Draft QSO for a completed transmission.
 
-        ``tocall`` / ``rst_sent`` / ``to_name`` / ``note`` come from the
-        TX panel's QSO-state bar, so a contact the operator already
-        described there arrives in the log dialog pre-filled.
+        Every field the operator typed on the TX panel's QSO-state bar
+        comes through here, so a contact they already described arrives
+        in the log dialog pre-filled rather than half-empty.
+
+        ``rst_received`` / ``qth`` / ``grid`` were added to the bar in
+        v0.6.7 for the UDP External Log and initially fed only that
+        path — so typing a QTH and grid, then clicking [Logbook…],
+        silently dropped both even though the capture dialog has rows
+        for them.
         """
         return QSO(
             direction="TX",
@@ -204,7 +213,10 @@ class LogbookCoordinator:
             mode=mode_display_name(mode),
             frequency_hz=frequency_hz,
             rsv_sent=rst_sent.strip(),
+            rsv_received=rst_received.strip(),
             name=to_name.strip(),
+            qth=qth.strip(),
+            grid=grid.strip().upper(),
             comment=note.strip(),
             image_path=image_path,
         )

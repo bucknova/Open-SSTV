@@ -80,12 +80,12 @@ class TestClearQSO:
         assert s.tocall_name == ""
         assert s.note == ""
 
-    def test_clear_wipes_udp_log_fields(self, widget: QSOStateWidget) -> None:
+    def test_clear_wipes_contact_fields(self, widget: QSOStateWidget) -> None:
         widget._rst_received.setCurrentText("589")
         widget._qth.setText("Springfield")
         widget._grid.setText("EN34")
         widget.clear()
-        assert widget.get_udp_log_fields() == ("", "", "")
+        assert widget.get_contact_fields() == ("", "", "")
 
     def test_clear_emits_state_changed(
         self, qtbot, widget: QSOStateWidget
@@ -145,13 +145,13 @@ class TestUdpLogFields:
     are deliberately kept off ``QSOState`` (see module docstring)."""
 
     def test_default_fields_are_empty(self, widget: QSOStateWidget) -> None:
-        assert widget.get_udp_log_fields() == ("", "", "")
+        assert widget.get_contact_fields() == ("", "", "")
 
     def test_reflects_field_values(self, widget: QSOStateWidget) -> None:
         widget._rst_received.setCurrentText("589")
         widget._qth.setText("Springfield")
         widget._grid.setText("en34")
-        assert widget.get_udp_log_fields() == ("589", "Springfield", "EN34")
+        assert widget.get_contact_fields() == ("589", "Springfield", "EN34")
 
     def test_grid_is_uppercased_on_type(self, widget: QSOStateWidget) -> None:
         widget._grid.setText("en34")

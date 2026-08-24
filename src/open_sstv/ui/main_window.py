@@ -1484,7 +1484,7 @@ class MainWindow(QMainWindow):
                 "UDP log: enter a ToCall on the QSO bar first", 5000
             )
             return
-        rst_received, qth, grid = self._tx_panel.get_udp_log_fields()
+        rst_received, qth, grid = self._tx_panel.get_contact_fields()
         qso = QSO(
             direction="TX",
             callsign=callsign,
@@ -2350,11 +2350,15 @@ class MainWindow(QMainWindow):
                     status_verb="TX saved",
                 )
             # v0.4: draft a logbook entry for the completed TX.  The
-            # QSO-state bar (ToCall / RST / Name / Note) pre-fills the
-            # contact side; frequency comes from the rig-poll cache
-            # (still holding the pre-TX value — see _last_rig_freq_hz).
+            # QSO-state bar pre-fills the contact side; frequency comes
+            # from the rig-poll cache (still holding the pre-TX value —
+            # see _last_rig_freq_hz).  RSTr / QTH / Grid live off
+            # QSOState (they aren't template tokens) and so arrive via
+            # get_contact_fields — they feed the logbook draft exactly
+            # like the rest of the bar, not just the UDP broadcast.
             if self._last_tx_image is not None and self._last_tx_mode is not None:
                 qso_state = self._tx_panel.get_qso_state()
+                rst_received, qth, grid = self._tx_panel.get_contact_fields()
                 draft = self._logbook_coordinator.build_tx_draft(
                     mode=self._last_tx_mode,
                     frequency_hz=self._last_rig_freq_hz,
@@ -2363,6 +2367,9 @@ class MainWindow(QMainWindow):
                     rst_sent=qso_state.rst,
                     to_name=qso_state.tocall_name,
                     note=qso_state.note,
+                    rst_received=rst_received,
+                    qth=qth,
+                    grid=grid,
                 )
                 self._capture_qso(draft, self._last_tx_image, self._last_tx_mode)
             self._last_tx_image = None

@@ -16,6 +16,13 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   shrink below their content, so on a 375 or 390 px screen — iPhone SE, 12/13
   mini, 14 — the page was forced wider than the display and the **Refresh**
   button sat off the right edge. The header now wraps to a second row instead.
+- **QSO-bar RSTr / QTH / Grid now reach the logbook, not just the UDP
+  broadcast.** The three fields added to the TX panel's QSO bar in v0.6.7
+  fed only the **[External Log]** datagram, so typing a QTH and grid and
+  then logging the contact silently dropped both — even though the capture
+  dialog has rows for exactly those fields, sitting one row below where you
+  typed them. They now pre-fill the logbook draft the same way ToCall, RST,
+  Name, and Note always have.
 - **ADIF `OPERATOR` field now contains the station callsign, not the
   configured operator name**, matching the ADIF 3.1.5 definition ("the
   call sign of the operator(s) in control of the station"). This
