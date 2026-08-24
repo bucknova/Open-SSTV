@@ -11,6 +11,11 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The remote web UI no longer scrolls sideways on narrower phones.** The
+  header's own controls added up to about 408 px and flex items refuse to
+  shrink below their content, so on a 375 or 390 px screen — iPhone SE, 12/13
+  mini, 14 — the page was forced wider than the display and the **Refresh**
+  button sat off the right edge. The header now wraps to a second row instead.
 - **ADIF `OPERATOR` field now contains the station callsign, not the
   configured operator name**, matching the ADIF 3.1.5 definition ("the
   call sign of the operator(s) in control of the station"). This
