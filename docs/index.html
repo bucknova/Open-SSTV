@@ -383,6 +383,13 @@
       object-fit: cover;
     }
 
+    /* Phone screenshots are portrait — letterbox them into the same 16/10
+       cell so the grid stays aligned instead of cropping to a sliver. */
+    .screenshot-item.portrait img {
+      object-fit: contain;
+      background: var(--bg);
+    }
+
     .screenshot-placeholder {
       aspect-ratio: 16/10;
       background: var(--bg);
@@ -885,13 +892,48 @@
   <div class="section-inner">
     <div class="section-label">In Action</div>
     <h2 class="section-title">See the interface</h2>
-    <p class="section-sub">Click any screenshot to enlarge. More screenshots coming soon as development continues.</p>
+    <p class="section-sub">Click any screenshot to enlarge. Rendered on Qt's cross-platform style rather than any one OS's window chrome, so they match what Linux, macOS, and Windows users all see.</p>
 
     <div class="screenshots-grid">
 
       <div class="screenshot-item" onclick="openLightbox('screenshots/main-window.png')">
         <img src="screenshots/main-window.png" alt="Main Window" />
-        <div class="screenshot-caption">Main Window — TX &amp; RX with v0.3 Template Gallery</div>
+        <div class="screenshot-caption">Main Window — TX &amp; RX with the template gallery</div>
+      </div>
+
+      <div class="screenshot-item portrait" onclick="openLightbox('screenshots/remote-gallery.png')">
+        <img src="screenshots/remote-gallery.png" alt="Remote Station" />
+        <div class="screenshot-caption">Remote Station — decodes in a phone browser, streamed live</div>
+      </div>
+
+      <div class="screenshot-item portrait" onclick="openLightbox('screenshots/remote-compose.png')">
+        <img src="screenshots/remote-compose.png" alt="Remote Station" />
+        <div class="screenshot-caption">Remote Station — compose a card and transmit, from the phone</div>
+      </div>
+
+      <div class="screenshot-item portrait" onclick="openLightbox('screenshots/remote-logbook.png')">
+        <img src="screenshots/remote-logbook.png" alt="Remote Station" />
+        <div class="screenshot-caption">Remote Station — the logbook on the phone</div>
+      </div>
+
+      <div class="screenshot-item" onclick="openLightbox('screenshots/logbook.png')">
+        <img src="screenshots/logbook.png" alt="Logbook" />
+        <div class="screenshot-caption">Logbook — filterable QSO table with ADIF import/export</div>
+      </div>
+
+      <div class="screenshot-item" onclick="openLightbox('screenshots/gallery.png')">
+        <img src="screenshots/gallery.png" alt="Gallery" />
+        <div class="screenshot-caption">Gallery — thumbnails joined to the logbook</div>
+      </div>
+
+      <div class="screenshot-item" onclick="openLightbox('screenshots/log-qso-dialog.png')">
+        <img src="screenshots/log-qso-dialog.png" alt="Capture Dialog" />
+        <div class="screenshot-caption">Capture Dialog — pre-filled at TX/RX completion</div>
+      </div>
+
+      <div class="screenshot-item" onclick="openLightbox('screenshots/image-editor.png')">
+        <img src="screenshots/image-editor.png" alt="Image Editor" />
+        <div class="screenshot-caption">Image Editor — crop &amp; text overlays</div>
       </div>
 
       <div class="screenshot-item" onclick="openLightbox('screenshots/template-editor.png')">
@@ -899,30 +941,46 @@
         <div class="screenshot-caption">Template Editor — Layers / Live Preview / Properties</div>
       </div>
 
-      <div class="screenshot-item" onclick="openLightbox('screenshots/image-editor.png')">
-        <img src="screenshots/image-editor.png" alt="Image Editor" />
-        <div class="screenshot-caption">Image Editor — Crop &amp; Text Overlays</div>
+      <div class="screenshot-item" onclick="openLightbox('screenshots/settings-general.png')">
+        <img src="screenshots/settings-general.png" alt="Settings" />
+        <div class="screenshot-caption">Settings — General</div>
       </div>
 
       <div class="screenshot-item" onclick="openLightbox('screenshots/settings-audio.png')">
-        <img src="screenshots/settings-audio.png" alt="Audio Settings" />
+        <img src="screenshots/settings-audio.png" alt="Settings" />
         <div class="screenshot-caption">Settings — Audio</div>
       </div>
 
       <div class="screenshot-item" onclick="openLightbox('screenshots/settings-radio.png')">
-        <img src="screenshots/settings-radio.png" alt="Radio Settings" />
-        <div class="screenshot-caption">Settings — Rig Control</div>
+        <img src="screenshots/settings-radio.png" alt="Settings" />
+        <div class="screenshot-caption">Settings — Radio &amp; rig control</div>
+      </div>
+
+      <div class="screenshot-item" onclick="openLightbox('screenshots/settings-remote.png')">
+        <img src="screenshots/settings-remote.png" alt="Settings" />
+        <div class="screenshot-caption">Settings — Remote web access</div>
       </div>
 
       <div class="screenshot-item" onclick="openLightbox('screenshots/settings-images.png')">
-        <img src="screenshots/settings-images.png" alt="Image Settings" />
+        <img src="screenshots/settings-images.png" alt="Settings" />
         <div class="screenshot-caption">Settings — Images</div>
       </div>
 
-      <div class="screenshot-item" onclick="openLightbox('screenshots/about-dialog.png')">
-        <img src="screenshots/about-dialog.png" alt="About Dialog" />
-        <div class="screenshot-caption">About — v0.3, 22 Modes</div>
+      <div class="screenshot-item" onclick="openLightbox('screenshots/settings-logging.png')">
+        <img src="screenshots/settings-logging.png" alt="Settings" />
+        <div class="screenshot-caption">Settings — Logging &amp; UDP QSO log</div>
       </div>
+
+      <div class="screenshot-item" onclick="openLightbox('screenshots/first-launch.png')">
+        <img src="screenshots/first-launch.png" alt="First Launch" />
+        <div class="screenshot-caption">First Launch — one-time setup</div>
+      </div>
+
+      <div class="screenshot-item" onclick="openLightbox('screenshots/about-dialog.png')">
+        <img src="screenshots/about-dialog.png" alt="About" />
+        <div class="screenshot-caption">About — 22 Modes, GPL-3.0-or-later</div>
+      </div>
+
 
     </div>
   </div>
