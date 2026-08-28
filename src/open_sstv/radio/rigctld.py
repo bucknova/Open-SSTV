@@ -251,7 +251,7 @@ class RigctldClient:
                 command=command,
                 rprt=rprt,
             )
-        return lines[:-1]  # drop the RPRT terminator
+        return lines[1:-1]  # drop the echoed command header and RPRT terminator
 
     #: Maximum number of lines accepted in a single rigctld response.
     #: Guards against unbounded buffer growth if the daemon sends garbage

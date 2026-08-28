@@ -151,42 +151,46 @@ class FakeRigctld:
         cmd = command_text[1:] if command_text.startswith("+") else command_text
         self.commands_received.append(cmd)
 
+        # Hamlib's extended response mode echoes the command header before
+        # the response body and final ``RPRT`` status line.
+        header = f"{cmd}:\n" if command_text.startswith("+") else ""
+
         if self.fail_all_commands:
-            return "RPRT -1\n"
+            return header + "RPRT -1\n"
         if self.fail_next_command:
             self.fail_next_command = False
-            return "RPRT -1\n"
+            return header + "RPRT -1\n"
 
         parts = cmd.split()
         if not parts:
-            return "RPRT -1\n"
+            return header + "RPRT -1\n"
 
         op = parts[0]
         try:
             if op == "f":
-                return f"Frequency: {self.freq}\nRPRT 0\n"
+                return header + f"Frequency: {self.freq}\nRPRT 0\n"
             if op == "F":
                 self.freq = int(parts[1])
-                return "RPRT 0\n"
+                return header + "RPRT 0\n"
             if op == "m":
-                return (
+                return header + (
                     f"Mode: {self.mode_name}\nPassband: {self.passband_hz}\nRPRT 0\n"
                 )
             if op == "M":
                 self.mode_name = parts[1]
                 self.passband_hz = int(parts[2])
-                return "RPRT 0\n"
+                return header + "RPRT 0\n"
             if op == "t":
-                return f"PTT: {1 if self.ptt else 0}\nRPRT 0\n"
+                return header + f"PTT: {1 if self.ptt else 0}\nRPRT 0\n"
             if op == "T":
                 self.ptt = parts[1] == "1"
-                return "RPRT 0\n"
+                return header + "RPRT 0\n"
             if op == "l" and len(parts) >= 2 and parts[1] == "STRENGTH":
-                return f"STRENGTH: {self.strength_db}\nRPRT 0\n"
+                return header + f"STRENGTH: {self.strength_db}\nRPRT 0\n"
         except (IndexError, ValueError):
-            return "RPRT -1\n"
+            return header + "RPRT -1\n"
 
-        return "RPRT -1\n"
+        return header + "RPRT -1\n"
 
 
 __all__ = ["FakeRigctld"]
