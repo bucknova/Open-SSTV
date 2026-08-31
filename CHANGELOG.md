@@ -11,6 +11,20 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Kenwood and Elecraft transmissions no longer abort a second in.**
+  Reading PTT sent `TX;` — which on those radios is the *set* command that
+  keys the transmitter, not a query. It is never answered, so the
+  once-a-second health check timed out and aborted the transmission, and
+  the stray key could switch the radio from its data input to the
+  microphone mid-image. PTT is now read from the `IF` status string, as
+  Hamlib does.
+- **Connecting a rig no longer keys it.** Opening a serial port asserted
+  both DTR and RTS (pyserial raises both on `open()`), and the CAT backends
+  never lowered them. On the common single-cable interface that wires one
+  of those lines to PTT, pressing **Connect Rig** put the radio on the air
+  for the whole session, transmitting a dead carrier with nothing in the UI
+  to show it. Both lines are now held low from the moment the port opens.
+
 - **The remote web UI no longer scrolls sideways on narrower phones.** The
   header's own controls added up to about 408 px and flex items refuse to
   shrink below their content, so on a 375 or 390 px screen — iPhone SE, 12/13
