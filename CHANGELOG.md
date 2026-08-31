@@ -11,6 +11,33 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Saving Settings no longer wipes extra gallery folders.** Every
+  `AppConfig` field is rebuilt from the dialog when you save, and
+  `gallery_extra_dirs` — which has no widget, being TOML-only — was reverting
+  to empty. Opening Settings to change anything at all silently dropped the
+  folders from both the desktop gallery and the remote one. A test now walks
+  the dataclass and fails if *any* field isn't carried through, so the next
+  TOML-only setting is covered the day it's added.
+- **Wraase SC2-120 decoded slightly wrong, including our own transmissions.**
+  The mode table made the line 1.5 ms short: SC2-120 carries a porch before
+  every channel, not just before red, so green and blue were sampled 0.5 ms
+  and 1.0 ms early on every line. A new test asserts the table's line time
+  matches what the encoder actually emits, for all 22 modes.
+- **Invalid audio and rig settings are now clamped instead of reaching the
+  radio.** `audio_output_gain` accepted NaN (which transmitted silence while
+  keyed) and negative values (which inverted and hard-clipped the waveform
+  into splatter), because the guards were bare `>` comparisons that NaN
+  always fails. `sample_rate` had no validation at all — `0` reached the
+  encoder and raised a `ZeroDivisionError` on Transmit. `ptt_delay_s` and
+  `rig_civ_address` are now range-checked too.
+
+### Internal
+
+- `scripts/roundtrip_all_modes.py`, the end-to-end encode→decode audit over
+  the whole mode table, had imported the pre-rename `sstv_app` package and
+  been dead code since. It runs again — and would have caught the SC2-120
+  discrepancy.
+
 - **The remote web UI no longer scrolls sideways on narrower phones.** The
   header's own controls added up to about 408 px and flex items refuse to
   shrink below their content, so on a 375 or 390 px screen — iPhone SE, 12/13
