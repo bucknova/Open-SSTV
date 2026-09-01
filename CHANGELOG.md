@@ -32,6 +32,68 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   way through closing the same stream. That is the cross-thread teardown
   that corrupted the heap in PortAudio's ALSA backend before v0.6.2. The
   abort now happens under the lock the TX thread must hold to tear down.
+- **Saving Settings no longer wipes extra gallery folders.** Every
+  `AppConfig` field is rebuilt from the dialog when you save, and
+  `gallery_extra_dirs` — which has no widget, being TOML-only — was reverting
+  to empty. Opening Settings to change anything at all silently dropped the
+  folders from both the desktop gallery and the remote one. A test now walks
+  the dataclass and fails if *any* field isn't carried through, so the next
+  TOML-only setting is covered the day it's added.
+- **Wraase SC2-120 decoded slightly wrong, including our own transmissions.**
+  The mode table made the line 1.5 ms short: SC2-120 carries a porch before
+  every channel, not just before red, so green and blue were sampled 0.5 ms
+  and 1.0 ms early on every line. A new test asserts the table's line time
+  matches what the encoder actually emits, for all 22 modes.
+- **Invalid audio and rig settings are now clamped instead of reaching the
+  radio.** `audio_output_gain` accepted NaN (which transmitted silence while
+  keyed) and negative values (which inverted and hard-clipped the waveform
+  into splatter), because the guards were bare `>` comparisons that NaN
+  always fails. `sample_rate` had no validation at all — `0` reached the
+  encoder and raised a `ZeroDivisionError` on Transmit. `ptt_delay_s` and
+  `rig_civ_address` are now range-checked too.
+
+### Internal
+
+- `scripts/roundtrip_all_modes.py`, the end-to-end encode→decode audit over
+  the whole mode table, had imported the pre-rename `sstv_app` package and
+  been dead code since. It runs again — and would have caught the SC2-120
+  discrepancy.
+- **Remote transmit could key the rig with every safeguard disarmed.** The
+  control plane gated only on its own state, so while the operator was
+  transmitting locally it reported idle and accepted a remote request. The
+  image queued behind the local transmission; the local completion returned
+  the plane to idle; the transmitter was then keyed for the remote image
+  with the plane reporting idle — **Abort** answering "busy", the operator's
+  reclaim a no-op, and the dead-man's-switch never armed. Remote requests
+  are now refused while the transmitter is busy, re-checked at the moment of
+  keying, and a completed transmission only returns the plane to idle if the
+  plane is what started it.
+- **The app no longer freezes while the dead-man's-switch unkeys a wedged
+  rig.** The control plane invoked its transmit/unkey callbacks while
+  holding its own lock, and unkeying performs blocking serial or TCP I/O.
+  Everything else — including the reclaim that runs first thing on quit —
+  blocked behind it, which is why a stuck PTT-off appeared to hang the app
+  for over a minute. Callbacks are now queued under the lock and dispatched
+  after it is released, preserving their order.
+- **Local Stop now also reclaims remote control.** Previously the remote
+  client kept its lease and could immediately start another transmission,
+  overriding the stop the operator had just pressed.
+- **A non-ASCII access or confirm token is rejected cleanly** instead of
+  raising `TypeError` out of the request handler (dropping the connection
+  with no response) or stranding the control plane awaiting confirmation.
+- **Kenwood and Elecraft transmissions no longer abort a second in.**
+  Reading PTT sent `TX;` — which on those radios is the *set* command that
+  keys the transmitter, not a query. It is never answered, so the
+  once-a-second health check timed out and aborted the transmission, and
+  the stray key could switch the radio from its data input to the
+  microphone mid-image. PTT is now read from the `IF` status string, as
+  Hamlib does.
+- **Connecting a rig no longer keys it.** Opening a serial port asserted
+  both DTR and RTS (pyserial raises both on `open()`), and the CAT backends
+  never lowered them. On the common single-cable interface that wires one
+  of those lines to PTT, pressing **Connect Rig** put the radio on the air
+  for the whole session, transmitting a dead carrier with nothing in the UI
+  to show it. Both lines are now held low from the moment the port opens.
 
 - **The remote web UI no longer scrolls sideways on narrower phones.** The
   header's own controls added up to about 408 px and flex items refuse to

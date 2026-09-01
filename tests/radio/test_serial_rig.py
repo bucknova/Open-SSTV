@@ -826,3 +826,112 @@ class TestTermiosErrorWrapping:
             "_SERIAL_IO_ERRORS is now redundant but harmless — update this test "
             "and the comment in serial_rig.py to reflect the new MRO."
         )
+
+
+# ---------------------------------------------------------------------------
+# Kenwood get_ptt must READ, never key the transmitter
+# ---------------------------------------------------------------------------
+
+
+class TestKenwoodGetPtt:
+    """``TX;`` is a Kenwood *set* command — get_ptt must not send it.
+
+    Regression: get_ptt sent ``TX;``, which keys the radio (Hamlib maps
+    bare ``TX`` to RIG_PTT_ON) and is never answered, so the health
+    monitor's once-a-second call timed out and aborted every
+    Kenwood/Elecraft transmission about a second in.  PTT is read from
+    byte 28 of the ``IF`` status string, as Hamlib's kenwood_get_ptt does.
+    """
+
+    def _rig_answering(self, if_response: bytes):
+        r = _make_kenwood_rig()
+        mock_ser = MagicMock()
+        mock_ser.in_waiting = len(if_response)
+        mock_ser.read.return_value = if_response
+        r._ser = mock_ser
+        return r, mock_ser
+
+    #: A real TS-590 IF response: "IF" + 35 payload chars.  Index 28 is the
+    #: TX/RX flag; everything else is padding for this test's purposes.
+    def _if(self, ptt: str) -> bytes:
+        body = list("0" * 35)
+        body[28 - 2] = ptt  # -2: index 28 counts the "IF" prefix
+        return ("IF" + "".join(body) + ";").encode("ascii")
+
+    def test_get_ptt_never_sends_the_tx_set_command(self) -> None:
+        r, mock_ser = self._rig_answering(self._if("0"))
+        r.get_ptt()
+        sent = b"".join(c.args[0] for c in mock_ser.write.call_args_list)
+        assert b"TX" not in sent, f"get_ptt keyed the transmitter: sent {sent!r}"
+        assert sent == b"IF;"
+
+    def test_get_ptt_false_when_receiving(self) -> None:
+        r, _ = self._rig_answering(self._if("0"))
+        assert r.get_ptt() is False
+
+    def test_get_ptt_true_when_transmitting(self) -> None:
+        r, _ = self._rig_answering(self._if("1"))
+        assert r.get_ptt() is True
+
+    def test_short_if_response_raises_rather_than_lying(self) -> None:
+        from open_sstv.radio.exceptions import RigCommandError
+
+        r, _ = self._rig_answering(b"IF001;")
+        with pytest.raises(RigCommandError, match="unparseable IF"):
+            r.get_ptt()
+
+
+# ---------------------------------------------------------------------------
+# Opening a port must not assert the modem control lines
+# ---------------------------------------------------------------------------
+
+
+class TestPortOpensWithLinesLow:
+    """DTR and RTS must be low before open(), on every backend.
+
+    Regression: pyserial's SerialBase defaults both line states to True and
+    open() asserts them, so on a cable that wires DTR or RTS to PTT the
+    radio keyed the moment the operator pressed Connect — and the CAT
+    backends never lowered them again.
+    """
+
+    class _FakePort:
+        """Records the order of attribute writes and the open() call."""
+
+        def __init__(self) -> None:
+            self.events: list[str] = []
+            self.is_open = False
+            self._dtr = True   # pyserial's real defaults
+            self._rts = True
+
+        def __setattr__(self, name, value):
+            if name in ("dtr", "rts"):
+                self.events.append(f"{name}={value}")
+            object.__setattr__(self, name, value)
+
+        def open(self) -> None:
+            self.events.append("open")
+            object.__setattr__(self, "is_open", True)
+
+        def reset_input_buffer(self) -> None:
+            pass
+
+    def _opened(self, monkeypatch) -> TestPortOpensWithLinesLow._FakePort:
+        import open_sstv.radio.serial_rig as sr
+
+        fake = self._FakePort()
+        monkeypatch.setattr(sr.serial, "Serial", lambda *a, **k: fake)
+        sr._open_port("/dev/ttyUSB0", 9600, timeout=0.5)
+        return fake
+
+    def test_both_lines_are_cleared_before_open(self, monkeypatch) -> None:
+        fake = self._opened(monkeypatch)
+        assert "open" in fake.events
+        before_open = fake.events[: fake.events.index("open")]
+        assert "dtr=False" in before_open, fake.events
+        assert "rts=False" in before_open, fake.events
+
+    def test_lines_are_low_after_open(self, monkeypatch) -> None:
+        fake = self._opened(monkeypatch)
+        assert fake.dtr is False
+        assert fake.rts is False

@@ -618,6 +618,11 @@ class MainWindow(QMainWindow):
         #: transmission, see ``_compute_playback_watchdog_s``).
         self._last_watchdog_duration_s: float = 0.0
         self._last_tx_was_test_tone: bool = False
+        #: Whether the transmission currently in flight was started by the
+        #: remote control plane.  _remote_tx_ended fires on ANY completion
+        #: signal, so without this a *local* transmission finishing reset
+        #: the plane out of TRANSMITTING.
+        self._last_tx_was_remote: bool = False
         #: Set by _on_tx_error so _on_tx_aborted doesn't wipe the error
         #: message with "Transmission aborted." before the user can read it.
         self._tx_error_pending: bool = False
@@ -699,6 +704,14 @@ class MainWindow(QMainWindow):
             # keyed/unkeyed.  The no-op manual/VOX backend doesn't qualify —
             # the dead-man's-switch could only stop audio, not drop PTT.
             rig_ready=lambda: not isinstance(self._rig, ManualRig),
+            # The plane owns remote TX authority, not the radio: without
+            # this it granted a remote request while the local operator was
+            # already transmitting.  The image queued behind the local one,
+            # the local completion reset the plane to IDLE, and the worker
+            # then keyed for the remote image with the plane reporting idle
+            # — abort answering "busy", reclaim_local a no-op, and the
+            # dead-man's-switch never armed.
+            tx_busy=lambda: not self._tx_worker.wait_for_idle(0.0),
         )
         self._remote_tx_request.connect(
             self._on_remote_tx_request, Qt.ConnectionType.QueuedConnection
@@ -1347,6 +1360,7 @@ class MainWindow(QMainWindow):
             return
         _log.info("remote TX: transmitting %s in %s", what, mode)
         self._last_tx_was_test_tone = False
+        self._last_tx_was_remote = True
         self._request_transmit.emit(img, mode_enum)
 
     def _remote_tx_abandon(self) -> None:
@@ -1357,11 +1371,19 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _remote_tx_ended(self) -> None:
-        """Any transmission ended → return the control plane to idle.
+        """A transmission ended → return the control plane to idle.
 
-        Idempotent: a no-op unless a remote TX was in flight.  Normal
-        completion does not unkey (the worker already stopped).
+        Only for a transmission the plane actually started.  This slot is
+        connected to transmission_complete/aborted, which fire for *every*
+        transmission, so an unguarded on_tx_finished() let a local TX
+        finishing reset the plane out of TRANSMITTING — leaving a remote
+        transmit that was still queued to key the rig with the plane
+        reporting idle.  Normal completion does not unkey (the worker
+        already stopped).
         """
+        if not self._last_tx_was_remote:
+            return
+        self._last_tx_was_remote = False
         self._remote_control.on_tx_finished()
 
     # === Menu bar ===
@@ -2210,6 +2232,7 @@ class MainWindow(QMainWindow):
         # reclaims control from any remote holder (and unkeys a remote TX).
         self._remote_control.reclaim_local()
         self._last_tx_was_test_tone = False
+        self._last_tx_was_remote = False
         self._request_transmit.emit(image, mode)
 
     @Slot()
@@ -2217,10 +2240,19 @@ class MainWindow(QMainWindow):
         """Set the test-tone flag and dispatch via queued signal to TX thread."""
         self._remote_control.reclaim_local()  # local keying wins over remote
         self._last_tx_was_test_tone = True
+        self._last_tx_was_remote = False
         self._request_test_tone.emit()
 
     @Slot()
     def _on_stop_requested(self) -> None:
+        """Local Stop — the operator at the radio always wins.
+
+        Reclaims the remote lease as well as stopping the transmission:
+        without that, the remote client kept its lease and could request +
+        confirm a fresh image immediately, overriding the very stop the
+        operator just pressed.
+        """
+        self._remote_control.reclaim_local()
         self._tx_worker.request_stop()
 
     @Slot(int, int)

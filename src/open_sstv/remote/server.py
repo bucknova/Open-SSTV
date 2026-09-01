@@ -213,7 +213,15 @@ class RemoteServer:
                     supplied = auth[7:]
                 elif "token" in query:
                     supplied = query["token"][0]
-                return hmac.compare_digest(supplied, token)
+                # Compare as bytes.  hmac.compare_digest refuses to compare
+                # str containing any non-ASCII character and raises
+                # TypeError — and self.path/headers are latin-1 decoded, so
+                # any byte >= 0x80 in the token produced an unhandled
+                # exception and a dropped connection instead of a clean 401.
+                return hmac.compare_digest(
+                    supplied.encode("utf-8", "surrogateescape"),
+                    token.encode("utf-8", "surrogateescape"),
+                )
 
             def _send(self, status: HTTPStatus, body: bytes, ctype: str) -> None:
                 self.send_response(status)
