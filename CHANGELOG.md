@@ -11,6 +11,27 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Switching audio devices no longer corrupts an in-flight decode.** The
+  audio-worker hot-swap called the RX decoder's reset directly from the GUI
+  thread, while a flush triggered by the same event was still decoding on
+  the RX thread. If no audio had been fed yet it also created the RX
+  watchdog timer on the wrong thread, after which Qt refused to let the
+  worker stop it — leaving a live timer firing into a worker being torn
+  down. The reset is now requested through the same queued signal
+  everything else uses, and the timer refuses to be created with the wrong
+  thread affinity.
+- **Restarting capture no longer probes audio devices from the decode
+  thread.** The one-shot that starts capture after a decoder reset was a
+  plain closure, which Qt runs in whichever thread emitted the signal — so
+  `query_devices()`, a process-global PortAudio call, could run on the RX
+  thread at the same moment the audio worker was re-initialising PortAudio.
+  It is now a slot on the main window, delivered to the GUI thread.
+- **Stopping a transmission can no longer abort a stream that is being
+  closed.** `stop()` read the stream pointer, released its lock, and then
+  called `abort()` — leaving a window in which the TX thread could be part
+  way through closing the same stream. That is the cross-thread teardown
+  that corrupted the heap in PortAudio's ALSA backend before v0.6.2. The
+  abort now happens under the lock the TX thread must hold to tear down.
 - **Saving Settings no longer wipes extra gallery folders.** Every
   `AppConfig` field is rebuilt from the dialog when you save, and
   `gallery_extra_dirs` — which has no widget, being TOML-only — was reverting

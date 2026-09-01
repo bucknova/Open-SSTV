@@ -81,7 +81,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import sounddevice as sd
-from PySide6.QtCore import QObject, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 
 _log = logging.getLogger(__name__)
 
@@ -2104,6 +2104,21 @@ class RxWorker(QObject):
         pattern as ``InputStreamWorker`` uses for its drain timer.
         """
         if self._watchdog_timer is not None:
+            return
+        # Guard the affinity assumption rather than trusting it.  A caller
+        # that reached reset() from the GUI thread (the audio-worker swap
+        # used to) would otherwise create this timer with GUI affinity, and
+        # from then on the watchdog would run its checks on the GUI thread
+        # while shutdown() — on the worker thread — could not stop it
+        # ("QObject::killTimer: Timers cannot be stopped from another
+        # thread"), leaving a live timer firing into a torn-down worker.
+        if self.thread() is not QThread.currentThread():
+            _log.error(
+                "RxWorker watchdog timer requested from %s but the worker "
+                "lives on %s — refusing to create it with the wrong thread "
+                "affinity; ask for reset() through a queued signal instead.",
+                QThread.currentThread(), self.thread(),
+            )
             return
         self._watchdog_timer = QTimer()
         self._watchdog_timer.setInterval(_RX_WATCHDOG_TICK_MS)
