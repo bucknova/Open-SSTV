@@ -618,6 +618,11 @@ class MainWindow(QMainWindow):
         #: transmission, see ``_compute_playback_watchdog_s``).
         self._last_watchdog_duration_s: float = 0.0
         self._last_tx_was_test_tone: bool = False
+        #: Whether the transmission currently in flight was started by the
+        #: remote control plane.  _remote_tx_ended fires on ANY completion
+        #: signal, so without this a *local* transmission finishing reset
+        #: the plane out of TRANSMITTING.
+        self._last_tx_was_remote: bool = False
         #: Set by _on_tx_error so _on_tx_aborted doesn't wipe the error
         #: message with "Transmission aborted." before the user can read it.
         self._tx_error_pending: bool = False
@@ -626,7 +631,13 @@ class MainWindow(QMainWindow):
         #: disconnect-by-reference instead of nuking all connections
         #: (which fires a noisy ``RuntimeWarning`` from PySide6 when
         #: there's nothing to disconnect).
-        self._start_once_closure: object | None = None
+        #: Armed by _set_capture / the audio-worker swap before asking the
+        #: RxWorker to reset; consumed by _start_capture_after_reset when
+        #: reset_done arrives.  Replaces a bare closure connected to
+        #: reset_done: a plain callable has no QObject affinity, so PySide
+        #: invoked it directly on the RX decode thread — running
+        #: sd.query_devices() and writing _input_device from there.
+        self._start_capture_armed: bool = False
         #: M16: set by ``_on_audio_device_lost`` so ``_start_once``
         #: knows to re-resolve the PortAudio index for the saved device
         #: name (USB replug typically reassigns the index).  Avoids the
@@ -693,6 +704,14 @@ class MainWindow(QMainWindow):
             # keyed/unkeyed.  The no-op manual/VOX backend doesn't qualify —
             # the dead-man's-switch could only stop audio, not drop PTT.
             rig_ready=lambda: not isinstance(self._rig, ManualRig),
+            # The plane owns remote TX authority, not the radio: without
+            # this it granted a remote request while the local operator was
+            # already transmitting.  The image queued behind the local one,
+            # the local completion reset the plane to IDLE, and the worker
+            # then keyed for the remote image with the plane reporting idle
+            # — abort answering "busy", reclaim_local a no-op, and the
+            # dead-man's-switch never armed.
+            tx_busy=lambda: not self._tx_worker.wait_for_idle(0.0),
         )
         self._remote_tx_request.connect(
             self._on_remote_tx_request, Qt.ConnectionType.QueuedConnection
@@ -954,6 +973,11 @@ class MainWindow(QMainWindow):
         self._request_start_capture.connect(self._audio_worker.start)
         self._request_stop_capture.connect(self._audio_worker.stop)
         self._request_rx_reset.connect(self._rx_worker.reset)
+        # Queued with this window as receiver so it runs on the GUI thread:
+        # reset_done is emitted from the RX decode thread.
+        self._rx_worker.reset_done.connect(
+            self._start_capture_after_reset, Qt.ConnectionType.QueuedConnection
+        )
         self._request_rx_shutdown.connect(self._rx_worker.shutdown)
         # Settings dispatchers — connect BEFORE _apply_config is ever called.
         # Because rx_worker lives on rx_thread, Qt auto-promotes these to
@@ -1336,6 +1360,7 @@ class MainWindow(QMainWindow):
             return
         _log.info("remote TX: transmitting %s in %s", what, mode)
         self._last_tx_was_test_tone = False
+        self._last_tx_was_remote = True
         self._request_transmit.emit(img, mode_enum)
 
     def _remote_tx_abandon(self) -> None:
@@ -1346,11 +1371,19 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _remote_tx_ended(self) -> None:
-        """Any transmission ended → return the control plane to idle.
+        """A transmission ended → return the control plane to idle.
 
-        Idempotent: a no-op unless a remote TX was in flight.  Normal
-        completion does not unkey (the worker already stopped).
+        Only for a transmission the plane actually started.  This slot is
+        connected to transmission_complete/aborted, which fire for *every*
+        transmission, so an unguarded on_tx_finished() let a local TX
+        finishing reset the plane out of TRANSMITTING — leaving a remote
+        transmit that was still queued to key the rig with the plane
+        reporting idle.  Normal completion does not unkey (the worker
+        already stopped).
         """
+        if not self._last_tx_was_remote:
+            return
+        self._last_tx_was_remote = False
         self._remote_control.on_tx_finished()
 
     # === Menu bar ===
@@ -2199,6 +2232,7 @@ class MainWindow(QMainWindow):
         # reclaims control from any remote holder (and unkeys a remote TX).
         self._remote_control.reclaim_local()
         self._last_tx_was_test_tone = False
+        self._last_tx_was_remote = False
         self._request_transmit.emit(image, mode)
 
     @Slot()
@@ -2206,10 +2240,19 @@ class MainWindow(QMainWindow):
         """Set the test-tone flag and dispatch via queued signal to TX thread."""
         self._remote_control.reclaim_local()  # local keying wins over remote
         self._last_tx_was_test_tone = True
+        self._last_tx_was_remote = False
         self._request_test_tone.emit()
 
     @Slot()
     def _on_stop_requested(self) -> None:
+        """Local Stop — the operator at the radio always wins.
+
+        Reclaims the remote lease as well as stopping the transmission:
+        without that, the remote client kept its lease and could request +
+        confirm a fresh image immediately, overriding the very stop the
+        operator just pressed.
+        """
+        self._remote_control.reclaim_local()
         self._tx_worker.request_stop()
 
     @Slot(int, int)
@@ -2472,61 +2515,14 @@ class MainWindow(QMainWindow):
             # Defer the start-capture request until reset_done arrives so
             # the two worker threads are ordered correctly (OP-05).
             #
-            # H7: rapid Start / Stop / Start used to leave stale closures
-            # connected to ``reset_done`` because the disconnect inside
-            # each closure only removed itself.  A second click before
-            # the first reset completed enqueued a second closure;
-            # both fired on the next ``reset_done`` → two
-            # ``_request_start_capture`` emissions → InputStreamWorker
-            # raised "already running" via the error signal.  Disconnect
-            # any prior closure by reference (not nuclear ``disconnect()``,
-            # which prints a RuntimeWarning from PySide6 when there's
-            # nothing connected) before installing the new one.
-            if self._start_once_closure is not None:
-                try:
-                    self._rx_worker.reset_done.disconnect(
-                        self._start_once_closure
-                    )
-                except (RuntimeError, TypeError):
-                    pass
-                self._start_once_closure = None
-
-            def _start_once() -> None:
-                # Disconnect ourselves before emitting so a later reset()
-                # (e.g. user clicks Clear) doesn't retrigger start_capture.
-                try:
-                    self._rx_worker.reset_done.disconnect(_start_once)
-                except (RuntimeError, TypeError):
-                    pass
-                if self._start_once_closure is _start_once:
-                    self._start_once_closure = None
-                # Re-enumerate AFTER _pa_reset (which fires before reset_done)
-                # so a USB replug gets the new PortAudio device index rather
-                # than the stale pre-reset index captured before the reset.
-                #
-                # M16: only re-resolve if the device is actually known to
-                # have changed (``_input_device_needs_relookup`` is set by
-                # ``_on_audio_device_lost``).  ``sd.query_devices()`` can
-                # block the GUI thread for 50–500 ms on macOS Core Audio
-                # after a USB event; gating on the lost-flag means the
-                # common case (clean start, no replug) skips the lookup
-                # entirely.
-                if (
-                    self._input_device_needs_relookup
-                    and self._config.audio_input_device
-                ):
-                    fresh = find_input_device_by_name(
-                        self._config.audio_input_device
-                    )
-                    if fresh is not None:
-                        self._input_device = fresh
-                    self._input_device_needs_relookup = False
-                self._request_start_capture.emit(
-                    self._input_device, self._config.sample_rate, DEFAULT_BLOCKSIZE
-                )
-
-            self._start_once_closure = _start_once
-            self._rx_worker.reset_done.connect(_start_once)
+            # Arm the one-shot: reset_done is connected once, at
+            # construction, to a real slot on this window, so it lands on
+            # the GUI thread.  The flag makes it one-shot without the
+            # connect/disconnect dance a closure needed — and without the
+            # H7 failure where a second click before the first reset
+            # completed left two closures connected and started capture
+            # twice ("already running").
+            self._start_capture_armed = True
             self._request_rx_reset.emit()
         else:
             # Cancel any in-flight decode before stopping audio so the tail
@@ -2534,6 +2530,36 @@ class MainWindow(QMainWindow):
             # thread for several seconds on a large buffer.
             self._rx_worker.request_cancel()
             self._request_stop_capture.emit()
+
+    @Slot()
+    def _start_capture_after_reset(self) -> None:
+        """``reset_done`` → start capture, on the GUI thread.
+
+        Connected queued at construction, so this runs on the GUI thread
+        however the RxWorker emitted it.  It used to be a bare closure,
+        which PySide invokes directly in the emitting thread — i.e. the RX
+        decode thread — where ``sd.query_devices()`` is a process-global
+        PortAudio read that can run concurrently with the audio worker's
+        own ``_pa_reset``, and where ``_input_device`` was being written
+        while the GUI thread read it.
+
+        Ignored unless a caller armed it, so an unrelated ``reset()`` (the
+        Clear button, or the decoder's own watchdog) can't start capture.
+        """
+        if not self._start_capture_armed:
+            return
+        self._start_capture_armed = False
+        # Re-enumerate only when the device is known to have changed
+        # (_on_audio_device_lost sets the flag): sd.query_devices() can
+        # block for 50-500 ms on macOS Core Audio after a USB event.
+        if self._input_device_needs_relookup and self._config.audio_input_device:
+            fresh = find_input_device_by_name(self._config.audio_input_device)
+            if fresh is not None:
+                self._input_device = fresh
+            self._input_device_needs_relookup = False
+        self._request_start_capture.emit(
+            self._input_device, self._config.sample_rate, DEFAULT_BLOCKSIZE
+        )
 
     @Slot()
     def _on_rx_started(self) -> None:
@@ -3517,17 +3543,20 @@ class MainWindow(QMainWindow):
         # VIS would almost guarantee a corrupted first decode after a
         # hot-swap.  reset() is idempotent and safe to call when the
         # decoder is already idle.
-        try:
-            self._rx_worker.reset()
-        except Exception as exc:  # noqa: BLE001 — never block the swap
-            _log.warning("RxWorker reset after swap failed: %s", exc)
-
-        # C2: if capture was running before the swap, restart it on the
-        # new worker so the user sees no gap in the RX stream.
-        if was_capturing:
-            self._request_start_capture.emit(
-                self._input_device, self._config.sample_rate, DEFAULT_BLOCKSIZE
-            )
+        # RxWorker lives on the RX decode thread, so reset() must be asked
+        # for, not called: the audio worker's ``stopped`` fans out to both
+        # ``_rx_worker.flush`` (queued, RX thread) and this loop's quit
+        # (GUI), so calling reset() directly here mutated the decoder's
+        # buffers while a flush was still decoding on the other thread —
+        # and, if no chunk had been fed yet, created the RX watchdog QTimer
+        # with GUI affinity, after which Qt refuses to stop it from the
+        # worker ("Timers cannot be stopped from another thread").
+        #
+        # C2: if capture was running before the swap, restart it — arming
+        # the same one-shot _set_capture uses, so start_capture is ordered
+        # after the reset instead of racing it on a second worker thread.
+        self._start_capture_armed = bool(was_capturing)
+        self._request_rx_reset.emit()
 
     # === Waterfall ===
 
