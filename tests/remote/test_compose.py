@@ -155,12 +155,20 @@ class TestDecompressionCap:
         assert 7000 * 7000 > MAX_IMAGE_PIXELS
         assert len(payload) < 1_000_000, "payload should be small — that's the point"
 
+        from open_sstv.templates import manager as template_manager
+
         cfg = replace(AppConfig(), logbook_db_path=str(tmp_path / "no.db"))
-        svc = ComposeService(lambda: cfg)
+        # Install the bundled starter templates into a temp dir and point the
+        # service at it.  Relying on whatever templates happen to exist on the
+        # machine made this pass locally and fail in CI, where there are none.
+        templates_dir = tmp_path / "templates"
+        templates_dir.mkdir()
+        template_manager.install_starter_pack(templates_dir)
+        svc = ComposeService(lambda: cfg, templates_dir=templates_dir)
         # Use a REAL template id: _resolve() runs before the decode, so a
         # bogus id would make this pass without ever exercising the cap.
         templates = svc.list_templates()
-        assert templates, "need at least one template for this test to mean anything"
+        assert templates, "starter pack should have installed at least one template"
         template_id = templates[0]["id"]
 
         # Sanity: a normal photo through the same call must succeed, so a
