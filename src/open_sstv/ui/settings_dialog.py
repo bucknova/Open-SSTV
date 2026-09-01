@@ -2208,6 +2208,11 @@ class SettingsDialog(QDialog):
             auto_log_qsos=self._auto_log_check.isChecked(),
             rx_capture_prompt=self._rx_capture_combo.currentData() or "always",
             logbook_db_path=self._config.logbook_db_path,
+            # TOML-only, like logbook_db_path above: no widget sets it, so
+            # it MUST be carried through or saving Settings wipes the
+            # operator's extra gallery folders (and the remote gallery's,
+            # which reads the same field).
+            gallery_extra_dirs=self._config.gallery_extra_dirs,
             log_level=self._log_level_combo.currentData() or "INFO",
             # v0.6.7: UDP QSO log broadcast (ported from cwrobot).
             udp_log_host=self._udp_log_host.text().strip() or "127.0.0.1",

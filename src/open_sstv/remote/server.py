@@ -201,6 +201,25 @@ class RemoteServer:
         compose = self._compose
 
         class _Handler(BaseHTTPRequestHandler):
+            #: Drop a connection that stalls part-way through its request.
+            #: BaseHTTPRequestHandler leaves this at None, so a client that
+            #: sent half a header line and then stopped held a request
+            #: thread forever — and did so *before* auth runs, so it needed
+            #: no token.  A few hundred such connections exhaust the thread
+            #: pool and the file-descriptor limit, blocking the accept loop
+            #: for the operator's own phone.  SSE responses are unaffected:
+            #: this bounds the read of the request, not the life of a
+            #: response we are writing.
+            timeout = 15.0
+
+            def handle_one_request(self) -> None:  # noqa: D102
+                try:
+                    super().handle_one_request()
+                except TimeoutError:
+                    # Stalled client: close quietly rather than logging a
+                    # traceback per abandoned connection.
+                    self.close_connection = True
+
             # Route stdlib access logs through our logger at DEBUG rather
             # than spamming stderr with one line per request.
             def log_message(self, fmt: str, *args: object) -> None:
@@ -213,7 +232,15 @@ class RemoteServer:
                     supplied = auth[7:]
                 elif "token" in query:
                     supplied = query["token"][0]
-                return hmac.compare_digest(supplied, token)
+                # Compare as bytes.  hmac.compare_digest refuses to compare
+                # str containing any non-ASCII character and raises
+                # TypeError — and self.path/headers are latin-1 decoded, so
+                # any byte >= 0x80 in the token produced an unhandled
+                # exception and a dropped connection instead of a clean 401.
+                return hmac.compare_digest(
+                    supplied.encode("utf-8", "surrogateescape"),
+                    token.encode("utf-8", "surrogateescape"),
+                )
 
             def _send(self, status: HTTPStatus, body: bytes, ctype: str) -> None:
                 self.send_response(status)

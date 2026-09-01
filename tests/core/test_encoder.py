@@ -166,3 +166,47 @@ def test_zip_strict_raises_value_error_on_mismatched_lengths() -> None:
     """
     with pytest.raises(ValueError):
         list(zip([1, 2, 3], [1, 2], strict=True))
+
+
+# ---------------------------------------------------------------------------
+# The mode table and the encoder must agree about every mode
+# ---------------------------------------------------------------------------
+
+
+class TestModeTableMatchesEncoder:
+    """``line_time_ms`` must equal what the encoder actually emits.
+
+    The decoder derives every channel offset from ``line_time_ms``, so if
+    the table and the encoder disagree the app mis-decodes its own
+    transmissions — and, more to the point, everyone else's.
+
+    Wraase SC2-120 was 1.5 ms/line short: PySSTV emits a porch before every
+    channel while the table modelled a single leading porch, so green and
+    blue were sampled 0.5 ms and 1.0 ms early on every line. It went
+    unnoticed because ``scripts/roundtrip_all_modes.py`` — the only
+    end-to-end audit over the table — still imported the pre-rename
+    ``sstv_app`` package and had been dead code since.
+    """
+
+    @pytest.mark.parametrize("mode", sorted(Mode, key=lambda m: m.value))
+    def test_line_time_matches_pysstv(self, mode: Mode) -> None:
+        from PIL import Image
+
+        from open_sstv.core.encoder import _PYSSTV_CLASSES
+        from open_sstv.core.modes import MODE_TABLE
+
+        spec = MODE_TABLE[mode]
+        cls = _PYSSTV_CLASSES[mode]
+        # Build at the encoder's own image size: the PD modes carry two
+        # image rows per transmitted line, so PySSTV's HEIGHT is twice the
+        # spec's line count.  spec.height is always the number of lines on
+        # the air, which is what line_time_ms is per.
+        enc = cls(Image.new("RGB", (cls.WIDTH, cls.HEIGHT)), 48000, 16)
+        emitted_ms = sum(ms for _freq, ms in enc.gen_image_tuples())
+        per_line = emitted_ms / spec.height
+
+        assert per_line == pytest.approx(spec.line_time_ms, abs=1e-6), (
+            f"{mode.value}: table says {spec.line_time_ms} ms/line but the "
+            f"encoder emits {per_line} ms/line — the decoder derives every "
+            f"channel offset from the table value, so they must agree"
+        )
