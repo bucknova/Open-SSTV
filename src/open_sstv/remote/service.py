@@ -228,10 +228,38 @@ class GalleryService:
         with self._lock:
             return self._registry.get(image_id)
 
+    def _within_source_dirs(self, path: Path) -> bool:
+        """True if *path*'s real location is inside a configured gallery dir.
+
+        The id registry is the fence against client-supplied paths, but it
+        is built by walking the gallery directories, and ``Path.is_file()``
+        follows symlinks — so a symlink dropped into a watched folder
+        (``gallery_extra_dirs`` explicitly invites pointing at a shared
+        one) became a legitimate gallery id whose bytes this server would
+        then serve.  Resolve both sides and require containment.
+        """
+        try:
+            real = path.resolve(strict=True)
+        except OSError:
+            return False
+        for d in self._source_dirs():
+            try:
+                if real.is_relative_to(d.resolve(strict=True)):
+                    return True
+            except OSError:
+                continue
+        _log.warning(
+            "remote: refusing %s — resolves to %s, outside every gallery "
+            "directory (symlink?)", path, real,
+        )
+        return False
+
     def image_path(self, image_id: str) -> Path | None:
         """Resolve *image_id* to a still-present source file, or ``None``."""
         path = self.resolve(image_id)
         if path is None or not path.is_file():
+            return None
+        if not self._within_source_dirs(path):
             return None
         return path
 
