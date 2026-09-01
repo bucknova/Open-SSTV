@@ -67,12 +67,6 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   encoder and raised a `ZeroDivisionError` on Transmit. `ptt_delay_s` and
   `rig_civ_address` are now range-checked too.
 
-### Internal
-
-- `scripts/roundtrip_all_modes.py`, the end-to-end encode→decode audit over
-  the whole mode table, had imported the pre-rename `sstv_app` package and
-  been dead code since. It runs again — and would have caught the SC2-120
-  discrepancy.
 - **Remote transmit could key the rig with every safeguard disarmed.** The
   control plane gated only on its own state, so while the operator was
   transmitting locally it reported idle and accepted a remote request. The
@@ -130,6 +124,13 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   field for operator matching, and a non-callsign value could cause a
   QSO to silently fail to auto-upload. The operator's configured
   display name now goes into the correct field, `MY_NAME`.
+
+### Internal
+
+- `scripts/roundtrip_all_modes.py`, the end-to-end encode→decode audit over
+  the whole mode table, had imported the pre-rename `sstv_app` package and
+  been dead code since. It runs again — and would have caught the SC2-120
+  discrepancy.
 
 ---
 
