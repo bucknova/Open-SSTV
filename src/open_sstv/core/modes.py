@@ -478,11 +478,18 @@ MODE_TABLE: dict[Mode, ModeSpec] = {
         height=256,
         sync_pulse_ms=_WRAASE_SC2_SYNC_MS,
         sync_porch_ms=_WRAASE_SC2_PORCH_MS,
-        # SYNC + PORCH (before R only) + R + G + B
+        # SYNC + PORCH + 3 × (PORCH + scan).  Unlike SC2-180, SC2-120
+        # carries a porch before *every* channel, not just before red —
+        # PySSTV's WraaseSC2120.before_channel emits one each time, and
+        # slowrx's table agrees at ~475.53 ms/line.  Modelling it as a
+        # single leading porch made the line 1.5 ms short, so our own
+        # encoder and decoder disagreed about this one mode: the green and
+        # blue channels were sampled 0.5 ms and 1.0 ms early, which showed
+        # up as a blue-heavy error on every decode.
         line_time_ms=(
             _WRAASE_SC2_SYNC_MS
             + _WRAASE_SC2_PORCH_MS
-            + 3 * _WRAASE_SC2_120_SCAN_MS
+            + 3 * (_WRAASE_SC2_PORCH_MS + _WRAASE_SC2_120_SCAN_MS)
         ),
         color_layout=("R", "G", "B"),
         sync_position=SyncPosition.LINE_START,

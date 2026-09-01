@@ -12,6 +12,7 @@ PySide6.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -27,6 +28,12 @@ _log = logging.getLogger(__name__)
 #: clamping a bad value would still fail, so unknown rates fall back to
 #: the 9600 default instead.
 VALID_BAUD_RATES: tuple[int, ...] = (4800, 9600, 19200, 38400, 57600, 115200)
+
+#: Sample rates the Audio tab offers.  A rate outside this set can't be
+#: usefully clamped (0 divides by zero deep inside PySSTV; a negative rate
+#: breaks the RX filter design), so an unknown value falls back to the
+#: default the same way rig_baud_rate does.
+VALID_SAMPLE_RATES: tuple[int, ...] = (44_100, 48_000)
 
 #: Valid values for ``tx_banner_size`` — mirrors ``banner.SIZE_TABLE``.
 _VALID_BANNER_SIZES: tuple[str, ...] = ("small", "medium", "large")
@@ -302,8 +309,30 @@ class AppConfig:
         # v0.1.12: slider ceiling reverted from 500% to 200%.
         # Clamp any stored value so users who raised it to ≤500% on v0.1.11
         # don't get unexpected clipping on next open.
-        if self.audio_output_gain > 2.0:
-            self.audio_output_gain = 2.0
+        # Clamp first, the same way audio_input_gain does below.  The old
+        # bare ``> 2.0`` guard let two values through that reach the rig:
+        # NaN (every comparison with NaN is False) transmitted pure silence
+        # while keyed, and a negative gain inverted and hard-clipped the
+        # waveform into a near-square wave — real splatter on a shared
+        # calling frequency.  float() also normalises an int or a numeric
+        # string from a hand-edited config.
+        try:
+            out_gain = float(self.audio_output_gain)
+        except (TypeError, ValueError):
+            out_gain = 1.0
+        if not math.isfinite(out_gain):
+            _log.warning(
+                "AppConfig: audio_output_gain %r is not a finite number "
+                "— using 1.0", self.audio_output_gain,
+            )
+            out_gain = 1.0
+        clamped_out_gain = max(0.0, min(2.0, out_gain))
+        if clamped_out_gain != out_gain:
+            _log.warning(
+                "AppConfig: audio_output_gain %r out of range [0.0, 2.0] "
+                "— clamped to %.2f", self.audio_output_gain, clamped_out_gain,
+            )
+        self.audio_output_gain = clamped_out_gain
         # v0.1.13: default slider ceiling is now 100%.  If an existing config
         # has a value above 100% but overdrive was never persisted (missing
         # field, old config file), auto-enable overdrive so the user's
@@ -487,6 +516,40 @@ class AppConfig:
 
         # Baud rate must match the rig exactly, so unknown values fall
         # back to the default rather than clamping to a neighbour.
+        if self.sample_rate not in VALID_SAMPLE_RATES:
+            _log.warning(
+                "AppConfig: unsupported sample_rate %r (valid: %s) — "
+                "falling back to 48000",
+                self.sample_rate, list(VALID_SAMPLE_RATES),
+            )
+            self.sample_rate = 48_000
+
+        # PTT lead-in: a negative delay is meaningless and a large one looks
+        # like a hang while the rig sits keyed with no audio.
+        try:
+            ptt_delay = float(self.ptt_delay_s)
+        except (TypeError, ValueError):
+            ptt_delay = 0.5
+        if not math.isfinite(ptt_delay):
+            ptt_delay = 0.5
+        clamped_ptt = max(0.0, min(5.0, ptt_delay))
+        if clamped_ptt != ptt_delay:
+            _log.warning(
+                "AppConfig: ptt_delay_s %r out of range [0.0, 5.0] — "
+                "clamped to %.2f", self.ptt_delay_s, clamped_ptt,
+            )
+        self.ptt_delay_s = clamped_ptt
+
+        # CI-V addresses are a single byte on the wire.
+        civ = int(self.rig_civ_address)
+        clamped_civ = max(0, min(0xFF, civ))
+        if clamped_civ != civ:
+            _log.warning(
+                "AppConfig: rig_civ_address %r outside the CI-V byte range "
+                "[0, 255] — clamped to %d", self.rig_civ_address, clamped_civ,
+            )
+        self.rig_civ_address = clamped_civ
+
         if self.rig_baud_rate not in VALID_BAUD_RATES:
             _log.warning(
                 "AppConfig: rig_baud_rate %d not a supported rate %s — "

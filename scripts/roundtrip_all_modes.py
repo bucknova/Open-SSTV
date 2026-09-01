@@ -29,9 +29,9 @@ from PIL import Image
 
 sys.path.insert(0, str(__file__.replace("/scripts/roundtrip_all_modes.py", "/src")))
 
-from sstv_app.core.encoder import encode
-from sstv_app.core.decoder import decode_wav
-from sstv_app.core.modes import MODE_TABLE, Mode
+from open_sstv.core.decoder import decode_wav
+from open_sstv.core.encoder import encode
+from open_sstv.core.modes import MODE_TABLE, Mode
 
 if TYPE_CHECKING:
     pass
