@@ -11,6 +11,29 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Remote transmit could key the rig with every safeguard disarmed.** The
+  control plane gated only on its own state, so while the operator was
+  transmitting locally it reported idle and accepted a remote request. The
+  image queued behind the local transmission; the local completion returned
+  the plane to idle; the transmitter was then keyed for the remote image
+  with the plane reporting idle — **Abort** answering "busy", the operator's
+  reclaim a no-op, and the dead-man's-switch never armed. Remote requests
+  are now refused while the transmitter is busy, re-checked at the moment of
+  keying, and a completed transmission only returns the plane to idle if the
+  plane is what started it.
+- **The app no longer freezes while the dead-man's-switch unkeys a wedged
+  rig.** The control plane invoked its transmit/unkey callbacks while
+  holding its own lock, and unkeying performs blocking serial or TCP I/O.
+  Everything else — including the reclaim that runs first thing on quit —
+  blocked behind it, which is why a stuck PTT-off appeared to hang the app
+  for over a minute. Callbacks are now queued under the lock and dispatched
+  after it is released, preserving their order.
+- **Local Stop now also reclaims remote control.** Previously the remote
+  client kept its lease and could immediately start another transmission,
+  overriding the stop the operator had just pressed.
+- **A non-ASCII access or confirm token is rejected cleanly** instead of
+  raising `TypeError` out of the request handler (dropping the connection
+  with no response) or stranding the control plane awaiting confirmation.
 - **Kenwood and Elecraft transmissions no longer abort a second in.**
   Reading PTT sent `TX;` — which on those radios is the *set* command that
   keys the transmitter, not a query. It is never answered, so the

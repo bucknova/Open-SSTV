@@ -294,3 +294,134 @@ class TestStatus:
         if held:
             cp.take_lease("A")
         assert cp.status()["lease_held"] is held
+
+
+# ---------------------------------------------------------------------------
+# The transmitter may already be busy with a transmission this plane did not
+# start (the local Send button).
+# ---------------------------------------------------------------------------
+
+
+class TestLocalTxBlocksRemote:
+    """A local transmission must block remote request/confirm.
+
+    Regression: the plane gated only on its own state, so during a local TX
+    it reported idle and granted a remote request.  The image queued behind
+    the local one; the local completion reset the plane to IDLE; the worker
+    then keyed for the remote image with the plane reporting idle — abort
+    answering "busy", reclaim_local a no-op, and no dead-man's-switch.
+    """
+
+    def _plane(self, busy: list[bool]):
+        keyed: list[tuple[str, str]] = []
+        unkeyed: list[str] = []
+        plane = ControlPlane(
+            now=lambda: 1000.0,
+            transmit=lambda i, m: keyed.append((i, m)),
+            unkey=unkeyed.append,
+            enabled=lambda: True,
+            rig_ready=lambda: True,
+            tx_busy=lambda: busy[0],
+        )
+        return plane, keyed, unkeyed
+
+    def test_request_refused_while_local_tx_running(self) -> None:
+        busy = [True]
+        plane, keyed, _ = self._plane(busy)
+        assert plane.take_lease("phone").ok
+        res = plane.request("phone", "img-1", "scottie_s1")
+        assert not res.ok
+        assert res.error == "busy"
+        assert keyed == []
+
+    def test_request_allowed_once_local_tx_ends(self) -> None:
+        busy = [True]
+        plane, keyed, _ = self._plane(busy)
+        plane.take_lease("phone")
+        assert not plane.request("phone", "img-1", "scottie_s1").ok
+        busy[0] = False
+        res = plane.request("phone", "img-1", "scottie_s1")
+        assert res.ok and res.token
+
+    def test_local_send_between_request_and_confirm_refuses_the_key(self) -> None:
+        """The widest window: the operator presses Send after the request."""
+        busy = [False]
+        plane, keyed, _ = self._plane(busy)
+        plane.take_lease("phone")
+        token = plane.request("phone", "img-1", "scottie_s1").token
+        assert token is not None
+        busy[0] = True  # local operator presses Send
+        res = plane.confirm("phone", token)
+        assert not res.ok
+        assert res.error == "busy"
+        assert keyed == [], "keyed the rig on top of a local transmission"
+        assert plane.status()["state"] == "idle"
+
+
+class TestNonAsciiConfirmToken:
+    """A non-ASCII confirm token must be rejected, not raise.
+
+    Regression: secrets.compare_digest refuses to compare str containing
+    non-ASCII and raises TypeError, which escaped confirm() and left the
+    plane stuck in AWAITING_CONFIRM.
+    """
+
+    def test_non_ascii_token_is_bad_token_not_typeerror(self) -> None:
+        plane = ControlPlane(
+            now=lambda: 1000.0,
+            transmit=lambda i, m: None,
+            unkey=lambda r: None,
+            enabled=lambda: True,
+        )
+        plane.take_lease("phone")
+        real = plane.request("phone", "img-1", "scottie_s1").token
+        assert real is not None
+        res = plane.confirm("phone", "tokén-with-é")
+        assert not res.ok
+        assert res.error == "bad_token"
+        # ...and the plane is still usable with the real token afterwards.
+        assert plane.confirm("phone", real).ok
+
+
+class TestCallbacksNotInvokedUnderLock:
+    """Callbacks must run with the state lock released.
+
+    Regression: unkey ran under the lock while doing blocking rig I/O, so
+    every other caller — including reclaim_local, the first statement of
+    closeEvent — blocked behind a PTT-off that can take seconds on a wedged
+    link.  The observed symptom was the app hanging for over a minute at
+    quit with the rig still keyed.
+    """
+
+    def test_status_is_callable_from_inside_the_unkey_callback(self) -> None:
+        import threading
+
+        plane_box: list[ControlPlane] = []
+        observed: list[object] = []
+        done = threading.Event()
+
+        def slow_unkey(reason: str) -> None:
+            # Stand-in for blocking rig I/O: another thread must be able to
+            # make progress against the plane while we are in here.
+            def other() -> None:
+                observed.append(plane_box[0].status()["state"])
+                done.set()
+
+            t = threading.Thread(target=other)
+            t.start()
+            assert done.wait(2.0), "a second thread blocked on the plane's lock"
+            t.join()
+
+        plane = ControlPlane(
+            now=lambda: 1000.0,
+            transmit=lambda i, m: None,
+            unkey=slow_unkey,
+            enabled=lambda: True,
+        )
+        plane_box.append(plane)
+        plane.take_lease("phone")
+        token = plane.request("phone", "img-1", "scottie_s1").token
+        assert token is not None
+        plane.confirm("phone", token)
+        plane.abort("phone")  # fires slow_unkey
+        assert observed == ["idle"]

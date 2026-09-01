@@ -37,6 +37,7 @@ from __future__ import annotations
 import logging
 import secrets
 import threading
+from collections import deque
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -80,15 +81,25 @@ class Result:
 class ControlPlane:
     """Owns remote-TX authority and the transmit lifecycle.
 
-    **Callback contract.** ``transmit`` and ``unkey`` are invoked while the
-    internal lock is held, so their *dispatch order* always matches the
-    state-transition order (a key can never be dispatched after the unkey
-    that supersedes it).  They must therefore be **non-blocking and must
-    not re-enter** this object — in the app they post onto the Qt loop /
-    call the thread-safe TX stop and return immediately.  Critically, both
-    must travel the **same ordered channel** so they *execute* in dispatch
-    order too (e.g. both marshalled onto the Qt thread), or the ordering
-    guarantee stops at dispatch.
+    **Callback contract.** ``transmit`` and ``unkey`` are queued while the
+    state lock is held and then dispatched *after* it is released, in the
+    order they were queued.  A key can therefore never be dispatched after
+    the unkey that supersedes it, without the lock being held across the
+    callback itself.
+
+    That last part matters: the callbacks reach the rig, and rig I/O
+    blocks.  ``unkey`` in the app performs a synchronous PTT-off over
+    serial or TCP, which can take seconds on a wedged link.  Invoking it
+    under the lock meant every other caller — including ``reclaim_local``,
+    which is the first statement of the app's ``closeEvent``, and
+    ``status`` on the GUI thread at ~10 Hz during TX — blocked behind it.
+    The observed symptom was the app appearing to hang for over a minute at
+    quit while the dead-man's-switch was trying to unkey a stuck rig.
+
+    Callbacks should still be quick and **must not re-enter** this object.
+    Both must also travel the **same ordered channel** so they *execute* in
+    dispatch order too (e.g. both marshalled onto the Qt thread), or the
+    ordering guarantee stops at dispatch.
     """
 
     def __init__(
@@ -99,6 +110,7 @@ class ControlPlane:
         unkey: Callable[[str], None],
         enabled: Callable[[], bool],
         rig_ready: Callable[[], bool] | None = None,
+        tx_busy: Callable[[], bool] | None = None,
     ) -> None:
         self._now = now
         self._transmit = transmit
@@ -110,7 +122,22 @@ class ControlPlane:
         #: stop audio, not drop PTT.  Defaults to always-ready for headless
         #: tests; the app passes "a CAT rig is connected".
         self._rig_ready = rig_ready if rig_ready is not None else (lambda: True)
+        #: Whether the transmitter is *already* busy with a transmission this
+        #: plane did not start — i.e. the local operator pressed Send.  The
+        #: plane owns remote TX authority, not the radio, so without this it
+        #: happily granted a remote request during a local transmission: the
+        #: image queued behind the local one, the local completion reset the
+        #: plane to IDLE, and the worker then keyed for the remote image with
+        #: the plane reporting idle — abort answering "busy", reclaim_local a
+        #: no-op, and the dead-man's-switch never armed.  Defaults to
+        #: never-busy for headless tests; the app passes the TX worker.
+        self._tx_busy = tx_busy if tx_busy is not None else (lambda: False)
         self._lock = threading.RLock()
+        #: Callbacks queued under _lock, dispatched after it is released.
+        #: _dispatch_lock serialises drainers so queue order is also
+        #: execution order.  See the callback contract above.
+        self._pending_dispatch: deque[tuple[str, tuple[object, ...]]] = deque()
+        self._dispatch_lock = threading.Lock()
 
         self._state = TxState.IDLE
         self._lease_holder: str | None = None
@@ -142,8 +169,9 @@ class ControlPlane:
             self._reset_locked()
             self._lease_holder = None
             if was_tx:
-                self._unkey("lease_released")  # under lock: ordered vs transmit
-            return Result(True)
+                self._queue_locked("unkey", "lease_released")
+        self._drain()
+        return Result(True)
 
     def reclaim_local(self) -> None:
         """The local GUI takes back control unconditionally — unkeys any
@@ -153,7 +181,8 @@ class ControlPlane:
             self._reset_locked()
             self._lease_holder = None
             if was_tx:
-                self._unkey("local_reclaim")  # under lock: ordered vs transmit
+                self._queue_locked("unkey", "local_reclaim")
+        self._drain()
 
     def heartbeat(self, client_id: str) -> Result:
         """Liveness ping from the holder.  Refreshes the lease and, while
@@ -184,6 +213,11 @@ class ControlPlane:
                 return Result(False, "not_lease_holder")
             if self._state is not TxState.IDLE:
                 return Result(False, "busy")
+            # The radio may be transmitting something this plane did not
+            # start (the local Send button).  Queuing behind it would key
+            # the rig later with the plane reporting idle.
+            if self._tx_busy():
+                return Result(False, "busy")
             t = self._now()
             self._lease_seen = t
             token = secrets.token_urlsafe(12)
@@ -212,9 +246,18 @@ class ControlPlane:
             if not self._rig_ready():
                 self._reset_locked()
                 return Result(False, "no_rig")
+            # Re-check at the keying edge: the local operator may have
+            # pressed Send between request and confirm.
+            if self._tx_busy():
+                self._reset_locked()
+                return Result(False, "busy")
             t = self._now()
+            # Compare as bytes: hmac/secrets refuse to compare str with any
+            # non-ASCII character and raise TypeError, which would escape as
+            # an unhandled error instead of a clean "bad_token".
             if self._confirm_token is None or not secrets.compare_digest(
-                token, self._confirm_token
+                token.encode("utf-8", "surrogateescape"),
+                self._confirm_token.encode("utf-8", "surrogateescape"),
             ):
                 return Result(False, "bad_token")
             if t >= self._confirm_expires:
@@ -226,10 +269,11 @@ class ControlPlane:
             self._tx_last_hb = t
             self._lease_seen = t
             self._confirm_token = None
-            # Dispatch under the lock so no concurrent abort/reclaim can
-            # slip its unkey ahead of this key (see the callback contract).
-            self._transmit(image_id, mode)
-            return Result(True)
+            # Queued under the lock so no concurrent abort/reclaim can slip
+            # its unkey ahead of this key; dispatched below, outside it.
+            self._queue_locked("transmit", image_id, mode)
+        self._drain()
+        return Result(True)
 
     def abort(self, client_id: str) -> Result:
         """Operator-initiated stop of a pending or in-flight transmit."""
@@ -241,8 +285,9 @@ class ControlPlane:
             was_tx = self._state is TxState.TRANSMITTING
             self._reset_locked()
             if was_tx:
-                self._unkey("operator_abort")  # under lock: ordered vs transmit
-            return Result(True)
+                self._queue_locked("unkey", "operator_abort")
+        self._drain()
+        return Result(True)
 
     def on_tx_finished(self) -> None:
         """The app calls this when the TX worker reports the transmission
@@ -273,7 +318,7 @@ class ControlPlane:
                     self._reset_locked()
                     self._lease_holder = None  # lost link / revoked → drop authority
                     _log.warning("remote TX safety sweep: %s → unkey", unkey_reason)
-                    self._unkey(unkey_reason)  # under lock: ordered vs transmit
+                    self._queue_locked("unkey", unkey_reason)
             elif self._state is TxState.AWAITING_CONFIRM:
                 if t >= self._confirm_expires:
                     self._reset_locked()
@@ -283,8 +328,38 @@ class ControlPlane:
                 and t - self._lease_seen > LEASE_TIMEOUT_S
             ):
                 self._lease_holder = None
+        self._drain()
 
     # -- introspection -------------------------------------------------
+
+    # -- deferred callback dispatch ------------------------------------
+
+    def _queue_locked(self, kind: str, *args: object) -> None:
+        """Queue a callback for dispatch after the lock is released.
+
+        Must be called with ``_lock`` held: queue order is what preserves
+        the key-never-after-its-unkey ordering guarantee.
+        """
+        self._pending_dispatch.append((kind, args))
+
+    def _drain(self) -> None:
+        """Invoke queued callbacks in order, with ``_lock`` NOT held.
+
+        ``_dispatch_lock`` serialises drainers, so two threads that queued
+        under ``_lock`` still execute their callbacks in the order they
+        queued them.  Callbacks reach the rig and can block for seconds;
+        that must never stall another caller's state transition.
+        """
+        with self._dispatch_lock:
+            while True:
+                with self._lock:
+                    if not self._pending_dispatch:
+                        return
+                    kind, args = self._pending_dispatch.popleft()
+                if kind == "transmit":
+                    self._transmit(*args)  # type: ignore[arg-type]
+                else:
+                    self._unkey(*args)  # type: ignore[arg-type]
 
     def status(self) -> dict[str, object]:
         """Snapshot for the SSE ``tx.state`` event / the HTTP layer."""
