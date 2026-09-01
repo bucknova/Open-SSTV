@@ -41,6 +41,9 @@ class FakeRigctld:
         self.passband_hz: int = 2400
         self.ptt: bool = False
         self.strength_db: int = -73
+        #: Whether extended responses include Hamlib's long command echo.
+        #: Both framing variants exist in deployed Hamlib versions/backends.
+        self.echo_header: bool = False
         # Test hooks.
         self.commands_received: list[str] = []
         #: When True, the next command receives ``RPRT -1`` instead of being
@@ -151,42 +154,66 @@ class FakeRigctld:
         cmd = command_text[1:] if command_text.startswith("+") else command_text
         self.commands_received.append(cmd)
 
+        # Hamlib's extended response mode echoes the command header before
+        # the response body and final ``RPRT`` status line.
+        header = self._response_header(command_text, cmd)
+
         if self.fail_all_commands:
-            return "RPRT -1\n"
+            return header + "RPRT -1\n"
         if self.fail_next_command:
             self.fail_next_command = False
-            return "RPRT -1\n"
+            return header + "RPRT -1\n"
 
         parts = cmd.split()
         if not parts:
-            return "RPRT -1\n"
+            return header + "RPRT -1\n"
 
         op = parts[0]
         try:
             if op == "f":
-                return f"Frequency: {self.freq}\nRPRT 0\n"
+                return header + f"Frequency: {self.freq}\nRPRT 0\n"
             if op == "F":
                 self.freq = int(parts[1])
-                return "RPRT 0\n"
+                return header + "RPRT 0\n"
             if op == "m":
-                return (
+                return header + (
                     f"Mode: {self.mode_name}\nPassband: {self.passband_hz}\nRPRT 0\n"
                 )
             if op == "M":
                 self.mode_name = parts[1]
                 self.passband_hz = int(parts[2])
-                return "RPRT 0\n"
+                return header + "RPRT 0\n"
             if op == "t":
-                return f"PTT: {1 if self.ptt else 0}\nRPRT 0\n"
+                return header + f"PTT: {1 if self.ptt else 0}\nRPRT 0\n"
             if op == "T":
                 self.ptt = parts[1] == "1"
-                return "RPRT 0\n"
+                return header + "RPRT 0\n"
             if op == "l" and len(parts) >= 2 and parts[1] == "STRENGTH":
-                return f"STRENGTH: {self.strength_db}\nRPRT 0\n"
+                return header + f"STRENGTH: {self.strength_db}\nRPRT 0\n"
         except (IndexError, ValueError):
-            return "RPRT -1\n"
+            return header + "RPRT -1\n"
 
-        return "RPRT -1\n"
+        return header + "RPRT -1\n"
 
+    def _response_header(self, command_text: str, cmd: str) -> str:
+        """Return the optional long-name header used by some Hamlib daemons."""
+        if not command_text.startswith("+") or not self.echo_header:
+            return ""
+        parts = cmd.split(maxsplit=1)
+        if not parts:
+            return ""
+        long_name = {
+            "f": "get_freq",
+            "F": "set_freq",
+            "m": "get_mode",
+            "M": "set_mode",
+            "t": "get_ptt",
+            "T": "set_ptt",
+            "l": "get_level",
+        }.get(parts[0])
+        if long_name is None:
+            return ""
+        argument = f" {parts[1]}" if len(parts) == 2 else ""
+        return f"{long_name}:{argument}\n"
 
 __all__ = ["FakeRigctld"]
