@@ -87,6 +87,41 @@ def _close_serial_port(ser: serial.Serial) -> None:
 # ============================================================
 
 
+def _open_port(
+    port: str,
+    baud_rate: int,
+    *,
+    timeout: float,
+    write_timeout: float = 1.0,
+) -> serial.Serial:
+    """Open *port* with **both** modem control lines held low.
+
+    ``serial.Serial(port, ...)`` opens immediately, and pyserial's
+    ``SerialBase.__init__`` defaults ``_dtr_state`` and ``_rts_state`` to
+    ``True`` — ``open()`` then asserts DTR *and* RTS before any of our code
+    runs.  On the common single-cable interface that wires one of those
+    lines to PTT, that keys the radio the moment the operator presses
+    Connect, and the CAT backends never lowered them again: a dead carrier
+    for the whole session, with nothing in the UI to show it.
+
+    Constructing portless, clearing both lines, then opening keeps them low
+    from the start.  ``SerialPttRig`` raises its configured line only when
+    it actually keys.
+    """
+    ser = serial.Serial()
+    ser.port = port
+    ser.baudrate = baud_rate
+    ser.timeout = timeout
+    ser.write_timeout = write_timeout
+    # Must be set while closed: the setters only touch the hardware when
+    # the port is already open, so assigning here just seeds the state
+    # that open() will apply.
+    ser.dtr = False
+    ser.rts = False
+    ser.open()
+    return ser
+
+
 class SerialPttRig:
     """PTT via DTR or RTS on a serial port.
 
@@ -125,11 +160,8 @@ class SerialPttRig:
             if self._ser is not None:
                 return
             try:
-                self._ser = serial.Serial(
-                    self._port,
-                    self._baud_rate,
-                    timeout=1.0,
-                    write_timeout=1.0,
+                self._ser = _open_port(
+                    self._port, self._baud_rate, timeout=1.0
                 )
                 # Ensure PTT is off on open
                 self._set_ptt_line(False)
@@ -264,11 +296,8 @@ class IcomCIVRig:
             if self._ser is not None:
                 return
             try:
-                self._ser = serial.Serial(
-                    self._port,
-                    self._baud_rate,
-                    timeout=0.5,
-                    write_timeout=1.0,
+                self._ser = _open_port(
+                    self._port, self._baud_rate, timeout=0.5
                 )
                 self._ser.reset_input_buffer()
             except _SERIAL_IO_ERRORS as exc:
@@ -562,11 +591,8 @@ class KenwoodRig:
             if self._ser is not None:
                 return
             try:
-                self._ser = serial.Serial(
-                    self._port,
-                    self._baud_rate,
-                    timeout=0.5,
-                    write_timeout=1.0,
+                self._ser = _open_port(
+                    self._port, self._baud_rate, timeout=0.5
                 )
                 self._ser.reset_input_buffer()
             except _SERIAL_IO_ERRORS as exc:
@@ -616,12 +642,31 @@ class KenwoodRig:
         # MD{digit}; is a set command — no response expected.
         self._write_command(f"MD{digit}")
 
+    #: Index of the TX/RX flag within a Kenwood ``IF`` response, counting
+    #: the ``IF`` prefix itself ("0" = receiving, anything else = keyed).
+    #: Matches Hamlib's ``kenwood_get_ptt``, which reads ``info[28]`` from
+    #: the same 37-character response.
+    _IF_PTT_INDEX: int = 28
+
     def get_ptt(self) -> bool:
-        resp = self._command("TX", deadline_s=_DIAG_DEADLINE_S)
-        # Response: "TXn;" where n=0 is RX, n=1 is TX
-        if resp.startswith("TX") and len(resp) >= 3:
-            return resp[2] != "0"
-        return False
+        """Read PTT out of the ``IF`` status string.
+
+        **Not** ``TX;``.  On Kenwood/Elecraft ``TX;`` is a *set* command
+        that keys the transmitter — there is no ``TX`` query, and the
+        radio answers a set with nothing at all.  Sending it here keyed
+        the rig with the mic input (Hamlib maps bare ``TX`` to
+        ``RIG_PTT_ON``, while we key with ``TX1`` = ``RIG_PTT_ON_DATA``)
+        and then timed out waiting for a reply that never comes, which
+        aborted every Kenwood/Elecraft transmission about a second in —
+        the health monitor is this method's only caller.  ``TX;`` *is* a
+        valid read on Yaesu, which is where the old code came from.
+        """
+        resp = self._command("IF", deadline_s=_DIAG_DEADLINE_S)
+        if resp.startswith("IF") and len(resp) > self._IF_PTT_INDEX:
+            return resp[self._IF_PTT_INDEX] != "0"
+        raise RigCommandError(
+            f"unparseable IF response {resp!r}", command="IF"
+        )
 
     def set_ptt(self, on: bool) -> None:
         # TX1;/RX; are set commands — use write-only path for robustness.
@@ -787,11 +832,8 @@ class YaesuRig:
             if self._ser is not None:
                 return
             try:
-                self._ser = serial.Serial(
-                    self._port,
-                    self._baud_rate,
-                    timeout=0.5,
-                    write_timeout=1.0,
+                self._ser = _open_port(
+                    self._port, self._baud_rate, timeout=0.5
                 )
                 self._ser.reset_input_buffer()
             except _SERIAL_IO_ERRORS as exc:
