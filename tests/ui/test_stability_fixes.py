@@ -261,3 +261,66 @@ class TestTemplateDuplicateErrors:
         )
         panel._on_duplicate_template_requested(corrupt)  # must not raise
         assert len(shown) == 1
+
+
+# ---------------------------------------------------------------------------
+# Thread-affinity guards
+# ---------------------------------------------------------------------------
+
+
+class TestRxResetIsNotCalledAcrossThreads:
+    """The audio-worker swap must ask for the reset, not call it.
+
+    RxWorker lives on the RX decode thread.  Calling reset() directly from
+    the GUI thread mutated decoder state while a flush (fanned out from the
+    same ``stopped`` signal) was still decoding, and — if no chunk had been
+    fed yet — created the watchdog QTimer with GUI affinity, after which Qt
+    refuses to let the worker thread stop it.
+    """
+
+    def test_swap_uses_the_queued_reset_signal(
+        self, qtbot, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        w = _make_window(qtbot, monkeypatch, tmp_path)
+        # Detach the signal from the worker's slot so the only way reset()
+        # can be reached is a direct call from the swap itself.
+        try:
+            w._request_rx_reset.disconnect(w._rx_worker.reset)
+        except (RuntimeError, TypeError):
+            pass
+        called: list[str] = []
+        monkeypatch.setattr(
+            w._rx_worker, "reset", lambda: called.append("direct-reset")
+        )
+        emitted: list[str] = []
+        w._request_rx_reset.connect(lambda: emitted.append("queued-reset"))
+
+        from open_sstv.audio.input_stream import InputStreamWorker
+
+        w._swap_audio_worker(InputStreamWorker())
+
+        assert emitted, "the swap must request the reset through _request_rx_reset"
+        assert called == [], (
+            "the swap called RxWorker.reset() directly from the GUI thread"
+        )
+
+
+class TestWatchdogTimerRefusesWrongThread:
+    """_ensure_watchdog_timer must not create a timer with foreign affinity."""
+
+    def test_no_timer_created_from_the_wrong_thread(self, qtbot) -> None:
+        from open_sstv.ui.workers import RxWorker
+
+        worker = RxWorker()          # constructed on (and living on) this thread
+        qtbot.addWidget  # noqa: B018 — keep the fixture referenced
+
+        class _Elsewhere:
+            def __eq__(self, other: object) -> bool:
+                return False
+
+        # Pretend the worker belongs to some other thread.
+        worker.thread = lambda: _Elsewhere()  # type: ignore[method-assign]
+        worker._ensure_watchdog_timer()
+        assert worker._watchdog_timer is None, (
+            "created a QTimer from a thread that does not own the worker"
+        )
