@@ -41,6 +41,9 @@ class FakeRigctld:
         self.passband_hz: int = 2400
         self.ptt: bool = False
         self.strength_db: int = -73
+        #: Whether extended responses include Hamlib's long command echo.
+        #: Both framing variants exist in deployed Hamlib versions/backends.
+        self.echo_header: bool = False
         # Test hooks.
         self.commands_received: list[str] = []
         #: When True, the next command receives ``RPRT -1`` instead of being
@@ -153,7 +156,7 @@ class FakeRigctld:
 
         # Hamlib's extended response mode echoes the command header before
         # the response body and final ``RPRT`` status line.
-        header = f"{cmd}:\n" if command_text.startswith("+") else ""
+        header = self._response_header(command_text, cmd)
 
         if self.fail_all_commands:
             return header + "RPRT -1\n"
@@ -192,5 +195,25 @@ class FakeRigctld:
 
         return header + "RPRT -1\n"
 
+    def _response_header(self, command_text: str, cmd: str) -> str:
+        """Return the optional long-name header used by some Hamlib daemons."""
+        if not command_text.startswith("+") or not self.echo_header:
+            return ""
+        parts = cmd.split(maxsplit=1)
+        if not parts:
+            return ""
+        long_name = {
+            "f": "get_freq",
+            "F": "set_freq",
+            "m": "get_mode",
+            "M": "set_mode",
+            "t": "get_ptt",
+            "T": "set_ptt",
+            "l": "get_level",
+        }.get(parts[0])
+        if long_name is None:
+            return ""
+        argument = f" {parts[1]}" if len(parts) == 2 else ""
+        return f"{long_name}:{argument}\n"
 
 __all__ = ["FakeRigctld"]

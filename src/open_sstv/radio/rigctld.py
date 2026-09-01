@@ -251,7 +251,10 @@ class RigctldClient:
                 command=command,
                 rprt=rprt,
             )
-        return lines[1:-1]  # drop the echoed command header and RPRT terminator
+        body = lines[:-1]  # drop the RPRT terminator
+        if body and _is_echoed_command_header(body[0], command):
+            body = body[1:]
+        return body
 
     #: Maximum number of lines accepted in a single rigctld response.
     #: Guards against unbounded buffer growth if the daemon sends garbage
@@ -305,6 +308,30 @@ class RigctldClient:
         if lines and lines[-1] == "":
             lines.pop()  # drop trailing empty from final \n
         return lines
+
+
+_LONG_COMMAND_NAMES: dict[str, str] = {
+    "f": "get_freq",
+    "F": "set_freq",
+    "m": "get_mode",
+    "M": "set_mode",
+    "t": "get_ptt",
+    "T": "set_ptt",
+    "l": "get_level",
+}
+
+
+def _is_echoed_command_header(line: str, command: str) -> bool:
+    """Return whether *line* is Hamlib's optional extended-command echo.
+
+    Hamlib versions/backends differ: some extended responses begin directly
+    with response fields, while others echo the long command name first. An
+    echo can include an argument (``get_level: STRENGTH``), so testing only
+    for a trailing colon would fail for level reads.
+    """
+    op = command.split(maxsplit=1)[0]
+    long_name = _LONG_COMMAND_NAMES.get(op)
+    return long_name is not None and line.startswith(f"{long_name}:")
 
 
 def _parse_int(line: str, *, field: str, command: str) -> int:
