@@ -128,3 +128,45 @@ class TestStaging:
 
     def test_gallery_id_is_not_staged(self, service: ComposeService) -> None:
         assert service.is_staged_id("ee5998afb64b94f6") is False
+
+
+class TestDecompressionCap:
+    """A small upload declaring a huge canvas must be refused before decode.
+
+    Pillow's MAX_IMAGE_PIXELS only *raises* above 2x the limit; between 1x
+    and 2x it warns and decodes anyway. So a ~150 KB solid-colour PNG
+    declaring 7000x7000 cleared the 32 MP cap and materialised hundreds of
+    MB of pixels per request, with nothing bounding concurrency.
+    """
+
+    def test_oversized_canvas_rejected_without_decoding(self, tmp_path) -> None:
+        import io
+        from dataclasses import replace
+
+        from PIL import Image
+
+        from open_sstv.config.schema import AppConfig
+        from open_sstv.remote.compose import ComposeService
+        from open_sstv.security import MAX_IMAGE_PIXELS
+
+        buf = io.BytesIO()
+        Image.new("RGB", (7000, 7000), (3, 5, 7)).save(buf, "PNG", compress_level=9)
+        payload = buf.getvalue()
+        assert 7000 * 7000 > MAX_IMAGE_PIXELS
+        assert len(payload) < 1_000_000, "payload should be small — that's the point"
+
+        cfg = replace(AppConfig(), logbook_db_path=str(tmp_path / "no.db"))
+        svc = ComposeService(lambda: cfg)
+        # Use a REAL template id: _resolve() runs before the decode, so a
+        # bogus id would make this pass without ever exercising the cap.
+        templates = svc.list_templates()
+        assert templates, "need at least one template for this test to mean anything"
+        template_id = templates[0]["id"]
+
+        # Sanity: a normal photo through the same call must succeed, so a
+        # None below can only be the pixel cap.
+        small = io.BytesIO()
+        Image.new("RGB", (320, 256), (9, 9, 9)).save(small, "PNG")
+        assert svc.render(small.getvalue(), template_id, {}, "scottie_s1") is not None
+
+        assert svc.render(payload, template_id, {}, "scottie_s1") is None

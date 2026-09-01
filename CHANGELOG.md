@@ -11,6 +11,22 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Remote web server hardening.** Three issues found by an adversarial
+  security review of the embedded server:
+  - A symlink placed in a watched gallery folder became a readable gallery
+    entry, so its target — anywhere on disk — could be fetched over the
+    network. Image paths are now required to resolve inside a configured
+    gallery directory. (`gallery_extra_dirs` is explicitly meant for shared
+    folders, which is where this mattered.)
+  - A small upload declaring an enormous canvas sailed past the 32 MP cap,
+    because Pillow only *rejects* above twice the limit and merely warns
+    below that. A ~150 KB file could allocate hundreds of megabytes, with
+    nothing bounding concurrent renders. Dimensions are now checked before
+    decoding.
+  - A client that sent half a request and stopped held a server thread
+    indefinitely, before authentication, so no token was needed. Requests
+    now time out.
+
 - **The remote web UI no longer scrolls sideways on narrower phones.** The
   header's own controls added up to about 408 px and flex items refuse to
   shrink below their content, so on a 375 or 390 px screen — iPhone SE, 12/13
