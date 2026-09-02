@@ -9,6 +9,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.6.9] — 2026-09-02
+
 ### Fixed
 
 - **Remote web server hardening.** Three issues found by an adversarial

@@ -7,7 +7,7 @@ radio. Receives and decodes SSTV images live off your radio, and encodes and
 transmits images back, with optional Hamlib, direct serial, or TCI (ExpertSDR2 /
 SunSDR2 / AetherSDR) rig control.
 
-**Status: Beta (v0.6.8) — ready for user testing and feedback.** TX and RX paths work
+**Status: Beta (v0.6.9) — ready for user testing and feedback.** TX and RX paths work
 end-to-end across all 22 supported modes, with a built-in QSO logbook (v0.4), an image
 gallery (v0.5), and opt-in remote control from a phone or laptop browser (v0.6). Rig
 control via rigctld or direct serial CAT is functional. Weak-signal decode is usable
