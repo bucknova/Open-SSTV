@@ -152,3 +152,47 @@ class TestLogbookPayload:
         assert k1["rst_received"] == "595"
         # A logged image exposes the same opaque id the gallery uses.
         assert k1["image_id"] and svc.image_path(str(k1["image_id"])) == img
+
+
+class TestSymlinkContainment:
+    """A symlink in a gallery folder must not become a readable id.
+
+    The id registry fences off client-supplied paths, but it is built by
+    walking the gallery directories and ``Path.is_file()`` follows
+    symlinks — so ``leak.png -> ~/.ssh/id_rsa`` dropped into a watched
+    folder became a legitimate id whose bytes the server would serve.
+    ``gallery_extra_dirs`` explicitly invites watching a shared folder,
+    which is where that precondition stops being far-fetched.
+    """
+
+    def test_symlink_escaping_the_gallery_is_refused(self, tmp_path) -> None:
+        import os
+        from dataclasses import replace
+
+        from PIL import Image
+
+        from open_sstv.config.schema import AppConfig
+        from open_sstv.remote.service import GalleryService
+
+        gallery = tmp_path / "gallery"
+        gallery.mkdir()
+        outside = tmp_path / "secret.txt"
+        outside.write_text("PRIVATE KEY MATERIAL")
+        Image.new("RGB", (8, 8)).save(gallery / "real.png")
+        os.symlink(outside, gallery / "leak.png")
+
+        cfg = replace(
+            AppConfig(),
+            images_save_dir=str(gallery),
+            gallery_extra_dirs=[],
+            logbook_db_path=str(tmp_path / "no.db"),
+        )
+        svc = GalleryService(lambda: cfg)
+        svc.list_items()  # populates the id registry
+        by_name = {path.name: image_id for image_id, path in svc._registry.items()}
+        assert {"real.png", "leak.png"} <= set(by_name)
+
+        # The genuine image resolves; the escaping symlink does not.
+        assert svc.image_path(by_name["real.png"]) is not None
+        assert svc.image_path(by_name["leak.png"]) is None
+        assert svc.thumbnail_path(by_name["leak.png"]) is None

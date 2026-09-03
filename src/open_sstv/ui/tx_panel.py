@@ -347,9 +347,13 @@ class TxPanel(QWidget):
         """Return the current QSO state from the QSO widget."""
         return self._qso_widget.get_state()
 
-    def get_udp_log_fields(self) -> tuple[str, str, str]:
-        """Return ``(rst_received, qth, grid)`` from the QSO widget."""
-        return self._qso_widget.get_udp_log_fields()
+    def get_contact_fields(self) -> tuple[str, str, str]:
+        """Return ``(rst_received, qth, grid)`` from the QSO widget.
+
+        Relayed to both the UDP External Log and the TX-completion
+        logbook draft.
+        """
+        return self._qso_widget.get_contact_fields()
 
     def load_image(self, path: Path) -> None:
         """Load an image from disk into the preview."""

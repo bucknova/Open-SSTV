@@ -30,9 +30,18 @@ _PAGE = """<!doctype html>
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--ink);
     font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  /* wrap rather than overflow: the header's own children (title, TX chip,
+     status pill, count, Refresh) add up to ~408px, and flex items refuse to
+     shrink below min-content, so without this the whole document is forced
+     wider than a 375/390px phone and scrolls sideways with Refresh off the
+     right edge. */
   header { position:sticky; top:0; z-index:5; display:flex; align-items:center;
-    gap:14px; padding:12px 18px; background:rgba(12,20,22,.92);
+    flex-wrap:wrap; gap:10px 14px; padding:12px 18px;
+    background:rgba(12,20,22,.92);
     backdrop-filter:blur(8px); border-bottom:1px solid var(--line); }
+  @media (max-width:430px) {
+    header { gap:8px 10px; padding:10px 12px; }
+  }
   .statuspill { display:inline-flex; align-items:center; gap:7px; padding:4px 11px;
     border-radius:20px; border:1px solid var(--line); font-family:var(--mono);
     font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted);

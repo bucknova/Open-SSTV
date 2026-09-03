@@ -109,7 +109,10 @@ interchange format.
 file.  Entries without a callsign (drafts) are skipped.  Your station
 identity from Settings → General (callsign, name, grid, QTH) is
 stamped into every record as `STATION_CALLSIGN` / `OPERATOR` /
-`MY_GRIDSQUARE` / `MY_CITY`.
+`MY_GRIDSQUARE` / `MY_CITY` / `MY_NAME` — `OPERATOR` carries your
+callsign (per the ADIF 3.1.5 definition, "the call sign of the
+operator(s) in control of the station"), and your configured display
+name goes in `MY_NAME` instead.
 
 The specific SSTV mode travels in `SUBMODE` using the compact MMSSTV
 convention (`MartinM1`, `Scottie1`, `PD120`); `MODE` is always

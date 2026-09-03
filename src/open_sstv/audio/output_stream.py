@@ -512,20 +512,32 @@ def stop() -> None:
     time, with no escalation needed or present anymore.
     """
     sd.stop()
+    # Hold the lock across abort() rather than just to read the pointer.
+    # The TX thread clears _active_stream under this same lock *before* its
+    # ``with sd.OutputStream(...)`` block exits and calls Pa_StopStream then
+    # Pa_CloseStream, so holding it here means one of two things happens:
+    # we abort a stream that is still live and the TX thread waits, or we
+    # arrive after it has been cleared and do nothing.  Reading the pointer
+    # and then releasing left a window where Pa_AbortStream could land on a
+    # stream mid-close — sounddevice passes the pointer to PortAudio with no
+    # state check, and close() frees it before NULLing it.  That is the same
+    # cross-thread teardown that corrupted the heap in PortAudio's ALSA
+    # backend before v0.6.2.  abort() measures well under a millisecond, so
+    # the lock is not held long.
     with _tx_state_lock:
         stream = _active_stream
         desc = _active_device_desc
-    if stream is None:
-        return
-    t0 = time.monotonic()
-    try:
-        stream.abort()
-        _log.info(
-            "output_stream.stop: abort() returned in %.1f ms (%s)",
-            (time.monotonic() - t0) * 1000, desc,
-        )
-    except Exception as exc:  # noqa: BLE001
-        _log.warning("output_stream.stop: abort failed: %s (%s)", exc, desc)
+        if stream is None:
+            return
+        t0 = time.monotonic()
+        try:
+            stream.abort()
+            _log.info(
+                "output_stream.stop: abort() returned in %.1f ms (%s)",
+                (time.monotonic() - t0) * 1000, desc,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("output_stream.stop: abort failed: %s (%s)", exc, desc)
 
 
 __all__ = ["is_tx_active", "play_blocking", "run_if_tx_idle", "stop"]

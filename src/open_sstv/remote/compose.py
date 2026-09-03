@@ -24,6 +24,7 @@ from collections import OrderedDict
 from typing import TYPE_CHECKING
 
 from open_sstv.core.modes import MODE_TABLE, Mode
+from open_sstv.security import MAX_IMAGE_PIXELS
 from open_sstv.templates import manager as template_manager
 from open_sstv.templates.model import QSOState, TXContext
 from open_sstv.templates.renderer import render_template
@@ -118,6 +119,21 @@ class ComposeService:
             return None
         try:
             photo = PIL.Image.open(io.BytesIO(photo_bytes))
+            # Check the declared size before decoding.  Pillow's
+            # MAX_IMAGE_PIXELS only *raises* above 2x the limit — at 1x-2x it
+            # merely warns and decodes anyway — so a ~150 KB solid-colour PNG
+            # declaring 7000x7000 sailed past the 32 MP cap and materialised
+            # hundreds of MB of pixels, with nothing bounding concurrent
+            # renders.  open() is lazy, so the dimensions are known here
+            # without having decoded anything.
+            pixels = photo.size[0] * photo.size[1]
+            if pixels > MAX_IMAGE_PIXELS:
+                _log.warning(
+                    "compose: rejecting %dx%d photo (%.1f MP > %.1f MP cap)",
+                    photo.size[0], photo.size[1],
+                    pixels / 1e6, MAX_IMAGE_PIXELS / 1e6,
+                )
+                return None
             photo.load()
             # Phone photos carry their orientation in an EXIF tag rather than
             # in the pixels; bake it in so the composited frame is upright

@@ -76,6 +76,16 @@ def test_get_freq(client: RigctldClient, fake: FakeRigctld) -> None:
     assert client.get_freq() == 14_070_000
 
 
+@pytest.mark.parametrize("echo_header", [False, True])
+def test_get_freq_accepts_both_extended_response_framings(
+    client: RigctldClient, fake: FakeRigctld, echo_header: bool
+) -> None:
+    """Hamlib may include or omit the optional long-command response echo."""
+    fake.echo_header = echo_header
+    fake.freq = 14_230_000
+    assert client.get_freq() == 14_230_000
+
+
 def test_set_freq(client: RigctldClient, fake: FakeRigctld) -> None:
     client.set_freq(14_250_000)
     assert fake.freq == 14_250_000
@@ -133,6 +143,15 @@ def test_set_ptt_keys_and_unkeys(
 def test_get_strength(client: RigctldClient, fake: FakeRigctld) -> None:
     fake.strength_db = -42
     assert client.get_strength() == -42
+
+
+def test_get_strength_accepts_echo_header_with_argument(
+    client: RigctldClient, fake: FakeRigctld
+) -> None:
+    """``get_level: STRENGTH`` is an echoed header, not a data field."""
+    fake.echo_header = True
+    fake.strength_db = -24
+    assert client.get_strength() == -24
 
 
 # === ping ===

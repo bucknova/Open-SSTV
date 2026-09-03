@@ -766,3 +766,60 @@ class TestRestoreDefaultTemplates:
 
         self._dialog(qtbot)._on_restore_templates()  # must not raise
         assert warned and "disk full" in warned[0]
+
+
+# ---------------------------------------------------------------------------
+# Opening Settings and saving must not change anything
+# ---------------------------------------------------------------------------
+
+
+class TestSettingsRoundTripPreservesEveryField:
+    """Save must carry through every AppConfig field, including TOML-only ones.
+
+    ``result_config()`` rebuilds AppConfig from scratch, so any field without
+    a widget silently reverts to its default. That has now bitten twice:
+    first the ``remote_*`` block, then ``gallery_extra_dirs`` (v0.5), where
+    opening Settings to change an unrelated option wiped the operator's extra
+    gallery folders — and the remote gallery's, which reads the same field.
+
+    This test is deliberately field-agnostic: it walks the dataclass rather
+    than naming fields, so a new TOML-only setting is covered the day it is
+    added instead of the day someone reports losing it.
+    """
+
+    def _distinctive(self, value):
+        """A value clearly different from *value*, of the same type."""
+        if isinstance(value, bool):
+            return not value
+        if isinstance(value, list):
+            return ["/tmp/probe-alpha", "/tmp/probe-beta"]
+        return None
+
+    def test_open_then_save_preserves_all_list_fields(self, qtbot) -> None:
+        import dataclasses
+
+        from open_sstv.config.schema import AppConfig
+        from open_sstv.ui.settings_dialog import SettingsDialog
+
+        base = AppConfig()
+        changed = {}
+        for f in dataclasses.fields(AppConfig):
+            probe = self._distinctive(getattr(base, f.name))
+            if isinstance(probe, list):
+                changed[f.name] = probe
+        assert changed, "expected at least one list-valued config field"
+
+        cfg = dataclasses.replace(base, **changed)
+        dlg = SettingsDialog(cfg)
+        qtbot.addWidget(dlg)
+        out = dlg.result_config()
+
+        lost = [
+            f.name
+            for f in dataclasses.fields(AppConfig)
+            if getattr(cfg, f.name) != getattr(out, f.name)
+        ]
+        assert not lost, (
+            f"Settings save did not preserve {lost} — every field without a "
+            f"widget must be passed through from self._config"
+        )

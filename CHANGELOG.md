@@ -11,6 +11,133 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.6.9] — 2026-09-02
+
+### Fixed
+
+- **Remote web server hardening.** Three issues found by an adversarial
+  security review of the embedded server:
+  - A symlink placed in a watched gallery folder became a readable gallery
+    entry, so its target — anywhere on disk — could be fetched over the
+    network. Image paths are now required to resolve inside a configured
+    gallery directory. (`gallery_extra_dirs` is explicitly meant for shared
+    folders, which is where this mattered.)
+  - A small upload declaring an enormous canvas sailed past the 32 MP cap,
+    because Pillow only *rejects* above twice the limit and merely warns
+    below that. A ~150 KB file could allocate hundreds of megabytes, with
+    nothing bounding concurrent renders. Dimensions are now checked before
+    decoding.
+  - A client that sent half a request and stopped held a server thread
+    indefinitely, before authentication, so no token was needed. Requests
+    now time out.
+- **Switching audio devices no longer corrupts an in-flight decode.** The
+  audio-worker hot-swap called the RX decoder's reset directly from the GUI
+  thread, while a flush triggered by the same event was still decoding on
+  the RX thread. If no audio had been fed yet it also created the RX
+  watchdog timer on the wrong thread, after which Qt refused to let the
+  worker stop it — leaving a live timer firing into a worker being torn
+  down. The reset is now requested through the same queued signal
+  everything else uses, and the timer refuses to be created with the wrong
+  thread affinity.
+- **Restarting capture no longer probes audio devices from the decode
+  thread.** The one-shot that starts capture after a decoder reset was a
+  plain closure, which Qt runs in whichever thread emitted the signal — so
+  `query_devices()`, a process-global PortAudio call, could run on the RX
+  thread at the same moment the audio worker was re-initialising PortAudio.
+  It is now a slot on the main window, delivered to the GUI thread.
+- **Stopping a transmission can no longer abort a stream that is being
+  closed.** `stop()` read the stream pointer, released its lock, and then
+  called `abort()` — leaving a window in which the TX thread could be part
+  way through closing the same stream. That is the cross-thread teardown
+  that corrupted the heap in PortAudio's ALSA backend before v0.6.2. The
+  abort now happens under the lock the TX thread must hold to tear down.
+- **Saving Settings no longer wipes extra gallery folders.** Every
+  `AppConfig` field is rebuilt from the dialog when you save, and
+  `gallery_extra_dirs` — which has no widget, being TOML-only — was reverting
+  to empty. Opening Settings to change anything at all silently dropped the
+  folders from both the desktop gallery and the remote one. A test now walks
+  the dataclass and fails if *any* field isn't carried through, so the next
+  TOML-only setting is covered the day it's added.
+- **Wraase SC2-120 decoded slightly wrong, including our own transmissions.**
+  The mode table made the line 1.5 ms short: SC2-120 carries a porch before
+  every channel, not just before red, so green and blue were sampled 0.5 ms
+  and 1.0 ms early on every line. A new test asserts the table's line time
+  matches what the encoder actually emits, for all 22 modes.
+- **Invalid audio and rig settings are now clamped instead of reaching the
+  radio.** `audio_output_gain` accepted NaN (which transmitted silence while
+  keyed) and negative values (which inverted and hard-clipped the waveform
+  into splatter), because the guards were bare `>` comparisons that NaN
+  always fails. `sample_rate` had no validation at all — `0` reached the
+  encoder and raised a `ZeroDivisionError` on Transmit. `ptt_delay_s` and
+  `rig_civ_address` are now range-checked too.
+
+- **Remote transmit could key the rig with every safeguard disarmed.** The
+  control plane gated only on its own state, so while the operator was
+  transmitting locally it reported idle and accepted a remote request. The
+  image queued behind the local transmission; the local completion returned
+  the plane to idle; the transmitter was then keyed for the remote image
+  with the plane reporting idle — **Abort** answering "busy", the operator's
+  reclaim a no-op, and the dead-man's-switch never armed. Remote requests
+  are now refused while the transmitter is busy, re-checked at the moment of
+  keying, and a completed transmission only returns the plane to idle if the
+  plane is what started it.
+- **The app no longer freezes while the dead-man's-switch unkeys a wedged
+  rig.** The control plane invoked its transmit/unkey callbacks while
+  holding its own lock, and unkeying performs blocking serial or TCP I/O.
+  Everything else — including the reclaim that runs first thing on quit —
+  blocked behind it, which is why a stuck PTT-off appeared to hang the app
+  for over a minute. Callbacks are now queued under the lock and dispatched
+  after it is released, preserving their order.
+- **Local Stop now also reclaims remote control.** Previously the remote
+  client kept its lease and could immediately start another transmission,
+  overriding the stop the operator had just pressed.
+- **A non-ASCII access or confirm token is rejected cleanly** instead of
+  raising `TypeError` out of the request handler (dropping the connection
+  with no response) or stranding the control plane awaiting confirmation.
+- **Kenwood and Elecraft transmissions no longer abort a second in.**
+  Reading PTT sent `TX;` — which on those radios is the *set* command that
+  keys the transmitter, not a query. It is never answered, so the
+  once-a-second health check timed out and aborted the transmission, and
+  the stray key could switch the radio from its data input to the
+  microphone mid-image. PTT is now read from the `IF` status string, as
+  Hamlib does.
+- **Connecting a rig no longer keys it.** Opening a serial port asserted
+  both DTR and RTS (pyserial raises both on `open()`), and the CAT backends
+  never lowered them. On the common single-cable interface that wires one
+  of those lines to PTT, pressing **Connect Rig** put the radio on the air
+  for the whole session, transmitting a dead carrier with nothing in the UI
+  to show it. Both lines are now held low from the moment the port opens.
+
+- **The remote web UI no longer scrolls sideways on narrower phones.** The
+  header's own controls added up to about 408 px and flex items refuse to
+  shrink below their content, so on a 375 or 390 px screen — iPhone SE, 12/13
+  mini, 14 — the page was forced wider than the display and the **Refresh**
+  button sat off the right edge. The header now wraps to a second row instead.
+- **QSO-bar RSTr / QTH / Grid now reach the logbook, not just the UDP
+  broadcast.** The three fields added to the TX panel's QSO bar in v0.6.7
+  fed only the **[External Log]** datagram, so typing a QTH and grid and
+  then logging the contact silently dropped both — even though the capture
+  dialog has rows for exactly those fields, sitting one row below where you
+  typed them. They now pre-fill the logbook draft the same way ToCall, RST,
+  Name, and Note always have.
+- **ADIF `OPERATOR` field now contains the station callsign, not the
+  configured operator name**, matching the ADIF 3.1.5 definition ("the
+  call sign of the operator(s) in control of the station"). This
+  affects both file-based ADIF export and the UDP companion-logger
+  broadcast — some cloud QSL services (eQSL, LoTW, ClubLog) use this
+  field for operator matching, and a non-callsign value could cause a
+  QSO to silently fail to auto-upload. The operator's configured
+  display name now goes into the correct field, `MY_NAME`.
+
+### Internal
+
+- `scripts/roundtrip_all_modes.py`, the end-to-end encode→decode audit over
+  the whole mode table, had imported the pre-rename `sstv_app` package and
+  been dead code since. It runs again — and would have caught the SC2-120
+  discrepancy.
+
+---
+
 ## [0.6.8] — 2026-08-17
 
 ### Fixed

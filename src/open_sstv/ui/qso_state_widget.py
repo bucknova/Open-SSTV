@@ -11,10 +11,12 @@ different callsign (heuristic: new callsign → new QSO).
 The ``state_changed`` signal is debounced 300 ms so live-preview
 re-renders don't fire on every keypress.
 
-v0.6.7 adds RST-received / QTH / Grid plus an [External Log] button: these feed
-the UDP QSO-log broadcast (``logbook.udp_log``), sent once per QSO —
-independent of the ``QSOState`` template tokens above, so they're kept
-off the ``QSOState`` dataclass and exposed through a separate accessor.
+v0.6.7 adds RST-received / QTH / Grid plus an [External Log] button.
+These describe the contact rather than resolving a template token, so
+they're kept off the ``QSOState`` dataclass and exposed through
+``get_contact_fields()`` instead.  Both consumers use them: the UDP
+QSO-log broadcast (``logbook.udp_log``) and the logbook draft built at
+TX completion.
 """
 from __future__ import annotations
 
@@ -61,7 +63,7 @@ class QSOStateWidget(QWidget):
     udp_log_requested():
         Emitted when the [External Log] button is clicked.  Relayed up
         through TxPanel to MainWindow, which builds a QSO from
-        ``get_state()`` + ``get_udp_log_fields()`` and sends it via
+        ``get_state()`` + ``get_contact_fields()`` and sends it via
         ``logbook.udp_log.UdpQsoLogger`` — this widget stays free of
         any logbook/network import.
     """
@@ -195,11 +197,15 @@ class QSOStateWidget(QWidget):
             note=self._note.text().strip(),
         )
 
-    def get_udp_log_fields(self) -> tuple[str, str, str]:
-        """Return ``(rst_received, qth, grid)`` for the UDP QSO log.
+    def get_contact_fields(self) -> tuple[str, str, str]:
+        """Return ``(rst_received, qth, grid)`` describing the contact.
 
-        Kept separate from ``get_state()``/``QSOState`` — these aren't
-        template tokens, they only feed ``logbook.udp_log``.
+        Kept separate from ``get_state()``/``QSOState`` because these
+        aren't template tokens.  They feed both the UDP QSO-log
+        broadcast and the logbook draft at TX completion — the name is
+        deliberately not UDP-specific, since scoping them to that one
+        consumer is what caused them to be silently dropped from the
+        logbook in the first place.
         """
         return (
             self._rst_received.currentText().strip(),
