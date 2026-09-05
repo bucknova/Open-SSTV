@@ -100,9 +100,13 @@ def test_central_widget_hosts_tx_and_rx_panels(window: MainWindow) -> None:
     children = central.findChildren(QSplitter)
     assert len(children) >= 1
     splitter = children[0]
-    panels = [splitter.widget(i) for i in range(splitter.count())]
-    assert any(isinstance(p, TxPanel) for p in panels)
-    assert any(isinstance(p, RxPanel) for p in panels)
+    # The RX pane is a wrapper widget (RxPanel + the audio level strip),
+    # so search recursively rather than expecting a direct splitter child.
+    panes = [splitter.widget(i) for i in range(splitter.count())]
+    assert any(isinstance(p, TxPanel) for p in panes)
+    assert any(
+        isinstance(p, RxPanel) or p.findChild(RxPanel) is not None for p in panes
+    )
     assert central.findChild(RadioPanel) is not None
 
 
@@ -1704,3 +1708,79 @@ class TestRemoteTxWiring:
         assert spy.call_count == 1
         from open_sstv.core.modes import Mode
         assert spy.call_args[0][1] == Mode.MARTIN_M1
+
+
+class TestAudioLevelStrip:
+    """The always-on TX/RX gain sliders + RX level meter to the right of
+    the RX panel."""
+
+    def test_strip_seeded_from_config(self, window: MainWindow) -> None:
+        strip = window._level_strip
+        assert strip._tx_slider.value() == round(
+            window._config.audio_output_gain * 100
+        )
+        assert strip._rx_slider.value() == round(
+            window._config.audio_input_gain * 100
+        )
+
+    def test_tx_slider_pushes_gain_to_worker(self, window: MainWindow) -> None:
+        window._level_strip._tx_slider.setValue(65)
+        assert window._tx_worker._output_gain == pytest.approx(0.65)
+
+    def test_rx_slider_pushes_gain_to_worker(self, window: MainWindow) -> None:
+        window._level_strip._rx_slider.setValue(140)
+        assert window._rx_worker._input_gain == pytest.approx(1.4)
+
+    def test_slider_release_persists_to_config_and_disk(
+        self, window: MainWindow, qtbot, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        saved: list[object] = []
+        monkeypatch.setattr(
+            "open_sstv.ui.main_window.save_config", lambda cfg: saved.append(cfg)
+        )
+        window._level_strip._rx_slider.setValue(75)
+        window._level_strip._rx_slider.sliderReleased.emit()
+        # Config updates synchronously; the disk write is debounced.
+        assert window._config.audio_input_gain == pytest.approx(0.75)
+        qtbot.waitUntil(lambda: bool(saved), timeout=2000)
+        assert saved[-1] is window._config
+
+    def test_pending_gain_write_flushed_on_close(
+        self, window: MainWindow, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        saved: list[object] = []
+        monkeypatch.setattr(
+            "open_sstv.ui.main_window.save_config", lambda cfg: saved.append(cfg)
+        )
+        window._level_strip._tx_slider.setValue(55)
+        assert window._gain_persist_timer.isActive()
+        window.close()
+        assert saved and saved[-1] is window._config
+        assert window._config.audio_output_gain == pytest.approx(0.55)
+
+    def test_rx_chunk_drives_the_meter(self, window: MainWindow) -> None:
+        chunk = np.full(256, 0.5, dtype=np.float64)
+        window._on_rx_waterfall_chunk(chunk)
+        assert window._level_strip._meter._bar_db == pytest.approx(-6.02, abs=0.1)
+
+    def test_rx_stopped_resets_the_meter(self, window: MainWindow) -> None:
+        window._on_rx_waterfall_chunk(np.full(64, 0.9, dtype=np.float64))
+        window._on_rx_stopped()
+        assert not window._level_strip._meter._timer.isActive()
+
+    def test_apply_config_syncs_strip(self, window: MainWindow) -> None:
+        window._config.audio_output_gain = 0.3
+        window._config.audio_input_gain = 1.7
+        window._config.tx_output_overdrive = False
+        window._apply_config()
+        assert window._level_strip._tx_slider.value() == 30
+        assert window._level_strip._rx_slider.value() == 170
+
+    def test_apply_config_expands_tx_ceiling_for_overdrive(
+        self, window: MainWindow
+    ) -> None:
+        window._config.tx_output_overdrive = True
+        window._config.audio_output_gain = 1.8
+        window._apply_config()
+        assert window._level_strip._tx_slider.maximum() == 200
+        assert window._level_strip._tx_slider.value() == 180

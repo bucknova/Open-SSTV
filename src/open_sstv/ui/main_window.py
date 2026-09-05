@@ -96,6 +96,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import (
     QFileDialog,
+    QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -134,6 +135,7 @@ from open_sstv.remote import (
     RemoteServer,
 )
 from open_sstv.templates import TokenContext, build_autosave_filename, run_migration
+from open_sstv.ui.audio_level_strip import AudioLevelStrip
 from open_sstv.ui.first_launch_dialog import FirstLaunchDialog
 from open_sstv.ui.gallery_dialog import GalleryDialog
 from open_sstv.ui.log_qso_dialog import LogQsoDialog
@@ -825,9 +827,33 @@ class MainWindow(QMainWindow):
 
         # --- Panels inside a horizontal splitter ---
         self._rx_panel = RxPanel(self)
+        # Always-on audio strip (vertical TX/RX gain sliders + RX level
+        # meter) glued to the right edge of the RX panel — a fixed-width
+        # sibling inside a wrapper, so it never becomes its own splitter
+        # pane the user has to size.
+        self._level_strip = AudioLevelStrip(self)
+        rx_container = QWidget(self)
+        rx_hbox = QHBoxLayout(rx_container)
+        rx_hbox.setContentsMargins(0, 0, 0, 0)
+        rx_hbox.setSpacing(0)
+        rx_hbox.addWidget(self._rx_panel, stretch=1)
+        rx_hbox.addWidget(self._level_strip)
+        # Seed the strip from the persisted config (same values the
+        # Settings dialog shows).  set_tx_overdrive first so the TX
+        # slider ceiling is right before set_tx_gain clamps into it.
+        self._level_strip.set_tx_overdrive(self._config.tx_output_overdrive)
+        self._level_strip.set_tx_gain(self._config.audio_output_gain)
+        self._level_strip.set_rx_gain(self._config.audio_input_gain)
+        # Debounced disk write for the strip's gain sliders: the live value
+        # reaches the worker on every tick, but the TOML file is only
+        # rewritten once the slider has been still for ~400 ms.
+        self._gain_persist_timer = QTimer(self)
+        self._gain_persist_timer.setSingleShot(True)
+        self._gain_persist_timer.setInterval(400)
+        self._gain_persist_timer.timeout.connect(self._persist_audio_gain)
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
         splitter.addWidget(self._tx_panel)
-        splitter.addWidget(self._rx_panel)
+        splitter.addWidget(rx_container)
         # v0.3.5: bias the initial split toward the TX panel so its
         # template gallery shows 4 cards in a row out of the box —
         # 4 × 140 px thumbnails + 3 × 8 px gutters + flow / panel
@@ -1003,6 +1029,18 @@ class MainWindow(QMainWindow):
         self._rx_panel.decode_audio_file_requested.connect(
             self._on_decode_audio_file_requested
         )
+        # Audio strip: live gain pushes to the workers on every tick, and
+        # a debounced persist to disk once the slider settles.  The worker
+        # gain setters are the same ones _apply_config calls directly.
+        self._level_strip.tx_gain_changed.connect(
+            lambda g: self._tx_worker.set_output_gain(g)
+        )
+        self._level_strip.rx_gain_changed.connect(
+            lambda g: self._rx_worker.set_input_gain(g)
+        )
+        self._level_strip.tx_gain_committed.connect(self._on_tx_gain_committed)
+        self._level_strip.rx_gain_committed.connect(self._on_rx_gain_committed)
+
         # v0.4: gallery right-click → Log QSO… — deliberate logging for
         # monitoring stations (most decodes on a calling frequency are
         # other people's exchanges; this logs only the one that's yours).
@@ -2157,6 +2195,33 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Encode failed: {message}", 5000)
         QMessageBox.warning(self, "Encode failed", message)
 
+    @Slot(float)
+    def _on_tx_gain_committed(self, gain: float) -> None:
+        """Audio-strip TX slider settled — persist the new gain to disk.
+
+        The live value is already on the worker (tx_gain_changed →
+        set_output_gain); this only writes it through so it survives a
+        relaunch and shows up in Settings.  The disk write is debounced
+        so a wheel-scroll or held arrow key can't hammer the config file.
+        """
+        self._config.audio_output_gain = gain
+        self._gain_persist_timer.start()
+
+    @Slot(float)
+    def _on_rx_gain_committed(self, gain: float) -> None:
+        """Audio-strip RX slider settled — persist the new gain to disk."""
+        self._config.audio_input_gain = gain
+        self._gain_persist_timer.start()
+
+    @Slot()
+    def _persist_audio_gain(self) -> None:
+        try:
+            save_config(self._config)
+        except OSError as exc:
+            self.statusBar().showMessage(
+                f"Gain change could not be saved to disk: {exc}", 5000
+            )
+
     def _apply_config(self) -> None:
         """Push the current ``_config`` into all live workers and UI elements.
 
@@ -2178,6 +2243,11 @@ class MainWindow(QMainWindow):
         new_input = find_input_device_by_name(self._config.audio_input_device)
         self._input_device = new_input
         self._rx_worker.set_input_gain(self._config.audio_input_gain)
+        # Keep the always-on audio strip in sync with a Settings save
+        # (overdrive first so the TX ceiling is right before the clamp).
+        self._level_strip.set_tx_overdrive(self._config.tx_output_overdrive)
+        self._level_strip.set_tx_gain(self._config.audio_output_gain)
+        self._level_strip.set_rx_gain(self._config.audio_input_gain)
         # Emit via queued signals so decoder rebuilds happen on the worker
         # thread, not the GUI thread (H-02 fix; OP-09 extended to cover
         # set_final_slant_correction too).
@@ -2578,6 +2648,8 @@ class MainWindow(QMainWindow):
         self._capture_running = False
         self._suppress_rx_status_updates = True
         self._rx_panel.set_capturing(False)
+        # No more audio chunks are coming — drop the input meter to silence.
+        self._level_strip.reset_level()
         if self._last_rx_disconnect_msg:
             msg = self._last_rx_disconnect_msg
             self._last_rx_disconnect_msg = ""
@@ -3601,6 +3673,15 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def _on_rx_waterfall_chunk(self, chunk: object) -> None:
+        # Drive the always-on input level meter.  ``chunk`` is the
+        # post-input-gain audio RxWorker emits per feed_chunk (only while
+        # capturing), so the meter reflects what the decoder actually sees.
+        try:
+            arr = np.asarray(chunk, dtype=np.float64)
+            if arr.size:
+                self._level_strip.set_input_level(float(np.abs(arr).max()))
+        except (TypeError, ValueError):
+            pass
         if self._waterfall_window is not None and self._waterfall_window.isVisible():
             self._waterfall_window.add_rx_column(chunk)
 
@@ -3855,6 +3936,12 @@ class MainWindow(QMainWindow):
         # the capture flow checks this and stands down instead of
         # opening dialogs / re-opening the logbook store mid-teardown.
         self._closing = True
+
+        # Flush a pending debounced gain write so a slider nudge made just
+        # before quitting isn't lost.
+        if self._gain_persist_timer.isActive():
+            self._gain_persist_timer.stop()
+            self._persist_audio_gain()
 
         # v0.6 (Phase 3c): reclaim control first — unkeys any in-flight
         # remote TX and drops the lease — then stop the read-only server.

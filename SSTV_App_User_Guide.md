@@ -231,6 +231,8 @@ The **status label** shows the detected mode name, VIS code, and decode progress
 
 At the bottom is the **image gallery** — a horizontal strip of thumbnails showing up to 20 recently decoded images, with the newest on the left. Double-click a thumbnail to save it, or right-click for a context menu with "Save As..." and "Copy to Clipboard" options.
 
+Along the right edge of the Receive panel is a slim **audio strip** with three vertical controls: a **TX gain** slider, an **RX gain** slider, and an input-level meter. The two sliders are the same software-gain values found in Settings → Audio → Software Gain — dragging one takes effect immediately, and releasing it saves the value so it persists across restarts and shows up in the Settings dialog. The **input-level meter** is a colour-zoned dBFS bar (green = healthy, yellow = hot, red = clipping) with a slowly falling peak-hold marker; it moves while capture is running and reflects the level *after* the RX gain slider, so you can raise RX gain until the meter sits comfortably in the green without touching red.
+
 ### 6.4 Menu Bar
 
 The **File** menu contains **Settings** (opens the configuration dialog) and **Quit**.
