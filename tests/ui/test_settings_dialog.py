@@ -655,6 +655,42 @@ class TestFlexRadioDirect:
         assert out.flex_slice == 1
 
 
+class TestRigctldSstvMode:
+    """The rigctld group carries its own "SSTV mode" combo, sharing the
+    ``rig_tune_mode_policy`` field with the Direct Serial group."""
+
+    def test_rigctld_group_has_sstv_mode_combo_seeded_from_config(self, qtbot) -> None:
+        dlg = SettingsDialog(AppConfig(rig_tune_mode_policy="data"))
+        qtbot.addWidget(dlg)
+        assert dlg._rigctld_tune_mode_combo.currentData() == "data"
+
+    def test_rigctld_sstv_mode_saved_when_connection_mode_is_rigctld(self, qtbot) -> None:
+        from open_sstv.radio.base import RigConnectionMode
+
+        dlg = SettingsDialog(AppConfig())
+        qtbot.addWidget(dlg)
+        combo = dlg._conn_mode_combo
+        combo.setCurrentIndex(combo.findData(RigConnectionMode.RIGCTLD.value))
+        tune = dlg._rigctld_tune_mode_combo
+        tune.setCurrentIndex(tune.findData("data"))
+
+        out = dlg.result_config()
+        assert out.rig_connection_mode == RigConnectionMode.RIGCTLD.value
+        assert out.rig_tune_mode_policy == "data"
+
+    def test_serial_sstv_mode_still_used_when_connection_mode_is_serial(self, qtbot) -> None:
+        from open_sstv.radio.base import RigConnectionMode
+
+        dlg = SettingsDialog(AppConfig())
+        qtbot.addWidget(dlg)
+        combo = dlg._conn_mode_combo
+        combo.setCurrentIndex(combo.findData(RigConnectionMode.SERIAL.value))
+        dlg._tune_mode_combo.setCurrentIndex(dlg._tune_mode_combo.findData("none"))
+        # The rigctld combo is left at its default — it must not win here.
+        out = dlg.result_config()
+        assert out.rig_tune_mode_policy == "none"
+
+
 # ---------------------------------------------------------------------------
 # Test Tone button: enabled independent of rig connection
 # ---------------------------------------------------------------------------

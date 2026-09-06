@@ -1132,6 +1132,24 @@ class SettingsDialog(QDialog):
         self._rigctld_port.setValue(self._config.rigctld_port)
         rigctld_form.addRow("rigctld port:", self._rigctld_port)
 
+        # SSTV mode policy — same 3-way choice as the Direct Serial group,
+        # sharing the ``rig_tune_mode_policy`` config field.  For rigctld
+        # "Data/Pkt" resolves to Hamlib's universal PKTUSB/PKTLSB
+        # (band_plan.resolve_tune_mode / RIGCTLD_PROTOCOL).
+        self._rigctld_tune_mode_combo = QComboBox()
+        self._rigctld_tune_mode_combo.addItem("Don't change mode", "none")
+        self._rigctld_tune_mode_combo.addItem("Voice (USB/LSB)", "voice")
+        self._rigctld_tune_mode_combo.addItem("Data/Pkt (recommended for SSTV)", "data")
+        idx = self._rigctld_tune_mode_combo.findData(self._config.rig_tune_mode_policy)
+        if idx >= 0:
+            self._rigctld_tune_mode_combo.setCurrentIndex(idx)
+        self._rigctld_tune_mode_combo.setToolTip(
+            "Applies to Band Plan tuning only.\n"
+            "Data/Pkt sends Hamlib PKTUSB / PKTLSB; a rig without a data "
+            "mode will reject it (shown as a tune-failed message)."
+        )
+        rigctld_form.addRow("SSTV mode:", self._rigctld_tune_mode_combo)
+
         self._test_btn = QPushButton("Test rigctld Connection")
         self._test_btn.clicked.connect(self._test_connection)
         rigctld_form.addRow("", self._test_btn)
@@ -2172,7 +2190,12 @@ class SettingsDialog(QDialog):
             rig_serial_protocol=self._serial_protocol_combo.currentText(),
             rig_civ_address=self._civ_address_spin.value(),
             rig_ptt_line=self._ptt_line_combo.currentData() or "DTR",
-            rig_tune_mode_policy=self._tune_mode_combo.currentData() or "voice",
+            rig_tune_mode_policy=(
+                self._rigctld_tune_mode_combo.currentData()
+                if conn_mode == RigConnectionMode.RIGCTLD
+                else self._tune_mode_combo.currentData()
+            )
+            or "voice",
             audio_input_gain=self._input_gain_slider.value() / 100.0,
             audio_output_gain=self._output_gain_slider.value() / 100.0,
             tx_output_overdrive=self._overdrive_check.isChecked(),
