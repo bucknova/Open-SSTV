@@ -876,6 +876,40 @@ class TestRigPollWorkerTune:
         rig.get_freq.assert_not_called()
 
 
+class TestOnTuneRequestedModePolicy:
+    """``_on_tune_requested`` resolves the band-plan entry's plain USB/LSB
+    literal through ``resolve_tune_mode`` before relaying it to the poll
+    thread — for Direct Serial *and* rigctld connections."""
+
+    def _emitted_mode(self, window: MainWindow) -> str:
+        seen: list[str] = []
+        window._request_tune.connect(lambda _f, mode, _p: seen.append(mode))
+        window._on_tune_requested(14_230_000, "USB", 2700)
+        assert seen, "_request_tune was not emitted"
+        return seen[0]
+
+    def test_rigctld_data_policy_resolves_to_pktusb(self, window: MainWindow) -> None:
+        from open_sstv.radio.base import RigConnectionMode
+
+        window._config.rig_connection_mode = RigConnectionMode.RIGCTLD.value
+        window._config.rig_tune_mode_policy = "data"
+        assert self._emitted_mode(window) == "PKTUSB"
+
+    def test_rigctld_voice_policy_passes_through(self, window: MainWindow) -> None:
+        from open_sstv.radio.base import RigConnectionMode
+
+        window._config.rig_connection_mode = RigConnectionMode.RIGCTLD.value
+        window._config.rig_tune_mode_policy = "voice"
+        assert self._emitted_mode(window) == "USB"
+
+    def test_rigctld_none_policy_sends_empty_mode(self, window: MainWindow) -> None:
+        from open_sstv.radio.base import RigConnectionMode
+
+        window._config.rig_connection_mode = RigConnectionMode.RIGCTLD.value
+        window._config.rig_tune_mode_policy = "none"
+        assert self._emitted_mode(window) == ""
+
+
 class TestOnRadioDisconnected:
     """Integration: _on_radio_disconnected reverts MainWindow to idle state."""
 

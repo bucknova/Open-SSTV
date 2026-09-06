@@ -44,6 +44,23 @@ Reference: [`rigctld(1)` man page](https://hamlib.sourceforge.net/html/rigctld.1
 - **Timeout.** 2 seconds per command. Timeout is treated like a broken pipe
   (reconnect once, then surface).
 
+## Band Plan tuning and the "SSTV mode" setting
+
+A Band Plan tune sends `F <hz>` and (unless the mode family already
+matches) `M <mode> <pb>`. The `<mode>` is resolved from the Settings →
+Radio → rigctld **SSTV mode** dropdown via
+`radio.band_plan.resolve_tune_mode(..., RIGCTLD_PROTOCOL, policy)`:
+
+| Setting            | `<mode>` sent            |
+|--------------------|--------------------------|
+| Don't change mode  | *(no `M` command)*       |
+| Voice (USB/LSB)    | `USB` / `LSB` / `FM`     |
+| Data/Pkt           | `PKTUSB` / `PKTLSB` (FM unchanged) |
+
+`PKTUSB` / `PKTLSB` are Hamlib's backend-independent data-mode tokens. A
+rig backend without a data mode answers `M PKTUSB` with a non-zero
+`RPRT`, which surfaces as a "tune failed" status message.
+
 ## Testing without a real radio
 
 Use Hamlib's dummy rig: `rigctld -m 1`. It speaks the full TCP protocol and

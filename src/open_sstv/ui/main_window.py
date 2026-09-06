@@ -121,7 +121,7 @@ from open_sstv.config.store import last_corrupt_backup, load_config, save_config
 from open_sstv.config.templates import load_templates
 from open_sstv.core.modes import Mode
 from open_sstv.logbook import QSO, LogbookCoordinator, QsoLoggingError, UdpQsoLogger
-from open_sstv.radio.band_plan import mode_family, resolve_tune_mode
+from open_sstv.radio.band_plan import RIGCTLD_PROTOCOL, mode_family, resolve_tune_mode
 from open_sstv.radio.base import ManualRig, Rig, RigConnectionMode
 from open_sstv.radio.exceptions import RigCommandError, RigError
 from open_sstv.radio.rigctld import RigctldClient, is_safe_rigctld_arg
@@ -3749,11 +3749,12 @@ class MainWindow(QMainWindow):
 
         The band-plan entry's *mode* is a plain ``"USB"``/``"LSB"``/``"FM"``
         literal; it's resolved through ``resolve_tune_mode`` against the
-        user's "SSTV mode" policy (Settings → Radio → Direct Serial) before
-        being sent, so a "data" policy asks the rig for its data-mode variant
-        (e.g. Yaesu ``DATA-U``/``DATA-L``) instead of forcing plain USB/LSB.
-        Only applies to Direct Serial connections — the policy is keyed by
-        ``rig_serial_protocol``, which other connection modes don't use.
+        user's "SSTV mode" policy (Settings → Radio) before being sent, so a
+        "data" policy asks the rig for its data-mode variant instead of
+        forcing plain USB/LSB — Yaesu ``DATA-U``/``DATA-L`` for Direct
+        Serial, Hamlib ``PKTUSB``/``PKTLSB`` for rigctld.  Applies to the
+        Direct Serial and rigctld connection modes; the other modes send the
+        plain literal unchanged.
         """
         if freq_hz >= 1_000_000:
             freq_str = f"{freq_hz / 1_000_000:.3f} MHz"
@@ -3762,6 +3763,10 @@ class MainWindow(QMainWindow):
         if self._config.rig_connection_mode == RigConnectionMode.SERIAL:
             mode = resolve_tune_mode(
                 mode, self._config.rig_serial_protocol, self._config.rig_tune_mode_policy
+            )
+        elif self._config.rig_connection_mode == RigConnectionMode.RIGCTLD:
+            mode = resolve_tune_mode(
+                mode, RIGCTLD_PROTOCOL, self._config.rig_tune_mode_policy
             )
         self.statusBar().showMessage(f"Tuning to {freq_str} ({mode or 'mode unchanged'})…", 3000)
         self._request_tune.emit(freq_hz, mode, passband_hz)
