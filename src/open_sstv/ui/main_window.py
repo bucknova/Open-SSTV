@@ -269,8 +269,14 @@ class _RigPollWorker(QObject):
         self._consecutive_errors = 0
         self.poll_result.emit(freq, mode_name, strength)
 
-    @Slot(int, str, int)
-    def tune(self, freq_hz: int, mode: str, passband_hz: int) -> None:
+    @Slot(int, str, int, bool)
+    def tune(
+        self,
+        freq_hz: int,
+        mode: str,
+        passband_hz: int,
+        mode_is_exact: bool = False,
+    ) -> None:
         """Send a frequency + mode command to the rig.
 
         Runs on the rig-poll thread (queued from ``MainWindow._request_tune``
@@ -279,14 +285,23 @@ class _RigPollWorker(QObject):
         can surface them; the poll cycle still catches any persistent
         connection problem within 3 s independently.
 
-        Mode is only re-sent if the current mode's **sideband family** differs
-        from the target's.  This preserves data-variant modes (IC-7300
-        ``USB-D``, Yaesu ``USB-DATA``, Kenwood / Hamlib ``PKTUSB``, …) when
-        the band-plan entry's family matches what the user is already on.
-        Without this, every band-plan pick would clobber the rig's data
-        routing and re-enable the speech processor.  Band-edge crossings
-        that flip sideband (e.g. 20 m USB → 40 m LSB) still switch correctly
-        because the family changes.
+        With ``mode_is_exact`` false (the default, a "voice" tune) mode is
+        only re-sent if the current mode's **sideband family** differs from
+        the target's.  This preserves data-variant modes (IC-7300 ``USB-D``,
+        Yaesu ``USB-DATA``, Kenwood / Hamlib ``PKTUSB``, …) when the
+        band-plan entry's family matches what the user is already on, so a
+        band-plan pick doesn't clobber the rig's data routing and re-enable
+        the speech processor.
+
+        With ``mode_is_exact`` true — set when the "Data/Pkt" policy
+        resolved to a real data mode like ``PKTUSB`` — the comparison is by
+        the full mode string instead: the rig is switched unless it is
+        *already* on exactly that mode, because ``PKTUSB`` and ``USB`` share
+        a family and the family check would otherwise never move an operator
+        off plain USB into the data mode they asked for.
+
+        Band-edge crossings that flip sideband (e.g. 20 m USB → 40 m LSB)
+        still switch correctly under either rule.
 
         The frequency-set, mode-change, and frequency-verification steps each
         catch their own exception independently instead of sharing one
@@ -317,7 +332,11 @@ class _RigPollWorker(QObject):
                 except Exception as exc:  # noqa: BLE001 — same tolerance as poll()
                     _log.debug("tune: get_mode failed, assuming mode switch needed: %s", exc)
                     current_mode = ""
-                if mode_family(current_mode) != mode_family(mode):
+                if mode_is_exact:
+                    needs_switch = current_mode.strip().upper() != mode.strip().upper()
+                else:
+                    needs_switch = mode_family(current_mode) != mode_family(mode)
+                if needs_switch:
                     self._rig.set_mode(mode, passband_hz)
             except Exception as exc:  # noqa: BLE001 — same tolerance as poll()
                 errors.append(f"set mode: {exc}")
@@ -528,7 +547,8 @@ class MainWindow(QMainWindow):
     #: thread.  Qt auto-promotes cross-thread connections to QueuedConnection,
     #: so ``_RigPollWorker.tune`` executes on its own event loop — safely
     #: serialised with the 1 Hz ``poll`` slot on the same thread.
-    _request_tune = Signal(int, str, int)  # (freq_hz, rig_mode, passband_hz)
+    # (freq_hz, rig_mode, passband_hz, mode_is_exact)
+    _request_tune = Signal(int, str, int, bool)
     #: Triggers the one-shot update check on the update worker thread.
     _request_update_check = Signal()
 
@@ -3755,11 +3775,20 @@ class MainWindow(QMainWindow):
         Serial, Hamlib ``PKTUSB``/``PKTLSB`` for rigctld.  Applies to the
         Direct Serial and rigctld connection modes; the other modes send the
         plain literal unchanged.
+
+        When the "data" policy actually produced a data-mode variant (the
+        resolved string differs from the plain band-plan literal), the
+        request is flagged *exact*: ``tune()`` must then switch the rig even
+        though ``PKTUSB`` and ``USB`` share a sideband family, otherwise a
+        user sitting on plain USB who picks "Data/Pkt" is never moved into
+        it.  A "voice" tune stays family-matched so it preserves a data mode
+        the operator dialled in themselves.
         """
         if freq_hz >= 1_000_000:
             freq_str = f"{freq_hz / 1_000_000:.3f} MHz"
         else:
             freq_str = f"{freq_hz / 1_000:.3f} kHz"
+        voice_literal = mode
         if self._config.rig_connection_mode == RigConnectionMode.SERIAL:
             mode = resolve_tune_mode(
                 mode, self._config.rig_serial_protocol, self._config.rig_tune_mode_policy
@@ -3768,8 +3797,9 @@ class MainWindow(QMainWindow):
             mode = resolve_tune_mode(
                 mode, RIGCTLD_PROTOCOL, self._config.rig_tune_mode_policy
             )
+        mode_is_exact = bool(mode) and mode != voice_literal
         self.statusBar().showMessage(f"Tuning to {freq_str} ({mode or 'mode unchanged'})…", 3000)
-        self._request_tune.emit(freq_hz, mode, passband_hz)
+        self._request_tune.emit(freq_hz, mode, passband_hz, mode_is_exact)
 
     @Slot(str)
     def _on_tune_failed(self, reason: str) -> None:

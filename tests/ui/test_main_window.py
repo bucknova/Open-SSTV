@@ -801,6 +801,33 @@ class TestRigPollWorkerTune:
         rig.set_freq.assert_called_once_with(14_230_000)
         rig.set_mode.assert_not_called()
 
+    def test_tune_exact_mode_switches_within_same_family(self, qapp) -> None:
+        """Data/Pkt policy: user is on plain USB, target is PKTUSB — same
+        sideband family, but mode_is_exact means the rig must still be
+        switched into the data mode it was asked for."""
+        worker = self._make_worker()
+        rig = MagicMock()
+        rig.get_freq.return_value = 14_230_000
+        rig.get_mode.return_value = ("USB", 0)
+        worker.set_rig(rig)
+
+        worker.tune(14_230_000, "PKTUSB", 2700, True)
+
+        rig.set_mode.assert_called_once_with("PKTUSB", 2700)
+
+    def test_tune_exact_mode_skips_when_already_on_target(self, qapp) -> None:
+        """mode_is_exact still avoids a redundant set_mode when the rig is
+        already on exactly that mode."""
+        worker = self._make_worker()
+        rig = MagicMock()
+        rig.get_freq.return_value = 14_230_000
+        rig.get_mode.return_value = ("PKTUSB", 0)
+        worker.set_rig(rig)
+
+        worker.tune(14_230_000, "PKTUSB", 2700, True)
+
+        rig.set_mode.assert_not_called()
+
     def test_tune_emits_tune_failed_on_freq_readback_mismatch(self, qapp) -> None:
         """set_freq() reported success but the radio is still on the old
         frequency after the settle-retry budget (dial lock, band-edge
@@ -881,33 +908,37 @@ class TestOnTuneRequestedModePolicy:
     literal through ``resolve_tune_mode`` before relaying it to the poll
     thread — for Direct Serial *and* rigctld connections."""
 
-    def _emitted_mode(self, window: MainWindow) -> str:
-        seen: list[str] = []
-        window._request_tune.connect(lambda _f, mode, _p: seen.append(mode))
+    def _emit(self, window: MainWindow) -> tuple[str, bool]:
+        seen: list[tuple[str, bool]] = []
+        window._request_tune.connect(
+            lambda _f, mode, _p, exact: seen.append((mode, exact))
+        )
         window._on_tune_requested(14_230_000, "USB", 2700)
         assert seen, "_request_tune was not emitted"
         return seen[0]
 
-    def test_rigctld_data_policy_resolves_to_pktusb(self, window: MainWindow) -> None:
+    def test_rigctld_data_policy_resolves_to_pktusb_and_flags_exact(
+        self, window: MainWindow
+    ) -> None:
         from open_sstv.radio.base import RigConnectionMode
 
         window._config.rig_connection_mode = RigConnectionMode.RIGCTLD.value
         window._config.rig_tune_mode_policy = "data"
-        assert self._emitted_mode(window) == "PKTUSB"
+        assert self._emit(window) == ("PKTUSB", True)
 
-    def test_rigctld_voice_policy_passes_through(self, window: MainWindow) -> None:
+    def test_rigctld_voice_policy_passes_through_not_exact(self, window: MainWindow) -> None:
         from open_sstv.radio.base import RigConnectionMode
 
         window._config.rig_connection_mode = RigConnectionMode.RIGCTLD.value
         window._config.rig_tune_mode_policy = "voice"
-        assert self._emitted_mode(window) == "USB"
+        assert self._emit(window) == ("USB", False)
 
     def test_rigctld_none_policy_sends_empty_mode(self, window: MainWindow) -> None:
         from open_sstv.radio.base import RigConnectionMode
 
         window._config.rig_connection_mode = RigConnectionMode.RIGCTLD.value
         window._config.rig_tune_mode_policy = "none"
-        assert self._emitted_mode(window) == ""
+        assert self._emit(window) == ("", False)
 
 
 class TestOnRadioDisconnected:

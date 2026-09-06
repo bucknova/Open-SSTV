@@ -46,9 +46,9 @@ Reference: [`rigctld(1)` man page](https://hamlib.sourceforge.net/html/rigctld.1
 
 ## Band Plan tuning and the "SSTV mode" setting
 
-A Band Plan tune sends `F <hz>` and (unless the mode family already
-matches) `M <mode> <pb>`. The `<mode>` is resolved from the Settings →
-Radio → rigctld **SSTV mode** dropdown via
+A Band Plan tune sends `F <hz>` and then, if the mode needs to change,
+`M <mode> <pb>`. The `<mode>` is resolved from the Settings → Radio →
+rigctld **SSTV mode** dropdown via
 `radio.band_plan.resolve_tune_mode(..., RIGCTLD_PROTOCOL, policy)`:
 
 | Setting            | `<mode>` sent            |
@@ -56,6 +56,14 @@ Radio → rigctld **SSTV mode** dropdown via
 | Don't change mode  | *(no `M` command)*       |
 | Voice (USB/LSB)    | `USB` / `LSB` / `FM`     |
 | Data/Pkt           | `PKTUSB` / `PKTLSB` (FM unchanged) |
+
+**When `M` is sent.** A *voice* tune compares only the sideband *family*
+(`get_mode` → `USB` vs target `USB`) and skips `M` on a match, so it
+never clobbers a data mode the operator dialled in themselves. A
+*Data/Pkt* tune compares the full mode string instead — `PKTUSB` and
+`USB` are the same family, so a family-only check would never move a
+station off plain USB — and sends `M PKTUSB` unless `get_mode` already
+reports exactly `PKTUSB`.
 
 `PKTUSB` / `PKTLSB` are Hamlib's backend-independent data-mode tokens. A
 rig backend without a data mode answers `M PKTUSB` with a non-zero
