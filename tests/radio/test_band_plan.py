@@ -10,6 +10,7 @@ import pytest
 
 from open_sstv.radio.band_plan import (
     DATA_MODE_BY_PROTOCOL,
+    RIGCTLD_PROTOCOL,
     SSTV_BAND_PLAN,
     BandEntry,
     mode_family,
@@ -323,7 +324,29 @@ class TestResolveTuneMode:
     def test_data_map_only_lists_verified_protocols(self) -> None:
         """Guard against silently "supporting" a protocol whose data-mode
         CAT command was never verified against real hardware."""
-        assert set(DATA_MODE_BY_PROTOCOL) == {"Yaesu CAT"}
+        assert set(DATA_MODE_BY_PROTOCOL) == {"Yaesu CAT", RIGCTLD_PROTOCOL}
+
+    # --- "data" policy: rigctld → Hamlib universal PKTUSB/PKTLSB -----------
+
+    def test_data_policy_resolves_rigctld_usb_to_pktusb(self) -> None:
+        assert resolve_tune_mode("USB", RIGCTLD_PROTOCOL, "data") == "PKTUSB"
+
+    def test_data_policy_resolves_rigctld_lsb_to_pktlsb(self) -> None:
+        assert resolve_tune_mode("LSB", RIGCTLD_PROTOCOL, "data") == "PKTLSB"
+
+    def test_data_policy_rigctld_fm_passes_through(self) -> None:
+        assert resolve_tune_mode("FM", RIGCTLD_PROTOCOL, "data") == "FM"
+
+    def test_voice_and_none_policies_pass_through_for_rigctld(self) -> None:
+        assert resolve_tune_mode("USB", RIGCTLD_PROTOCOL, "voice") == "USB"
+        assert resolve_tune_mode("USB", RIGCTLD_PROTOCOL, "none") == ""
+
+    def test_data_policy_rigctld_known_mapping_does_not_log(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level("WARNING", logger="open_sstv.radio.band_plan"):
+            resolve_tune_mode("USB", RIGCTLD_PROTOCOL, "data")
+        assert caplog.records == []
 
     # --- "data" fallback must be logged, not silent (PR #47 review #3) -----
 
