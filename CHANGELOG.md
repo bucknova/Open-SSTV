@@ -11,6 +11,42 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.6.10] — 2026-09-07
+
+Every user-facing change in this release was contributed by
+[@dacrhu](https://github.com/dacrhu).
+
+### Fixed
+
+- **The "SSTV mode → Data/Pkt" setting now actually switches the radio.**
+  Added in v0.6.8 for Direct Serial, it resolved the right data mode
+  (`DATA-U` on Yaesu) and then never sent it: Band Plan tuning skips the mode
+  change when the current mode's *sideband family* matches the target's — a
+  deliberate guard so a Voice tune doesn't clobber a data mode you dialled in
+  yourself — and `DATA-U`, `PKTUSB` and `USB` are all the same family. The
+  setting appeared in Settings, the tooltip explained it, and nothing
+  happened. If you tried it and concluded your rig didn't support it, that
+  was us. A tune that genuinely resolved a data mode now compares the whole
+  mode string and switches unless the radio is already on it; Voice tuning is
+  unchanged and still preserves a data mode you selected yourself.
+
+### Added
+
+- **rigctld connections honour the SSTV mode policy too.** The Data/Pkt
+  setting was Direct Serial only; rigctld always sent plain USB/LSB. It now
+  uses Hamlib's universal `PKTUSB`/`PKTLSB`, which every backend with a data
+  mode accepts — so unlike a single vendor's CAT commands, this works for any
+  rig Hamlib supports. A rig without a data mode rejects it and the existing
+  "tune failed" message says so.
+- **Audio level strip on the Receive panel.** A slim always-visible column
+  with TX and RX gain sliders and an input level meter, so gain can be set
+  and the incoming level watched without opening Settings. The meter is a
+  colour-zoned dBFS bar with a slow falling peak hold, fed from what the
+  decoder actually sees (post input gain). It stays in sync with Settings
+  both ways, and gain changes are written to disk once the slider settles.
+
+---
+
 ## [0.6.9] — 2026-09-02
 
 ### Fixed
