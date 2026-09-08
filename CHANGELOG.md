@@ -9,6 +9,34 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **PD images decoded from a WAV file lost every saturated colour.** The
+  batch decoder's chroma sampler replaced any chroma value under 15% of the
+  signalling band (byte 38) with neutral grey. Chroma is coded 0-255 *around*
+  a neutral 128, so a low value is a fully saturated pixel, not a nearly-grey
+  one — the clamp erased exactly the most colourful part of every frame.
+  Saturated yellows, cyans and greens came back pale and washed out; on the
+  round-trip audit PD's mean pixel error was 9.2 against under 1.0 for every
+  RGB-family mode. Now 2.7. The clamp was written to suppress a Robot 36
+  edge artifact, but Robot 36 moved to its own slowrx-derived sampler long
+  ago, so in practice it only ever reached the PD family.
+- **Fully saturated chroma came back speckled with grey, live and from
+  file.** A byte-0 chroma scan transmits at exactly 1500 Hz — the bottom of
+  the signalling band — so demodulator jitter puts about half the readings a
+  fraction of a hertz below it. Both decoders treated any sub-1500 Hz chroma
+  reading as unusable and substituted neutral 128, salting large saturated
+  areas with grey pixels at roughly 50%. Such a reading is now clamped to
+  byte 0; genuine out-of-band leakage is still rejected, by frequency.
+
+### Internal
+
+- The batch and incremental decoders' chroma samplers were separate copies
+  that had silently drifted apart — the fix above landed in the incremental
+  one in v0.1.13 and never reached the batch one. They now share the reject
+  threshold from `core.demod`, and a test sweeps both across the chroma range
+  and requires byte-for-byte agreement.
+
 ---
 
 ## [0.6.10] — 2026-09-07

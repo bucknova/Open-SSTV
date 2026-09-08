@@ -79,6 +79,7 @@ from scipy.signal import sosfiltfilt
 
 from open_sstv.core.demod import (
     SSTV_BLACK_HZ,
+    SSTV_SYNC_REJECT_HZ,
     SSTV_WHITE_HZ,
     instantaneous_frequency,
 )
@@ -789,10 +790,14 @@ def _sample_pixels(
     bit-window dodging trick from ``vis.detect_vis``), and maps to a uint8
     luma. Returns zeros for pixel windows that fall outside the buffer.
 
-    When ``chroma=True`` the default and sub-black-level value is 128
+    When ``chroma=True`` the default and sync-band-reject value is 128
     (the neutral YCbCr midpoint) instead of 0, preventing the bright-green
-    fringe that Robot 36 produces when edge pixels sample from the
-    sync/porch region at ~1200-1500 Hz.
+    fringe produced when an edge pixel samples the sync/porch region at
+    ~1200 Hz.
+
+    Kept byte-for-byte in step with ``incremental_decoder._sample_pixels_inc``
+    — PD frames decoded from a WAV import and PD frames decoded live off
+    the air must land on the same pixels.
 
     Median is more robust to filter ringing at sub-window boundaries than
     a plain mean, and dramatically faster than the per-sample interpolation
@@ -807,18 +812,19 @@ def _sample_pixels(
     span_lo = SSTV_BLACK_HZ
     span_hi = SSTV_WHITE_HZ
     span_range = span_hi - span_lo
-    # Chroma guard: two defences against the green fringe that Robot 36's
-    # YCbCr→RGB conversion produces when edge chroma pixels sample from
-    # the adjacent porch/sync region.
+    # Chroma guard: the last ~1.25 % of columns (≈4 px at width 320) are
+    # left at neutral-128 rather than sampled, because the bandpass
+    # filter smears the upcoming 1200 Hz sync back 10-15 samples into the
+    # end of the chroma scan. Reading those windows would decode as
+    # byte-0 chroma → a strong green stripe on the right edge.
     #
-    # 1. Right-edge pixel guard — the last 1 % of columns (≈3 px at
-    #    width 320) are left at neutral-128 rather than sampled, because
-    #    their windows inevitably straddle the scan/porch boundary.
-    # 2. Frequency floor — any sampled frequency below ~1620 Hz is
-    #    replaced with neutral. The 0.15 threshold maps to chroma value
-    #    38/255, which is nearly indistinguishable from grey.
-    chroma_floor = 0.15 if chroma else 0.0
-    guard_pixels = max(3, width // 80) if chroma else 0  # ~1.25 %
+    # Sub-black samples are handled by the ``SSTV_SYNC_REJECT_HZ`` test in
+    # the loop, NOT by a proportional floor: chroma is coded 0-255 around a
+    # neutral 128, so a low value is a *saturated* pixel (Cb≈0 is fully
+    # yellow, Cr≈0 fully cyan), not a nearly-grey one. An earlier revision
+    # clamped everything under 15 % of the band (byte 38) to 128 and wiped
+    # out every saturated yellow / green / cyan pixel in the PD family.
+    guard_pixels = max(2, width // 80) if chroma else 0
     max_col = width - guard_pixels
     for col in range(max_col):
         center_lo = start + col * pixel_span + margin
@@ -833,17 +839,29 @@ def _sample_pixels(
         if chunk.size == 0:
             continue
         freq = float(np.median(chunk))
+        # Sync-band reject: frequencies deep in sync territory are not
+        # valid pixel data. Chroma clamps to neutral (preserves neighbour
+        # interpolation); luma falls through to the [0, 255] clip below
+        # (sub-black noise just reads as very dark).
+        if chroma and freq < SSTV_SYNC_REJECT_HZ:
+            out[col] = neutral
+            continue
         # Linear map 1500..2300 → 0..255 with clipping. Inlined to keep
         # this hot loop a single pass over the array.
         norm = (freq - span_lo) / span_range
         # v0.4.0 audit high #3: NaN passes BOTH range checks (NaN
         # comparisons are False) and int(round(nan)) raises — treat a
         # non-finite sample as neutral rather than crashing the line.
-        if not math.isfinite(norm) or norm < chroma_floor:
+        if not math.isfinite(norm):
             out[col] = neutral
             continue
-        elif norm > 1.0:
-            norm = 1.0
+        # A reading a hair under SSTV_BLACK_HZ is byte 0, not neutral:
+        # demod jitter on a genuine byte-0 chroma scan (exactly 1500 Hz)
+        # lands on both sides of the boundary, and clamping the low half
+        # to 128 speckles saturated areas with grey. Anything far enough
+        # below to be real leakage was already caught by the sync-band
+        # reject above.
+        norm = min(1.0, max(0.0, norm))
         out[col] = int(round(norm * 255.0))
     return out
 

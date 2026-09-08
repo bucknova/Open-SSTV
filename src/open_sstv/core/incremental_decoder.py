@@ -73,7 +73,12 @@ import numpy as np
 from PIL import Image
 from scipy.signal import sosfiltfilt
 
-from open_sstv.core.demod import SSTV_BLACK_HZ, SSTV_WHITE_HZ, instantaneous_frequency
+from open_sstv.core.demod import (
+    SSTV_BLACK_HZ,
+    SSTV_SYNC_REJECT_HZ,
+    SSTV_WHITE_HZ,
+    instantaneous_frequency,
+)
 from open_sstv.core.dsp_utils import bandpass_sos
 from open_sstv.core.modes import Mode, ModeSpec, SyncPosition
 from open_sstv.core.robot36_dsp import (
@@ -142,7 +147,9 @@ _MIN_BP_SAMPLES: int = 256
 # "byte 0 = strong green" artefact that shows up as a right-edge stripe.
 # For luma, the existing [0, 255] clipping is already correct (below-
 # black noise is just very dark), so this threshold is chroma-only.
-_SYNC_REJECT_HZ: float = 1400.0
+#: Re-exported from ``core.demod`` so the batch and incremental decoders
+#: cannot drift apart again — they did once, and PD paid for it.
+_SYNC_REJECT_HZ: float = SSTV_SYNC_REJECT_HZ
 
 
 # ---------------------------------------------------------------------------
@@ -176,25 +183,25 @@ def _sample_pixels_inc(
 ) -> NDArray[np.uint8]:
     """Slice a frequency-track span into ``width`` pixel medians.
 
-    **Diverges from ``decoder._sample_pixels``** on two points:
+    Kept byte-for-byte in step with ``decoder._sample_pixels``: a PD frame
+    decoded live off the air and the same frame decoded from a WAV import
+    must land on the same pixels.  (Between v0.1.13 and v0.6.10 they were
+    *not* in step — this copy carried the sync-band reject below while the
+    batch copy still clamped any chroma under 15 % of the signalling band
+    to neutral, wiping out every saturated yellow / cyan / green pixel in
+    every PD image decoded from a file.)
 
-    1. The batch helper clamps any chroma frequency below 15 % of the
-       signalling band (~byte 38) to neutral 128.  That corrupts every
-       saturated yellow / green / cyan pixel because those have a
-       genuine Cb or Cr value in [0, 38] under full-range BT.601.  This
-       copy replaces the 15 % floor with a narrow sync-band reject at
-       ``_SYNC_REJECT_HZ`` — legitimate low-chroma values decode as
-       themselves, but sync-pulse leakage (~1200 Hz) still clamps to
-       neutral and doesn't produce a green right-edge stripe.
-    2. The right-edge ``guard_pixels`` skip stays at ``max(2, W//80)``
-       (≈ 4 pixels on a 320-wide row).  This matches the batch decoder
-       and is the minimum that covers Robot 36's chroma-to-sync
-       transition: the bandpass filter's ringing smears the upcoming
-       1200 Hz sync back 10-15 samples into the Cb scan, producing
-       readings that slip below ``_SYNC_REJECT_HZ`` and would otherwise
-       decode as byte-0 chroma → strong green bias on the last image
-       column (most visible on dark-blue pixels).  The ~1.2 % right-
-       edge fringe is the price for robust chroma at the edge.
+    Two chroma-specific behaviours, both shared with the batch helper:
+
+    1. **Sync-band reject** at ``SSTV_SYNC_REJECT_HZ``.  Legitimate low
+       chroma decodes as itself — byte 0 is fully-saturated, not grey —
+       but sync-pulse leakage (~1200 Hz) clamps to neutral instead of
+       reading as a byte-0 chroma and painting the edge green.
+    2. **Right-edge guard** of ``max(2, W//80)`` (≈ 4 px on a 320-wide
+       row).  The bandpass filter smears the upcoming 1200 Hz sync back
+       10-15 samples into the end of the chroma scan; those windows are
+       left neutral rather than sampled.  The ~1.2 % right-edge fringe is
+       the price for robust chroma at the edge.
     """
     neutral: int = 128 if chroma else 0
     out = np.full(width, neutral, dtype=np.uint8)
@@ -230,11 +237,17 @@ def _sample_pixels_inc(
         norm = (freq - span_lo) / span_range
         # v0.4.0 audit high #3: NaN passes both range checks (NaN
         # comparisons are False) and int(round(nan)) raises, wedging
-        # the streaming decoder — clamp non-finite to black instead.
-        if not math.isfinite(norm) or norm < 0.0:
-            norm = 0.0
-        elif norm > 1.0:
-            norm = 1.0
+        # the streaming decoder — treat a non-finite sample as neutral.
+        if not math.isfinite(norm):
+            out[col] = neutral
+            continue
+        # A reading a hair under SSTV_BLACK_HZ is byte 0, not neutral:
+        # demod jitter on a genuine byte-0 chroma scan (exactly 1500 Hz)
+        # lands on both sides of the boundary, and clamping the low half
+        # to 128 speckles saturated areas with grey. Anything far enough
+        # below to be real leakage was already caught by the sync-band
+        # reject above.
+        norm = min(1.0, max(0.0, norm))
         out[col] = int(round(norm * 255.0))
     return out
 
