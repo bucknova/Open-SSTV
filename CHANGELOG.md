@@ -11,16 +11,21 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- **PD images decoded from a WAV file lost every saturated colour.** The
-  batch decoder's chroma sampler replaced any chroma value under 15% of the
-  signalling band (byte 38) with neutral grey. Chroma is coded 0-255 *around*
-  a neutral 128, so a low value is a fully saturated pixel, not a nearly-grey
-  one — the clamp erased exactly the most colourful part of every frame.
-  Saturated yellows, cyans and greens came back pale and washed out; on the
-  round-trip audit PD's mean pixel error was 9.2 against under 1.0 for every
-  RGB-family mode. Now 2.7. The clamp was written to suppress a Robot 36
-  edge artifact, but Robot 36 moved to its own slowrx-derived sampler long
-  ago, so in practice it only ever reached the PD family.
+- **PD images decoded from a WAV file lost every saturated colour.** All
+  seven PD modes were affected, PD-50 worst. The batch decoder's chroma
+  sampler replaced any chroma value under 15% of the signalling band (byte
+  38) with neutral grey. Chroma is coded 0-255 *around* a neutral 128, so a
+  low value is a fully saturated pixel, not a nearly-grey one — the clamp
+  erased exactly the most colourful part of every frame. Saturated yellows,
+  cyans and greens came back pale and washed out. The clamp was written to
+  suppress a Robot 36 edge artifact, but Robot 36 moved to its own
+  slowrx-derived sampler long ago, so in practice it only ever reached the
+  PD family.
+
+  Mean absolute pixel error over the round-trip audit, before → after:
+  PD-50 9.63 → 3.03, PD-90 9.43 → 2.83, PD-120 9.28 → 2.81,
+  PD-160 9.23 → 2.66, PD-180 9.21 → 2.72, PD-240 9.18 → 2.68,
+  PD-290 9.15 → 2.67. Every non-PD mode decodes bit-for-bit as before.
 - **Fully saturated chroma came back speckled with grey, live and from
   file.** A byte-0 chroma scan transmits at exactly 1500 Hz — the bottom of
   the signalling band — so demodulator jitter puts about half the readings a
@@ -31,6 +36,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Internal
 
+- `scripts/roundtrip_all_modes.py` audits every mode in `MODE_TABLE`
+  instead of a hand-written list that had fallen five modes behind it —
+  Martin M3/M4, Scottie S3/S4 and PD-50 were never covered. PD-50 carried
+  the worst instance of the chroma bug above and the audit could not see it.
 - The batch and incremental decoders' chroma samplers were separate copies
   that had silently drifted apart — the fix above landed in the incremental
   one in v0.1.13 and never reached the batch one. They now share the reject
