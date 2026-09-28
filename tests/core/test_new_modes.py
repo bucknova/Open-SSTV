@@ -36,9 +36,9 @@ _NEW_MODES = [
 # spec.width × spec.height.
 _EXPECTED_DECODED_SIZE: dict[Mode, tuple[int, int]] = {
     Mode.MARTIN_M3:  (320, 128),
-    Mode.MARTIN_M4:  (160, 128),
+    Mode.MARTIN_M4:  (320, 128),
     Mode.SCOTTIE_S3: (320, 128),
-    Mode.SCOTTIE_S4: (160, 128),
+    Mode.SCOTTIE_S4: (320, 128),
     Mode.PD_50:      (320, 256),   # spec.height=128 super-lines → 256 image rows
 }
 
@@ -231,4 +231,113 @@ def test_display_height(mode: Mode, expected_display_height: int) -> None:
     assert spec.display_height == expected_display_height, (
         f"{mode.value}: display_height={spec.display_height}, "
         f"expected {expected_display_height}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 6. Frame width — the issue #65 guards
+# ---------------------------------------------------------------------------
+# Martin M2/M4 and Scottie S2/S4 shipped as 160 px wide from v0.1.x through
+# v0.6.10.  They are not: those modes halve the *pixel dwell time*, not the
+# pixel count.  M2 runs 320 columns at 0.2288 ms each (73.216 ms per channel)
+# against M1's 320 at 0.4576 ms; S2 runs 320 at 0.2752 ms.  Cross-checked
+# against slowrx ``modespec.c`` (M2/M4/S2 all ImgWidth 320) and the published
+# mode tables (Martin 2: 320×256 58 s, Scottie 2: 320×256 71 s).
+#
+# The 160 came from upstream PySSTV, which sets ``WIDTH = 160`` on MartinM2
+# and ScottieS2.  ``core.encoder`` now overrides it.  The consequence of the
+# old value was that every landscape picture was squeezed into a 160×256
+# portrait before transmission.
+
+#: Modes whose declared width was wrong before the issue #65 fix.
+_HALF_CLOCK_MODES = [
+    Mode.MARTIN_M2,
+    Mode.MARTIN_M4,
+    Mode.SCOTTIE_S2,
+    Mode.SCOTTIE_S4,
+]
+
+
+@pytest.mark.parametrize("mode", _HALF_CLOCK_MODES)
+def test_half_pixel_clock_modes_are_320_wide(mode: Mode) -> None:
+    """M2 / M4 / S2 / S4 are 320 px wide, not 160 (issue #65)."""
+    assert MODE_TABLE[mode].width == 320, (
+        f"{mode.value}: width={MODE_TABLE[mode].width}. These modes halve the "
+        "pixel clock, not the pixel count — 160 squeezes every landscape "
+        "picture into a portrait frame."
+    )
+
+
+@pytest.mark.parametrize("mode", sorted(MODE_TABLE, key=lambda m: m.value))
+def test_spec_dimensions_match_the_encoder_class(mode: Mode) -> None:
+    """``MODE_TABLE`` and the PySSTV encoder class must agree on the frame.
+
+    The anti-drift guard for issue #65.  ``encode`` sizes the outgoing image
+    from ``sstv_cls.WIDTH``/``HEIGHT`` while every decoder sizes the incoming
+    one from ``spec.width``/``display_height``.  When those disagree, TX and
+    RX quietly use different frames and nothing in the suite notices — which
+    is exactly how the 160 px M2 survived eight minor releases.
+
+    PD modes compare against ``display_height`` because ``spec.height``
+    stores the sync-pulse count (half the image rows).
+    """
+    spec = MODE_TABLE[mode]
+    cls = _PYSSTV_CLASSES[mode]
+    assert (spec.width, spec.display_height) == (cls.WIDTH, cls.HEIGHT), (
+        f"{mode.value}: MODE_TABLE says {spec.width}×{spec.display_height}, "
+        f"encoder class {cls.__name__} says {cls.WIDTH}×{cls.HEIGHT}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_scan_ms"),
+    [
+        # 320 columns × the pixel dwell slowrx lists for each mode.
+        (Mode.MARTIN_M1, 320 * 0.4576),
+        (Mode.MARTIN_M2, 320 * 0.2288),
+        (Mode.MARTIN_M3, 320 * 0.4576),
+        (Mode.MARTIN_M4, 320 * 0.2288),
+    ],
+)
+def test_martin_channel_scan_matches_pixel_dwell(
+    mode: Mode, expected_scan_ms: float
+) -> None:
+    """Widening the frame must not have moved the on-air line timing.
+
+    The scan time the decoder derives from ``line_time_ms`` has to stay
+    equal to ``320 × dwell``.  If a future edit "fixes" a width by
+    rescaling SCAN instead, this fails and the mode stops decoding
+    anywhere else.
+    """
+    spec = MODE_TABLE[mode]
+    scan_ms = (spec.line_time_ms - spec.sync_pulse_ms - 4 * spec.sync_porch_ms) / 3
+    assert scan_ms == pytest.approx(expected_scan_ms, abs=1e-3), (
+        f"{mode.value}: derived scan {scan_ms:.4f} ms, "
+        f"expected {expected_scan_ms:.4f} ms"
+    )
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_duration_s"),
+    [
+        # Published on-air lengths — the numbers in every mode table.
+        (Mode.MARTIN_M2, 58.0),
+        (Mode.MARTIN_M4, 29.0),
+        (Mode.SCOTTIE_S2, 71.0),
+        (Mode.SCOTTIE_S4, 36.0),
+    ],
+)
+def test_half_clock_mode_durations_unchanged(
+    mode: Mode, expected_duration_s: float
+) -> None:
+    """The width fix is free: same seconds on air, twice the detail.
+
+    Pixel dwell is ``SCAN / WIDTH``, so doubling WIDTH halves the dwell and
+    the line period is untouched.  Bounds at ±2 % against the published
+    figures the reporter of issue #65 quoted.
+    """
+    actual = MODE_TABLE[mode].total_duration_s
+    assert actual == pytest.approx(expected_duration_s, rel=0.02), (
+        f"{mode.value}: {actual:.2f} s on air, published figure "
+        f"{expected_duration_s:.0f} s"
     )

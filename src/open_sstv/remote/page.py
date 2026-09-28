@@ -15,6 +15,32 @@ palette echoes the ``design/remote/mockup.html`` "remote head unit" look.
 """
 from __future__ import annotations
 
+import json
+
+from open_sstv.core.modes import MODE_TABLE, Mode
+
+#: Modes offered in the remote transmit picker, in display order.  This is a
+#: deliberately curated subset — the seven modes an operator actually reaches
+#: for — so the list itself is hand-written, but the frame dimensions are
+#: **not**: ``render_page`` fills them in from ``MODE_TABLE`` at request time.
+#: They used to be hard-coded here and drifted, shipping Martin M2 and
+#: Scottie S2 as 160×256 portrait boxes long after the table said otherwise
+#: (issue #65).  A curated label is safe to duplicate; a protocol number is not.
+_REMOTE_MODES: tuple[tuple[Mode, str], ...] = (
+    (Mode.SCOTTIE_S1, "Scottie S1"),
+    (Mode.SCOTTIE_S2, "Scottie S2"),
+    (Mode.MARTIN_M1, "Martin M1"),
+    (Mode.MARTIN_M2, "Martin M2"),
+    (Mode.PD_120, "PD-120"),
+    (Mode.PD_180, "PD-180"),
+    (Mode.ROBOT_36, "Robot 36"),
+)
+
+#: Sentinel replaced by the generated ``MODES`` array.  A plain ``str.replace``
+#: rather than ``str.format`` because the page is full of literal CSS and JS
+#: braces that would need doubling.
+_MODES_PLACEHOLDER = "__OPEN_SSTV_MODES_JSON__"
+
 _PAGE = """<!doctype html>
 <html lang="en">
 <head>
@@ -144,9 +170,11 @@ _PAGE = """<!doctype html>
   @media (max-width:640px) { .cwrap { grid-template-columns:1fr; } }
   .ccol { padding:14px; }
   /* Box tracks the selected mode's frame aspect (--fa / --fa-num set by JS).
-     width = min(column, capHeight * aspect) so tall modes (S2/M2, 160x256)
-     get a narrow upright box instead of a clamped-wide one, and the height
-     cap is honoured for landscape modes.  Centred in the column. */
+     width = min(column, capHeight * aspect) so a mode taller than it is wide
+     gets a narrow upright box instead of a clamped-wide one, and the height
+     cap is honoured for landscape modes.  Every mode we currently offer is
+     landscape, but the sizing is aspect-driven rather than assuming that.
+     Centred in the column. */
   .cshot { position:relative; aspect-ratio:var(--fa, 4 / 3);
     width:min(100%, calc(min(58vh,460px) * var(--fa-num, 1.3333)));
     max-height:min(58vh,460px); margin-inline:auto;
@@ -558,18 +586,10 @@ _PAGE = """<!doctype html>
   }
 
   /* ---- control plane: remote transmit ---- */
-  // w/h are the mode's frame size (from MODE_TABLE) — the crop box matches
-  // this aspect so what you frame is exactly what the station composites.
-  // Note S2/M2 are 160x256 (tall/portrait).
-  const MODES = [
-    { v: "scottie_s1", n: "Scottie S1", w: 320, h: 256 },
-    { v: "scottie_s2", n: "Scottie S2", w: 160, h: 256 },
-    { v: "martin_m1", n: "Martin M1", w: 320, h: 256 },
-    { v: "martin_m2", n: "Martin M2", w: 160, h: 256 },
-    { v: "pd_120", n: "PD-120", w: 640, h: 496 },
-    { v: "pd_180", n: "PD-180", w: 640, h: 496 },
-    { v: "robot_36", n: "Robot 36", w: 320, h: 240 },
-  ];
+  // w/h are the mode's frame size, injected from MODE_TABLE by render_page()
+  // — the crop box matches this aspect so what you frame is exactly what the
+  // station composites.  Never edit these numbers here; edit core/modes.py.
+  const MODES = __OPEN_SSTV_MODES_JSON__;
   let clientId = sessionStorage.getItem("sstv_client");
   if (!clientId) {
     clientId = "c-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -997,8 +1017,22 @@ _PAGE = """<!doctype html>
 
 
 def render_page() -> str:
-    """Return the self-contained read-only gallery viewer HTML."""
-    return _PAGE
+    """Return the self-contained read-only gallery viewer HTML.
+
+    The mode picker's frame dimensions are taken from ``MODE_TABLE`` on every
+    call rather than baked into the page string, so a correction to the mode
+    table reaches the remote crop box without a second edit here.
+    """
+    modes = [
+        {
+            "v": str(mode),
+            "n": label,
+            "w": MODE_TABLE[mode].width,
+            "h": MODE_TABLE[mode].display_height,
+        }
+        for mode, label in _REMOTE_MODES
+    ]
+    return _PAGE.replace(_MODES_PLACEHOLDER, json.dumps(modes))
 
 
 __all__ = ["render_page"]

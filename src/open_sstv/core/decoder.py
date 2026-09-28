@@ -485,8 +485,11 @@ def _decode_martin_rgb(
     Scan time is derived from the spec:
     ``scan_ms = (line_time − sync − 4×porch) / 3``
 
-    Handles M1 (320×256, ~114 s) and M2 (160×256, ~57 s) — any Martin
-    variant whose ModeSpec is structured this way.
+    Handles M1 (320×256, ~114 s), M2 (320×256, ~58 s) and the 320×128
+    M3 / M4 — any Martin variant whose ModeSpec is structured this way.
+    M2 and M4 differ from M1 and M3 only in scan time: they run the same
+    320 columns at half the pixel dwell, so nothing here special-cases
+    them; ``scan_ms`` falls out of the spec's ``line_time_ms``.
     """
     width = spec.width
     height = spec.height
@@ -541,8 +544,9 @@ def _decode_scottie_rgb(
 
     Scan time: ``scan_ms = (line_time − sync − 6×porch) / 3``
 
-    Handles S1 (320×256, ~110 s), S2 (160×256, ~71 s), and DX
-    (320×256, ~269 s).
+    Handles S1 (320×256, ~110 s), S2 (320×256, ~71 s), DX (320×256,
+    ~269 s), and the 320×128 S3 / S4.  As with Martin, the half-time
+    variants are the same width at half the pixel dwell.
     """
     width = spec.width
     height = spec.height

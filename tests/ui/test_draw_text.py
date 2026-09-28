@@ -1,11 +1,17 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Tests for the text-overlay renderer.
 
-v0.1.32 regression guards for the Exchange-template-on-narrow-modes
+v0.1.32 regression guards for the Exchange-template-on-narrow-frames
 bug: the bottom overlay ``UR {rst} {date}`` at 20 pt used to render
-wider than a 160-wide Martin M2 / Scottie S2 / M4 / S4 image, and the
-centring math in ``position_to_xy`` produced a negative ``x`` that
-spilled text off the right edge of the transmitted image.
+wider than the frame, and the centring math in ``position_to_xy``
+produced a negative ``x`` that spilled text off the right edge of the
+transmitted image.
+
+The 160 × 128 canvas used below is a deliberately undersized synthetic
+frame, not a mode we ship — the narrowest real mode is 320 px.  (It was
+written when M2 / M4 / S2 / S4 were wrongly held to be 160 px wide; see
+issue #65.)  Keeping it undersized is the point: it holds the auto-fit
+path under more pressure than any real transmission applies.
 
 The fix is twofold:
 
@@ -116,9 +122,9 @@ class TestAutoShrinkAndClamp:
     requested font size gets shrunk, and the final position is clamped
     so every pixel ends up inside the image."""
 
-    def test_exchange_template_bottom_overlay_on_narrow_mode(self) -> None:
+    def test_exchange_template_bottom_overlay_on_narrow_frame(self) -> None:
         """The original bug: Exchange template's ``UR 59 2026-04-16``
-        at 20 pt on a 160-wide image used to overflow the right side
+        at 20 pt on a narrow image used to overflow the right side
         when Bottom Center centring math produced a negative x.  With
         auto-shrink + clamp, every pixel of the rendered text falls
         inside the image bounds.
@@ -202,10 +208,11 @@ class TestAutoShrinkAndClamp:
         assert img.getpixel((10, 10)) == (10, 20, 30)
         assert img.getpixel((310, 230)) == (10, 20, 30)
 
-    def test_martin_m4_160x128_exchange_fits(self) -> None:
-        """Martin M4 is the smallest we ship (160 × 128).  Every
-        overlay in the built-in Exchange template must render
-        entirely on-image at that size."""
+    def test_undersized_160x128_frame_exchange_fits(self) -> None:
+        """A 160 × 128 frame is narrower than anything we transmit —
+        the smallest real mode is Martin M4 at 320 × 128.  Every
+        overlay in the built-in Exchange template must still render
+        entirely on-image at this deliberately cramped size."""
         for text, size in [
             ("K9XYZ DE W0AEZ", 24),  # Top Center, Exchange overlay 1
             ("UR 59 2026-04-16", 20),  # Bottom Center, Exchange overlay 2

@@ -376,25 +376,29 @@ def _run_decoder_events(
 
 
 @pytest.mark.parametrize(
-    "mode,width,height",
+    "mode",
     [
         # Shorter Martin variant — keeps default test time reasonable.
-        (Mode.MARTIN_M2, 160, 256),
+        Mode.MARTIN_M2,
         # Shortest PD variant — 50 s image, exercises the line-pair path.
-        (Mode.PD_50, 320, 256),
+        Mode.PD_50,
     ],
 )
-def test_decoder_incremental_routes_line_start_modes(
-    mode: Mode, width: int, height: int,
-) -> None:
+def test_decoder_incremental_routes_line_start_modes(mode: Mode) -> None:
     """Incremental path handles Martin and PD families end-to-end.
 
     Verifies: routing (experimental flag on → incremental subclass used),
     progressive emission (some ImageProgress before ImageComplete), and
     image completion (exactly one ImageComplete with the right mode and
     dimensions).
+
+    Dimensions come from ``MODE_TABLE``, never from a literal in the
+    parametrize list — those literals said Martin M2 was 160 px wide and
+    kept agreeing with themselves right through issue #65.
     """
     fs = 48_000
+    spec = MODE_TABLE[mode]
+    width, height = spec.width, spec.display_height
     img = _solid_image(width, height)
     samples_int16 = encode(img, mode, sample_rate=fs)
     audio = samples_int16.astype(np.float64) / 32768.0
@@ -417,10 +421,8 @@ def test_decoder_incremental_routes_line_start_modes(
     assert complete.image.size == (width, height)
 
 
-@pytest.mark.parametrize("mode,width,height", [(Mode.MARTIN_M2, 160, 256)])
-def test_incremental_pixel_quality_martin(
-    mode: Mode, width: int, height: int,
-) -> None:
+@pytest.mark.parametrize("mode", [Mode.MARTIN_M2])
+def test_incremental_pixel_quality_martin(mode: Mode) -> None:
     """Incremental Martin produces visually equivalent output to batch.
 
     Same tolerance rationale as the Scottie S1 test: walk_sync_grid fed
@@ -429,7 +431,8 @@ def test_incremental_pixel_quality_martin(
     5 LSB rather than requiring byte-for-byte equality.
     """
     fs = 48_000
-    img = _solid_image(width, height)
+    spec = MODE_TABLE[mode]
+    img = _solid_image(spec.width, spec.display_height)
     samples_int16 = encode(img, mode, sample_rate=fs)
     audio = samples_int16.astype(np.float64) / 32768.0
 
