@@ -59,6 +59,16 @@ SSTV_WHITE_HZ: float = 2300.0
 #: full set of magic frequencies lives in one module.
 SSTV_SYNC_HZ: float = 1200.0
 
+#: Chroma sync-band reject threshold. A chroma sampling window that slips
+#: into the sync/porch region reads well below ``SSTV_BLACK_HZ``; such a
+#: sample is out-of-band leakage, not a genuine byte-0 chroma value, and is
+#: clamped to neutral 128 so neighbour interpolation can recover it. Sits
+#: 100 Hz below black so every legitimate chroma byte (0-255 → 1500-2300 Hz)
+#: decodes as itself. Shared by the batch and incremental decoders — they
+#: must agree, or the same signal yields different images depending on
+#: whether it arrived live or as a WAV import.
+SSTV_SYNC_REJECT_HZ: float = 1400.0
+
 
 def analytic_signal(x: NDArray) -> NDArray[np.complex128]:
     """Compute the analytic representation of a real-valued buffer.
@@ -119,6 +129,7 @@ def freq_to_luma(
 __all__ = [
     "SSTV_BLACK_HZ",
     "SSTV_SYNC_HZ",
+    "SSTV_SYNC_REJECT_HZ",
     "SSTV_WHITE_HZ",
     "analytic_signal",
     "freq_to_luma",

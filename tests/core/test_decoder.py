@@ -689,3 +689,127 @@ def test_decode_wav_robot36_uses_walk_not_slant() -> None:
         "decode_wav must not call slant_corrected_line_starts for Robot 36 (OP2-15)"
     )
 
+
+
+# === PD chroma sampling (batch decoder) ===================================
+#
+# The batch and incremental decoders each own a copy of the chroma pixel
+# sampler.  Between v0.1.13 and v0.6.10 they disagreed: the incremental
+# copy was fixed to reject only the sync band, while this one still
+# clamped any chroma below 15 % of the signalling band (byte 38) to
+# neutral 128.  Chroma is coded 0-255 around a neutral 128, so a low value
+# is a *saturated* pixel (Cb≈0 is fully yellow, Cr≈0 fully cyan) — the
+# clamp erased exactly the most colourful pixels in the frame.  Only the
+# PD family reaches this path, so every PD image decoded from a WAV lost
+# its saturated yellows, cyans and greens.  These three tests are the
+# batch-side mirrors of the ``_sample_pixels_inc`` guards in
+# tests/core/test_incremental_decoder.py.
+
+
+def test_batch_sample_pixels_chroma_does_not_clamp_low_values() -> None:
+    """Low chroma frequencies decode as themselves, not 128."""
+    from open_sstv.core.decoder import _sample_pixels
+    from open_sstv.core.demod import SSTV_BLACK_HZ, SSTV_WHITE_HZ
+
+    width = 16
+    total_samples = width * 100
+    # Byte 10 → 1531.4 Hz, well under the old 15 % floor (~1620 Hz).
+    target_byte = 10
+    target_freq = SSTV_BLACK_HZ + (
+        (target_byte / 255.0) * (SSTV_WHITE_HZ - SSTV_BLACK_HZ)
+    )
+    inst = np.full(total_samples, target_freq, dtype=np.float64)
+
+    out = _sample_pixels(
+        inst, 0.0, float(total_samples), width, total_samples, chroma=True
+    )
+    assert abs(int(out[0]) - target_byte) <= 2, (
+        f"_sample_pixels: chroma byte {target_byte} decoded as {out[0]} "
+        "— floor clamp regression?"
+    )
+
+
+def test_batch_sample_pixels_chroma_rejects_sync_band_leakage() -> None:
+    """Sync-band frequencies still clamp chroma to neutral 128."""
+    from open_sstv.core.decoder import _sample_pixels
+    from open_sstv.core.demod import SSTV_SYNC_HZ
+
+    width = 16
+    total_samples = width * 100
+    inst = np.full(total_samples, float(SSTV_SYNC_HZ), dtype=np.float64)
+
+    out = _sample_pixels(
+        inst, 0.0, float(total_samples), width, total_samples, chroma=True
+    )
+    assert int(out[0]) == 128, (
+        f"_sample_pixels: sync-band chroma decoded as {out[0]}, expected "
+        "neutral 128"
+    )
+
+
+def test_batch_and_incremental_chroma_samplers_agree() -> None:
+    """The two chroma samplers must produce identical rows.
+
+    The PD bug above existed only because these two copies drifted.  A
+    frame decoded live off the air and the same frame decoded from a WAV
+    import have to land on the same pixels, so sweep the whole chroma
+    range plus the sync band through both and require a byte-for-byte
+    match.
+    """
+    from open_sstv.core.decoder import _sample_pixels
+    from open_sstv.core.demod import SSTV_BLACK_HZ, SSTV_SYNC_HZ, SSTV_WHITE_HZ
+    from open_sstv.core.incremental_decoder import _sample_pixels_inc
+
+    width = 32
+    total_samples = width * 100
+    freqs = [float(SSTV_SYNC_HZ), 1350.0, 1450.0]
+    freqs += [
+        SSTV_BLACK_HZ + (b / 255.0) * (SSTV_WHITE_HZ - SSTV_BLACK_HZ)
+        for b in (0, 1, 10, 38, 39, 128, 254, 255)
+    ]
+    for freq in freqs:
+        inst = np.full(total_samples, freq, dtype=np.float64)
+        for chroma in (True, False):
+            batch = _sample_pixels(
+                inst, 0.0, float(total_samples), width, total_samples,
+                chroma=chroma,
+            )
+            inc = _sample_pixels_inc(
+                inst, 0.0, float(total_samples), width, total_samples,
+                chroma=chroma,
+            )
+            assert np.array_equal(batch, inc), (
+                f"samplers disagree at {freq:.1f} Hz (chroma={chroma}): "
+                f"batch={batch.tolist()} inc={inc.tolist()}"
+            )
+
+
+def test_pd_roundtrip_preserves_saturated_chroma() -> None:
+    """A saturated-yellow PD-90 frame survives encode → decode.
+
+    Pure yellow is Cb ≈ 0 under full-range BT.601 — precisely the value
+    the old 15 % floor replaced with neutral 128, which turned the whole
+    frame pale pink.  Uses PD-90 because it is the shortest PD mode.
+    """
+    from open_sstv.core.decoder import decode_wav
+
+    spec = MODE_TABLE[Mode.PD_90]
+    height = spec.height * 2
+    img = Image.new("RGB", (spec.width, height), (255, 255, 0))
+
+    fs = 48_000
+    samples = encode(img, Mode.PD_90, sample_rate=fs).astype(np.float64)
+    result = decode_wav(samples, fs)
+
+    assert result is not None
+    assert result.mode == Mode.PD_90
+    # Sample the interior, away from the right-edge chroma guard and the
+    # first/last rows where sync search can clip a scan.
+    arr = np.array(result.image.convert("RGB"), dtype=float)
+    interior = arr[8:-8, 8:-16]
+    assert interior[..., 0].mean() > 235, "red channel lost"
+    assert interior[..., 1].mean() > 235, "green channel lost"
+    assert interior[..., 2].mean() < 25, (
+        f"blue channel is {interior[..., 2].mean():.1f}, expected ~0 — "
+        "saturated chroma was clamped to neutral"
+    )
