@@ -131,8 +131,14 @@ class ModeSpec:
 # === Per-mode protocol constants (from PySSTV ``pysstv/color.py``) ===
 
 # Martin M1 — most common European mode, ~114 s for a 320×256 image.
-# Martin M2 — half horizontal resolution variant, ~57 s for 160×256.
+# Martin M2 — ~58 s for the same 320×256 frame, at half the pixel clock.
 # Both share the same sync/porch timing; only the channel scan time differs.
+#
+# M2 halves the *pixel dwell time*, not the pixel count: 320 px × 0.2288 ms
+# = 73.216 ms per channel, against M1's 320 × 0.4576 ms = 146.432 ms. It is
+# a narrower-bandwidth M1, not a narrower image. Cross-checked against
+# slowrx ``modespec.c`` (M2: ImgWidth 320, PixelTime 0.2288e-3) and the
+# published mode tables (Martin 2: 320×256, 58 s).
 _MARTIN_M1_SCAN_MS = 146.432   # per-channel scan time
 _MARTIN_M2_SCAN_MS = 73.216
 _MARTIN_M1_PORCH_MS = 0.572    # 1500 Hz inter-channel gap (same for M1 and M2)
@@ -140,7 +146,9 @@ _MARTIN_M1_SYNC_MS = 4.862     # 1200 Hz horizontal sync pulse (same for M1 and 
 
 # Scottie S1 — most common US mode, ~110 s. Sync pulse separates B from R
 # within each line, not between lines (the defining oddity of Scottie modes).
-# S2 (half-res, ~71 s) and DX (high-quality, ~269 s) share the same sync/porch.
+# S2 (~71 s, half pixel clock — still 320×256) and DX (high-quality, ~269 s)
+# share the same sync/porch. slowrx has S2 at ImgWidth 320, PixelTime
+# 0.2752e-3 → 320 × 0.2752 = 88.064 ms, which is this SCAN plus one gap.
 _SCOTTIE_S1_SCAN_MS = 138.24 - 1.5  # = 136.74 ms (PySSTV: SCAN = TOTAL - INTER_CH_GAP)
 _SCOTTIE_S2_SCAN_MS = 86.564
 _SCOTTIE_DX_SCAN_MS = 344.1
@@ -253,12 +261,12 @@ MODE_TABLE: dict[Mode, ModeSpec] = {
     ),
 
     # ------------------------------------------------------------------ #
-    # Martin M2 — half horizontal resolution of M1, ~57 s for 160×256.   #
+    # Martin M2 — M1's frame at half the pixel clock, ~58 s for 320×256. #
     # ------------------------------------------------------------------ #
     Mode.MARTIN_M2: ModeSpec(
         name=Mode.MARTIN_M2,
         vis_code=0x28,  # 40
-        width=160,
+        width=320,
         height=256,
         sync_pulse_ms=_MARTIN_M1_SYNC_MS,
         sync_porch_ms=_MARTIN_M1_PORCH_MS,
@@ -273,7 +281,7 @@ MODE_TABLE: dict[Mode, ModeSpec] = {
     ),
 
     # ------------------------------------------------------------------ #
-    # Martin M3 / M4 — 128-line variants of M1/M2. Identical timing; only  #
+    # Martin M3 / M4 — 320×128 variants of M1/M2. Identical timing; only  #
     # height differs. VIS 36 (M3) / 32 (M4). ~57 s / ~29 s.              #
     # ------------------------------------------------------------------ #
     Mode.MARTIN_M3: ModeSpec(
@@ -294,7 +302,7 @@ MODE_TABLE: dict[Mode, ModeSpec] = {
     Mode.MARTIN_M4: ModeSpec(
         name=Mode.MARTIN_M4,
         vis_code=0x20,  # 32
-        width=160,
+        width=320,
         height=128,
         sync_pulse_ms=_MARTIN_M1_SYNC_MS,
         sync_porch_ms=_MARTIN_M1_PORCH_MS,
@@ -308,13 +316,13 @@ MODE_TABLE: dict[Mode, ModeSpec] = {
     ),
 
     # ------------------------------------------------------------------ #
-    # Scottie S2 — half horizontal resolution of S1, ~71 s for 160×256.  #
+    # Scottie S2 — S1's frame at half the pixel clock, ~71 s for 320×256.#
     # Scottie DX — wide-scan high-quality, ~269 s for 320×256.           #
     # ------------------------------------------------------------------ #
     Mode.SCOTTIE_S2: ModeSpec(
         name=Mode.SCOTTIE_S2,
         vis_code=0x38,  # 56
-        width=160,
+        width=320,
         height=256,
         sync_pulse_ms=_SCOTTIE_S1_SYNC_MS,
         sync_porch_ms=_SCOTTIE_S1_PORCH_MS,
@@ -344,7 +352,7 @@ MODE_TABLE: dict[Mode, ModeSpec] = {
     ),
 
     # ------------------------------------------------------------------ #
-    # Scottie S3 / S4 — 128-line variants of S1/S2. Identical timing;    #
+    # Scottie S3 / S4 — 320×128 variants of S1/S2. Identical timing;     #
     # only height differs. VIS 52 (S3) / 48 (S4). ~55 s / ~36 s.        #
     # ------------------------------------------------------------------ #
     Mode.SCOTTIE_S3: ModeSpec(
@@ -365,7 +373,7 @@ MODE_TABLE: dict[Mode, ModeSpec] = {
     Mode.SCOTTIE_S4: ModeSpec(
         name=Mode.SCOTTIE_S4,
         vis_code=0x30,  # 48
-        width=160,
+        width=320,
         height=128,
         sync_pulse_ms=_SCOTTIE_S1_SYNC_MS,
         sync_porch_ms=_SCOTTIE_S1_PORCH_MS,

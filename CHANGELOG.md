@@ -34,6 +34,37 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   areas with grey pixels at roughly 50%. Such a reading is now clamped to
   byte 0; genuine out-of-band leakage is still rejected, by frequency.
 
+- **Martin M2 / M4 and Scottie S2 / S4 transmitted and decoded at half the
+  correct width, squeezing every landscape picture into a portrait frame.**
+  Reported by [@cheyong007](https://github.com/cheyong007) in
+  [#65](https://github.com/bucknova/Open-SSTV/issues/65). The mode table
+  carried these four as 160 px wide. They are 320, like every other mode we
+  ship: M2 and S2 halve the *pixel dwell time*, not the pixel count — M2 runs
+  320 columns at 0.2288 ms each against M1's 320 at 0.4576 ms, and S2 runs 320
+  at 0.2752 ms against S1's 0.4320 ms. They are narrower-*bandwidth* versions
+  of the same frame, which is why every published mode table and every other
+  decoder (slowrx, QSSTV, MMSSTV) lists them as 320×256 and 320×128.
+
+  | mode | was | now | on air |
+  |---|---|---|---|
+  | Martin M2 | 160×256 | 320×256 | 58 s (unchanged) |
+  | Martin M4 | 160×128 | 320×128 | 29 s (unchanged) |
+  | Scottie S2 | 160×256 | 320×256 | 71 s (unchanged) |
+  | Scottie S4 | 160×128 | 320×128 | 36 s (unchanged) |
+
+  The bad width came from upstream PySSTV, which sets `WIDTH = 160` on its
+  `MartinM2` and `ScottieS2` classes; `core.encoder` now overrides it. Because
+  PySSTV derives pixel dwell as `SCAN / WIDTH`, widening the frame halves the
+  dwell and leaves the on-air line period byte-for-byte identical — the fix
+  costs nothing in transmission time and the 320 columns now carry 320
+  distinct values instead of 160 duplicated pairs. Receive-side, the decoders
+  were always driven from the mode table, so correcting the table was enough.
+
+  Three consequences for anyone who noticed the old behaviour: pictures no
+  longer arrive stretched, the TX crop box for these four modes is landscape
+  instead of portrait, and the "aspect mismatch — image will be stretched"
+  warning stops firing on a normal 4:3 photo sent in M2 or S2.
+
 ### Internal
 
 - `scripts/roundtrip_all_modes.py` audits every mode in `MODE_TABLE`
@@ -45,6 +76,20 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   one in v0.1.13 and never reached the batch one. They now share the reject
   threshold from `core.demod`, and a test sweeps both across the chroma range
   and requires byte-for-byte agreement.
+
+- The remote page's transmit-mode picker no longer hard-codes frame
+  dimensions. `render_page` fills `w`/`h` from `MODE_TABLE` at request time,
+  so a mode-table correction reaches the browser crop box without a second
+  edit — that duplicate list was carrying 160×256 for M2 and S2 and was one
+  of the surfaces that made #65 visible. The curated seven-mode order and the
+  display labels stay hand-written; only the protocol numbers are derived.
+- New regression guards in `tests/core/test_new_modes.py`: the four modes are
+  pinned at 320 px, `MODE_TABLE` is cross-checked against every PySSTV
+  encoder class's `WIDTH`/`HEIGHT` (the drift that let a 160 px M2 survive
+  eight minor releases went unnoticed because TX sized from the class and RX
+  sized from the table, and nothing compared them), the derived Martin channel
+  scan is pinned to `320 × dwell`, and the four durations are pinned to their
+  published figures so a future "fix" cannot rescale `SCAN` instead.
 
 ---
 

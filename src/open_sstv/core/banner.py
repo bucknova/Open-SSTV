@@ -269,10 +269,10 @@ def apply_tx_banner(
         bbox_l = draw.textbbox((0, 0), callsign, font=font)
         lw = bbox_l[2] - bbox_l[0]
         # L (v0.3 audit): the callsign is the §97.119 station ID — if it
-        # doesn't fit the strip (narrow 160 px modes + large banner size
-        # + long callsign), it clips at the image edge and an incomplete
-        # ID goes on the air with no trace.  Warn so the operator knows
-        # to pick a smaller banner size or a wider mode.
+        # doesn't fit the strip (320 px frame + large banner size + long
+        # callsign), it clips at the image edge and an incomplete ID goes
+        # on the air with no trace.  Warn so the operator knows to pick a
+        # smaller banner size or a wider mode.
         if padding + lw > width - padding:
             _log.warning(
                 "TX banner: callsign %r (%d px) does not fit the %d px "
@@ -284,10 +284,10 @@ def apply_tx_banner(
         callsign_right_x = padding + lw
 
     # --- Right side: app version (flush-right) ---
-    # v0.2.8: tiered fallback for narrow modes.  Martin M2 / M4 / Scottie S2
-    # are 160 px wide — the full "Open-SSTV v{version}" text doesn't fit
-    # beside even a short callsign.  Previous behaviour rendered whatever
-    # hit the image boundary and silently clipped the rest.
+    # v0.2.8: tiered fallback for narrow strips.  At the 320 px width most
+    # modes use, the full "Open-SSTV v{version}" text doesn't fit beside a
+    # long callsign at the larger banner sizes.  Previous behaviour rendered
+    # whatever hit the image boundary and silently clipped the rest.
     #
     # Callsign is §97.119-critical and never dropped.  Right-side text
     # degrades through three tiers until it fits — see

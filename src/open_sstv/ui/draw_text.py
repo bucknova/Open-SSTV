@@ -9,10 +9,11 @@ Overlay sizing and placement are both auto-fit:
 * **Auto-shrink** — if the text is wider than the image at the
   requested font size (minus margins on both sides), the font size is
   reduced one point at a time down to :data:`_MIN_FONT_SIZE` until it
-  fits.  This matters on narrow modes (Martin M2 at 160 × 256, Scottie
-  S2, M4, S4) where the Exchange template's ``UR {rst} {date}`` overlay
-  at 20 pt used to render wider than 160 pixels and spill off the
-  right edge.
+  fits.  This matters at the 320 px width most modes use, where the
+  Exchange template's ``UR {rst} {date}`` overlay at 20 pt with a long
+  callsign used to render wider than the frame and spill off the right
+  edge.  (It mattered more when M2 / M4 / S2 / S4 were wrongly treated
+  as 160 px wide; they are 320 like everything else — see issue #65.)
 * **Clamp to bounds** — the final ``(x, y)`` is clamped so the text's
   four-direction shadow never crosses the image edge.  Applies to both
   named presets (``Top Center`` of an extra-wide string used to produce

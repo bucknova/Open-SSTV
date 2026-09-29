@@ -293,31 +293,36 @@ class TestTxTargetStatus:
     def test_aspect_mismatch_shows_amber_status(
         self, panel: TxPanel, tmp_path: Path
     ) -> None:
-        """A 320×256 source (M1 aspect) against Martin M2 (160×256,
-        different aspect) warns that the image will be stretched."""
+        """A 320×256 source (M1 aspect) against Martin M3 (320×128,
+        different aspect) warns that the image will be stretched.
+
+        M3 rather than M2 because M2 is 320×256 like M1 — it halves the
+        pixel clock, not the frame (issue #65).  M3 halves the line count,
+        so it is the narrowest genuine aspect change we ship."""
         big = Image.new("RGB", (320, 256), color=(64, 128, 192))
         path = tmp_path / "src.png"
         big.save(path)
         panel.load_image(path)
 
-        # Pick Martin M2
+        # Pick Martin M3
         for i in range(panel._mode_combo.count()):
-            if panel._mode_combo.itemData(i) == Mode.MARTIN_M2:
+            if panel._mode_combo.itemData(i) == Mode.MARTIN_M3:
                 panel._mode_combo.setCurrentIndex(i)
                 break
 
         status = panel._tx_target_status.text()
         assert "mismatch" in status.lower()
         assert "stretched" in status.lower()
-        assert "martin_m2" in status
+        assert "martin_m3" in status
 
     def test_mode_change_updates_status(
         self, panel: TxPanel, tmp_path: Path
     ) -> None:
         """Changing modes after an image is loaded refreshes the
         status label — the original bug (TX preview stays on M1
-        when user switches to M2) is fixed by the outline + status
-        update on mode change."""
+        when the user switches modes) is fixed by the outline + status
+        update on mode change.  Uses M3 as the second mode because it
+        is the one that actually changes aspect; M2 shares M1's frame."""
         big = Image.new("RGB", (320, 256), color=(64, 128, 192))
         path = tmp_path / "src.png"
         big.save(path)
@@ -331,15 +336,15 @@ class TestTxTargetStatus:
         status_m1 = panel._tx_target_status.text()
         assert "matches" in status_m1.lower()
 
-        # Select M2 → mismatch
+        # Select M3 → mismatch
         for i in range(panel._mode_combo.count()):
-            if panel._mode_combo.itemData(i) == Mode.MARTIN_M2:
+            if panel._mode_combo.itemData(i) == Mode.MARTIN_M3:
                 panel._mode_combo.setCurrentIndex(i)
                 break
-        status_m2 = panel._tx_target_status.text()
-        assert "mismatch" in status_m2.lower()
+        status_m3 = panel._tx_target_status.text()
+        assert "mismatch" in status_m3.lower()
 
-        assert status_m1 != status_m2, (
+        assert status_m1 != status_m3, (
             "TX target status label must refresh on mode change — "
             "this is the v0.1.37 user-reported bug regression guard."
         )

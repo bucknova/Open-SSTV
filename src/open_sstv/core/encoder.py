@@ -39,17 +39,17 @@ from pysstv.color import (
     PD240,
     PD290,
     MartinM1,
-    MartinM2,
     PasokonP3,
     PasokonP5,
     PasokonP7,
     Robot36,
     ScottieDX,
     ScottieS1,
-    ScottieS2,
     WraaseSC2120,
     WraaseSC2180,
 )
+from pysstv.color import MartinM2 as _UpstreamMartinM2
+from pysstv.color import ScottieS2 as _UpstreamScottieS2
 from pysstv.sstv import (
     FREQ_BLACK,
     FREQ_SYNC,
@@ -169,6 +169,35 @@ class Robot36LinePair(Robot36):
 
 
 # ---------------------------------------------------------------------------
+# Corrected upstream widths: Martin M2 and Scottie S2
+# ---------------------------------------------------------------------------
+# PySSTV ships ``MartinM2.WIDTH = 160`` and ``ScottieS2.WIDTH = 160``, which
+# misreads the protocol.  M2 and S2 halve the *pixel dwell time*, not the
+# pixel count: M2 is 320 px × 0.2288 ms = 73.216 ms per channel against M1's
+# 320 × 0.4576 ms, and S2 is 320 × 0.2752 ms = 88.064 ms against S1's
+# 320 × 0.4320 ms.  Both are narrower-bandwidth versions of the same 320×256
+# frame, which is why every published mode table and every other decoder
+# (slowrx ``modespec.c``, QSSTV, MMSSTV) lists them as 320×256.
+#
+# ``SCAN`` is deliberately left alone — the line timing upstream produces is
+# correct, and PySSTV derives ``msec_pixel = SCAN / WIDTH``, so widening
+# WIDTH halves the dwell time and leaves the on-air line period identical.
+# The audio is bit-compatible in length with what we shipped before; what
+# changes is that the 320 columns now carry 320 distinct values instead of
+# 160 duplicated pairs, and we stop squeezing the operator's landscape
+# picture into a 160×256 portrait first (issue #65).
+
+class MartinM2(_UpstreamMartinM2):
+    """Martin M2 — 320×256, VIS 40, ~58 s.  Upstream says 160 wide; wrong."""
+    WIDTH = 320
+
+
+class ScottieS2(_UpstreamScottieS2):
+    """Scottie S2 — 320×256, VIS 56, ~71 s.  Upstream says 160 wide; wrong."""
+    WIDTH = 320
+
+
+# ---------------------------------------------------------------------------
 # Thin PySSTV subclasses for modes not in the upstream library
 # ---------------------------------------------------------------------------
 # Martin M3/M4 and Scottie S3/S4 are height-only variants of M1/M2 and
@@ -184,7 +213,7 @@ class MartinM3(MartinM1):
 
 
 class MartinM4(MartinM2):
-    """Martin M4 — 160×128 pixels, same line timing as M2, VIS 32."""
+    """Martin M4 — 320×128 pixels, same line timing as M2, VIS 32."""
     VIS_CODE = 32
     HEIGHT = 128
 
@@ -196,7 +225,7 @@ class ScottieS3(ScottieS1):
 
 
 class ScottieS4(ScottieS2):
-    """Scottie S4 — 160×128 pixels, same line timing as S2, VIS 48."""
+    """Scottie S4 — 320×128 pixels, same line timing as S2, VIS 48."""
     VIS_CODE = 48
     HEIGHT = 128
 

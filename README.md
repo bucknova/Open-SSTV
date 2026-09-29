@@ -316,14 +316,14 @@ All 22 modes support both TX (encode) and RX (decode).
 |------|-----------|----------|--------------|
 | Robot 36 | 320×240 | ~36 s | YCbCr |
 | Martin M1 | 320×256 | ~114 s | RGB |
-| Martin M2 | 160×256 | ~57 s | RGB |
+| Martin M2 | 320×256 | ~58 s | RGB |
 | Martin M3 | 320×128 | ~57 s | RGB |
-| Martin M4 | 160×128 | ~29 s | RGB |
+| Martin M4 | 320×128 | ~29 s | RGB |
 | Scottie S1 | 320×256 | ~110 s | RGB |
-| Scottie S2 | 160×256 | ~71 s | RGB |
+| Scottie S2 | 320×256 | ~71 s | RGB |
 | Scottie DX | 320×256 | ~269 s | RGB |
 | Scottie S3 | 320×128 | ~55 s | RGB |
-| Scottie S4 | 160×128 | ~36 s | RGB |
+| Scottie S4 | 320×128 | ~36 s | RGB |
 | PD-50 | 320×256 | ~50 s | YCbCr |
 | PD-90 | 320×256 | ~90 s | YCbCr |
 | PD-120 | 640×496 | ~126 s | YCbCr |
