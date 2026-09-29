@@ -11,6 +11,37 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The Linux AppImage and zip closed immediately on launch on any system
+  without PortAudio installed.** Found when the AppImage catalog's bot
+  started the v0.6.10 AppImage in a clean environment
+  ([AppImage/appimage.github.io#7563](https://github.com/AppImage/appimage.github.io/pull/7563)):
+  `OSError: PortAudio library not found`, before any window appeared. The
+  `sounddevice` package bundles PortAudio in its macOS and Windows wheels
+  but has no Linux wheel with the library inside, so the build had nothing
+  to copy. The PyInstaller spec's comment claimed otherwise. The build never
+  installed PortAudio, while the test workflow always had, so CI never
+  exercised the missing-library case. Every Linux release through v0.6.10
+  was affected. It worked only on systems where some other package had
+  already installed `libportaudio2`.
+
+  The Linux builds now compile PortAudio 19.7.0 from the pinned official
+  source (ALSA only) and bundle it. A PyInstaller runtime hook points
+  `sounddevice` at the bundled copy, because bundling alone doesn't help:
+  PyInstaller doesn't redirect `ctypes.util.find_library` on Linux, so
+  `sounddevice` would still ask only the host. ALSA and JACK stay host
+  libraries, following the AppImage project's excludelist: a bundled
+  `libasound` can't find the host's PipeWire and PulseAudio plugins, and
+  Ubuntu's own PortAudio package is avoided because it links `libjack`.
+
+- **An audio-library failure at startup now shows a dialog instead of
+  nothing.** `app.main` caught `ImportError` around the main-window import,
+  but PortAudio fails with `OSError`, so the error escaped as a traceback
+  on stderr. That is invisible to anyone who launched from a desktop icon.
+  It now shows advice that depends on what's actually missing: ALSA for the
+  bundled builds, PortAudio for pip installs, and a bug report if a bundled
+  build lost its own PortAudio. The same guard's "missing dependency"
+  message named the package `sstv-app`; it is `open-sstv`.
+
 - **PD images decoded from a WAV file lost every saturated colour.** All
   seven PD modes were affected, PD-50 worst. The batch decoder's chroma
   sampler replaced any chroma value under 15% of the signalling band (byte
@@ -66,6 +97,21 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   warning stops firing on a normal 4:3 photo sent in M2 or S2.
 
 ### Internal
+
+- The Linux release build now fails instead of shipping a broken bundle.
+  The spec aborts if no `libportaudio.so*` made it in, where before the
+  hooks-contrib hook printed a warning nobody read. A new smoke test checks
+  that the bundled PortAudio links ALSA and not JACK, and that neither
+  host-only library was bundled. It then **deletes the build machine's
+  PortAudio**, since that copy would hide a broken bundle the way
+  `test.yml`'s did, and launches both the onedir build and the AppImage
+  headless. Either one exiting within 20 s fails the build. This is the
+  test the AppImage catalog ran.
+- README: the Linux install section documents the ALSA dependency and the
+  `libportaudio2` requirement for pip and pipx installs. It also no longer
+  calls the AppImage "self-contained", and its example command uses the
+  real asset name: `Open-SSTV-*.AppImage`, not `open-sstv-*`, which a
+  case-sensitive shell wouldn't match.
 
 - `scripts/roundtrip_all_modes.py` audits every mode in `MODE_TABLE`
   instead of a hand-written list that had fallen five modes behind it —

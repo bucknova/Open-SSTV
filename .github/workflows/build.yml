@@ -45,6 +45,13 @@ env:
   APPIMAGETOOL_VERSION: "1.9.1"
   APPIMAGETOOL_SHA256_X86_64: "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
   APPIMAGETOOL_SHA256_AARCH64: "f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158"
+  # Pinned PortAudio source for the Linux builds.  sounddevice ships no
+  # Linux wheel with PortAudio inside, so we compile it and bundle it
+  # (AppImage/appimage.github.io#7563).  The official release tarball; the
+  # sha256 matches Homebrew's independently pinned value for the same file.
+  # Bump deliberately and re-capture the sum when you do.
+  PORTAUDIO_TARBALL: "pa_stable_v190700_20210406.tgz"
+  PORTAUDIO_SHA256: "47efbf42c77c19a05d22e627d42873e991ec0c1357219c0d74ce6a2948cb2def"
 
 # Tag-driven release builds are cheap to start but slow to finish, so
 # coalesce in-flight runs whenever a fresh tag (or manual dispatch)
@@ -115,6 +122,46 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .
           pip install pyinstaller pyinstaller-hooks-contrib
+
+      # ── 3b. PortAudio for Linux ────────────────────────────────────────────
+      # The Linux sounddevice wheel is pure Python and expects PortAudio from
+      # the distro, so a plain build ships without it and the app dies at
+      # launch with "PortAudio library not found" on any machine that lacks
+      # a system copy (AppImage/appimage.github.io#7563).  test.yml has always
+      # apt-installed libportaudio2, and that's why the tests never caught it.
+      #
+      # Built from source instead of apt, because Ubuntu's libportaudio2
+      # links libjack.so.0, and libjack is on the AppImage excludelist: it
+      # must match the host's JACK server, and it is absent on many desktops.
+      # This build is ALSA-only, so its only non-libc dependency is
+      # libasound.so.2, which every desktop Linux provides.  PipeWire and
+      # PulseAudio users go through ALSA's default device.
+      #
+      # Installed to /usr/local so the hooks-contrib sounddevice hook finds it
+      # with find_library() and collects it.  The spec fails the build if it
+      # doesn't end up in the bundle.
+      - name: Build PortAudio (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y -q libasound2-dev
+          wget -q "https://files.portaudio.com/archives/${PORTAUDIO_TARBALL}"
+          ACTUAL=$(sha256sum "${PORTAUDIO_TARBALL}" | awk '{print $1}')
+          if [ "${ACTUAL}" != "${PORTAUDIO_SHA256}" ]; then
+            echo "PortAudio sha256 mismatch:"
+            echo "  expected ${PORTAUDIO_SHA256}"
+            echo "  actual   ${ACTUAL}"
+            exit 1
+          fi
+          tar xzf "${PORTAUDIO_TARBALL}"
+          cd portaudio
+          ./configure --prefix=/usr/local --disable-static \
+            --with-alsa --without-jack --without-oss --without-asihpi
+          make -j"$(nproc)"
+          sudo make install
+          sudo ldconfig
+          python -c "import ctypes.util as u; p = u.find_library('portaudio'); print('find_library:', p); assert p, 'PortAudio not visible after install'"
 
       # ── 4. Build ───────────────────────────────────────────────────────────
       - name: Build with PyInstaller
@@ -299,6 +346,79 @@ jobs:
           # Build the AppImage
           ARCH="${ARCH}" ./"${TOOL}" AppDir "Open-SSTV-${ARCH}.AppImage"
           echo "AppImage: $(du -sh Open-SSTV-${ARCH}.AppImage | cut -f1)"
+
+      # ── 6d. Smoke test on a host without PortAudio (Linux only) ────────────
+      # The test the AppImage catalog runs, and the one that failed #7563:
+      # start the app on a machine with no system PortAudio and check it's
+      # still up. First we check that the bundle is self-contained in the
+      # right way. Then we delete the PortAudio built above, because that
+      # copy would otherwise hide a broken bundle exactly the way test.yml's
+      # apt-installed copy hid this bug for months. Then we launch both
+      # artifacts we ship.
+      - name: Smoke test without system PortAudio (Linux only)
+        if: runner.os == 'Linux'
+        # Backstop.  The first version of this step sat for two hours:
+        # Open-SSTV ignores SIGTERM while its event loop is idle, and plain
+        # `timeout` waits forever after sending it.  --kill-after below fixes
+        # that; this cap makes sure a future hang costs minutes, not hours.
+        timeout-minutes: 10
+        env:
+          ARCH: ${{ matrix.appimage_arch }}
+        run: |
+          set -euo pipefail
+
+          # 1. PortAudio is bundled, and it's the ALSA-only build.
+          PA=$(find dist/open-sstv -maxdepth 2 -name 'libportaudio.so*' | head -n1)
+          [ -n "${PA}" ] || { echo "ERROR: no libportaudio.so* in the bundle"; exit 1; }
+          echo "bundled: ${PA}"
+          readelf -d "${PA}" | grep NEEDED
+          readelf -d "${PA}" | grep -q 'libasound\.so\.2' \
+            || { echo "ERROR: bundled PortAudio has no ALSA backend"; exit 1; }
+          if readelf -d "${PA}" | grep -q 'libjack'; then
+            echo "ERROR: bundled PortAudio links libjack (AppImage excludelist)"; exit 1
+          fi
+          # The host must supply these two; the spec strips them.
+          HOSTONLY=$(find dist/open-sstv \( -name 'libasound.so*' -o -name 'libjack.so*' \) -print)
+          if [ -n "${HOSTONLY}" ]; then
+            echo "ERROR: host-only libraries were bundled:"; echo "${HOSTONLY}"; exit 1
+          fi
+
+          # 2. Make the runner look like a desktop with no PortAudio.  Install
+          #    the Qt runtime libraries every desktop has, which are also on the
+          #    AppImage excludelist and so correctly come from the host.  This
+          #    is test.yml's list minus libportaudio2, which is the whole point.
+          #    Then remove the PortAudio built above.
+          sudo apt-get install -y -q libegl1 libxkbcommon0 libdbus-1-3 libfontconfig1
+          sudo rm -f /usr/local/lib/libportaudio.*
+          sudo ldconfig
+          python -c "import ctypes.util as u, sys; p = u.find_library('portaudio'); sys.exit(f'system PortAudio still visible: {p}') if p else print('host has no PortAudio: OK')"
+
+          # 3. Launch each shipped artifact headless.  Still running after 20 s
+          #    means it got past startup.  timeout then stops it and exits 124
+          #    (SIGTERM worked) or 137 (it needed the SIGKILL 5 s later).
+          #    Anything else means the app exited on its own, i.e. a crash.
+          #    SIGKILL is needed in practice: the app's SIGTERM handler is a
+          #    Python callback, and it doesn't run while the Qt loop is idle.
+          smoke() {
+            local label="$1"; shift
+            set +e
+            QT_QPA_PLATFORM=offscreen timeout --kill-after=5 20 "$@" > smoke.log 2>&1
+            local rc=$?
+            set -e
+            # The AppImage runtime may leave its child running after being killed.
+            pkill -9 -x open-sstv 2>/dev/null || true
+            if { [ "${rc}" -ne 124 ] && [ "${rc}" -ne 137 ]; } \
+               || grep -qE 'PortAudio library not found|Failed to execute script' smoke.log; then
+              echo "ERROR: ${label} exited with rc=${rc} instead of staying up"
+              cat smoke.log
+              exit 1
+            fi
+            echo "OK: ${label} stayed up for 20 s with no system PortAudio (rc=${rc})"
+            echo "--- first lines of its output ---"
+            head -n 15 smoke.log
+          }
+          smoke "onedir (zip contents)" dist/open-sstv/open-sstv
+          smoke "AppImage" "./Open-SSTV-${ARCH}.AppImage" --appimage-extract-and-run
 
       # ── 7. Upload Actions artifacts (always available for 30 days) ──────────
       - name: Upload zip artifact

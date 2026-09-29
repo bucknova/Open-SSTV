@@ -468,8 +468,19 @@ clone.
 
 Two formats are published per architecture:
 
-- **`.AppImage`** — single-file, self-contained. `chmod +x open-sstv-*.AppImage && ./open-sstv-*.AppImage`.
+- **`.AppImage`** — single file. `chmod +x Open-SSTV-*.AppImage && ./Open-SSTV-*.AppImage`.
 - **`.zip`** — unpacked onedir bundle. `unzip open-sstv-linux-*.zip && ./open-sstv/open-sstv`.
+
+Both include PortAudio, the audio library. They use your system's ALSA
+library (`libasound2`) for the audio devices themselves, which is what lets
+PipeWire and PulseAudio devices show up. Every desktop distribution ships
+ALSA. If Open-SSTV reports it missing, install it with
+`sudo apt install libasound2` (Debian/Ubuntu), `sudo dnf install alsa-lib`
+(Fedora), or `sudo pacman -S alsa-lib` (Arch).
+
+> Linux builds up to and including v0.6.10 did **not** include PortAudio. On a
+> system without it, they closed immediately on launch without a message.
+> Install `libportaudio2` to run those versions, or upgrade.
 
 ### Windows
 
@@ -488,6 +499,15 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 ```
+
+On Linux, `pip` can't provide PortAudio. The `sounddevice` package ships
+it inside its macOS and Windows wheels, but not in its Linux one. Install
+it from your distribution before running, and the same applies to
+`pipx install open-sstv`:
+
+- **Debian/Ubuntu:** `sudo apt install libportaudio2`
+- **Fedora:** `sudo dnf install portaudio`
+- **Arch:** `sudo pacman -S portaudio`
 
 You will also need Hamlib's `rigctld` for rigctld-based radio control (not
 required for direct serial or manual PTT):

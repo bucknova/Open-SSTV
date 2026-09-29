@@ -13,6 +13,7 @@
 #   macOS   : open-sstv  (run from terminal; or wrap in a .app manually)
 #   Linux   : open-sstv  (or package via appimagetool — see build.yml)
 
+import os
 import sys
 import tomllib
 from pathlib import Path
@@ -36,9 +37,16 @@ pyssty_hidden = collect_submodules("PySSTV")
 hidden_imports = [
     *scipy_hidden,
     *pyssty_hidden,
-    # sounddevice loads PortAudio through ctypes — the shared library is
-    # shipped with the sounddevice wheel and PyInstaller copies it
-    # automatically, but the module itself still needs to be listed here.
+    # sounddevice loads PortAudio through ctypes.  On macOS and Windows the
+    # sounddevice wheel ships the shared library and the hooks-contrib hook
+    # copies it.  On Linux there is NO manylinux wheel — pip installs the
+    # pure-Python one with no library inside — so the hook can only bundle
+    # a *system* PortAudio found on the build machine, and at runtime
+    # sounddevice will not look in the bundle for it anyway.  build.yml
+    # compiles PortAudio for Linux, and the Linux section below the
+    # Analysis wires it in.  This comment used to say the wheel handled it
+    # everywhere, which is how every Linux build through v0.6.10 shipped
+    # without PortAudio (AppImage/appimage.github.io#7563).
     "sounddevice",
     # tomllib is stdlib on 3.11+; tomli_w is a pure-Python write companion.
     "tomli_w",
@@ -130,7 +138,13 @@ a = Analysis(
     hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    # Linux only: point sounddevice at the bundled PortAudio.  See the
+    # hook's docstring for why PyInstaller does not do this on Linux.
+    runtime_hooks=(
+        ["packaging/pyinstaller/rthook_portaudio.py"]
+        if sys.platform.startswith("linux")
+        else []
+    ),
     # Keep the bundle lean: strip test frameworks and type-stub packages.
     excludes=[
         "pytest",
@@ -146,6 +160,37 @@ a = Analysis(
     ],
     noarchive=False,
 )
+
+# ── Linux: PortAudio must be inside the bundle; ALSA and JACK must not ──
+#
+# PortAudio is required: without it the app dies at import with
+# "PortAudio library not found".  The hooks-contrib sounddevice hook
+# collects it from the build machine, but only prints a warning when it
+# can't find one.  That warning went by unread on every Linux release
+# through v0.6.10, so a missing PortAudio now fails the build instead.
+#
+# libasound and libjack are left out on purpose.  Both are on the AppImage
+# project's excludelist: a bundled libasound can't find the host's ALSA
+# plugins or config, so PipeWire and PulseAudio users get no sound cards,
+# and libjack has to match the ABI of the host's JACK server.  PortAudio
+# loads the host's copies; every desktop Linux ships libasound2.
+if sys.platform.startswith("linux"):
+    _HOST_ONLY_LIBS = ("libasound.so", "libjack.so")
+
+    a.binaries = [
+        entry for entry in a.binaries
+        if not os.path.basename(entry[0]).startswith(_HOST_ONLY_LIBS)
+    ]
+    if not any(
+        os.path.basename(entry[0]).startswith("libportaudio.so")
+        for entry in a.binaries
+    ):
+        raise SystemExit(
+            "open_sstv.spec: no libportaudio.so* in the Linux bundle. "
+            "The app would crash on launch on any machine without a system "
+            "PortAudio.  Build and install PortAudio first (see the 'Build "
+            "PortAudio' step in .github/workflows/build.yml), then rebuild."
+        )
 
 pyz = PYZ(a.pure)
 

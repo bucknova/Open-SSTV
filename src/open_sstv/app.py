@@ -213,6 +213,93 @@ def _config_log_level() -> int:
     }.get(name, logging.INFO)
 
 
+def _qt_import_error_text(exc: ImportError) -> str:
+    """Advice when PySide6 can't be imported, keeping the real cause."""
+    lines = ["Error: could not load PySide6 (Qt).", f"Details: {exc}", ""]
+    if ".so" in str(exc) or "DLL" in str(exc):
+        lines.append(
+            "A system library Qt needs is missing. Install the library "
+            "named above with your package manager."
+        )
+    elif getattr(sys, "frozen", False):
+        lines.append(
+            "This build should include PySide6. Please report this at "
+            "https://github.com/bucknova/Open-SSTV/issues"
+        )
+    else:
+        lines.append("Install it with:  pip install PySide6")
+    return "\n".join(lines)
+
+
+def _audio_library_error_text(exc: OSError) -> str:
+    """Advice for an operator whose system couldn't load PortAudio.
+
+    ``sounddevice`` loads PortAudio at import time.  When that fails it
+    raises ``OSError``: either "PortAudio library not found" or a
+    ``dlopen`` error naming whichever library is missing.  ``OSError`` is
+    not ``ImportError``, so it used to slip past the import guard in
+    ``main`` and kill the app with a bare traceback.  From a
+    double-clicked AppImage, which has no terminal, that meant nothing
+    happened at all.
+    """
+    lines = [
+        "Open-SSTV could not load its audio library (PortAudio).",
+        "",
+        f"Details: {exc}",
+        "",
+    ]
+    report = [
+        "Please report this at https://github.com/bucknova/Open-SSTV/issues",
+        "and include the details above.",
+    ]
+    if sys.platform.startswith("linux"):
+        frozen = getattr(sys, "frozen", False)
+        if frozen and "libasound" in str(exc):
+            # The AppImage and zip bundle PortAudio but take ALSA from the
+            # host (bundling it breaks PipeWire / PulseAudio).
+            lines += [
+                "This build includes PortAudio but uses your system's ALSA",
+                "library, which is missing. Install it with your package",
+                "manager:",
+                "",
+                "  Debian / Ubuntu:  sudo apt install libasound2",
+                "  Fedora:           sudo dnf install alsa-lib",
+                "  Arch:             sudo pacman -S alsa-lib",
+            ]
+        elif frozen:
+            # The bundled PortAudio should have loaded.  If it didn't, that
+            # is a packaging bug on our side.  A system PortAudio works as
+            # a stopgap, because the runtime hook only overrides the lookup
+            # when a bundled copy exists.
+            lines += [
+                "This build should include PortAudio, so this is a bug in",
+                "how Open-SSTV was packaged.",
+                *report,
+                "",
+                "Until it's fixed, installing PortAudio yourself may work:",
+                "",
+                "  Debian / Ubuntu:  sudo apt install libportaudio2",
+                "  Fedora:           sudo dnf install portaudio",
+                "  Arch:             sudo pacman -S portaudio",
+            ]
+        else:
+            lines += [
+                "Install PortAudio with your package manager:",
+                "",
+                "  Debian / Ubuntu:  sudo apt install libportaudio2",
+                "  Fedora:           sudo dnf install portaudio",
+                "  Arch:             sudo pacman -S portaudio",
+            ]
+    else:
+        # macOS and Windows builds get PortAudio from the sounddevice
+        # wheel, so reaching this point means a damaged install.
+        lines += [
+            "Reinstalling Open-SSTV should fix this. If it doesn't:",
+            *report,
+        ]
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the ``open-sstv`` console script and ``python -m open_sstv``."""
     import logging  # noqa: PLC0415
@@ -305,12 +392,13 @@ def main(argv: list[str] | None = None) -> int:
         from PySide6.QtCore import QCoreApplication  # noqa: PLC0415
         from PySide6.QtGui import QIcon  # noqa: PLC0415
         from PySide6.QtWidgets import QApplication  # noqa: PLC0415
-    except ImportError:
-        print(
-            "Error: PySide6 is not installed.\n"
-            "Install it with:  pip install 'open-sstv[dev]'  or  pip install PySide6",
-            file=sys.stderr,
-        )
+    except ImportError as exc:
+        # Not only "PySide6 absent": a PySide6 that is present but can't
+        # load a Qt system library (libEGL, libxkbcommon, ...) raises the
+        # same ImportError.  This handler used to say "not installed" in
+        # both cases and drop the real error, which was wrong for every
+        # bundled build.
+        print(_qt_import_error_text(exc), file=sys.stderr)
         return 1
 
     try:
@@ -319,9 +407,24 @@ def main(argv: list[str] | None = None) -> int:
         missing = str(exc).replace("No module named ", "").strip("'\"")
         print(
             f"Error: required dependency '{missing}' is not installed.\n"
-            f"Install all dependencies with:  pip install sstv-app",
+            f"Install all dependencies with:  pip install open-sstv",
             file=sys.stderr,
         )
+        return 1
+    except OSError as exc:
+        # PortAudio failed to load (see _audio_library_error_text).  The
+        # message goes to stderr for terminal users and to a dialog for
+        # everyone else.  A launcher-started app has no terminal, and
+        # without the dialog this failure is completely silent.
+        text = _audio_library_error_text(exc)
+        print(text, file=sys.stderr)
+        from PySide6.QtWidgets import QMessageBox  # noqa: PLC0415
+
+        _dialog_app = QApplication.instance() or QApplication(
+            list(argv) if argv is not None else sys.argv
+        )
+        QMessageBox.critical(None, "Open-SSTV — audio library missing", text)
+        del _dialog_app
         return 1
 
     # (4) Qt application metadata — set via the static QCoreApplication
