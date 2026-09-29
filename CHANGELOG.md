@@ -9,6 +9,23 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.6.11] — 2026-09-29
+
+A fix release. Three things were quietly wrong, and each affected everyone
+using the feature concerned:
+
+- **Linux users:** the AppImage and zip now start on a system without
+  PortAudio installed. Before, they closed without any message. If a Linux
+  build "did nothing" when you launched it, this was why.
+- **PD-mode users:** saturated yellows, greens and cyans no longer come back
+  washed out in images decoded from WAV files.
+- **Martin M2 / M4 and Scottie S2 / S4 users:** pictures keep their
+  landscape shape instead of being squeezed into a portrait frame. Reported
+  by [@cheyong007](https://github.com/cheyong007) in
+  [#65](https://github.com/bucknova/Open-SSTV/issues/65).
+
 ### Fixed
 
 - **The Linux AppImage and zip closed immediately on launch on any system
