@@ -357,6 +357,11 @@ jobs:
       # artifacts we ship.
       - name: Smoke test without system PortAudio (Linux only)
         if: runner.os == 'Linux'
+        # Backstop.  The first version of this step sat for two hours:
+        # Open-SSTV ignores SIGTERM while its event loop is idle, and plain
+        # `timeout` waits forever after sending it.  --kill-after below fixes
+        # that; this cap makes sure a future hang costs minutes, not hours.
+        timeout-minutes: 10
         env:
           ARCH: ${{ matrix.appimage_arch }}
         run: |
@@ -389,21 +394,28 @@ jobs:
           python -c "import ctypes.util as u, sys; p = u.find_library('portaudio'); sys.exit(f'system PortAudio still visible: {p}') if p else print('host has no PortAudio: OK')"
 
           # 3. Launch each shipped artifact headless.  Still running after 20 s
-          #    means it got past startup: timeout exits 124 when it had to kill
-          #    the app.  Anything else is a crash.
+          #    means it got past startup.  timeout then stops it and exits 124
+          #    (SIGTERM worked) or 137 (it needed the SIGKILL 5 s later).
+          #    Anything else means the app exited on its own, i.e. a crash.
+          #    SIGKILL is needed in practice: the app's SIGTERM handler is a
+          #    Python callback, and it doesn't run while the Qt loop is idle.
           smoke() {
             local label="$1"; shift
             set +e
-            QT_QPA_PLATFORM=offscreen timeout 20 "$@" > smoke.log 2>&1
+            QT_QPA_PLATFORM=offscreen timeout --kill-after=5 20 "$@" > smoke.log 2>&1
             local rc=$?
             set -e
-            if [ "${rc}" -ne 124 ] \
+            # The AppImage runtime may leave its child running after being killed.
+            pkill -9 -x open-sstv 2>/dev/null || true
+            if { [ "${rc}" -ne 124 ] && [ "${rc}" -ne 137 ]; } \
                || grep -qE 'PortAudio library not found|Failed to execute script' smoke.log; then
               echo "ERROR: ${label} exited with rc=${rc} instead of staying up"
               cat smoke.log
               exit 1
             fi
-            echo "OK: ${label} stayed up for 20 s with no system PortAudio"
+            echo "OK: ${label} stayed up for 20 s with no system PortAudio (rc=${rc})"
+            echo "--- first lines of its output ---"
+            head -n 15 smoke.log
           }
           smoke "onedir (zip contents)" dist/open-sstv/open-sstv
           smoke "AppImage" "./Open-SSTV-${ARCH}.AppImage" --appimage-extract-and-run
