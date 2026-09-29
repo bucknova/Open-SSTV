@@ -128,3 +128,27 @@ def test_main_shows_dialog_and_exits_1(
     assert "PortAudio library not found" in text
     # Terminal users still get it on stderr.
     assert "PortAudio library not found" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# The PySide6 import guard keeps the real cause
+# ---------------------------------------------------------------------------
+# Found by this PR's own smoke test.  On the bare build runner the bundled
+# app printed "PySide6 is not installed". PySide6 was bundled; what was
+# missing was a Qt system library, and the handler had thrown away the
+# message saying which one.
+
+def test_qt_missing_system_library_names_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_env(monkeypatch, "linux", frozen=True)
+    exc = ImportError("libEGL.so.1: cannot open shared object file: No such file or directory")
+    text = app._qt_import_error_text(exc)
+    assert "libEGL.so.1" in text
+    assert "not installed" not in text
+    assert "pip install" not in text, "pip advice is useless for a bundled build"
+
+
+def test_qt_absent_from_source_install_says_pip(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_env(monkeypatch, "linux", frozen=False)
+    text = app._qt_import_error_text(ImportError("No module named 'PySide6'"))
+    assert "pip install PySide6" in text
+    assert "No module named 'PySide6'" in text

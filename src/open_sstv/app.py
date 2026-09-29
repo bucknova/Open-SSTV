@@ -213,6 +213,24 @@ def _config_log_level() -> int:
     }.get(name, logging.INFO)
 
 
+def _qt_import_error_text(exc: ImportError) -> str:
+    """Advice when PySide6 can't be imported, keeping the real cause."""
+    lines = ["Error: could not load PySide6 (Qt).", f"Details: {exc}", ""]
+    if ".so" in str(exc) or "DLL" in str(exc):
+        lines.append(
+            "A system library Qt needs is missing. Install the library "
+            "named above with your package manager."
+        )
+    elif getattr(sys, "frozen", False):
+        lines.append(
+            "This build should include PySide6. Please report this at "
+            "https://github.com/bucknova/Open-SSTV/issues"
+        )
+    else:
+        lines.append("Install it with:  pip install PySide6")
+    return "\n".join(lines)
+
+
 def _audio_library_error_text(exc: OSError) -> str:
     """Advice for an operator whose system couldn't load PortAudio.
 
@@ -374,12 +392,13 @@ def main(argv: list[str] | None = None) -> int:
         from PySide6.QtCore import QCoreApplication  # noqa: PLC0415
         from PySide6.QtGui import QIcon  # noqa: PLC0415
         from PySide6.QtWidgets import QApplication  # noqa: PLC0415
-    except ImportError:
-        print(
-            "Error: PySide6 is not installed.\n"
-            "Install it with:  pip install 'open-sstv[dev]'  or  pip install PySide6",
-            file=sys.stderr,
-        )
+    except ImportError as exc:
+        # Not only "PySide6 absent": a PySide6 that is present but can't
+        # load a Qt system library (libEGL, libxkbcommon, ...) raises the
+        # same ImportError.  This handler used to say "not installed" in
+        # both cases and drop the real error, which was wrong for every
+        # bundled build.
+        print(_qt_import_error_text(exc), file=sys.stderr)
         return 1
 
     try:

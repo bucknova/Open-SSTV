@@ -378,7 +378,12 @@ jobs:
             echo "ERROR: host-only libraries were bundled:"; echo "${HOSTONLY}"; exit 1
           fi
 
-          # 2. Remove the build machine's PortAudio so the bundle must stand alone.
+          # 2. Make the runner look like a desktop with no PortAudio.  Install
+          #    the Qt runtime libraries every desktop has, which are also on the
+          #    AppImage excludelist and so correctly come from the host.  This
+          #    is test.yml's list minus libportaudio2, which is the whole point.
+          #    Then remove the PortAudio built above.
+          sudo apt-get install -y -q libegl1 libxkbcommon0 libdbus-1-3 libfontconfig1
           sudo rm -f /usr/local/lib/libportaudio.*
           sudo ldconfig
           python -c "import ctypes.util as u, sys; p = u.find_library('portaudio'); sys.exit(f'system PortAudio still visible: {p}') if p else print('host has no PortAudio: OK')"
