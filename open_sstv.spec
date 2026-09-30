@@ -169,13 +169,26 @@ a = Analysis(
 # can't find one.  That warning went by unread on every Linux release
 # through v0.6.10, so a missing PortAudio now fails the build instead.
 #
-# libasound and libjack are left out on purpose.  Both are on the AppImage
-# project's excludelist: a bundled libasound can't find the host's ALSA
-# plugins or config, so PipeWire and PulseAudio users get no sound cards,
-# and libjack has to match the ABI of the host's JACK server.  PortAudio
-# loads the host's copies; every desktop Linux ships libasound2.
+# Libraries on the AppImage project's excludelist are left out on purpose;
+# the host's copies are used instead.  The ones that matter to us:
+#   * libasound, libjack: a bundled libasound can't find the host's ALSA
+#     plugins or config, so PipeWire and PulseAudio users get no sound
+#     cards, and libjack has to match the ABI of the host's JACK server.
+#   * libxcb, libX11, libX11-xcb, libxcb-dri2/3, libEGL, libGL: the host's
+#     GPU driver loads its own copies.  An older bundled libxcb or libX11
+#     then breaks it with "undefined symbol" errors on newer distros.
+#   * libfontconfig, libfreetype, libwayland-client: must match the host's
+#     configuration and compositor.
+# The Qt X11 *extension* libraries (libxkbcommon-x11, libxcb-cursor, ...) are
+# NOT on the list and do get bundled; see "Install Qt X11 libraries" in
+# build.yml.  Keep this list in step with that workflow's smoke test.
 if sys.platform.startswith("linux"):
-    _HOST_ONLY_LIBS = ("libasound.so", "libjack.so")
+    _HOST_ONLY_LIBS = (
+        "libasound.so", "libjack.so",
+        "libxcb.so", "libX11.so", "libX11-xcb.so",
+        "libxcb-dri2.so", "libxcb-dri3.so", "libEGL.so", "libGL.so",
+        "libfontconfig.so", "libfreetype.so", "libwayland-client.so",
+    )
 
     a.binaries = [
         entry for entry in a.binaries

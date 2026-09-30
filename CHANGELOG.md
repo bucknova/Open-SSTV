@@ -9,6 +9,34 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Linux AppImage and zip now open their window on desktops without
+  Qt's X11 libraries.** v0.6.11 fixed the PortAudio crash, and the AppImage
+  catalog's retest
+  ([AppImage/appimage.github.io#7563](https://github.com/AppImage/appimage.github.io/pull/7563))
+  then got one step further. The app started, and then closed when Qt tried
+  to open a window: `libqxcb.so cannot load: libxkbcommon-x11.so.0: cannot
+  open shared object file`. PySide6 doesn't ship the libraries Qt's X11
+  plugin needs, and the build machine didn't have them, so they were never
+  bundled. They are now. Real desktops are affected as well as the catalog:
+  `libxcb-cursor0`, required since Qt 6.5, isn't a default install on
+  Ubuntu 22.04.
+
+  The core X, GL and font libraries (`libxcb`, `libX11`, `libEGL`, `libGL`,
+  `fontconfig`, `freetype`) are now left to the host, as the AppImage
+  project's excludelist requires. A bundled older copy breaks the host's
+  graphics driver on newer distributions.
+
+### Internal
+
+- The Linux release smoke test now runs the app under a real X server, as
+  the catalog does, and requires a window. The previous version used Qt's
+  `offscreen` platform, which never loads the X11 plugin, and that's how
+  v0.6.11 passed it. The test also removes the Qt X11 libraries from the
+  host so the bundle must supply them, and checks that Qt's X11 plugin
+  resolves every library it links.
+
 ---
 
 ## [0.6.11] — 2026-09-29
