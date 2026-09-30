@@ -326,31 +326,19 @@ jobs:
           APPRUN
           chmod +x AppDir/AppRun
 
-          # .desktop file (required by appimagetool)
-          cat > AppDir/open-sstv.desktop << 'DESKTOP'
-          [Desktop Entry]
-          Name=Open-SSTV
-          Exec=open-sstv
-          Icon=open-sstv
-          Type=Application
-          Categories=HamRadio;Network;
-          Comment=Open-source SSTV transceiver for amateur radio
-          DESKTOP
-
-          # Placeholder icon — appimagetool requires one.
-          # Replace assets/icon.png in the repo to use a real icon.
-          if [ -f assets/icon.png ]; then
-            cp assets/icon.png AppDir/open-sstv.png
-          else
-            python3 -c "
-          from PIL import Image, ImageDraw, ImageFont
-          img = Image.new('RGB', (256, 256), '#1a3a5c')
-          draw = ImageDraw.Draw(img)
-          draw.ellipse([28, 28, 228, 228], outline='#4fc3f7', width=8)
-          draw.text((88, 100), 'SSTV', fill='#4fc3f7')
-          img.save('AppDir/open-sstv.png')
-          "
-          fi
+          # Desktop entry, AppStream metainfo and icon, all from packaging/linux
+          # and assets/.  They were inline heredocs here before.  The rDNS ID
+          # is the AppStream convention, and it ties the three together.  The
+          # metainfo's default screenshot is what the AppImage catalog shows
+          # for us, in place of the screenshot its bot takes.
+          ID=io.github.bucknova.OpenSSTV
+          mkdir -p AppDir/usr/share/applications AppDir/usr/share/metainfo \
+                   AppDir/usr/share/icons/hicolor/512x512/apps
+          cp "packaging/linux/${ID}.desktop"      AppDir/
+          cp "packaging/linux/${ID}.desktop"      AppDir/usr/share/applications/
+          cp "packaging/linux/${ID}.metainfo.xml" AppDir/usr/share/metainfo/
+          cp assets/icon.png "AppDir/${ID}.png"
+          cp assets/icon.png "AppDir/usr/share/icons/hicolor/512x512/apps/${ID}.png"
 
           # Download a *pinned* appimagetool release and verify its
           # sha256 before running it.  See env block at the top of this
@@ -371,9 +359,17 @@ jobs:
           fi
           chmod +x "${TOOL}"
 
-          # Build the AppImage
-          ARCH="${ARCH}" ./"${TOOL}" AppDir "Open-SSTV-${ARCH}.AppImage"
-          echo "AppImage: $(du -sh Open-SSTV-${ARCH}.AppImage | cut -f1)"
+          # Build the AppImage with update information embedded, so
+          # AppImageUpdate, Gear Lever and similar tools can update it in
+          # place.  The AppImage catalog asked for this.  appimagetool writes
+          # the matching .zsync next to the AppImage; the release job
+          # publishes both.  "latest" means the tool always follows the
+          # newest release.
+          UPDATE_INFO="gh-releases-zsync|bucknova|Open-SSTV|latest|Open-SSTV-${ARCH}.AppImage.zsync"
+          ARCH="${ARCH}" ./"${TOOL}" -u "${UPDATE_INFO}" AppDir "Open-SSTV-${ARCH}.AppImage"
+          [ -s "Open-SSTV-${ARCH}.AppImage.zsync" ] \
+            || { echo "ERROR: appimagetool wrote no .zsync"; ls -la Open-SSTV-*; exit 1; }
+          echo "AppImage: $(du -sh Open-SSTV-${ARCH}.AppImage | cut -f1), zsync: $(du -sh Open-SSTV-${ARCH}.AppImage.zsync | cut -f1)"
 
       # ── 6d. Smoke test on a desktop-like host (Linux only) ─────────────────
       # The AppImage catalog's test: start the app under a real X server on a
@@ -408,17 +404,49 @@ jobs:
             echo "ERROR: bundled PortAudio links libjack (AppImage excludelist)"; exit 1
           fi
 
-          # 2. Nothing on the AppImage excludelist that we care about is bundled.
-          #    Keep in step with _HOST_ONLY_LIBS in open_sstv.spec.
-          HOSTONLY=$(find "$B" \( -name 'libasound.so*' -o -name 'libjack.so*' \
-              -o -name 'libxcb.so*' -o -name 'libX11.so*' -o -name 'libX11-xcb.so*' \
-              -o -name 'libxcb-dri2.so*' -o -name 'libxcb-dri3.so*' \
-              -o -name 'libEGL.so*' -o -name 'libGL.so*' \
-              -o -name 'libfontconfig.so*' -o -name 'libfreetype.so*' \
-              -o -name 'libwayland-client.so*' \) -print)
+          # 2. Nothing from packaging/linux/host-libs.txt is bundled.  The spec
+          #    strips them from the same file; this checks that it worked.
+          HOSTONLY=""
+          while read -r prefix; do
+            case "${prefix}" in ''|\#*) continue ;; esac
+            hit=$(find "$B" -name "${prefix}*" -print)
+            [ -z "${hit}" ] || HOSTONLY="${HOSTONLY}${hit}"$'\n'
+          done < packaging/linux/host-libs.txt
           if [ -n "${HOSTONLY}" ]; then
             echo "ERROR: host-only libraries were bundled:"; echo "${HOSTONLY}"; exit 1
           fi
+          echo "no host-only libraries bundled: OK"
+
+          # 2b. What the AppImage catalog reads from us.
+          APP="./Open-SSTV-${ARCH}.AppImage"
+          WANT="gh-releases-zsync|bucknova|Open-SSTV|latest|Open-SSTV-${ARCH}.AppImage.zsync"
+          GOT=$("${APP}" --appimage-updateinformation)
+          [ "${GOT}" = "${WANT}" ] \
+            || { echo "ERROR: update information is '${GOT}', expected '${WANT}'"; exit 1; }
+          [ -s "${APP}.zsync" ] || { echo "ERROR: ${APP}.zsync missing"; exit 1; }
+          echo "update information: ${GOT}"
+          rm -rf squashfs-root && "${APP}" --appimage-extract >/dev/null
+          META=squashfs-root/usr/share/metainfo/io.github.bucknova.OpenSSTV.metainfo.xml
+          [ -f "${META}" ] || { echo "ERROR: metainfo not in the AppImage"; exit 1; }
+          SHOT=$(grep -oE 'https://[^<]+main-window\.png' "${META}")
+          curl -fsIL "${SHOT}" >/dev/null || { echo "ERROR: screenshot URL unreachable: ${SHOT}"; exit 1; }
+          echo "screenshot: ${SHOT} (reachable)"
+          ICON=$(file -bL squashfs-root/.DirIcon)
+          echo "${ICON}" | grep -q '512 x 512' || { echo "ERROR: icon is not 512x512: ${ICON}"; exit 1; }
+          echo "icon: ${ICON}"
+          if [ "${ARCH}" = "x86_64" ]; then
+            # The same appstreamcli build the catalog uses (x86_64 only).
+            wget -q https://github.com/AppImage/appimage.github.io/releases/download/deps/appstreamcli-x86_64.AppImage
+            chmod +x appstreamcli-x86_64.AppImage
+            ./appstreamcli-x86_64.AppImage --appimage-extract-and-run validate --no-net --explain "${META}"
+          fi
+          # The glibc floor, measured the way the catalog measures it: the
+          # newest GLIBC_ symbol version any ELF file in the payload needs.
+          FLOOR=$(find squashfs-root -type f -print0 | while IFS= read -r -d '' f; do
+              [ "$(od -An -tx1 -N4 "$f" 2>/dev/null)" = " 7f 45 4c 46" ] || continue
+              objdump -T "$f" 2>/dev/null | grep '\*UND\*' | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' | sed 's/GLIBC_//'
+            done | sort -uV | tail -n1)
+          echo "glibc required: ${FLOOR}"
 
           # 3. Make the runner look like a bare desktop.  Keep the X server and
           #    the host-only libraries.  Remove everything the bundle is
@@ -501,7 +529,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}-appimage
-          path: Open-SSTV-*.AppImage
+          path: |
+            Open-SSTV-*.AppImage
+            Open-SSTV-*.AppImage.zsync
           retention-days: 30
 
       # NOTE: assets are NOT attached to the GitHub Release here.  See the
@@ -535,8 +565,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${GITHUB_REF_NAME}"
-          # One zip per platform + the two Linux AppImages.
-          mapfile -t assets < <(find artifacts -type f \( -name '*.zip' -o -name '*.AppImage' \) | sort)
+          # One zip per platform, the two Linux AppImages, and their .zsync
+          # files (AppImage update information points at those).
+          mapfile -t assets < <(find artifacts -type f \( -name '*.zip' -o -name '*.AppImage' -o -name '*.AppImage.zsync' \) | sort)
           if [ "${#assets[@]}" -eq 0 ]; then
             echo "::error::no build artifacts found to attach"; exit 1
           fi

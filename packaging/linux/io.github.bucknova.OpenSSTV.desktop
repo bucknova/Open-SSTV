@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Open-SSTV
+GenericName=SSTV Transceiver
+Comment=Open-source SSTV transceiver for amateur radio
+Exec=open-sstv
+Icon=io.github.bucknova.OpenSSTV
+Terminal=false
+Categories=HamRadio;Network;
+Keywords=SSTV;slow-scan;television;ham;amateur;radio;Robot36;Martin;Scottie;PD;
+StartupWMClass=Open-SSTV
