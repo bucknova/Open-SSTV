@@ -434,15 +434,11 @@ jobs:
           ICON=$(file -bL squashfs-root/.DirIcon)
           echo "${ICON}" | grep -q '512 x 512' || { echo "ERROR: icon is not 512x512: ${ICON}"; exit 1; }
           echo "icon: ${ICON}"
-          if [ "${ARCH}" = "x86_64" ]; then
-            # The same appstreamcli build the catalog uses (x86_64 only).
-            wget -q https://github.com/AppImage/appimage.github.io/releases/download/deps/appstreamcli-x86_64.AppImage
-            chmod +x appstreamcli-x86_64.AppImage
-            # Its older runtime needs FUSE even with --appimage-extract-and-run,
-            # so extract it into its own folder and run it from there.
-            mkdir -p asc && (cd asc && ../appstreamcli-x86_64.AppImage --appimage-extract >/dev/null)
-            asc/squashfs-root/AppRun validate --no-net --explain "${META}"
-          fi
+          # Validate the metainfo.  (The catalog's own appstreamcli AppImage is an
+          # old overlay-style build that won't run outside their environment,
+          # so this uses the distribution's.)
+          sudo apt-get install -y -q appstream >/dev/null
+          appstreamcli validate --no-net --explain "${META}"
           # The glibc floor, measured the way the catalog measures it: the
           # newest GLIBC_ symbol version any ELF file in the payload needs.
           FLOOR=$(find squashfs-root -type f -print0 | while IFS= read -r -d '' f; do
