@@ -9,6 +9,18 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.6.12] — 2026-09-29
+
+A Linux fix, finishing the job v0.6.11 started. v0.6.11 stopped the AppImage
+and zip crashing without PortAudio. On desktops without Qt's X11
+libraries, they still closed before their window appeared. This release
+bundles those libraries too. Every Linux build is now tested before release
+the way the AppImage catalog tests it: under a real X server, on a host
+missing the libraries the bundle should provide, and it has to show its
+window.
+
 ### Fixed
 
 - **The Linux AppImage and zip now open their window on desktops without
