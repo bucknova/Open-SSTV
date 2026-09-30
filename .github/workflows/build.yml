@@ -438,7 +438,10 @@ jobs:
             # The same appstreamcli build the catalog uses (x86_64 only).
             wget -q https://github.com/AppImage/appimage.github.io/releases/download/deps/appstreamcli-x86_64.AppImage
             chmod +x appstreamcli-x86_64.AppImage
-            ./appstreamcli-x86_64.AppImage --appimage-extract-and-run validate --no-net --explain "${META}"
+            # Its older runtime needs FUSE even with --appimage-extract-and-run,
+            # so extract it into its own folder and run it from there.
+            mkdir -p asc && (cd asc && ../appstreamcli-x86_64.AppImage --appimage-extract >/dev/null)
+            asc/squashfs-root/AppRun validate --no-net --explain "${META}"
           fi
           # The glibc floor, measured the way the catalog measures it: the
           # newest GLIBC_ symbol version any ELF file in the payload needs.
