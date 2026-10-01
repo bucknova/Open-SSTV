@@ -37,6 +37,34 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nothing. The check now remembers the latest release, so the notice stays
   until you update.
 
+### Changed
+
+- **The Linux ARM64 build now runs on older systems: Raspberry Pi OS
+  Bullseye, Ubuntu 20.04 and Debian 11.** It's built on Ubuntu 20.04, so it
+  needs glibc 2.31 rather than 2.35. Qt doesn't change: it's PySide6
+  6.8.0.2 either way, because PySide6's newer ARM64 releases need glibc
+  2.39. The x86_64 build stays on glibc 2.35, because supporting older
+  systems there would mean shipping Qt 6.9 instead of 6.11.
+- **The AppImage can update itself.** It now carries update information,
+  and each release publishes a `.zsync` file next to it, so AppImageUpdate,
+  Gear Lever and similar tools can update Open-SSTV in place, downloading
+  only what changed. The AppImage catalog asked for this when it listed us.
+- **A proper Linux icon and app metadata.** The icon was 775 × 779 pixels,
+  and launchers expect square icons; it's now 512 × 512. The AppImage
+  includes AppStream metadata, which software centres and the AppImage
+  catalog read, with the main-window screenshot from this repository.
+
+### Internal
+
+- One list of host-only libraries, `packaging/linux/host-libs.txt`, is read
+  by both the PyInstaller spec and the release smoke test. It now covers
+  the relevant part of the AppImage excludelist, including `libstdc++` and
+  the GL dispatch libraries.
+- A Linux build without Qt's X11 plugin now fails instead of shipping an
+  app that can't open a window. The smoke test also checks the update
+  information, the `.zsync`, the AppStream metadata, the icon size, and
+  the glibc floor, which on ARM64 must stay at 2.31 or below.
+
 ---
 
 ## [0.6.12] — 2026-09-29
