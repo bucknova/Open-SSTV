@@ -164,6 +164,8 @@ jobs:
 
       - name: Build CPython (container)
         if: matrix.container && steps.cpython-cache.outputs.cache-hit != 'true'
+        # Containers default to sh; these steps need bash (pipefail etc.).
+        shell: bash
         run: |
           set -euo pipefail
           T="Python-${CPYTHON_VERSION}.tar.xz"
@@ -210,6 +212,8 @@ jobs:
       # doesn't end up in the bundle.
       - name: Build PortAudio (Linux only)
         if: runner.os == 'Linux'
+        # Containers default to sh; these steps need bash (pipefail etc.).
+        shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update -q
@@ -370,6 +374,8 @@ jobs:
       # ── 6c. Package: Linux AppImage ────────────────────────────────────────
       - name: Build AppImage (Linux only)
         if: runner.os == 'Linux'
+        # Containers default to sh; these steps need bash (pipefail etc.).
+        shell: bash
         env:
           ARCH: ${{ matrix.appimage_arch }}
           # appimagetool is itself an AppImage; containers have no FUSE.
@@ -445,6 +451,8 @@ jobs:
       # with the xcb plugin, as the catalog does.
       - name: Smoke test on a desktop-like host (Linux only)
         if: runner.os == 'Linux'
+        # Containers default to sh; these steps need bash (pipefail etc.).
+        shell: bash
         # Backstop.  An earlier version of this step sat for two hours:
         # Open-SSTV ignores SIGTERM while its event loop is idle.  The app is
         # now stopped with SIGKILL; this cap limits any future hang.
