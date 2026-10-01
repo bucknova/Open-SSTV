@@ -10,8 +10,10 @@ import pytest
 
 from open_sstv.radio.band_plan import (
     DATA_MODE_BY_PROTOCOL,
+    FLEX_PROTOCOL,
     RIGCTLD_PROTOCOL,
     SSTV_BAND_PLAN,
+    TCI_PROTOCOL,
     BandEntry,
     mode_family,
     primary_entry,
@@ -323,8 +325,19 @@ class TestResolveTuneMode:
 
     def test_data_map_only_lists_verified_protocols(self) -> None:
         """Guard against silently "supporting" a protocol whose data-mode
-        CAT command was never verified against real hardware."""
-        assert set(DATA_MODE_BY_PROTOCOL) == {"Yaesu CAT", RIGCTLD_PROTOCOL}
+        CAT command was never verified.
+
+        Adding a protocol here is a deliberate decision.  The two SDR keys
+        (#68) are verified against their published specs rather than
+        hardware: TCI lists "DIGL, DIGU" among its modulations, and SmartSDR
+        slice modes include DIGU / DIGL (already used by radio.flex).  In
+        both, the data mode is a plain named mode.  Icom (a separate CI-V
+        sub-command) and Kenwood/Elecraft (model-specific) are still out,
+        for the reasons in band_plan.DATA_MODE_BY_PROTOCOL.
+        """
+        assert set(DATA_MODE_BY_PROTOCOL) == {
+            "Yaesu CAT", RIGCTLD_PROTOCOL, TCI_PROTOCOL, FLEX_PROTOCOL,
+        }
 
     # --- "data" policy: rigctld → Hamlib universal PKTUSB/PKTLSB -----------
 
@@ -382,3 +395,43 @@ class TestResolveTuneMode:
             resolve_tune_mode("USB", "Icom CI-V", "voice")
             resolve_tune_mode("USB", "Icom CI-V", "none")
         assert caplog.records == []
+
+
+# ---------------------------------------------------------------------------
+# #68: TCI and FlexRadio data modes (DIGU / DIGL)
+# ---------------------------------------------------------------------------
+# Reported by N8SDR: every band-plan pick moved his TCI SDR out of DIGU onto
+# plain USB.  Two causes.  mode_family() didn't know DIGU was a USB-family
+# mode, so even Voice tuning "switched" him.  And TCI / Flex weren't in
+# DATA_MODE_BY_PROTOCOL, so Data/Pkt couldn't ask for DIGU either.
+
+
+class TestSdrDataModes:
+    @pytest.mark.parametrize("mode", ["DIGU", "digu", " DIGU "])
+    def test_digu_is_usb_family(self, mode: str) -> None:
+        assert mode_family(mode) == "USB"
+
+    @pytest.mark.parametrize("mode", ["DIGL", "digl"])
+    def test_digl_is_lsb_family(self, mode: str) -> None:
+        assert mode_family(mode) == "LSB"
+
+    def test_voice_tune_from_digu_is_a_same_family_no_op(self) -> None:
+        """The tune worker compares families for a Voice tune.  An operator
+        on DIGU picking a USB band must now compare equal, so their mode is
+        left alone."""
+        assert mode_family("DIGU") == mode_family("USB")
+        assert mode_family("DIGL") == mode_family("LSB")
+
+    @pytest.mark.parametrize("protocol", [TCI_PROTOCOL, FLEX_PROTOCOL])
+    def test_data_policy_selects_digu_digl(self, protocol: str) -> None:
+        assert resolve_tune_mode("USB", protocol, "data") == "DIGU"
+        assert resolve_tune_mode("LSB", protocol, "data") == "DIGL"
+
+    @pytest.mark.parametrize("protocol", [TCI_PROTOCOL, FLEX_PROTOCOL])
+    def test_voice_and_none_unchanged(self, protocol: str) -> None:
+        assert resolve_tune_mode("USB", protocol, "voice") == "USB"
+        assert resolve_tune_mode("USB", protocol, "none") == ""
+
+    @pytest.mark.parametrize("protocol", [TCI_PROTOCOL, FLEX_PROTOCOL])
+    def test_fm_has_no_data_variant(self, protocol: str) -> None:
+        assert resolve_tune_mode("FM", protocol, "data") == "FM"

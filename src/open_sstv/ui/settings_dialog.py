@@ -1232,6 +1232,16 @@ class SettingsDialog(QDialog):
         self._tci_port.setValue(self._config.tci_port)
         tci_form.addRow("TCI port:", self._tci_port)
 
+        # SSTV mode policy, as in the Serial and rigctld groups (#68).  TCI
+        # servers (ExpertSDR, Thetis, SunSDR, ...) name their data modes
+        # DIGU / DIGL.
+        self._tci_tune_mode_combo = self._make_tune_mode_combo(
+            "Applies to Band Plan tuning only.\n"
+            "Data/Pkt selects DIGU / DIGL. Voice keeps DIGU / DIGL if the "
+            "radio is already in them and only changes the frequency."
+        )
+        tci_form.addRow("SSTV mode:", self._tci_tune_mode_combo)
+
         layout.addWidget(self._tci_group)
 
         # --- FlexRadio direct (SmartSDR TCP API) ---
@@ -1267,6 +1277,15 @@ class SettingsDialog(QDialog):
 
         self._flex_test_btn = QPushButton("Test FlexRadio Connection")
         self._flex_test_btn.clicked.connect(self._test_flex_connection)
+        # SSTV mode policy (#68).  SmartSDR names its data modes DIGU / DIGL.
+        self._flex_tune_mode_combo = self._make_tune_mode_combo(
+            "Applies to Band Plan tuning only.\n"
+            "Data/Pkt selects DIGU / DIGL on the slice. Voice keeps DIGU / "
+            "DIGL if the slice is already in them and only changes the "
+            "frequency."
+        )
+        flex_form.addRow("SSTV mode:", self._flex_tune_mode_combo)
+
         flex_form.addRow(self._flex_test_btn)
 
         layout.addWidget(self._flex_group)
@@ -1369,6 +1388,36 @@ class SettingsDialog(QDialog):
             self._suggest_baud_for_protocol(proto)
         # "Data" support depends on the protocol too — refresh the tooltip.
         self._on_tune_mode_policy_changed()
+
+    def _make_tune_mode_combo(self, tooltip: str) -> QComboBox:
+        """The three-way SSTV-mode policy combo, preset from the config.
+
+        Each connection group has its own combo over the one shared
+        ``rig_tune_mode_policy`` field; ``_tune_mode_policy_for`` picks the
+        one belonging to the active connection mode on save.
+        """
+        combo = QComboBox()
+        combo.addItem("Don't change mode", "none")
+        combo.addItem("Voice (USB/LSB)", "voice")
+        combo.addItem("Data/Pkt (recommended for SSTV)", "data")
+        idx = combo.findData(self._config.rig_tune_mode_policy)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+        combo.setToolTip(tooltip)
+        return combo
+
+    def _tune_mode_policy_for(self, conn_mode: str) -> str:
+        """The policy selected in *conn_mode*'s settings group.
+
+        Manual / PTT-only has no group of its own and keeps using the
+        Serial group's combo, as it always has.
+        """
+        combo = {
+            RigConnectionMode.RIGCTLD: self._rigctld_tune_mode_combo,
+            RigConnectionMode.TCI: self._tci_tune_mode_combo,
+            RigConnectionMode.FLEX: self._flex_tune_mode_combo,
+        }.get(conn_mode, self._tune_mode_combo)
+        return combo.currentData() or "voice"
 
     def _on_tune_mode_policy_changed(self) -> None:
         """Update the SSTV-mode tooltip with what "Data" resolves to.
@@ -2190,12 +2239,7 @@ class SettingsDialog(QDialog):
             rig_serial_protocol=self._serial_protocol_combo.currentText(),
             rig_civ_address=self._civ_address_spin.value(),
             rig_ptt_line=self._ptt_line_combo.currentData() or "DTR",
-            rig_tune_mode_policy=(
-                self._rigctld_tune_mode_combo.currentData()
-                if conn_mode == RigConnectionMode.RIGCTLD
-                else self._tune_mode_combo.currentData()
-            )
-            or "voice",
+            rig_tune_mode_policy=self._tune_mode_policy_for(conn_mode),
             audio_input_gain=self._input_gain_slider.value() / 100.0,
             audio_output_gain=self._output_gain_slider.value() / 100.0,
             tx_output_overdrive=self._overdrive_check.isChecked(),

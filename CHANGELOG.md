@@ -9,6 +9,34 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Band Plan tuning no longer knocks TCI and FlexRadio SDRs out of DIGU /
+  DIGL.** Reported by N8SDR in
+  [#68](https://github.com/bucknova/Open-SSTV/issues/68): every frequency
+  pick switched his SDR from DIGU to plain USB, losing the bandwidth and
+  audio profile he keeps on DIGU. Two bugs combined:
+  - Tuning is meant to leave your mode alone when you're already on the
+    right sideband. It recognised `USB-D`, `PKTUSB`, `DATA-U` and similar,
+    but not `DIGU`/`DIGL`, the names TCI servers and SmartSDR use. So it
+    switched you every time, even on the default *Voice* setting.
+  - The *SSTV mode → Data/Pkt* setting was never consulted for TCI or
+    FlexRadio connections, which always got plain USB. The setting wasn't
+    even shown in their sections of Settings → Radio.
+
+  Both are fixed. *Voice* now keeps DIGU / DIGL and only changes the
+  frequency. *Data/Pkt* selects DIGU / DIGL, and the setting appears in the
+  TCI and FlexRadio sections. The DIGU / DIGL names come from the TCI and
+  SmartSDR specifications.
+- **The "new version available" notice no longer disappears after the first
+  launch.** Prompted by
+  [#69](https://github.com/bucknova/Open-SSTV/issues/69). To stay inside
+  GitHub's rate limit, the update check runs at most once every 6 hours, but
+  it only remembered *when* it last checked, not *what* it found. The link
+  showed on one launch, and every launch in the next 6 hours showed
+  nothing. The check now remembers the latest release, so the notice stays
+  until you update.
+
 ---
 
 ## [0.6.12] — 2026-09-29

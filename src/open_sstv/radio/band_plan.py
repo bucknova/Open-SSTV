@@ -198,9 +198,15 @@ def mode_family(mode: str) -> str:
     if not m:
         return ""
     # Explicit aliases for mode strings that don't contain a sideband
-    # substring (K3 DATA-A/DATA-B, PSK-U/L, FT8-U/L on some firmware).
-    _USB_ALIASES = {"DATA-U", "DATA-A", "PSK-U", "FT8-U", "U"}
-    _LSB_ALIASES = {"DATA-L", "DATA-B", "PSK-L", "FT8-L", "L"}
+    # substring (K3 DATA-A/DATA-B, PSK-U/L, FT8-U/L on some firmware, and
+    # the SDR data modes DIGU/DIGL used by TCI servers and FlexRadio).
+    #
+    # DIGU/DIGL were missing until #68.  To this function "DIGU" was its
+    # own family, unlike "USB", so every Voice-policy band pick moved a
+    # TCI or Flex operator out of DIGU and onto plain USB, losing the
+    # bandwidth and audio profile they had set up for it.
+    _USB_ALIASES = {"DATA-U", "DATA-A", "PSK-U", "FT8-U", "DIGU", "U"}
+    _LSB_ALIASES = {"DATA-L", "DATA-B", "PSK-L", "FT8-L", "DIGL", "L"}
     if m in _USB_ALIASES or "USB" in m:
         return "USB"
     if m in _LSB_ALIASES or "LSB" in m:
@@ -220,6 +226,16 @@ def mode_family(mode: str) -> str:
 #: "tune failed" message rather than silently doing nothing.
 RIGCTLD_PROTOCOL = "rigctld"
 
+#: Pseudo-protocol keys for the two SDR backends.  Both use DIGU / DIGL as
+#: their data-mode names: TCI's spec lists "DIGL, DIGU" among its
+#: modulations (ExpertSDR, Thetis, SunSDR and other TCI servers), and
+#: SmartSDR has DIGU / DIGL slice modes (``radio.flex``).  Neither has a
+#: serial protocol name, so like rigctld they get their own keys.  Added
+#: for #68: before that, a TCI or Flex band-plan tune always sent plain
+#: USB, whatever the SSTV-mode policy said.
+TCI_PROTOCOL = "tci"
+FLEX_PROTOCOL = "flex"
+
 #: Per-protocol CAT mode strings for the "data" tune policy, keyed by the
 #: ``rig_serial_protocol`` name (see ``serial_rig.SERIAL_RIG_PROTOCOLS``),
 #: or ``RIGCTLD_PROTOCOL`` for the Hamlib daemon, and then by sideband
@@ -235,6 +251,8 @@ RIGCTLD_PROTOCOL = "rigctld"
 DATA_MODE_BY_PROTOCOL: dict[str, dict[str, str]] = {
     "Yaesu CAT": {"USB": "DATA-U", "LSB": "DATA-L"},
     RIGCTLD_PROTOCOL: {"USB": "PKTUSB", "LSB": "PKTLSB"},
+    TCI_PROTOCOL: {"USB": "DIGU", "LSB": "DIGL"},
+    FLEX_PROTOCOL: {"USB": "DIGU", "LSB": "DIGL"},
 }
 
 
@@ -281,8 +299,10 @@ def resolve_tune_mode(rig_mode: str, protocol: str, policy: str) -> str:
 __all__ = [
     "BandEntry",
     "DATA_MODE_BY_PROTOCOL",
+    "FLEX_PROTOCOL",
     "RIGCTLD_PROTOCOL",
     "SSTV_BAND_PLAN",
+    "TCI_PROTOCOL",
     "mode_family",
     "primary_entry",
     "resolve_tune_mode",
