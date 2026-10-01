@@ -199,6 +199,22 @@ if sys.platform.startswith("linux"):
             "PortAudio' step in .github/workflows/build.yml), then rebuild."
         )
 
+# ── Linux: Qt's X11 platform plugin must be in the bundle ──
+# Without libqxcb the app can't open a window under X11 (most desktops, and
+# the AppImage catalog's test).  PyInstaller's PySide6 hook finds the
+# plugins by importing Qt at build time.  If that import fails on the build
+# machine (a missing libglib, say), it logs a warning and bundles no
+# plugins at all.  That happened once, in the Ubuntu 20.04 ARM64 container.
+# Fail here instead of shipping an app that can't show a window.
+if sys.platform.startswith("linux") and not any(
+    os.path.basename(entry[0]) == "libqxcb.so" for entry in a.binaries + a.datas
+):
+    raise SystemExit(
+        "open_sstv.spec: Qt's X11 platform plugin (libqxcb.so) is not in the "
+        "Linux bundle.  PyInstaller's PySide6 hook probably couldn't import Qt "
+        "on this machine; look for 'failed to obtain Qt library info' above."
+    )
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
