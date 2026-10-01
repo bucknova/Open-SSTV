@@ -115,7 +115,7 @@ UPX_OK = sys.platform != "darwin"
 #     nothing useful in onedir mode (the launcher binary isn't where
 #     macOS looks for an app icon), so we set it on the bundle below.
 #   * Linux  — PyInstaller ignores ``icon=``; the .desktop file in the
-#     AppImage step references ``assets/icon.png`` for shell integration.
+#     AppImage step installs ``assets/icon.png`` (512x512) for shell integration.
 # Skipping the icon (None) on EXE() for macOS / Linux is the safe
 # default — passing a .ico to a non-Windows EXE() either no-ops or warns.
 if sys.platform == "win32":
@@ -169,26 +169,20 @@ a = Analysis(
 # can't find one.  That warning went by unread on every Linux release
 # through v0.6.10, so a missing PortAudio now fails the build instead.
 #
-# Libraries on the AppImage project's excludelist are left out on purpose;
-# the host's copies are used instead.  The ones that matter to us:
-#   * libasound, libjack: a bundled libasound can't find the host's ALSA
-#     plugins or config, so PipeWire and PulseAudio users get no sound
-#     cards, and libjack has to match the ABI of the host's JACK server.
-#   * libxcb, libX11, libX11-xcb, libxcb-dri2/3, libEGL, libGL: the host's
-#     GPU driver loads its own copies.  An older bundled libxcb or libX11
-#     then breaks it with "undefined symbol" errors on newer distros.
-#   * libfontconfig, libfreetype, libwayland-client: must match the host's
-#     configuration and compositor.
-# The Qt X11 *extension* libraries (libxkbcommon-x11, libxcb-cursor, ...) are
-# NOT on the list and do get bundled; see "Install Qt X11 libraries" in
-# build.yml.  Keep this list in step with that workflow's smoke test.
+# Libraries on the AppImage project's excludelist are left out on purpose,
+# so the host's copies are used: a bundled libasound can't see PipeWire, and
+# a bundled libstdc++ or libxcb breaks the host's GPU driver, among others.
+# The list lives in packaging/linux/host-libs.txt, with the reason for each
+# entry.  The Linux smoke test in build.yml reads the same file, so the
+# spec and the test can't disagree about it.
 if sys.platform.startswith("linux"):
-    _HOST_ONLY_LIBS = (
-        "libasound.so", "libjack.so",
-        "libxcb.so", "libX11.so", "libX11-xcb.so",
-        "libxcb-dri2.so", "libxcb-dri3.so", "libEGL.so", "libGL.so",
-        "libfontconfig.so", "libfreetype.so", "libwayland-client.so",
+    _HOST_ONLY_LIBS = tuple(
+        line.strip()
+        for line in Path("packaging/linux/host-libs.txt").read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
     )
+    if not _HOST_ONLY_LIBS:
+        raise SystemExit("open_sstv.spec: packaging/linux/host-libs.txt is empty")
 
     a.binaries = [
         entry for entry in a.binaries
@@ -204,6 +198,22 @@ if sys.platform.startswith("linux"):
             "PortAudio.  Build and install PortAudio first (see the 'Build "
             "PortAudio' step in .github/workflows/build.yml), then rebuild."
         )
+
+# ── Linux: Qt's X11 platform plugin must be in the bundle ──
+# Without libqxcb the app can't open a window under X11 (most desktops, and
+# the AppImage catalog's test).  PyInstaller's PySide6 hook finds the
+# plugins by importing Qt at build time.  If that import fails on the build
+# machine (a missing libglib, say), it logs a warning and bundles no
+# plugins at all.  That happened once, in the Ubuntu 20.04 ARM64 container.
+# Fail here instead of shipping an app that can't show a window.
+if sys.platform.startswith("linux") and not any(
+    os.path.basename(entry[0]) == "libqxcb.so" for entry in a.binaries + a.datas
+):
+    raise SystemExit(
+        "open_sstv.spec: Qt's X11 platform plugin (libqxcb.so) is not in the "
+        "Linux bundle.  PyInstaller's PySide6 hook probably couldn't import Qt "
+        "on this machine; look for 'failed to obtain Qt library info' above."
+    )
 
 pyz = PYZ(a.pure)
 

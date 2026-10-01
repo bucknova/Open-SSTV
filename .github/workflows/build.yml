@@ -52,6 +52,12 @@ env:
   # Bump deliberately and re-capture the sum when you do.
   PORTAUDIO_TARBALL: "pa_stable_v190700_20210406.tgz"
   PORTAUDIO_SHA256: "47efbf42c77c19a05d22e627d42873e991ec0c1357219c0d74ce6a2948cb2def"
+  # CPython for the Linux ARM64 build, which runs in an Ubuntu 20.04 container
+  # (glibc 2.31).  20.04 has no Python 3.11, and PyInstaller needs one built
+  # as a shared library, so it's compiled from the pinned source.  The sha256
+  # matches python.org's published value.
+  CPYTHON_VERSION: "3.11.16"
+  CPYTHON_SHA256: "91bcdebfdde239a003ae93738a7fce0f9230fee5c4bc2b86f6e6e8c6f98aabe8"
   # Libraries Qt's X11 plugin needs that the Linux bundle must carry.  The
   # build installs them so PyInstaller collects them; the smoke test removes
   # them again so the bundle has to supply them.  One list, used for both.
@@ -89,6 +95,10 @@ jobs:
     needs: test
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
+    # Only Linux ARM64 sets one; every other leg runs on the host as before.
+    container: ${{ matrix.container }}
+    env:
+      DEBIAN_FRONTEND: noninteractive
     strategy:
       fail-fast: false   # let other platforms finish even if one fails
       matrix:
@@ -105,6 +115,13 @@ jobs:
 
           - name: Linux ARM64
             runner: ubuntu-22.04-arm
+            # Built on Ubuntu 20.04 so it runs on glibc 2.31+: Raspberry Pi
+            # OS Bullseye, Ubuntu 20.04, Debian 11.  No Qt cost, because
+            # PySide6's newer ARM64 wheels need glibc 2.39, so pip was already
+            # picking 6.8.0.2 on 22.04.  The smoke test enforces glibc_max.
+            # x86_64 stays on 22.04: lowering it would mean Qt 6.11 -> 6.9.
+            container: ubuntu:20.04
+            glibc_max: "2.31"
             artifact: open-sstv-linux-arm64
             appimage_arch: aarch64
 
@@ -113,16 +130,67 @@ jobs:
             artifact: open-sstv-macos-arm64
 
     steps:
+      # ── 0. Container prerequisites (Linux ARM64 only) ──────────────────────
+      - name: Prepare Ubuntu 20.04 container
+        if: matrix.container
+        run: |
+          apt-get update -q
+          apt-get install -y -q sudo git curl wget ca-certificates \
+            build-essential zip unzip file binutils procps xz-utils zstd \
+            libssl-dev zlib1g-dev libbz2-dev libreadline-dev libsqlite3-dev \
+            libffi-dev liblzma-dev uuid-dev libgdbm-dev libncurses-dev \
+            libglib2.0-0 libfontconfig1 libfreetype6 libdbus-1-3 \
+            libegl1 libgl1 libx11-6 libx11-xcb1 libxcb1
+          # The last line: libraries Qt needs at build time.  PyInstaller's
+          # PySide6 hook imports Qt to find its plugins.  In a bare container
+          # that import failed on libglib, and no plugins were bundled at all,
+          # including the X11 one.  The host runners have these installed.
+
       # ── 1. Source ──────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
       # ── 2. Python ──────────────────────────────────────────────────────────
       - name: Set up Python 3.11
+        if: ${{ !matrix.container }}
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
+
+      # In the container, setup-python has no Ubuntu 20.04 ARM64 builds, so
+      # CPython is compiled (shared, as PyInstaller needs) and cached.
+      - name: Cache CPython (container)
+        if: matrix.container
+        id: cpython-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/python3.11
+          key: cpython-${{ env.CPYTHON_VERSION }}-${{ matrix.container }}-${{ runner.arch }}
+
+      - name: Build CPython (container)
+        if: matrix.container && steps.cpython-cache.outputs.cache-hit != 'true'
+        # Containers default to sh; these steps need bash (pipefail etc.).
+        shell: bash
+        run: |
+          set -euo pipefail
+          T="Python-${CPYTHON_VERSION}.tar.xz"
+          wget -q "https://www.python.org/ftp/python/${CPYTHON_VERSION}/${T}"
+          ACTUAL=$(sha256sum "${T}" | awk '{print $1}')
+          [ "${ACTUAL}" = "${CPYTHON_SHA256}" ] \
+            || { echo "CPython sha256 mismatch: ${ACTUAL}"; exit 1; }
+          tar xJf "${T}" && cd "Python-${CPYTHON_VERSION}"
+          ./configure --prefix=/opt/python3.11 --enable-shared \
+            LDFLAGS="-Wl,-rpath,/opt/python3.11/lib" >/dev/null
+          make -j"$(nproc)" >/dev/null
+          make install >/dev/null
+          ln -sf python3.11 /opt/python3.11/bin/python
+
+      - name: Use CPython (container)
+        if: matrix.container
+        run: |
+          echo /opt/python3.11/bin >> "$GITHUB_PATH"
+          /opt/python3.11/bin/python -c "import sys, sysconfig, ssl, sqlite3; print(sys.version); print('shared:', sysconfig.get_config_var('Py_ENABLE_SHARED'), ssl.OPENSSL_VERSION)"
 
       # ── 3. Dependencies ────────────────────────────────────────────────────
       - name: Install project + PyInstaller
@@ -150,6 +218,8 @@ jobs:
       # doesn't end up in the bundle.
       - name: Build PortAudio (Linux only)
         if: runner.os == 'Linux'
+        # Containers default to sh; these steps need bash (pipefail etc.).
+        shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update -q
@@ -310,8 +380,12 @@ jobs:
       # ── 6c. Package: Linux AppImage ────────────────────────────────────────
       - name: Build AppImage (Linux only)
         if: runner.os == 'Linux'
+        # Containers default to sh; these steps need bash (pipefail etc.).
+        shell: bash
         env:
           ARCH: ${{ matrix.appimage_arch }}
+          # appimagetool is itself an AppImage; containers have no FUSE.
+          APPIMAGE_EXTRACT_AND_RUN: 1
         run: |
           # Build AppDir from the PyInstaller onedir output
           mkdir -p AppDir
@@ -326,31 +400,19 @@ jobs:
           APPRUN
           chmod +x AppDir/AppRun
 
-          # .desktop file (required by appimagetool)
-          cat > AppDir/open-sstv.desktop << 'DESKTOP'
-          [Desktop Entry]
-          Name=Open-SSTV
-          Exec=open-sstv
-          Icon=open-sstv
-          Type=Application
-          Categories=HamRadio;Network;
-          Comment=Open-source SSTV transceiver for amateur radio
-          DESKTOP
-
-          # Placeholder icon — appimagetool requires one.
-          # Replace assets/icon.png in the repo to use a real icon.
-          if [ -f assets/icon.png ]; then
-            cp assets/icon.png AppDir/open-sstv.png
-          else
-            python3 -c "
-          from PIL import Image, ImageDraw, ImageFont
-          img = Image.new('RGB', (256, 256), '#1a3a5c')
-          draw = ImageDraw.Draw(img)
-          draw.ellipse([28, 28, 228, 228], outline='#4fc3f7', width=8)
-          draw.text((88, 100), 'SSTV', fill='#4fc3f7')
-          img.save('AppDir/open-sstv.png')
-          "
-          fi
+          # Desktop entry, AppStream metainfo and icon, all from packaging/linux
+          # and assets/.  They were inline heredocs here before.  The rDNS ID
+          # is the AppStream convention, and it ties the three together.  The
+          # metainfo's default screenshot is what the AppImage catalog shows
+          # for us, in place of the screenshot its bot takes.
+          ID=io.github.bucknova.OpenSSTV
+          mkdir -p AppDir/usr/share/applications AppDir/usr/share/metainfo \
+                   AppDir/usr/share/icons/hicolor/512x512/apps
+          cp "packaging/linux/${ID}.desktop"      AppDir/
+          cp "packaging/linux/${ID}.desktop"      AppDir/usr/share/applications/
+          cp "packaging/linux/${ID}.metainfo.xml" AppDir/usr/share/metainfo/
+          cp assets/icon.png "AppDir/${ID}.png"
+          cp assets/icon.png "AppDir/usr/share/icons/hicolor/512x512/apps/${ID}.png"
 
           # Download a *pinned* appimagetool release and verify its
           # sha256 before running it.  See env block at the top of this
@@ -371,9 +433,17 @@ jobs:
           fi
           chmod +x "${TOOL}"
 
-          # Build the AppImage
-          ARCH="${ARCH}" ./"${TOOL}" AppDir "Open-SSTV-${ARCH}.AppImage"
-          echo "AppImage: $(du -sh Open-SSTV-${ARCH}.AppImage | cut -f1)"
+          # Build the AppImage with update information embedded, so
+          # AppImageUpdate, Gear Lever and similar tools can update it in
+          # place.  The AppImage catalog asked for this.  appimagetool writes
+          # the matching .zsync next to the AppImage; the release job
+          # publishes both.  "latest" means the tool always follows the
+          # newest release.
+          UPDATE_INFO="gh-releases-zsync|bucknova|Open-SSTV|latest|Open-SSTV-${ARCH}.AppImage.zsync"
+          ARCH="${ARCH}" ./"${TOOL}" -u "${UPDATE_INFO}" AppDir "Open-SSTV-${ARCH}.AppImage"
+          [ -s "Open-SSTV-${ARCH}.AppImage.zsync" ] \
+            || { echo "ERROR: appimagetool wrote no .zsync"; ls -la Open-SSTV-*; exit 1; }
+          echo "AppImage: $(du -sh Open-SSTV-${ARCH}.AppImage | cut -f1), zsync: $(du -sh Open-SSTV-${ARCH}.AppImage.zsync | cut -f1)"
 
       # ── 6d. Smoke test on a desktop-like host (Linux only) ─────────────────
       # The AppImage catalog's test: start the app under a real X server on a
@@ -387,12 +457,15 @@ jobs:
       # with the xcb plugin, as the catalog does.
       - name: Smoke test on a desktop-like host (Linux only)
         if: runner.os == 'Linux'
+        # Containers default to sh; these steps need bash (pipefail etc.).
+        shell: bash
         # Backstop.  An earlier version of this step sat for two hours:
         # Open-SSTV ignores SIGTERM while its event loop is idle.  The app is
         # now stopped with SIGKILL; this cap limits any future hang.
         timeout-minutes: 10
         env:
           ARCH: ${{ matrix.appimage_arch }}
+          GLIBC_MAX: ${{ matrix.glibc_max }}
         run: |
           set -euo pipefail
           B=dist/open-sstv
@@ -408,16 +481,55 @@ jobs:
             echo "ERROR: bundled PortAudio links libjack (AppImage excludelist)"; exit 1
           fi
 
-          # 2. Nothing on the AppImage excludelist that we care about is bundled.
-          #    Keep in step with _HOST_ONLY_LIBS in open_sstv.spec.
-          HOSTONLY=$(find "$B" \( -name 'libasound.so*' -o -name 'libjack.so*' \
-              -o -name 'libxcb.so*' -o -name 'libX11.so*' -o -name 'libX11-xcb.so*' \
-              -o -name 'libxcb-dri2.so*' -o -name 'libxcb-dri3.so*' \
-              -o -name 'libEGL.so*' -o -name 'libGL.so*' \
-              -o -name 'libfontconfig.so*' -o -name 'libfreetype.so*' \
-              -o -name 'libwayland-client.so*' \) -print)
+          # 2. Nothing from packaging/linux/host-libs.txt is bundled.  The spec
+          #    strips them from the same file; this checks that it worked.
+          HOSTONLY=""
+          while read -r prefix; do
+            case "${prefix}" in ''|\#*) continue ;; esac
+            hit=$(find "$B" -name "${prefix}*" -print)
+            [ -z "${hit}" ] || HOSTONLY="${HOSTONLY}${hit}"$'\n'
+          done < packaging/linux/host-libs.txt
           if [ -n "${HOSTONLY}" ]; then
             echo "ERROR: host-only libraries were bundled:"; echo "${HOSTONLY}"; exit 1
+          fi
+          echo "no host-only libraries bundled: OK"
+
+          # 2b. What the AppImage catalog reads from us.
+          APP="./Open-SSTV-${ARCH}.AppImage"
+          WANT="gh-releases-zsync|bucknova|Open-SSTV|latest|Open-SSTV-${ARCH}.AppImage.zsync"
+          GOT=$("${APP}" --appimage-updateinformation)
+          [ "${GOT}" = "${WANT}" ] \
+            || { echo "ERROR: update information is '${GOT}', expected '${WANT}'"; exit 1; }
+          [ -s "${APP}.zsync" ] || { echo "ERROR: ${APP}.zsync missing"; exit 1; }
+          echo "update information: ${GOT}"
+          rm -rf squashfs-root && "${APP}" --appimage-extract >/dev/null
+          META=squashfs-root/usr/share/metainfo/io.github.bucknova.OpenSSTV.metainfo.xml
+          [ -f "${META}" ] || { echo "ERROR: metainfo not in the AppImage"; exit 1; }
+          SHOT=$(grep -oE 'https://[^<]+main-window\.png' "${META}")
+          curl -fsIL "${SHOT}" >/dev/null || { echo "ERROR: screenshot URL unreachable: ${SHOT}"; exit 1; }
+          echo "screenshot: ${SHOT} (reachable)"
+          ICON=$(file -bL squashfs-root/.DirIcon)
+          echo "${ICON}" | grep -q '512 x 512' || { echo "ERROR: icon is not 512x512: ${ICON}"; exit 1; }
+          echo "icon: ${ICON}"
+          # Validate the metainfo.  (The catalog's own appstreamcli AppImage is an
+          # old overlay-style build that won't run outside their environment,
+          # so this uses the distribution's.)
+          # The metainfo is identical on both architectures.  Validate on the
+          # 22.04 host; 20.04's appstream 0.12 predates the <developer> tag.
+          if [ -z "${GLIBC_MAX}" ]; then
+            sudo apt-get install -y -q appstream >/dev/null
+            appstreamcli validate --no-net --explain "${META}"
+          fi
+          # The glibc floor, measured the way the catalog measures it: the
+          # newest GLIBC_ symbol version any ELF file in the payload needs.
+          FLOOR=$(find squashfs-root -type f -print0 | while IFS= read -r -d '' f; do
+              [ "$(od -An -tx1 -N4 "$f" 2>/dev/null)" = " 7f 45 4c 46" ] || continue
+              objdump -T "$f" 2>/dev/null | grep '\*UND\*' | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' | sed 's/GLIBC_//'
+            done | sort -uV | tail -n1)
+          echo "glibc required: ${FLOOR}"
+          if [ -n "${GLIBC_MAX}" ] \
+             && [ "$(printf '%s\n%s\n' "${FLOOR}" "${GLIBC_MAX}" | sort -V | tail -n1)" != "${GLIBC_MAX}" ]; then
+            echo "ERROR: needs glibc ${FLOOR}, above this build's ceiling of ${GLIBC_MAX}"; exit 1
           fi
 
           # 3. Make the runner look like a bare desktop.  Keep the X server and
@@ -501,7 +613,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}-appimage
-          path: Open-SSTV-*.AppImage
+          path: |
+            Open-SSTV-*.AppImage
+            Open-SSTV-*.AppImage.zsync
           retention-days: 30
 
       # NOTE: assets are NOT attached to the GitHub Release here.  See the
@@ -535,8 +649,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${GITHUB_REF_NAME}"
-          # One zip per platform + the two Linux AppImages.
-          mapfile -t assets < <(find artifacts -type f \( -name '*.zip' -o -name '*.AppImage' \) | sort)
+          # One zip per platform, the two Linux AppImages, and their .zsync
+          # files (AppImage update information points at those).
+          mapfile -t assets < <(find artifacts -type f \( -name '*.zip' -o -name '*.AppImage' -o -name '*.AppImage.zsync' \) | sort)
           if [ "${#assets[@]}" -eq 0 ]; then
             echo "::error::no build artifacts found to attach"; exit 1
           fi
