@@ -410,7 +410,11 @@ jobs:
                    AppDir/usr/share/icons/hicolor/512x512/apps
           cp "packaging/linux/${ID}.desktop"      AppDir/
           cp "packaging/linux/${ID}.desktop"      AppDir/usr/share/applications/
-          cp "packaging/linux/${ID}.metainfo.xml" AppDir/usr/share/metainfo/
+          # Named .appdata.xml, the older AppStream name that AppStream still
+          # accepts: the AppImage catalog reads the summary and description,
+          # and its appdir-lint check looks, only for *appdata.xml.  It reads
+          # the screenshot from either name.
+          cp "packaging/linux/${ID}.appdata.xml" AppDir/usr/share/metainfo/
           cp assets/icon.png "AppDir/${ID}.png"
           cp assets/icon.png "AppDir/usr/share/icons/hicolor/512x512/apps/${ID}.png"
 
@@ -503,7 +507,7 @@ jobs:
           [ -s "${APP}.zsync" ] || { echo "ERROR: ${APP}.zsync missing"; exit 1; }
           echo "update information: ${GOT}"
           rm -rf squashfs-root && "${APP}" --appimage-extract >/dev/null
-          META=squashfs-root/usr/share/metainfo/io.github.bucknova.OpenSSTV.metainfo.xml
+          META=squashfs-root/usr/share/metainfo/io.github.bucknova.OpenSSTV.appdata.xml
           [ -f "${META}" ] || { echo "ERROR: metainfo not in the AppImage"; exit 1; }
           SHOT=$(grep -oE 'https://[^<]+main-window\.png' "${META}")
           curl -fsIL "${SHOT}" >/dev/null || { echo "ERROR: screenshot URL unreachable: ${SHOT}"; exit 1; }

@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   AppStream metadata, shipped in the Linux AppImage at
-  usr/share/metainfo/.  Software centres read it, and the AppImage catalog
+  usr/share/metainfo/.  The filename uses the older .appdata.xml suffix on
+  purpose: the AppImage catalog reads the summary and description, and runs
+  its lint, only for *appdata.xml.  AppStream still accepts the name.  Software centres read it, and the AppImage catalog
   (appimage.github.io) uses it for its listing: the summary becomes the
   description, and the default screenshot below becomes the page's
   screenshot, replacing the one the catalog's bot takes itself.  The
