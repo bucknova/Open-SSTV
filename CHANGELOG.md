@@ -9,6 +9,22 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.6.13] — 2026-10-01
+
+Two fixes from user reports, plus the polish the AppImage catalog asked for
+when it listed us.
+
+- **TCI and FlexRadio users:** Band Plan tuning no longer switches your SDR
+  out of DIGU / DIGL, and *SSTV mode → Data/Pkt* now selects them. Reported
+  by N8SDR in [#68](https://github.com/bucknova/Open-SSTV/issues/68).
+- **Everyone:** the "new version available" notice no longer disappears
+  after the first launch ([#69](https://github.com/bucknova/Open-SSTV/issues/69)).
+- **Linux:** the AppImage can now update itself. The ARM64 build runs on
+  Raspberry Pi OS Bullseye, Ubuntu 20.04 and Debian 11. The icon is
+  properly square.
+
 ### Fixed
 
 - **Band Plan tuning no longer knocks TCI and FlexRadio SDRs out of DIGU /
