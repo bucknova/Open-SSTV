@@ -9,6 +9,16 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- The AppImage's AppStream file is now named `….appdata.xml` instead of
+  `….metainfo.xml`. The AppImage catalog reads our summary and
+  description, and runs its `appdir-lint` check, only for the older
+  `.appdata.xml` name, so with the new name it shows our description on the
+  listing page and its "No appdata file present" warning goes away.
+  AppStream still accepts the name. The screenshot was already picked up
+  under either name.
+
 ---
 
 ## [0.6.13] — 2026-10-01
