@@ -261,15 +261,21 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
   disabled when no rig is connected or TX is in progress. A rejected
   frequency/mode change (VFO lock, band-edge, an unsupported CAT command)
   is now surfaced as a status-bar message instead of failing silently.
-- **SSTV mode policy (Direct Serial only)** -- Settings → Radio → Direct
-  Serial → "SSTV mode" controls what the Band Plan button sends for the
-  mode half of a tune, mirroring WSJT-X's rig Mode setting: **Voice**
-  (default; sends the band-plan entry's plain USB/LSB/FM, unchanged from
-  before), **Data/Pkt** (asks for the protocol's data-mode variant instead
-  -- e.g. Yaesu `DATA-U`/`DATA-L` -- so SSTV doesn't land on plain USB with
-  the speech processor still engaged; currently mapped for Yaesu CAT only,
-  other protocols fall back to Voice), or **Don't change mode** (frequency
-  only, for operators who already have their data mode set up manually).
+- **SSTV mode policy** -- Settings → Radio → "SSTV mode", in the Direct
+  Serial, rigctld, TCI and FlexRadio sections, controls what the Band Plan
+  button sends for the mode half of a tune. It mirrors WSJT-X's rig Mode
+  setting:
+  - **Voice** (default) sends the band-plan entry's plain USB/LSB/FM. If the
+    radio is already in a data mode on the same sideband (`USB-D`,
+    `DATA-U`, `PKTUSB`, `DIGU`, …), it's left there and only the frequency
+    changes.
+  - **Data/Pkt** asks for the backend's data mode, so SSTV doesn't land on
+    plain USB with the speech processor still engaged: Yaesu CAT
+    `DATA-U`/`DATA-L`, rigctld `PKTUSB`/`PKTLSB`, TCI and FlexRadio
+    `DIGU`/`DIGL`. Icom and Kenwood/Elecraft over Direct Serial fall back to
+    Voice, because their data mode isn't a single CAT command.
+  - **Don't change mode** changes the frequency only, for operators who set
+    their data mode up manually.
 - **Configurable baud rate** -- 4800, 9600, 19200, 38400, 57600, or 115200 baud.
 - **Rig status bar** -- frequency, mode, and S-meter polled at 1 Hz when connected.
   Graceful disconnect: non-modal status bar message, auto-reconnect on next poll.
@@ -470,6 +476,17 @@ Two formats are published per architecture:
 
 - **`.AppImage`** — single file. `chmod +x Open-SSTV-*.AppImage && ./Open-SSTV-*.AppImage`.
 - **`.zip`** — unpacked onedir bundle. `unzip open-sstv-linux-*.zip && ./open-sstv/open-sstv`.
+
+**Requirements:** glibc 2.35 or newer on x86_64 (Ubuntu 22.04, Debian 12,
+Fedora 36 or later), and glibc 2.31 or newer on ARM64 (Raspberry Pi OS
+Bullseye, Ubuntu 20.04, Debian 11 or later). The ARM64 build supports
+older systems because it's built on Ubuntu 20.04. Doing the same on
+x86_64 would mean shipping an older Qt.
+
+**Updates:** from v0.6.13 the AppImage carries update information, so
+[AppImageUpdate](https://github.com/AppImageCommunity/AppImageUpdate),
+Gear Lever and similar tools can update it in place, downloading only the
+parts that changed.
 
 Both include PortAudio, the audio library. They use your system's ALSA
 library (`libasound2`) for the audio devices themselves, which is what lets

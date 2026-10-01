@@ -485,7 +485,11 @@ do not need a virtual audio cable or a second sound device.
 2. **Settings → Radio → Mode: TCI (ExpertSDR2 / SunSDR)**.
 3. Enter the **TCI host** (`127.0.0.1` if the SDR software runs on this
    machine) and **port**.
-4. Click OK, then **Connect Rig**.
+4. Choose the **SSTV mode** for Band Plan tuning. **Voice** keeps the SDR
+   in DIGU / DIGL if it's already there and only changes the frequency.
+   **Data/Pkt** switches it into DIGU / DIGL. **Don't change mode** leaves
+   the mode alone entirely.
+5. Click OK, then **Connect Rig**.
 
 RX audio arrives over the same connection and replaces the sound-card
 input automatically, so the Audio tab's input device is ignored while TCI
@@ -503,7 +507,10 @@ SmartSDR TCP API — no `rigctld` and no virtual serial port in between.
 4. Choose the **Slice** to follow: `0` is slice A, `1` is slice B, and so
    on. The slice must be **active in SmartSDR** — if it isn't, the
    connection test says so rather than silently reading 0.000 MHz.
-5. Click **Test FlexRadio Connection** to confirm, then OK and
+5. Choose the **SSTV mode** for Band Plan tuning, as for TCI above.
+   **Data/Pkt** puts the slice in DIGU / DIGL, and **Voice** keeps it there
+   if it's already in one.
+6. Click **Test FlexRadio Connection** to confirm, then OK and
    **Connect Rig**.
 
 Unlike TCI this is **CAT only** — audio still comes from your sound
