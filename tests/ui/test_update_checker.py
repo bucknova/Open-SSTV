@@ -254,3 +254,100 @@ class TestNonUtf8Response:
         ):
             worker.check()  # must not raise
         assert done == [True]
+
+
+# === #69: a skipped check must still show a known update ===
+#
+# The 6-hour backoff (M-8) used to cache only a timestamp.  The "available"
+# link appeared on one launch, and then every launch inside the next 6 hours
+# skipped the network check and showed nothing.  The cache now also records
+# the latest tag and URL the last check saw.
+
+import time as _time  # noqa: E402
+
+import open_sstv.ui.update_checker as _uc  # noqa: E402
+
+
+@pytest.fixture
+def real_cache_reader(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Undo the file-wide ``_read_last_check_ts → 0.0`` bypass, so the
+    cache file written by the test is actually honoured."""
+    monkeypatch.setattr(_uc, "_read_last_check_ts", lambda: _uc._read_cache()[0])
+
+
+def _no_network():
+    return patch(
+        "open_sstv.ui.update_checker.urllib.request.urlopen",
+        side_effect=AssertionError("a fresh cache must not hit the network"),
+    )
+
+
+def test_fresh_cache_still_reports_a_known_update(qtbot, real_cache_reader) -> None:
+    url = "https://github.com/bucknova/Open-SSTV/releases/tag/v9.9.9"
+    _uc._write_last_check_ts(_time.time(), "v9.9.9", url)
+    worker = UpdateCheckerWorker()
+    received: list[tuple[str, str]] = []
+    worker.update_available.connect(lambda v, u: received.append((v, u)))
+
+    with _no_network():
+        worker.check()
+
+    assert received == [("9.9.9", url)]
+
+
+def test_fresh_cache_stays_quiet_once_upgraded(qtbot, real_cache_reader) -> None:
+    from open_sstv import __version__
+
+    _uc._write_last_check_ts(
+        _time.time(), f"v{__version__}",
+        f"https://github.com/bucknova/Open-SSTV/releases/tag/v{__version__}",
+    )
+    worker = UpdateCheckerWorker()
+    received: list[tuple[str, str]] = []
+    worker.update_available.connect(lambda v, u: received.append((v, u)))
+
+    with _no_network():
+        worker.check()
+
+    assert received == []
+
+
+def test_successful_check_records_what_it_found(qtbot) -> None:
+    url = "https://github.com/bucknova/Open-SSTV/releases/tag/v9.9.9"
+    with patch("open_sstv.ui.update_checker.urllib.request.urlopen",
+               return_value=_mock_response("v9.9.9", url)):
+        UpdateCheckerWorker().check()
+
+    ts, tag, cached_url = _uc._read_cache()
+    assert ts > 0
+    assert (tag, cached_url) == ("v9.9.9", url)
+
+
+def test_old_one_line_cache_is_read_without_error(qtbot, real_cache_reader) -> None:
+    """Caches written before #69 hold only a timestamp: still a valid
+    backoff, with nothing known to report."""
+    _uc._cache_path().write_text(f"{_time.time():.3f}\n")
+    worker = UpdateCheckerWorker()
+    received: list[tuple[str, str]] = []
+    worker.update_available.connect(lambda v, u: received.append((v, u)))
+
+    with _no_network():
+        worker.check()
+
+    assert received == []
+
+
+def test_cached_link_cannot_point_off_site(qtbot, real_cache_reader) -> None:
+    """The cached URL becomes a clickable link.  A tampered cache file must
+    not be able to send it anywhere but our own releases page."""
+    _uc._write_last_check_ts(_time.time(), "v9.9.9", "https://example.com/evil")
+    worker = UpdateCheckerWorker()
+    received: list[tuple[str, str]] = []
+    worker.update_available.connect(lambda v, u: received.append((v, u)))
+
+    with _no_network():
+        worker.check()
+
+    assert received == [
+        ("9.9.9", "https://github.com/bucknova/Open-SSTV/releases/latest")
+    ]

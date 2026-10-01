@@ -96,20 +96,49 @@ def _cache_path() -> Path:
     return Path(platformdirs.user_cache_dir("open_sstv")) / _CACHE_FILENAME
 
 
+#: Only release pages of this repository are reused from the cache.  The
+#: URL becomes a clickable link in the status bar, so a corrupted or
+#: hand-edited cache file must not be able to point it anywhere else.
+_RELEASES_PREFIX = "https://github.com/bucknova/Open-SSTV/releases/"
+
+
+def _read_cache() -> tuple[float, str, str]:
+    """``(timestamp, latest_tag, release_url)`` from the cache file.
+
+    Line 1 is the last successful check's Unix timestamp.  Lines 2 and 3
+    are the latest release's tag and page URL as seen at that check.  An
+    old one-line file, or any unreadable one, gives empty strings or
+    ``(0.0, "", "")``.
+    """
+    try:
+        lines = _cache_path().read_text().splitlines()
+        ts = float(lines[0].strip())
+    except (OSError, ValueError, IndexError):
+        return 0.0, "", ""
+    tag = lines[1].strip() if len(lines) > 1 else ""
+    url = lines[2].strip() if len(lines) > 2 else ""
+    return ts, tag, url
+
+
 def _read_last_check_ts() -> float:
     """Read the cached last-successful-check Unix timestamp, or 0.0."""
-    try:
-        return float(_cache_path().read_text().strip())
-    except (OSError, ValueError):
-        return 0.0
+    return _read_cache()[0]
 
 
-def _write_last_check_ts(ts: float) -> None:
-    """Persist the last-successful-check timestamp; swallow I/O errors."""
+def _read_cached_release() -> tuple[str, str]:
+    """The latest release ``(tag, url)`` seen at the last successful check."""
+    _, tag, url = _read_cache()
+    return tag, url
+
+
+def _write_last_check_ts(ts: float, tag: str = "", url: str = "") -> None:
+    """Persist the check timestamp and what it found; swallow I/O errors."""
+    tag = (tag.splitlines() or [""])[0].strip()
+    url = (url.splitlines() or [""])[0].strip()
     try:
         path = _cache_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f"{ts:.3f}\n")
+        path.write_text(f"{ts:.3f}\n{tag}\n{url}\n")
     except OSError as exc:
         # A locked-down cache dir means we lose the backoff next launch,
         # not the end of the world.  Log at debug.
@@ -144,6 +173,16 @@ class UpdateCheckerWorker(QObject):
                 "(min interval %d s)",
                 now - last, _MIN_CHECK_INTERVAL_S,
             )
+            # #69: skipping the network must not skip the notice.  The cache
+            # used to hold only a timestamp, so the "available" link showed
+            # on one launch and then vanished for up to 6 hours: later
+            # launches skipped the check and had nothing to show.  Re-use
+            # what the last check found.
+            tag, url = _read_cached_release()
+            if tag and _parse_version(tag) > _parse_version(__version__):
+                if not url.startswith(_RELEASES_PREFIX):
+                    url = _RELEASES_PREFIX + "latest"
+                self.update_available.emit(tag.lstrip("v"), url)
             self.check_complete.emit()
             return
         try:
@@ -172,7 +211,7 @@ class UpdateCheckerWorker(QObject):
             # means we wouldn't retry for 6 hours.  That's intentional:
             # if GitHub returned 403 in a structured way, hammering them
             # again 30 seconds later won't help anyone.
-            _write_last_check_ts(now)
+            _write_last_check_ts(now, tag, url)
             if tag and _parse_version(tag) > _parse_version(__version__):
                 self.update_available.emit(tag.lstrip("v"), url)
         except (

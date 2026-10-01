@@ -122,7 +122,13 @@ from open_sstv.config.store import last_corrupt_backup, load_config, save_config
 from open_sstv.config.templates import load_templates
 from open_sstv.core.modes import Mode
 from open_sstv.logbook import QSO, LogbookCoordinator, QsoLoggingError, UdpQsoLogger
-from open_sstv.radio.band_plan import RIGCTLD_PROTOCOL, mode_family, resolve_tune_mode
+from open_sstv.radio.band_plan import (
+    FLEX_PROTOCOL,
+    RIGCTLD_PROTOCOL,
+    TCI_PROTOCOL,
+    mode_family,
+    resolve_tune_mode,
+)
 from open_sstv.radio.base import ManualRig, Rig, RigConnectionMode
 from open_sstv.radio.exceptions import RigCommandError, RigError
 from open_sstv.radio.rigctld import RigctldClient, is_safe_rigctld_arg
@@ -3852,10 +3858,11 @@ class MainWindow(QMainWindow):
         literal; it's resolved through ``resolve_tune_mode`` against the
         user's "SSTV mode" policy (Settings → Radio) before being sent, so a
         "data" policy asks the rig for its data-mode variant instead of
-        forcing plain USB/LSB — Yaesu ``DATA-U``/``DATA-L`` for Direct
-        Serial, Hamlib ``PKTUSB``/``PKTLSB`` for rigctld.  Applies to the
-        Direct Serial and rigctld connection modes; the other modes send the
-        plain literal unchanged.
+        forcing plain USB/LSB: Yaesu ``DATA-U``/``DATA-L`` for Direct
+        Serial, Hamlib ``PKTUSB``/``PKTLSB`` for rigctld, ``DIGU``/``DIGL``
+        for TCI and FlexRadio.  Manual / PTT-only mode has no rig to set, so
+        it sends the plain literal.  (TCI and Flex were added for #68.
+        Before that they always got plain USB.)
 
         When the "data" policy actually produced a data-mode variant (the
         resolved string differs from the plain band-plan literal), the
@@ -3877,6 +3884,14 @@ class MainWindow(QMainWindow):
         elif self._config.rig_connection_mode == RigConnectionMode.RIGCTLD:
             mode = resolve_tune_mode(
                 mode, RIGCTLD_PROTOCOL, self._config.rig_tune_mode_policy
+            )
+        elif self._config.rig_connection_mode == RigConnectionMode.TCI:
+            mode = resolve_tune_mode(
+                mode, TCI_PROTOCOL, self._config.rig_tune_mode_policy
+            )
+        elif self._config.rig_connection_mode == RigConnectionMode.FLEX:
+            mode = resolve_tune_mode(
+                mode, FLEX_PROTOCOL, self._config.rig_tune_mode_policy
             )
         mode_is_exact = bool(mode) and mode != voice_literal
         self.statusBar().showMessage(f"Tuning to {freq_str} ({mode or 'mode unchanged'})…", 3000)

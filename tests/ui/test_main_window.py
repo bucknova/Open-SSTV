@@ -791,6 +791,38 @@ class TestRigPollWorkerTune:
         rig.set_mode.assert_called_once_with("USB", 2700)
         assert failures == []
 
+    @pytest.mark.parametrize(("current", "band"), [("DIGU", "USB"), ("DIGL", "LSB")])
+    def test_voice_tune_keeps_sdr_data_mode(self, qapp, current: str, band: str) -> None:
+        """#68, as reported by N8SDR: a TCI / Flex SDR sitting in DIGU must
+        stay in DIGU when a Voice-policy band pick asks for USB.  Only the
+        frequency changes.  Before the fix, mode_family("DIGU") was its own
+        family, so this sent set_mode("USB") and dropped the operator's
+        DIGU bandwidth profile."""
+        worker = self._make_worker()
+        rig = MagicMock()
+        rig.get_freq.return_value = 14_230_000
+        rig.get_mode.return_value = (current, 0)
+        worker.set_rig(rig)
+
+        worker.tune(14_230_000, band, 2700)
+
+        rig.set_freq.assert_called_once_with(14_230_000)
+        rig.set_mode.assert_not_called()
+
+    def test_data_tune_moves_sdr_from_usb_into_digu(self, qapp) -> None:
+        """The other half of #68: with Data/Pkt, an SDR on plain USB is moved
+        into DIGU.  The tune is flagged exact, because DIGU and USB now share
+        a family."""
+        worker = self._make_worker()
+        rig = MagicMock()
+        rig.get_freq.return_value = 14_230_000
+        rig.get_mode.return_value = ("USB", 0)
+        worker.set_rig(rig)
+
+        worker.tune(14_230_000, "DIGU", 2700, True)
+
+        rig.set_mode.assert_called_once_with("DIGU", 2700)
+
     def test_tune_skips_mode_when_family_matches(self, qapp) -> None:
         """User already on a data variant (e.g. Yaesu DATA-U) — same
         family as the target, so set_mode must not be re-sent."""
@@ -941,6 +973,31 @@ class TestOnTuneRequestedModePolicy:
         from open_sstv.radio.base import RigConnectionMode
 
         window._config.rig_connection_mode = RigConnectionMode.RIGCTLD.value
+        window._config.rig_tune_mode_policy = "none"
+        assert self._emit(window) == ("", False)
+
+    # #68: TCI and FlexRadio used to skip the policy and always send USB.
+    @pytest.mark.parametrize("conn", ["tci", "flex"])
+    def test_sdr_data_policy_resolves_to_digu_and_flags_exact(
+        self, window: MainWindow, conn: str
+    ) -> None:
+        window._config.rig_connection_mode = conn
+        window._config.rig_tune_mode_policy = "data"
+        assert self._emit(window) == ("DIGU", True)
+
+    @pytest.mark.parametrize("conn", ["tci", "flex"])
+    def test_sdr_voice_policy_passes_through_not_exact(
+        self, window: MainWindow, conn: str
+    ) -> None:
+        window._config.rig_connection_mode = conn
+        window._config.rig_tune_mode_policy = "voice"
+        assert self._emit(window) == ("USB", False)
+
+    @pytest.mark.parametrize("conn", ["tci", "flex"])
+    def test_sdr_none_policy_sends_empty_mode(
+        self, window: MainWindow, conn: str
+    ) -> None:
+        window._config.rig_connection_mode = conn
         window._config.rig_tune_mode_policy = "none"
         assert self._emit(window) == ("", False)
 
