@@ -9,6 +9,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.6.14] — 2026-10-01
+
 A stability and reliability release, from a full audit of the project
 (`docs/audit_opus_5.5_v0.6.13.md`). Every fix below was reproduced first and
 has a regression test.
