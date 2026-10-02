@@ -232,7 +232,9 @@ RIGCTLD_PROTOCOL = "rigctld"
 #: SmartSDR has DIGU / DIGL slice modes (``radio.flex``).  Neither has a
 #: serial protocol name, so like rigctld they get their own keys.  Added
 #: for #68: before that, a TCI or Flex band-plan tune always sent plain
-#: USB, whatever the SSTV-mode policy said.
+#: USB, whatever the SSTV-mode policy said.  TCI DIGU/DIGL was confirmed on
+#: real hardware by N8SDR with Lyra (Hermes Lite 2) on 2026-10-02; the
+#: Flex mapping is still from the SmartSDR spec only.
 TCI_PROTOCOL = "tci"
 FLEX_PROTOCOL = "flex"
 

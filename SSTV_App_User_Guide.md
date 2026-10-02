@@ -477,7 +477,8 @@ Select **"Direct Serial (built-in)"** to have Open-SSTV communicate directly wit
 ### 10.4 TCI (ExpertSDR / SunSDR)
 
 TCI is a WebSocket protocol spoken by ExpertSDR2 / ExpertSDR3, the SunSDR2
-family, and the AetherSDR. It is the only backend that carries **both**
+family, the AetherSDR, and [Lyra](https://github.com/N8SDR1/Lyra-SDR-cpp) (a Hermes Lite 2 transceiver). It is the
+only backend that carries **both**
 rig control **and** audio over a single connection — with TCI selected you
 do not need a virtual audio cable or a second sound device.
 
@@ -532,7 +533,7 @@ The following radios have been tested or have built-in presets in the settings d
 
 **Via Direct Serial (Yaesu)**: FT-991A, FT-891, FT-710, FTDX10, FTDX101, FT-950.
 
-**Via TCI**: Expert Electronics SunSDR2 family (PRO / DX / MB1) and the AetherSDR, through ExpertSDR2 / ExpertSDR3.
+**Via TCI**: Expert Electronics SunSDR2 family (PRO / DX / MB1) and the AetherSDR, through ExpertSDR2 / ExpertSDR3; and the Hermes Lite 2 / 2+ through [Lyra](https://github.com/N8SDR1/Lyra-SDR-cpp), with Band Plan DIGU / DIGL switching confirmed by its author, N8SDR.
 
 **Via FlexRadio direct**: the 6000 series — FLEX-6300/6400/6500/6600/6700 and the 6400M/6600M — over the SmartSDR TCP API.
 
