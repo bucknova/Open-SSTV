@@ -93,6 +93,14 @@ def normalize_flex_mode(mode: str) -> str:
     return _MODE_ALIASES.get(token, token)
 
 
+#: Reply code we hand to waiting commands when the link itself fails (closed,
+#: or lost).  Real SmartSDR error codes are unsigned 32-bit hex (0x5000...),
+#: so it can't collide.  _command raises RigConnectionError for it rather
+#: than RigCommandError, because the radio didn't reject anything; the link
+#: died under the command.
+_LINK_FAILED = -1
+
+
 class FlexRig:
     """Direct SmartSDR TCP control of a FlexRadio 6000-series radio.
 
@@ -211,7 +219,7 @@ class FlexRig:
             pending = list(self._pending.values())
             self._pending.clear()
         for entry in pending:
-            entry[1] = (-1, reason)
+            entry[1] = (_LINK_FAILED, reason)
             entry[0].set()
 
     def __enter__(self) -> FlexRig:
@@ -316,6 +324,8 @@ class FlexRig:
                 f"{self.name}: timed out waiting for reply to {command!r}"
             )
         code, message = entry[1]
+        if code == _LINK_FAILED:
+            raise RigConnectionError(f"{self.name}: {message} during {command!r}")
         if code != 0:
             raise RigCommandError(
                 f"{command!r} failed: Flex error 0x{code:X} {message}".rstrip(),
