@@ -85,7 +85,11 @@ didn't raise, and `set_ptt(False)` took 5.0 s to fail.
 
 **Fix:** the reader marks the link lost and fails in-flight commands.
 The getters raise, and commands fail immediately. The TX unkey retry's
-`close()` / `open()` clears the flag.
+`close()` / `open()` clears the flag. A command already waiting when the
+link dies now raises `RigConnectionError`. CI caught that it previously
+surfaced as `RigCommandError` ("Flex error 0x-1"), as if the radio had
+rejected it. CI also caught that the test harness needs `shutdown()`
+before `close()` to drop a connection on Linux.
 
 ## 🔴 H5. `QThread.terminate()` at quit aborts or hangs the process
 
