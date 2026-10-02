@@ -84,6 +84,13 @@ import numpy as np
 
 _log = logging.getLogger(__name__)
 
+#: Back-off between attempts to restart RX capture after the input device
+#: was lost (2026-10 stability audit).  After the last entry, it keeps
+#: retrying at that interval indefinitely: an unattended station should
+#: start receiving again whenever the device comes back, without anyone
+#: clicking Start.
+_AUDIO_RECOVERY_DELAYS_S: tuple[int, ...] = (5, 10, 20, 40, 60)
+
 #: Worker threads that wouldn't stop in time at shutdown, kept referenced
 #: until the process exits.
 #:
@@ -810,6 +817,15 @@ class MainWindow(QMainWindow):
         #: True while auto-saves keep failing.  Only the first failure in a
         #: streak gets a modal dialog; see _autosave_image.
         self._autosave_failing: bool = False
+        #: RX auto-resume after an involuntary device loss (2026-10 audit).
+        #: Capture used to stop for good on a device loss, so a one-second
+        #: USB glitch ended reception for the night on an unattended station.
+        self._audio_recovery_active: bool = False
+        self._audio_recovery_attempt: int = 0
+        self._audio_recovery_reason: str = ""
+        self._audio_recovery_timer = QTimer(self)
+        self._audio_recovery_timer.setSingleShot(True)
+        self._audio_recovery_timer.timeout.connect(self._attempt_audio_recovery)
         #: Set by ``closeEvent`` only once its teardown has actually run to
         #: completion.  Deliberately NOT ``_closing``: that one means "we are
         #: shutting down, stand down from new work" and is set by other code
@@ -2628,38 +2644,82 @@ class MainWindow(QMainWindow):
         from an already-warm device can reach ``feed_chunk`` before the
         reset slot runs.  The one-shot ``reset_done → start_capture``
         connection sequences the two steps deterministically.
+
+        This is the user's own Start/Stop, so it takes over from any RX
+        auto-resume in progress.
         """
+        self._cancel_audio_recovery()
         if start:
-            # Clear any stale device-loss / stream-error state from the
-            # previous session so _on_rx_started and _on_rx_stopped behave
-            # correctly for this new attempt.
-            self._last_rx_disconnect_msg = ""
-            self._last_rx_audio_error_msg = ""
-            # Defensive: if _on_rx_started never fired (e.g. stream-open
-            # failed last time), the suppress flag may still be True.
-            # Clear it here so the next status updates are visible.
-            self._suppress_rx_status_updates = False
-            # Reset the decoder + sample counter so each new capture session
-            # starts from zero rather than accumulating across stop/restart
-            # cycles (bug R-1: counter climbed past 127s with no image).
-            # Defer the start-capture request until reset_done arrives so
-            # the two worker threads are ordered correctly (OP-05).
-            #
-            # Arm the one-shot: reset_done is connected once, at
-            # construction, to a real slot on this window, so it lands on
-            # the GUI thread.  The flag makes it one-shot without the
-            # connect/disconnect dance a closure needed — and without the
-            # H7 failure where a second click before the first reset
-            # completed left two closures connected and started capture
-            # twice ("already running").
-            self._start_capture_armed = True
-            self._request_rx_reset.emit()
+            self._begin_capture()
         else:
             # Cancel any in-flight decode before stopping audio so the tail
             # flush triggered by audio_worker.stopped doesn't block the worker
             # thread for several seconds on a large buffer.
             self._rx_worker.request_cancel()
             self._request_stop_capture.emit()
+
+    def _begin_capture(self) -> None:
+        """Start capture: the Start button, and each RX auto-resume attempt."""
+        # Clear any stale device-loss / stream-error state from the
+        # previous session so _on_rx_started and _on_rx_stopped behave
+        # correctly for this new attempt.
+        self._last_rx_disconnect_msg = ""
+        self._last_rx_audio_error_msg = ""
+        # Defensive: if _on_rx_started never fired (e.g. stream-open
+        # failed last time), the suppress flag may still be True.
+        # Clear it here so the next status updates are visible.
+        self._suppress_rx_status_updates = False
+        # Reset the decoder + sample counter so each new capture session
+        # starts from zero rather than accumulating across stop/restart
+        # cycles (bug R-1: counter climbed past 127s with no image).
+        # Defer the start-capture request until reset_done arrives so
+        # the two worker threads are ordered correctly (OP-05).
+        #
+        # Arm the one-shot: reset_done is connected once, at
+        # construction, to a real slot on this window, so it lands on
+        # the GUI thread.  The flag makes it one-shot without the
+        # connect/disconnect dance a closure needed — and without the
+        # H7 failure where a second click before the first reset
+        # completed left two closures connected and started capture
+        # twice ("already running").
+        self._start_capture_armed = True
+        self._request_rx_reset.emit()
+
+    # --- RX auto-resume after a device loss (2026-10 stability audit) -----
+
+    def _schedule_audio_recovery(self) -> None:
+        """Arm the next attempt to restart capture, with back-off."""
+        delays = _AUDIO_RECOVERY_DELAYS_S
+        delay = delays[min(self._audio_recovery_attempt, len(delays) - 1)]
+        self._audio_recovery_attempt += 1
+        reason = self._audio_recovery_reason or "Audio input lost."
+        msg = f"{reason} Retrying in {delay} s (attempt {self._audio_recovery_attempt})."
+        self._rx_panel.set_status(msg)
+        self.statusBar().showMessage(msg)
+        self._audio_recovery_timer.start(delay * 1000)
+
+    @Slot()
+    def _attempt_audio_recovery(self) -> None:
+        if not self._audio_recovery_active or self._closing or self._capture_running:
+            return
+        # Starting capture resets the decoder, which would lift the RX gate
+        # while a TX is on the air.  Wait for the TX to end instead.
+        if not self._tx_worker.wait_for_idle(timeout=0):
+            self._audio_recovery_timer.start(5_000)
+            return
+        n = self._audio_recovery_attempt
+        if n <= len(_AUDIO_RECOVERY_DELAYS_S) or n % 10 == 0:
+            _log.info("RX audio recovery: attempt %d to restart capture", n)
+        self._input_device_needs_relookup = True  # USB re-plug renumbers devices
+        self._begin_capture()
+        # Success shows up as _on_rx_started.  A failure arrives as
+        # error + stopped, and _on_rx_stopped schedules the next attempt.
+
+    def _cancel_audio_recovery(self) -> None:
+        self._audio_recovery_timer.stop()
+        self._audio_recovery_active = False
+        self._audio_recovery_attempt = 0
+        self._audio_recovery_reason = ""
 
     @Slot()
     def _start_capture_after_reset(self) -> None:
@@ -2701,6 +2761,13 @@ class MainWindow(QMainWindow):
         self._capture_running = True
         self._suppress_rx_status_updates = False
         self._rx_panel.set_capturing(True)
+        if self._audio_recovery_active:
+            _log.info(
+                "RX audio recovered after %d attempt(s)", self._audio_recovery_attempt
+            )
+            self._cancel_audio_recovery()
+            self.statusBar().showMessage("Audio input recovered — capturing")
+            return
         self.statusBar().showMessage("Capturing")
 
     @Slot()
@@ -2725,6 +2792,8 @@ class MainWindow(QMainWindow):
         else:
             self._rx_panel.set_status("Not listening — click Start to begin.")
             self.statusBar().showMessage("Ready")
+        if self._audio_recovery_active and not self._closing:
+            self._schedule_audio_recovery()
 
     @Slot(str)
     def _on_audio_device_lost(self, message: str) -> None:
@@ -2737,6 +2806,13 @@ class MainWindow(QMainWindow):
         # Signal _start_once that it must re-resolve the saved device
         # name on the next capture start.
         self._input_device_needs_relookup = True
+        # An involuntary loss: keep trying to restart capture once the
+        # stream has stopped (_on_rx_stopped), rather than waiting for
+        # someone to click Start.
+        if not self._closing:
+            if not self._audio_recovery_active:
+                self._audio_recovery_reason = message
+            self._audio_recovery_active = True
 
     @Slot(str)
     def _on_rx_status_update(self, text: str) -> None:
@@ -4045,6 +4121,10 @@ class MainWindow(QMainWindow):
         if self._teardown_complete:
             event.accept()
             return
+        # No more RX auto-resume attempts once shutdown starts.
+        self._audio_recovery_timer.stop()
+        self._audio_recovery_active = False
+
         # Audit #3: flag first.  The shutdown drain below can deliver
         # one final queued image_complete (stop-flush, RX watchdog);
         # the capture flow checks this and stands down instead of

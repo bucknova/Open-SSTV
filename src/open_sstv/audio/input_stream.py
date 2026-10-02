@@ -503,7 +503,7 @@ class InputStreamWorker(QObject):
         self._device_lost = True
         if self._claim_device_loss_emit():
             self.stream_error.emit(
-                "Audio device disconnected — replug and click Start to recover"
+                "Audio device disconnected — reconnecting automatically."
             )
         QTimer.singleShot(0, self.stop)
 
@@ -534,7 +534,7 @@ class InputStreamWorker(QObject):
         # test-and-set in ``_claim_device_loss_emit`` closes it.
         if self._claim_device_loss_emit():
             self.stream_error.emit(
-                "Audio device disconnected — replug and click Start to recover"
+                "Audio device disconnected — reconnecting automatically."
             )
         from PySide6.QtCore import QMetaObject, Qt
         QMetaObject.invokeMethod(self, "stop", Qt.ConnectionType.QueuedConnection)
