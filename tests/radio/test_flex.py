@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import socket
 import threading
+import time
 from collections.abc import Iterator
 
 import pytest
@@ -216,3 +217,36 @@ class TestLifecycle:
         r.open()
         r.close()
         r.close()  # must not raise
+
+
+class TestConnectionLoss:
+    """2026-10 stability audit: when the radio drops the link, the reader
+    used to exit silently, and every getter kept serving cached state.  The
+    poll showed a dead radio as connected, and the TX health monitor, which
+    relies on get_ptt raising, never noticed."""
+
+    def _drop_and_wait(self, rig: FlexRig, radio: FakeFlex) -> None:
+        radio.close()  # the radio side goes away
+        # Wait for the reader to see it.  (Waits on the thread rather than
+        # on the new flag, so this test also runs against the old code.)
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and rig._reader is not None and rig._reader.is_alive():
+            time.sleep(0.02)
+
+    def test_getters_raise_after_the_radio_drops_the_link(
+        self, rig: FlexRig, radio: FakeFlex
+    ) -> None:
+        assert rig.get_freq() == 14_074_000  # healthy first
+        self._drop_and_wait(rig, radio)
+        for call in (rig.get_freq, rig.get_mode, rig.get_ptt):
+            with pytest.raises(RigConnectionError):
+                call()
+
+    def test_commands_fail_fast_instead_of_timing_out(
+        self, rig: FlexRig, radio: FakeFlex
+    ) -> None:
+        self._drop_and_wait(rig, radio)
+        t0 = time.monotonic()
+        with pytest.raises(RigConnectionError):
+            rig.set_ptt(False)
+        assert time.monotonic() - t0 < 0.5, "should not wait out the reply timeout"

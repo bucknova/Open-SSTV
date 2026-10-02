@@ -316,7 +316,7 @@ class IcomCIVRig:
         """Read the current VFO frequency."""
         # H12: diagnostic read — short deadline so a stale response can't
         # hold the serial lock long enough to delay a PTT-off write.
-        resp = self._command(b"\x03", deadline_s=_DIAG_DEADLINE_S)
+        resp = self._command(b"\x03", deadline_s=_DIAG_DEADLINE_S, read=True)
         # Response payload: [cmd_echo(0x03), b0, b1, b2, b3, b4] — 6 bytes.
         # Strip the command echo before handing to _bcd_to_freq.
         if len(resp) < 6:
@@ -328,7 +328,7 @@ class IcomCIVRig:
         self._command(b"\x05" + data)
 
     def get_mode(self) -> tuple[str, int]:
-        resp = self._command(b"\x04", deadline_s=_DIAG_DEADLINE_S)
+        resp = self._command(b"\x04", deadline_s=_DIAG_DEADLINE_S, read=True)
         # Response payload: [cmd_echo(0x04), mode_byte, passband_byte].
         # resp[0] is the command echo (happens to equal 0x04 = RTTY in the
         # mode_map), so without stripping it the mode always reads as RTTY.
@@ -358,7 +358,7 @@ class IcomCIVRig:
         # Response: [cmd_echo(0x1C), subcmd(0x00), tx_state].
         # resp[0]=0x1C is always non-zero, so without stripping the echo
         # get_ptt() would always return True (rig appears permanently keyed).
-        resp = self._command(b"\x1c\x00", deadline_s=_DIAG_DEADLINE_S)
+        resp = self._command(b"\x1c\x00", deadline_s=_DIAG_DEADLINE_S, read=True)
         if len(resp) >= 3:
             return resp[2] != 0x00
         return False
@@ -373,7 +373,7 @@ class IcomCIVRig:
         # Without stripping the echo, raw was always 0x1502=5378 (C-4).
         # The payload bytes are BCD, not binary: S9 is sent as 0x01 0x20
         # (= decimal 120), not 0x00 0x78 (= binary 120).
-        resp = self._command(b"\x15\x02", deadline_s=_DIAG_DEADLINE_S)
+        resp = self._command(b"\x15\x02", deadline_s=_DIAG_DEADLINE_S, read=True)
         _log.info("S-meter: resp=%s (%d bytes)", resp.hex() if resp else "(empty)", len(resp))
         if len(resp) >= 4:
             raw = self._bcd_byte_to_int(resp[2]) * 100 + self._bcd_byte_to_int(resp[3])
@@ -389,8 +389,15 @@ class IcomCIVRig:
 
     # === CI-V internals ===
 
-    def _command(self, cmd_data: bytes, deadline_s: float = 1.0) -> bytes:
+    def _command(
+        self, cmd_data: bytes, deadline_s: float = 1.0, *, read: bool = False
+    ) -> bytes:
         """Send a CI-V command and return the response data payload.
+
+        ``read`` marks a read command.  Its reply must be a data frame
+        echoing *cmd_data*.  A set command's reply must be OK or NG.  Any
+        other frame is a late reply to an earlier command, and is skipped
+        (see ``_read_response``).
 
         Serial I/O errors (unplug, device busy, timeout) are translated to
         ``RigConnectionError`` so upstream callers that catch ``RigError``
@@ -419,14 +426,31 @@ class IcomCIVRig:
             try:
                 self._ser.reset_input_buffer()
                 self._ser.write(frame)
-                return self._read_response(deadline_s=deadline_s)
+                return self._read_response(
+                    deadline_s=deadline_s, expect=cmd_data if read else None
+                )
             except _SERIAL_IO_ERRORS as exc:
                 raise RigConnectionError(
                     f"Icom CI-V serial I/O failed on {self._port}: {exc}"
                 ) from exc
 
-    def _read_response(self, deadline_s: float = 1.0) -> bytes:
-        """Read and parse a CI-V response frame.
+    def _read_response(
+        self, deadline_s: float = 1.0, expect: bytes | None = None
+    ) -> bytes:
+        """Read and parse the CI-V reply to the command just sent.
+
+        *expect* is the command bytes of a read (a data reply echoes them),
+        or ``None`` for a set (answered by OK / NG).  Before the 2026-10
+        stability audit, the first frame from the rig was taken as the
+        reply, whatever it answered.  Read deadlines are only 200 ms, so a
+        reply that missed one could arrive just after the next command's
+        input flush and be accepted as *that* command's reply.  Two
+        consequences: a late frequency reply could read as "PTT keyed"
+        (its third byte is non-zero), and a late data frame could satisfy
+        ``set_ptt(False)``, reporting the unkey as done while the rig's own
+        NG went unread.  Frames that can't be this command's reply are now
+        skipped.  (A late OK to an earlier *set* still can't be told apart
+        from ours, because CI-V acknowledgements carry no command byte.)
 
         ``serial.SerialException`` raised by ``in_waiting``/``read`` (e.g.
         cable unplugged mid-read) propagates out; ``_command`` catches it
@@ -500,16 +524,23 @@ class IcomCIVRig:
                     # accidentally satisfy the predicate below and be
                     # returned as our response.
                     if to_addr == _CIV_CONTROLLER and from_addr == self._addr:
-                        if payload and payload[0] == _CIV_OK:
-                            return payload[1:]  # data after OK byte
                         if payload and payload[0] == _CIV_NG:
                             raise RigCommandError(
                                 "CI-V command rejected (NG)",
                                 command=payload.hex(),
                             )
-                        # Data response (e.g. frequency read) —
-                        # command echo + data
-                        return payload
+                        if expect is None:
+                            # A set: only OK answers it.  A data frame here
+                            # is a late reply to an earlier read.
+                            if payload and payload[0] == _CIV_OK:
+                                return payload[1:]  # data after OK byte
+                            continue
+                        # A read: only a data frame echoing our command
+                        # answers it.  An OK here is a late ack of an
+                        # earlier set.
+                        if payload.startswith(expect):
+                            return payload
+                        continue
         finally:
             self._ser.timeout = original_timeout
         raise RigConnectionError("CI-V response timeout")
