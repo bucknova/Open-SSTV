@@ -83,6 +83,35 @@ import numpy as np
 
 _log = logging.getLogger(__name__)
 
+#: Worker threads that wouldn't stop in time at shutdown, kept referenced
+#: until the process exits.
+#:
+#: The 2026-10 stability audit measured both earlier approaches with a
+#: thread busy in numpy:
+#:
+#: * ``QThread.terminate()`` (the old offline / connect fallback) never
+#:   stopped it.  5 runs in 6 the process then aborted with "QThread:
+#:   Destroyed while thread is still running" (exit 134), and 1 in 6 it hung
+#:   outright, the GIL having been taken away with its owner.
+#: * ``setParent(None)`` alone (the old TX / audio / RX / poll policy) aborted
+#:   5 runs in 5.  It only postponed the qFatal to interpreter shutdown,
+#:   when PySide destroys the still-running ``QThread``.
+#:
+#: What works, 5 runs in 5, is to detach, keep the ``(thread, worker)`` pair
+#: referenced here, and have ``app.main`` leave with ``os._exit()`` whenever
+#: this list isn't empty, so finalization never destroys a live thread.
+_DETACHED_AT_SHUTDOWN: list[tuple[object, object]] = []
+
+
+def _detach_running_thread(thread: QThread, worker: object, label: str) -> None:
+    """Hand a thread that won't stop to the process instead of killing it."""
+    _log.warning(
+        "%s did not stop in time at shutdown; detaching it to exit "
+        "without terminate()", label,
+    )
+    thread.setParent(None)
+    _DETACHED_AT_SHUTDOWN.append((thread, worker))
+
 from PySide6.QtCore import (
     QEventLoop,
     QMetaObject,
@@ -3225,8 +3254,12 @@ class MainWindow(QMainWindow):
             if thread.objectName() == "rig-connect-thread" and thread.isRunning():
                 thread.quit()
                 if not thread.wait(2000):
-                    thread.terminate()
-                    thread.wait(500)
+                    # Blocked in rig.open() (a serial open or TCP connect).
+                    # Detach rather than terminate(): see
+                    # _DETACHED_AT_SHUTDOWN.
+                    _detach_running_thread(
+                        thread, self._connect_worker, "rig connect thread"
+                    )
 
         # Drop the worker reference only after all threads have stopped.
         # Clearing it earlier would destroy the C++ QObject while the worker
@@ -3929,14 +3962,15 @@ class MainWindow(QMainWindow):
            exit at the next opportunity.  No-op if the worker is
            mid-``encode()`` because the event loop is blocked on
            ``run()`` returning.
-        2. ``thread.wait(timeout)`` — block the GUI thread for up to
-           10 s to let an in-flight encode complete.  Covers Robot
-           36 / PD / Wraase / Scottie / Martin / Pasokon P3-P5.  A
-           Pasokon P7 mid-encode may exceed this; we fall through.
-        3. ``thread.terminate() + wait(1000)`` as a last resort.  Qt
-           docs warn that ``terminate`` can leave the worker in a
-           half-deinit state, but a half-deinit worker on a process
-           about to ``exit()`` anyway is preferable to ``qFatal``.
+        2. ``thread.wait(timeout)`` — block the GUI thread briefly to
+           let an in-flight encode/decode finish.  The result is
+           discarded anyway (the window is closing), so this only buys
+           a tidy exit.  It was 10 s per thread, which pushed the rest
+           of shutdown back by up to 20 s; it's now 2 s.
+        3. Detach a thread that's still running (see
+           ``_DETACHED_AT_SHUTDOWN``).  This used to ``terminate()`` it,
+           which can kill the thread while it holds the GIL and hang
+           the whole process at exit (2026-10 stability audit).
 
         Same shape as the ``_abort_connect`` shutdown drain for the
         ``_RigConnectWorker``.  Safe to call when no worker is in
@@ -3951,15 +3985,10 @@ class MainWindow(QMainWindow):
                 continue
             try:
                 thread.quit()
-                if not thread.wait(10_000):
-                    # Stage 3: force-terminate.  We prefer a slightly
-                    # ugly process exit over a qFatal abort.
-                    _log.warning(
-                        "%s did not exit cleanly in 10 s; terminating",
-                        attr_thread,
+                if not thread.wait(2_000):
+                    _detach_running_thread(
+                        thread, getattr(self, attr_worker, None), attr_thread
                     )
-                    thread.terminate()
-                    thread.wait(1000)
             except RuntimeError:
                 # Thread C++ object already destroyed (e.g. closeEvent
                 # firing twice via aboutToQuit + the X button).
@@ -3980,7 +4009,6 @@ class MainWindow(QMainWindow):
         if self._teardown_complete:
             event.accept()
             return
-
         # Audit #3: flag first.  The shutdown drain below can deliver
         # one final queued image_complete (stop-flush, RX watchdog);
         # the capture flow checks this and stands down instead of
@@ -3994,9 +4022,16 @@ class MainWindow(QMainWindow):
             self._persist_audio_gain()
 
         # v0.6 (Phase 3c): reclaim control first — unkeys any in-flight
-        # remote TX and drops the lease — then stop the read-only server.
-        # Both are independent of the rig/worker teardown below.
+        # remote TX and drops the lease.
         self._remote_control.reclaim_local()
+        # 2026-10 audit: stop a *local* transmission now as well.  This used
+        # to happen only after the remote-server stop (up to 7 s of joins),
+        # the connect abort (2.5 s) and the offline-worker drain (20 s), so
+        # quitting mid-TX could keep PTT keyed for half a minute.
+        # request_stop() is thread-safe and returns at once.  The worker
+        # unwinds and unkeys on its own thread while the rest of the
+        # teardown runs, and wait_for_idle() further down confirms it.
+        self._tx_worker.request_stop()
         self._stop_remote_server()
 
         # Abort any in-flight rig connect first — the QThread is a child of
@@ -4147,30 +4182,25 @@ class MainWindow(QMainWindow):
             # A leaked thread at exit beats an abort (same policy the
             # offline-worker drain documents).
             if not self._tx_thread.wait(500):
-                _logging.getLogger(__name__).warning(
-                    "TX worker thread still running at close — detaching "
-                    "from the window to avoid QThread destruction abort"
+                _detach_running_thread(
+                    self._tx_thread, self._tx_worker, "TX worker thread"
                 )
-                self._tx_thread.setParent(None)
 
-        for thread in (
-            self._audio_thread,
-            self._rx_thread,
-            self._rig_poll_thread,
-            self._update_thread,
+        for thread, worker in (
+            (self._audio_thread, self._audio_worker),
+            (self._rx_thread, self._rx_worker),
+            (self._rig_poll_thread, self._rig_poll_worker),
+            (self._update_thread, self._update_worker),
         ):
             thread.quit()
             if not thread.wait(4000):
                 # v0.4.0 audit high #4: same detach-over-abort policy as
                 # the TX thread above — a wedged Core Audio stop() or a
-                # long P7 decode must not turn quit into a qFatal.
-                import logging as _logging2
-                _logging2.getLogger(__name__).warning(
-                    "%s did not stop within 4 s at close — detaching from "
-                    "the window to avoid QThread destruction abort",
-                    thread.objectName() or "worker thread",
+                # long P7 decode must not turn quit into a qFatal.  (And
+                # app.main must then os._exit(); see _DETACHED_AT_SHUTDOWN.)
+                _detach_running_thread(
+                    thread, worker, thread.objectName() or "worker thread"
                 )
-                thread.setParent(None)
 
         # v0.4 (audit #3): close the logbook's SQLite connection only
         # now — every worker thread that could emit a completion has

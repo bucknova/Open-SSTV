@@ -300,6 +300,92 @@ def _audio_library_error_text(exc: OSError) -> str:
     return "\n".join(lines)
 
 
+def _quit_signals() -> list[signal.Signals]:
+    """Signals that mean "shut down now, cleanly".
+
+    SIGHUP is POSIX-only.  It's what a terminal sends when its window
+    closes, and its default action kills the process without running
+    ``closeEvent``, so mid-TX it left PTT keyed.
+    """
+    sigs = [signal.SIGINT, signal.SIGTERM]
+    if hasattr(signal, "SIGHUP"):
+        sigs.append(signal.SIGHUP)
+    return sigs
+
+
+def install_quit_signals(app: object) -> None:
+    """Route SIGINT / SIGTERM (and SIGHUP on POSIX) to a clean ``app.quit()``.
+
+    A plain ``signal.signal(SIGTERM, ...)`` doesn't work under Qt.  CPython
+    runs a Python signal handler only between bytecodes, and while Qt's
+    event loop sits idle in C++ no bytecode runs.  The handler is queued
+    and never executes, and since it replaced the default action, the
+    signal is ignored.  Until the 2026-10 stability audit that is exactly
+    what happened: ``kill``, ``systemctl stop``, a logout or Ctrl-C reached
+    an idle Open-SSTV and did nothing.  The release smoke test saw it ignore
+    SIGTERM for two hours.  When the OS then escalated to SIGKILL,
+    ``closeEvent`` never ran, so a keyed rig stayed keyed and a spawned
+    rigctld was orphaned.
+
+    The fix is CPython's ``set_wakeup_fd``.  The C-level handler writes the
+    signal number to a socket, a ``QSocketNotifier`` on the other end wakes
+    Qt's event loop, the drain slot runs Python code, and the queued Python
+    handler gets its turn.  ``app.quit()`` then closes the window, so
+    ``closeEvent`` drops PTT and tears down normally.
+
+    A second signal while shutting down is logged and ignored rather than
+    forcing an exit, because the first one is already running the unkey
+    path.  SIGKILL remains the way to force it.
+    """
+    import logging  # noqa: PLC0415
+    import socket  # noqa: PLC0415
+
+    from PySide6.QtCore import QSocketNotifier  # noqa: PLC0415
+
+    log = logging.getLogger("open_sstv")
+    rsock, wsock = socket.socketpair()
+    rsock.setblocking(False)
+    wsock.setblocking(False)
+    try:
+        signal.set_wakeup_fd(wsock.fileno(), warn_on_full_buffer=False)
+    except (ValueError, OSError) as exc:
+        # Only possible off the main thread or on an exotic platform.  The
+        # handlers below still work whenever Python code happens to run.
+        log.warning("signal wakeup unavailable (%s); quit signals may be slow", exc)
+
+    notifier = QSocketNotifier(rsock.fileno(), QSocketNotifier.Type.Read, app)
+
+    def _drain() -> None:
+        # Running this slot is what matters: it gives CPython a bytecode
+        # boundary at which to run the pending Python handler.
+        try:
+            while rsock.recv(4096):
+                pass
+        except OSError:  # BlockingIOError once empty
+            pass
+
+    notifier.activated.connect(_drain)
+
+    shutting_down = False
+
+    def _on_quit_signal(signum: int, _frame: object) -> None:
+        nonlocal shutting_down
+        name = signal.Signals(signum).name
+        if shutting_down:
+            log.info("%s received while already shutting down; ignoring", name)
+            return
+        shutting_down = True
+        log.info("%s received; shutting down cleanly", name)
+        app.quit()  # type: ignore[attr-defined]
+
+    for sig in _quit_signals():
+        signal.signal(sig, _on_quit_signal)
+
+    # Keep the sockets and notifier alive for the app's lifetime.  If they
+    # were garbage-collected, the wakeup fd would dangle.
+    app._open_sstv_quit_signal_wakeup = (rsock, wsock, notifier)  # type: ignore[attr-defined]
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the ``open-sstv`` console script and ``python -m open_sstv``."""
     import logging  # noqa: PLC0415
@@ -514,13 +600,46 @@ def main(argv: list[str] | None = None) -> int:
     # cleanly instead of being destroyed mid-run.
     app.aboutToQuit.connect(window.close)
 
-    # Route SIGTERM (systemd stop, kill PID, container shutdown) through
-    # Qt's event loop so closeEvent fires and PTT is unkeyed cleanly.
-    signal.signal(signal.SIGTERM, lambda *_: app.quit())
-    # SIGINT (Ctrl-C in terminal) follows the same path.
-    signal.signal(signal.SIGINT, lambda *_: app.quit())
+    # Route SIGTERM (systemd stop, kill PID, logout), SIGINT (Ctrl-C) and
+    # SIGHUP (terminal closed) through Qt's event loop, so closeEvent fires
+    # and PTT is unkeyed cleanly.  See install_quit_signals for why a plain
+    # signal.signal() call doesn't work while Qt is idle.
+    install_quit_signals(app)
 
-    return app.exec()
+    rc = app.exec()
+    _exit_now_if_threads_were_detached(rc)
+    return rc
+
+
+def _exit_now_if_threads_were_detached(rc: int) -> None:
+    """Leave with ``os._exit`` if shutdown had to detach a running thread.
+
+    ``closeEvent`` detaches a worker thread that won't stop in time rather
+    than kill it (see ``main_window._DETACHED_AT_SHUTDOWN``).  If this
+    function then returned normally, interpreter finalization would destroy
+    that still-running ``QThread`` and Qt would abort the process, measured
+    as exit 134 every time.  Everything worth saving is already saved by
+    this point: closeEvent wrote config and closed the logbook.  So flush
+    the logs and leave directly.  It does nothing on a normal shutdown.
+    """
+    from open_sstv.ui.main_window import _DETACHED_AT_SHUTDOWN  # noqa: PLC0415
+
+    if not _DETACHED_AT_SHUTDOWN:
+        return
+    import logging  # noqa: PLC0415
+    import os  # noqa: PLC0415
+
+    logging.getLogger("open_sstv").warning(
+        "%d worker thread(s) were still running at shutdown; exiting "
+        "immediately so Qt doesn't abort on them", len(_DETACHED_AT_SHUTDOWN),
+    )
+    logging.shutdown()
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:  # noqa: BLE001, S110 — exiting regardless
+            pass
+    os._exit(rc)
 
 
 if __name__ == "__main__":
