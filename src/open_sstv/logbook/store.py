@@ -206,7 +206,15 @@ class LogbookStore:
         self._conn.row_factory = sqlite3.Row
         # Enforce CHECK constraints, foreign keys (none yet but cheap).
         self._conn.execute("PRAGMA foreign_keys = ON")
-        self._init_schema()
+        try:
+            self._init_schema()
+        except BaseException:
+            # SchemaTooNewError (a downgrade) or a corrupt file.  The error
+            # tells the user to move the file aside, but the connection was
+            # left open, and on Windows that open handle keeps the file
+            # locked until the app quits.  (2026-10 stability audit.)
+            self._conn.close()
+            raise
 
     # -- schema --------------------------------------------------------
 

@@ -71,6 +71,7 @@ threads, and finally close the rig.
 from __future__ import annotations
 
 import datetime
+import io
 import logging
 import subprocess
 import threading
@@ -150,6 +151,7 @@ from open_sstv.config.schema import AppConfig
 from open_sstv.config.store import last_corrupt_backup, load_config, save_config
 from open_sstv.config.templates import load_templates
 from open_sstv.core.modes import Mode
+from open_sstv.fsutil import atomic_write_bytes
 from open_sstv.logbook import QSO, LogbookCoordinator, QsoLoggingError, UdpQsoLogger
 from open_sstv.radio.band_plan import (
     FLEX_PROTOCOL,
@@ -805,6 +807,9 @@ class MainWindow(QMainWindow):
         #: the capture flow must not run against a closing window /
         #: closed store.
         self._closing: bool = False
+        #: True while auto-saves keep failing.  Only the first failure in a
+        #: streak gets a modal dialog; see _autosave_image.
+        self._autosave_failing: bool = False
         #: Set by ``closeEvent`` only once its teardown has actually run to
         #: completion.  Deliberately NOT ``_closing``: that one means "we are
         #: shutting down, stand down from new work" and is set by other code
@@ -2782,12 +2787,27 @@ class MainWindow(QMainWindow):
     ) -> Path | None:
         """Resolve the filename template and write ``image`` to disk.
 
-        Returns the saved path on success, ``None`` on failure (a
-        warning dialog is shown for OSError).  Shared by the RX and TX
-        auto-save call sites so both consume the same
+        Returns the saved path on success, ``None`` on failure.  Shared by
+        the RX and TX auto-save call sites so both consume the same
         ``autosave_filename_pattern`` and ``autosave_file_format``
         config fields.
+
+        2026-10 stability audit:
+
+        * The image is encoded in memory and written with
+          ``atomic_write_bytes``.  PIL used to write straight to the final
+          path, so a full disk left a truncated image in the gallery.
+        * ``ValueError`` is caught as well as ``OSError``.  PIL raises it
+          for an unknown or unsuitable format, and it used to escape the
+          slot, skipping the logbook draft that follows.
+        * Only the first failure in a streak opens a modal dialog.  Later
+          ones go to the status bar and the log, until a save succeeds.  A
+          full disk on an unattended station used to stack one dialog per
+          decoded image, and nobody, including the remote page, could see
+          or dismiss them.
         """
+        from PIL import Image  # noqa: PLC0415
+
         save_dir = Path(self._config.images_save_dir)
         ctx = self._build_save_context(mode, direction)
         try:
@@ -2798,10 +2818,26 @@ class MainWindow(QMainWindow):
                 ctx,
                 file_format=self._config.autosave_file_format,
             )
-            image.save(str(path))
-        except OSError as exc:
-            QMessageBox.warning(self, "Save failed", str(exc))
+            fmt = Image.registered_extensions().get(path.suffix.lower())
+            if fmt is None:
+                raise ValueError(f"unknown image format {path.suffix!r}")
+            buf = io.BytesIO()
+            image.save(buf, format=fmt)
+            atomic_write_bytes(path, buf.getvalue())
+        except (OSError, ValueError) as exc:
+            _log.error("auto-save failed: %s", exc)
+            if not self._autosave_failing:
+                self._autosave_failing = True
+                QMessageBox.warning(
+                    self,
+                    "Save failed",
+                    f"{exc}\n\nFurther auto-save failures will appear in "
+                    "the status bar until a save succeeds.",
+                )
+            else:
+                self.statusBar().showMessage(f"Auto-save failed: {exc}", 10_000)
             return None
+        self._autosave_failing = False
         self.statusBar().showMessage(f"{status_verb} {path.name}", 3000)
         return path
 

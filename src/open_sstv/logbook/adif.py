@@ -455,9 +455,15 @@ def import_adif(
         data = text
 
     # Skip past the header if present.
-    eoh_idx = data.upper().find(b"<EOH>")
-    if eoh_idx >= 0:
-        data = data[eoh_idx + len(b"<EOH>"):]
+    # ADIF spec: "If the first character in an ADI file is <, it contains
+    # no header."  Look for <EOH> only when there *is* a header.  Searching
+    # unconditionally meant that a header-less file with "<EOH>" in a field
+    # value (a COMMENT, say) had every QSO before it silently dropped.
+    # (2026-10 stability audit.)
+    if not data.lstrip().startswith(b"<"):
+        eoh_idx = data.upper().find(b"<EOH>")
+        if eoh_idx >= 0:
+            data = data[eoh_idx + len(b"<EOH>"):]
 
     qsos: list[QSO] = []
     current: dict[str, str] = {}

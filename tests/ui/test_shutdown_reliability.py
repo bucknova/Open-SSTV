@@ -138,3 +138,71 @@ def test_exit_is_immediate_only_when_a_thread_was_detached(
     monkeypatch.setattr(mw, "_DETACHED_AT_SHUTDOWN", [(object(), object())])
     app._exit_now_if_threads_were_detached(3)
     assert exits == [3], "a detached thread must force os._exit with the same code"
+
+
+# ---------------------------------------------------------------------------
+# Auto-save on an unattended station (2026-10 audit, M5)
+# ---------------------------------------------------------------------------
+
+from PIL import Image as _PILImage  # noqa: E402
+
+from open_sstv.core.modes import Mode  # noqa: E402
+
+
+def _img() -> _PILImage.Image:
+    return _PILImage.new("RGB", (320, 256), (10, 20, 30))
+
+
+def test_repeated_save_failures_show_one_dialog_not_one_per_image(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x")  # images dir is a file, so every save fails
+    window._config.images_save_dir = str(blocker / "images")
+    dialogs: list[str] = []
+    monkeypatch.setattr(
+        "open_sstv.ui.main_window.QMessageBox.warning",
+        lambda *a, **k: dialogs.append(a[2] if len(a) > 2 else ""),
+    )
+
+    for _ in range(5):
+        assert window._autosave_image(_img(), Mode.MARTIN_M1, "rx") is None
+
+    assert len(dialogs) == 1, f"{len(dialogs)} modal dialogs for 5 failures"
+    assert "Auto-save failed" in window.statusBar().currentMessage()
+
+    # A success ends the streak, so the next failure gets a dialog again.
+    window._config.images_save_dir = str(tmp_path / "ok")
+    assert window._autosave_image(_img(), Mode.MARTIN_M1, "rx") is not None
+    window._config.images_save_dir = str(blocker / "images")
+    window._autosave_image(_img(), Mode.MARTIN_M1, "rx")
+    assert len(dialogs) == 2
+
+
+def test_failed_save_leaves_no_partial_file(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    out = tmp_path / "images"
+    window._config.images_save_dir = str(out)
+    monkeypatch.setattr("open_sstv.ui.main_window.QMessageBox.warning", lambda *a, **k: None)
+
+    def _disk_full(_a: object, _b: object) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("open_sstv.fsutil.os.replace", _disk_full)
+    assert window._autosave_image(_img(), Mode.MARTIN_M1, "rx") is None
+    assert list(out.iterdir()) == [], "a truncated or temp file was left in the gallery"
+
+
+def test_pil_value_error_is_reported_not_raised(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """PIL raises ValueError for some format problems.  Only OSError used to
+    be caught, so a ValueError escaped the slot and skipped the logbook
+    draft that follows.  (A bad config format can't reach this:
+    build_autosave_filename already normalises it to PNG.)"""
+    window._config.images_save_dir = str(tmp_path / "images")
+    monkeypatch.setattr("open_sstv.ui.main_window.QMessageBox.warning", lambda *a, **k: None)
+    img = _img()
+    monkeypatch.setattr(img, "save", lambda *a, **k: (_ for _ in ()).throw(ValueError("bad mode")))
+    assert window._autosave_image(img, Mode.MARTIN_M1, "rx") is None

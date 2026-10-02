@@ -442,3 +442,35 @@ class TestListDedupeFields:
         assert mode == "Martin M1"
         assert time_iso.endswith("+00:00")
         store.close()
+
+
+def test_newer_schema_refusal_closes_the_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2026-10 stability audit: refusing a newer-schema DB used to leave its
+    SQLite connection open.  The error tells the user to move the file
+    aside, and on Windows that leaked handle kept the file locked."""
+    import sqlite3
+
+    from open_sstv.logbook import store as store_mod
+
+    db = tmp_path / "logbook.db"
+    raw = sqlite3.connect(db)
+    raw.execute(f"PRAGMA user_version = {store_mod.SCHEMA_VERSION + 1}")
+    raw.close()
+
+    opened: list[sqlite3.Connection] = []
+    real_connect = sqlite3.connect
+
+    def _tracking_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+        conn = real_connect(*args, **kwargs)  # type: ignore[arg-type]
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(store_mod.sqlite3, "connect", _tracking_connect)
+    with pytest.raises(store_mod.SchemaTooNewError):
+        store_mod.LogbookStore(db)
+
+    assert len(opened) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened[0].execute("SELECT 1")  # "Cannot operate on a closed database."

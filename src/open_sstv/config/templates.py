@@ -13,7 +13,6 @@ three built-in defaults (CQ, Exchange, 73) are returned.
 from __future__ import annotations
 
 import logging
-import os
 import threading
 import tomllib
 from dataclasses import dataclass, field
@@ -24,6 +23,8 @@ _log = logging.getLogger(__name__)
 
 import platformdirs
 import tomli_w
+
+from open_sstv.fsutil import atomic_write_bytes
 
 _APP_NAME = "open_sstv"
 _TEMPLATES_FILENAME = "templates.toml"
@@ -249,16 +250,12 @@ def save_templates(
     # M10 (v0.3 audit): serialised under a module lock, mirroring
     # ``store.save_config`` — two concurrent saves could interleave on
     # the shared ``.tmp`` sibling and violate the atomic-write contract.
-    tmp = path.with_suffix(path.suffix + ".tmp")
     with _save_lock:
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with tmp.open("wb") as f:
-                tomli_w.dump(data, f)
-            os.replace(tmp, path)
+            # Durable, not just atomic: see fsutil.atomic_write_bytes.
+            atomic_write_bytes(path, tomli_w.dumps(data).encode("utf-8"))
         except OSError as exc:
             _log.error("Failed to save templates to %s: %s", path, exc)
-            tmp.unlink(missing_ok=True)
             raise
 
 

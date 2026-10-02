@@ -309,19 +309,23 @@ def test_save_config_is_atomic(tmp_path: Path) -> None:
 
 
 def test_save_config_no_tmp_on_ioerror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """If os.replace fails, the .tmp file must be cleaned up (OP2-07)."""
-    import open_sstv.config.store as store_module
+    """If os.replace fails, no temp file may be left behind (OP2-07).
+
+    The write goes through fsutil.atomic_write_bytes (2026-10 audit), whose
+    temp file has a unique name, so check that the directory holds nothing
+    but what was there before.
+    """
+    import open_sstv.fsutil as fsutil_module
 
     def _fail_replace(src: str, dst: str) -> None:
         raise OSError("simulated disk full")
 
-    monkeypatch.setattr(store_module.os, "replace", _fail_replace)
+    monkeypatch.setattr(fsutil_module.os, "replace", _fail_replace)
     p = tmp_path / "config.toml"
     with pytest.raises(OSError, match="simulated disk full"):
         save_config(AppConfig(), path=p)
 
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    assert not tmp.exists(), ".tmp must be cleaned up after a failed os.replace"
+    assert list(tmp_path.iterdir()) == [], "temp file left after a failed os.replace"
 
 
 # === M6: concurrent save_config is serialized via threading.Lock ===
@@ -349,29 +353,29 @@ def test_save_config_concurrent_calls_are_serialized(
     cfg_a = AppConfig(callsign="W0AAA")
     cfg_b = AppConfig(callsign="K1BBB")
 
-    # Track inside-critical-section concurrency by wrapping tomli_w.dump
-    # with a "I'm in" / "I'm out" pair guarded by a tiny sleep so the
-    # window is wide enough that two unsynchronised threads would
-    # observably overlap.
+    # Track inside-critical-section concurrency by wrapping the file write
+    # (now fsutil.atomic_write_bytes, 2026-10 audit) with a "I'm in" /
+    # "I'm out" pair guarded by a tiny sleep so the window is wide enough
+    # that two unsynchronised threads would observably overlap.
     inside_count = 0
     max_concurrent = 0
     overlap_lock = threading.Lock()
 
-    real_dump = store_module.tomli_w.dump
+    real_write = store_module.atomic_write_bytes
 
-    def _instrumented_dump(data, f):
+    def _instrumented_write(path, data):
         nonlocal inside_count, max_concurrent
         with overlap_lock:
             inside_count += 1
             max_concurrent = max(max_concurrent, inside_count)
         try:
             time.sleep(0.05)  # widen the race window
-            real_dump(data, f)
+            real_write(path, data)
         finally:
             with overlap_lock:
                 inside_count -= 1
 
-    monkeypatch.setattr(store_module.tomli_w, "dump", _instrumented_dump)
+    monkeypatch.setattr(store_module, "atomic_write_bytes", _instrumented_write)
 
     threads = [
         threading.Thread(target=save_config, args=(cfg_a,), kwargs={"path": p}),
@@ -392,8 +396,8 @@ def test_save_config_concurrent_calls_are_serialized(
     loaded = load_config(path=p)
     assert loaded.callsign in {"W0AAA", "K1BBB"}
 
-    # And no orphan .tmp sibling left behind.
-    assert not p.with_suffix(p.suffix + ".tmp").exists()
+    # And no orphan temp file left behind.
+    assert [x.name for x in tmp_path.iterdir()] == ["config.toml"]
 
 
 def test_round_trip_gallery_extra_dirs(tmp_path: Path) -> None:
