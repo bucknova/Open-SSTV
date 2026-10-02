@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from PIL import Image
@@ -222,7 +223,7 @@ class TestQSOStateIntegration:
 
 class TestTxWorkerBannerPolicy:
     def test_banner_enabled_stamps_regardless_of_template(
-        self, tmp_path: Path  # noqa: ARG002
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch  # noqa: ARG002
     ) -> None:
         """Banner is applied whenever ``_tx_banner_enabled`` is True.
 
@@ -231,6 +232,16 @@ class TestTxWorkerBannerPolicy:
         the banner code path runs (the apply_tx_banner call itself runs
         because no ``TX banner failed`` error is emitted on a normally-sized
         image)."""
+        # Stub the audio output.  transmit() runs synchronously here, so this
+        # test used to play the whole 114 s Martin M1 transmission through
+        # the machine's real output device on every run (117 s per run, out
+        # of the developer's speakers, via CoreAudio/PipeWire).  The banner
+        # policy doesn't need audio, and a full-suite run once segfaulted
+        # during that playback (2026-10 audit; it didn't reproduce, but real
+        # audio hardware has no place in a unit test).
+        monkeypatch.setattr(
+            "open_sstv.ui.workers.output_stream.play_blocking", MagicMock()
+        )
         errors: list[str] = []
         worker = TxWorker()
         worker._tx_banner_enabled = True

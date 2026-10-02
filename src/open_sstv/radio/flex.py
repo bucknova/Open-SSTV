@@ -93,6 +93,14 @@ def normalize_flex_mode(mode: str) -> str:
     return _MODE_ALIASES.get(token, token)
 
 
+#: Reply code we hand to waiting commands when the link itself fails (closed,
+#: or lost).  Real SmartSDR error codes are unsigned 32-bit hex (0x5000...),
+#: so it can't collide.  _command raises RigConnectionError for it rather
+#: than RigCommandError, because the radio didn't reject anything; the link
+#: died under the command.
+_LINK_FAILED = -1
+
+
 class FlexRig:
     """Direct SmartSDR TCP control of a FlexRadio 6000-series radio.
 
@@ -113,6 +121,12 @@ class FlexRig:
         self._sock: socket.socket | None = None
         self._reader: threading.Thread | None = None
         self._stop = threading.Event()
+        #: Set by the reader when the radio drops the link (2026-10 audit).
+        #: Before this, the reader just exited.  _require_alive kept
+        #: passing, and every getter served the last cached state
+        #: indefinitely: the poll showed a dead radio as connected, and the
+        #: TX health monitor (which relies on get_ptt raising) never noticed.
+        self._lost = threading.Event()
         self._lock = threading.Lock()          # guards socket writes + _seq
         self._state_lock = threading.Lock()    # guards the cached state below
         self._seq = 0
@@ -150,6 +164,7 @@ class FlexRig:
             sock.settimeout(_SOCKET_TIMEOUT_S)
             self._sock = sock
             self._stop.clear()
+            self._lost.clear()
             self._slice_seen.clear()
             self._reader = threading.Thread(
                 target=self._read_loop, name="sstv-flex-reader", daemon=True
@@ -196,11 +211,15 @@ class FlexRig:
         if reader is not None and reader is not threading.current_thread():
             reader.join(timeout=2.0)
         # Fail any command still waiting so no caller blocks on a dead link.
+        self._fail_pending("connection closed")
+
+    def _fail_pending(self, reason: str) -> None:
+        """Wake every in-flight command with a failure reply."""
         with self._state_lock:
             pending = list(self._pending.values())
             self._pending.clear()
         for entry in pending:
-            entry[1] = (-1, "connection closed")
+            entry[1] = (_LINK_FAILED, reason)
             entry[0].set()
 
     def __enter__(self) -> FlexRig:
@@ -268,6 +287,8 @@ class FlexRig:
     def _require_alive(self) -> None:
         if self._sock is None or self._stop.is_set():
             raise RigConnectionError(f"{self.name}: not connected")
+        if self._lost.is_set():
+            raise RigConnectionError(f"{self.name}: connection to the radio was lost")
 
     def _command(self, command: str, timeout_s: float = _RESPONSE_TIMEOUT_S) -> str:
         """Send one command and block until the radio's ``R`` reply lands."""
@@ -276,6 +297,11 @@ class FlexRig:
         with self._lock:
             if self._sock is None:
                 raise RigConnectionError(f"{self.name}: not connected")
+            if self._lost.is_set():
+                # Fail now rather than send into a dead socket and wait out
+                # the reply timeout.  The TX unkey retry close()s and
+                # open()s, which clears this.
+                raise RigConnectionError(f"{self.name}: connection to the radio was lost")
             self._seq += 1
             seq = self._seq
             with self._state_lock:
@@ -298,6 +324,8 @@ class FlexRig:
                 f"{self.name}: timed out waiting for reply to {command!r}"
             )
         code, message = entry[1]
+        if code == _LINK_FAILED:
+            raise RigConnectionError(f"{self.name}: {message} during {command!r}")
         if code != 0:
             raise RigCommandError(
                 f"{command!r} failed: Flex error 0x{code:X} {message}".rstrip(),
@@ -332,6 +360,11 @@ class FlexRig:
                         _log.debug("%s: unparseable line %r", self.name, line,
                                    exc_info=True)
         _log.debug("%s: reader loop exiting", self.name)
+        if not self._stop.is_set():
+            # Not asked to stop, so the radio closed the link or it errored.
+            _log.warning("%s: connection to the radio was lost", self.name)
+            self._lost.set()
+            self._fail_pending("connection lost")
 
     def _handle_line(self, line: str) -> None:
         _log.debug("%s: <<< %s", self.name, line)

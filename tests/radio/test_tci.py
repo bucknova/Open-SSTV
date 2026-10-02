@@ -14,7 +14,9 @@ from __future__ import annotations
 import struct
 
 import numpy as np
+import pytest
 
+from open_sstv.radio.exceptions import RigConnectionError
 from open_sstv.radio.tci import TciConnection, TciRig
 
 # ---------------------------------------------------------------------------
@@ -360,3 +362,43 @@ class TestRecvLoopTimeoutTolerance:
     def test_real_errors_still_end_the_loop(self) -> None:
         n = self._loop_with_fake_ws([ConnectionResetError("gone")])
         assert n == 1  # loop exits on the first genuine error
+
+
+# ---------------------------------------------------------------------------
+# 2026-10 stability audit
+# ---------------------------------------------------------------------------
+
+class _FakeConnection:
+    def __init__(self, alive: bool) -> None:
+        self.is_alive = alive
+        self.sent: list[str] = []
+
+    def send(self, text: str) -> None:
+        self.sent.append(text)
+
+
+class TestStaleCacheAndSecondReceiver:
+    def test_secondary_trx_modulation_is_ignored(self) -> None:
+        """A second receiver's mode must not overwrite TRX 0's.  Band Plan
+        tuning uses this value to decide whether to keep DIGU."""
+        rig = _make_rig()
+        rig._on_text("modulation:0,DIGU")
+        rig._on_text("modulation:1,LSB")
+        assert rig._last_mode == "DIGU"
+
+    @pytest.mark.parametrize("getter", ["get_freq", "get_mode", "get_ptt"])
+    def test_cached_getters_raise_once_the_connection_is_dead(self, getter: str) -> None:
+        rig = _make_rig()
+        rig._on_text("vfo:0,0,14074000")
+        rig._on_text("modulation:0,USB")
+        rig._on_text("trx:0,false")
+        rig.connection = _FakeConnection(alive=False)
+        with pytest.raises(RigConnectionError):
+            getattr(rig, getter)()
+
+    def test_cached_getters_still_answer_while_alive(self) -> None:
+        rig = _make_rig()
+        rig._on_text("vfo:0,0,14074000")
+        rig.connection = _FakeConnection(alive=True)
+        assert rig.get_freq() == 14_074_000
+        assert rig.connection.sent == [], "a warm cache must not hit the wire"

@@ -585,7 +585,20 @@ class TciRig:
         self._mode_event.clear()
         self._ptt_event.clear()
 
+    def _require_alive(self) -> None:
+        """Refuse to serve cached state from a dead connection.
+
+        TCI is push-based, so the getters answer from a cache the server
+        keeps current.  Until the 2026-10 stability audit they never
+        checked that the server was still there.  After the SDR app quit,
+        they kept returning the last frequency and mode, and the poll (which
+        only calls the getters) showed the radio as connected.
+        """
+        if not self.connection.is_alive:
+            raise RigConnectionError("TCI connection lost")
+
     def get_freq(self) -> int:
+        self._require_alive()
         if self._freq_received:
             return self._last_freq
         # Cache cold — request and wait for first push.
@@ -599,6 +612,7 @@ class TciRig:
         self.connection.send(f"vfo:0,0,{hz};")
 
     def get_mode(self) -> tuple[str, int]:
+        self._require_alive()
         if self._mode_received:
             return (self._last_mode, 2700)
         self._mode_event.clear()
@@ -612,6 +626,7 @@ class TciRig:
         self.connection.send(f"modulation:0,{mode.upper()};")
 
     def get_ptt(self) -> bool:
+        self._require_alive()
         if self._ptt_received:
             return self._last_ptt
         self._ptt_event.clear()
@@ -664,11 +679,18 @@ class TciRig:
             except (ValueError, IndexError):
                 pass
         elif lower.startswith("modulation:"):
-            # modulation:0,USB
+            # modulation:<trx>,<mode>  e.g. modulation:0,USB
+            # Only TRX 0, as for vfo: and trx: above.  This one used to take
+            # any TRX, so on a two-receiver SunSDR2 / ExpertSDR setup the
+            # second receiver's mode overwrote ours.  Band Plan tuning uses
+            # this value to decide whether to keep DIGU (2026-10 audit).
             try:
-                self._last_mode = msg.split(",")[-1].strip()
-                self._mode_received = True
-                self._mode_event.set()
+                parts = msg.split(",")
+                trx_field = parts[0].split(":")[-1].strip()
+                if trx_field == "0" and len(parts) >= 2:
+                    self._last_mode = parts[-1].strip()
+                    self._mode_received = True
+                    self._mode_event.set()
             except (ValueError, IndexError):
                 pass
         elif lower.startswith("trx:"):

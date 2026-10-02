@@ -13,6 +13,9 @@ for the integration job in CI when hamlib is on the runner.)
 """
 from __future__ import annotations
 
+import socketserver as _socketserver
+import threading
+import time as _time
 from collections.abc import Iterator
 
 import pytest
@@ -361,3 +364,77 @@ class TestNumericFormatTolerance:
         fake.strength_db = "n/a"  # type: ignore[assignment]
         with pytest.raises(RigCommandError, match="strength"):
             client.get_strength()
+
+
+# ---------------------------------------------------------------------------
+# 2026-10 stability audit: a late reply must not be read by the next command
+# ---------------------------------------------------------------------------
+
+
+
+class _SlowFirstReply(_socketserver.BaseRequestHandler):
+    """The first command on the first connection is answered *after* the
+    client's timeout, as a slow USB-CAT chain would.  Every other command is
+    answered at once.  PTT is genuinely off throughout."""
+
+    connections = 0
+
+    def handle(self) -> None:
+        cls = type(self)
+        cls.connections += 1
+        first_conn = cls.connections == 1
+        buf = b""
+        n = 0
+        while True:
+            try:
+                data = self.request.recv(1024)
+            except OSError:
+                return
+            if not data:
+                return
+            buf += data
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                n += 1
+                cmd = line.decode().lstrip("+").strip()
+                if first_conn and n == 1:
+                    _time.sleep(0.6)  # client times out at 0.3 s
+                reply = {
+                    "f": "Frequency: 14070000\nRPRT 0\n",
+                    "t": "PTT: 0\nRPRT 0\n",
+                }.get(cmd.split()[0], "RPRT 0\n")
+                try:
+                    self.request.sendall(reply.encode())
+                except OSError:
+                    return
+
+
+def test_late_reply_is_not_read_by_the_next_command() -> None:
+    _SlowFirstReply.connections = 0
+    srv = _socketserver.ThreadingTCPServer(("127.0.0.1", 0), _SlowFirstReply)
+    srv.daemon_threads = True
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        client = RigctldClient("127.0.0.1", srv.server_address[1], timeout_s=0.3)
+        with pytest.raises(RigConnectionError):
+            client.get_freq()          # times out; its reply is still coming
+        _time.sleep(0.5)               # ...and now it has arrived
+        # On a desynced link this read the late "Frequency: 14070000" and
+        # reported the rig as KEYED ("14070000" != "0").
+        assert client.get_ptt() is False
+        assert client.get_freq() == 14_070_000
+        client.close()
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_get_ptt_with_empty_body_raises_rig_error(
+    client: RigctldClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bare "RPRT 0" reply used to IndexError, which no RigError handler
+    catches.  This is the TX health monitor's call."""
+    monkeypatch.setattr(client, "_send_recv", lambda command: [])
+    with pytest.raises(RigCommandError):
+        client.get_ptt()

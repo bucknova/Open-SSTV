@@ -130,6 +130,11 @@ class RigctldClient:
     def get_ptt(self) -> bool:
         # +t → "PTT: 0\nRPRT 0"
         body = self._send_recv("t")
+        if not body:
+            # A bare "RPRT 0" used to IndexError here.  IndexError isn't a
+            # RigError, so it escaped every handler, and this is the call
+            # the TX health monitor makes.
+            raise RigCommandError("empty PTT response", command="t")
         return _parse_value(body[0]) != "0"
 
     def set_ptt(self, on: bool) -> None:
@@ -194,11 +199,28 @@ class RigctldClient:
         Holds the lock for the whole transaction so concurrent callers can
         never interleave bytes. On a broken socket we close, reconnect, and
         retry once before giving up.
+
+        Any failure that may leave a reply partly read (a timeout, or a
+        malformed or oversized reply) also closes the socket, so the next
+        command reconnects clean.  Before the 2026-10 stability audit the
+        socket stayed open.  A reply that arrived after the timeout was
+        then read as the answer to the *next* command, and every later
+        reply was off by one until something reconnected.  With the poll,
+        the TX health monitor and the TX worker sharing the link, a stale
+        ``RPRT 0`` could make ``set_ptt(False)`` look successful before its
+        own reply had been read.  A clean ``RPRT -N`` rejection is the one
+        failure that keeps the socket: that reply was read in full.
         """
         with self._lock:
             try:
                 self._connect_locked()
                 return self._send_recv_locked(command)
+            except RigCommandError as exc:
+                if exc.rprt is None:
+                    # Malformed / oversized / unparseable reply: we don't
+                    # know where the stream is any more.
+                    self._close_locked()
+                raise
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 # Half-open or peer-closed socket: try once more from scratch.
                 self._close_locked()
@@ -206,14 +228,19 @@ class RigctldClient:
                     self._connect_locked()
                     return self._send_recv_locked(command)
                 except OSError as exc:
+                    self._close_locked()
                     raise RigConnectionError(
                         f"{self.name}: lost connection during {command!r}: {exc}"
                     ) from exc
             except TimeoutError as exc:
+                # The reply may still be on its way; drop the link so it
+                # can't be read as the answer to the next command.
+                self._close_locked()
                 raise RigConnectionError(
                     f"{self.name}: timed out waiting for response to {command!r}"
                 ) from exc
             except OSError as exc:
+                self._close_locked()
                 raise RigConnectionError(
                     f"{self.name}: socket error on {command!r}: {exc}"
                 ) from exc

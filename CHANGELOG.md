@@ -9,6 +9,61 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+A stability and reliability release, from a full audit of the project
+(`docs/audit_opus_5.5_v0.6.13.md`). Every fix below was reproduced first and
+has a regression test.
+
+### Fixed
+
+- **Closing Open-SSTV from the system now unkeys the radio.** `kill`,
+  `systemctl stop`, logging out, and Ctrl-C in a terminal were ignored while
+  the app sat idle, so the clean shutdown that drops PTT never ran. If the
+  system then forced the app closed, a radio that was transmitting stayed
+  keyed. Closing the terminal Open-SSTV was started from killed it outright,
+  with the same result. All of these now shut down cleanly.
+- **Quitting mid-transmission drops PTT straight away.** It used to wait
+  behind other shutdown steps, for up to about 30 seconds.
+- **Quitting can no longer crash or hang.** When a background task wouldn't
+  stop in time, shutdown either aborted the process or froze it. It now
+  exits cleanly.
+- **Rig status can no longer show wrong values after a slow reply.**
+  rigctld: a reply that arrived late was read as the answer to the next
+  command, so frequency, mode and PTT could be off until a reconnect, and the
+  rig could even be shown as transmitting when it wasn't. Icom CI-V: a late
+  reply could be taken for the next command's, which once made a refused
+  PTT-off look successful.
+- **A lost FlexRadio or TCI connection is now noticed.** The radio panel kept
+  showing the last frequency and mode after the radio or SDR app went away.
+- **TCI with two receivers** (SunSDR2, ExpertSDR, Lyra): the second
+  receiver's mode no longer overwrites the first's. Band Plan uses that
+  mode to decide whether to keep you in DIGU.
+- **Receiving resumes by itself after an audio device glitch.** A USB audio
+  dropout or re-plug used to stop reception until someone clicked Start. It
+  now retries automatically, sooner at first and then every minute, until
+  the device is back.
+- **A full disk no longer floods the screen with error dialogs.** Each failed
+  auto-save opened its own dialog. Now only the first one does, and the rest
+  go to the status bar. A failed save also no longer leaves a half-written
+  image in the gallery.
+- **Settings and templates survive a power cut.** Saves are now flushed to
+  disk before they replace the old file. A power cut just after a save could
+  previously leave the settings file empty, which resets your callsign,
+  audio devices and rig setup.
+- **ADIF import no longer drops QSOs** from a file without a header when a
+  comment contains the text `<EOH>`.
+- **Opening a logbook from a newer version** no longer keeps the file locked
+  on Windows after Open-SSTV refuses it.
+
+### Documentation
+
+- **Lyra is now listed as a supported TCI SDR.** Lyra is N8SDR's Hermes
+  Lite 2 / 2+ transceiver. Its author confirmed on
+  [#73](https://github.com/bucknova/Open-SSTV/pull/73) that v0.6.13's Band
+  Plan DIGU/DIGL switching works correctly with it. That's the first
+  hardware confirmation of the TCI side of
+  [#68](https://github.com/bucknova/Open-SSTV/issues/68); the FlexRadio side
+  is still built from the SmartSDR specification alone.
+
 ### Changed
 
 - The AppImage's AppStream file is now named `….appdata.xml` instead of

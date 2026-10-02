@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import enum
 import logging
-import os
 import threading
 import tomllib
 from dataclasses import asdict, fields
@@ -24,6 +23,7 @@ import platformdirs
 import tomli_w
 
 from open_sstv.config.schema import AppConfig
+from open_sstv.fsutil import atomic_write_bytes
 
 _APP_NAME = "open_sstv"
 _CONFIG_FILENAME = "config.toml"
@@ -226,7 +226,6 @@ def save_config(cfg: AppConfig, path: Path | None = None) -> None:
     """
     if path is None:
         path = config_path()
-    tmp = path.with_suffix(path.suffix + ".tmp")
     with _save_lock:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -247,12 +246,10 @@ def save_config(cfg: AppConfig, path: Path | None = None) -> None:
                 for k, v in asdict(cfg).items()
                 if v is not None
             }
-            with tmp.open("wb") as f:
-                tomli_w.dump(data, f)
-            os.replace(tmp, path)
+            # Durable, not just atomic: see fsutil.atomic_write_bytes.
+            atomic_write_bytes(path, tomli_w.dumps(data).encode("utf-8"))
         except OSError as exc:
             _log.error("Could not save config to %s: %s", path, exc)
-            tmp.unlink(missing_ok=True)
             raise
 
 

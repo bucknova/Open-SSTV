@@ -1193,7 +1193,7 @@ class TestAudioDeviceLostUI:
     ) -> None:
         """_on_audio_device_lost must post a sticky status-bar message with
         no timeout, so it survives until the user acts."""
-        msg = "Audio device disconnected — replug and click Start to recover"
+        msg = "Audio device disconnected — reconnecting automatically."
         window._on_audio_device_lost(msg)
         assert window.statusBar().currentMessage() == msg
 
@@ -1201,7 +1201,7 @@ class TestAudioDeviceLostUI:
         self, window: MainWindow, qapp
     ) -> None:
         """_on_audio_device_lost must also update the RX panel status label."""
-        msg = "Audio device disconnected — replug and click Start to recover"
+        msg = "Audio device disconnected — reconnecting automatically."
         window._on_audio_device_lost(msg)
         assert window._rx_panel._status.text() == msg
 
@@ -1209,21 +1209,25 @@ class TestAudioDeviceLostUI:
         self, window: MainWindow, qapp
     ) -> None:
         """When stream_error fires before stopped, _on_rx_stopped must
-        re-show the disconnect message, not 'Capture stopped.' / 'Ready'."""
-        msg = "Audio device disconnected — replug and click Start to recover"
+        re-show the disconnect message, not 'Capture stopped.' / 'Ready'.
+
+        Since RX auto-resume (2026-10 audit) the message also carries the
+        retry countdown, so check that it's contained rather than equal."""
+        msg = "Audio device disconnected — reconnecting automatically."
         window._on_audio_device_lost(msg)
         # Now the stopped signal fires (as it would after device-loss stop()).
         window._on_rx_stopped()
 
-        assert window.statusBar().currentMessage() == msg
-        assert window._rx_panel._status.text() == msg
+        for shown in (window.statusBar().currentMessage(), window._rx_panel._status.text()):
+            assert msg in shown
+            assert "Retrying in" in shown
 
     def test_device_lost_flag_cleared_after_rx_stopped(
         self, window: MainWindow, qapp
     ) -> None:
         """_on_rx_stopped must clear _last_rx_disconnect_msg after consuming it
         so subsequent normal stops don't re-show the stale disconnect message."""
-        msg = "Audio device disconnected — replug and click Start to recover"
+        msg = "Audio device disconnected — reconnecting automatically."
         window._on_audio_device_lost(msg)
         window._on_rx_stopped()
 
@@ -1245,7 +1249,7 @@ class TestAudioDeviceLostUI:
     ) -> None:
         """stream_error must be connected to _on_audio_device_lost, NOT
         _on_rx_error, so the message is stored for _on_rx_stopped to use."""
-        msg = "Audio device disconnected — replug and click Start to recover"
+        msg = "Audio device disconnected — reconnecting automatically."
         # Emit stream_error directly on the worker (direct call, synchronous).
         window._audio_worker.stream_error.emit(msg)
         # The stored flag confirms _on_audio_device_lost ran (not _on_rx_error,
@@ -1259,7 +1263,7 @@ class TestAudioDeviceLostUI:
     ) -> None:
         """If stream_error fires before started (race on disconnect during start),
         _on_rx_started must not overwrite the disconnect message in the UI."""
-        msg = "Audio device disconnected — replug and click Start to recover"
+        msg = "Audio device disconnected — reconnecting automatically."
         window._on_audio_device_lost(msg)
         # Simulate the late started arriving after stream_error.
         window._on_rx_started()
@@ -1303,7 +1307,7 @@ class TestAudioDeviceLostUI:
         """RxWorker status_update must be suppressed after device loss."""
         from open_sstv.ui.workers import RX_LISTENING
 
-        disconnect_msg = "Audio device disconnected — replug and click Start to recover"
+        disconnect_msg = "Audio device disconnected — reconnecting automatically."
         window._on_audio_device_lost(disconnect_msg)
         window._on_rx_status_update(RX_LISTENING)
         assert window._rx_panel._status.text() == disconnect_msg

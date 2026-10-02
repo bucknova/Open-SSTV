@@ -487,3 +487,40 @@ class TestOutOfRangeDateTime:
         )
         qsos = import_adif(doc)
         assert [q.callsign for q in qsos] == ["K9GOOD"]
+
+
+# ---------------------------------------------------------------------------
+# 2026-10 stability audit: <EOH> text inside a value in a header-less file
+# ---------------------------------------------------------------------------
+
+def _rec(call: str, comment: str = "") -> str:
+    parts = [
+        f"<CALL:{len(call)}>{call}",
+        "<QSO_DATE:8>20261001",
+        "<TIME_ON:6>120000",
+        "<MODE:4>SSTV",
+    ]
+    if comment:
+        parts.append(f"<COMMENT:{len(comment)}>{comment}")
+    return " ".join(parts) + " <EOR>\n"
+
+
+def test_eoh_text_in_a_comment_does_not_drop_earlier_qsos() -> None:
+    """Header-less file (starts with '<'): every QSO must survive, even when
+    a later COMMENT contains the text <EOH>."""
+    doc = _rec("W1AAA") + _rec("K2BBB", comment="see <EOH> marker") + _rec("N3CCC")
+    calls = [q.callsign for q in import_adif(doc)]
+    assert calls == ["W1AAA", "K2BBB", "N3CCC"]
+
+
+def test_tag_only_header_is_still_discarded() -> None:
+    """Some loggers write a header of tags with no leading text.  Its
+    fields must not leak into the first record."""
+    doc = "<ADIF_VER:5>3.1.4 <PROGRAMID:5>Other <EOH>\n" + _rec("W1AAA")
+    qsos = import_adif(doc)
+    assert [q.callsign for q in qsos] == ["W1AAA"]
+
+
+def test_free_text_header_still_works() -> None:
+    doc = "Exported by something\n<ADIF_VER:5>3.1.4 <EOH>\n" + _rec("W1AAA")
+    assert [q.callsign for q in import_adif(doc)] == ["W1AAA"]

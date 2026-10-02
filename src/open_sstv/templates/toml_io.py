@@ -38,12 +38,12 @@ Design choices
 from __future__ import annotations
 
 import logging
-import os
 import tomllib
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import tomli_w
 
+from open_sstv.fsutil import atomic_write_bytes
 from open_sstv.templates.model import (
     RGBA,
     GradientLayer,
@@ -499,15 +499,13 @@ def save_template(template: Template, path: Path) -> None:
         "layer": [_layer_to_dict(layer) for layer in template.layers],
     }
 
-    tmp = path.with_suffix(path.suffix + ".tmp")
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with tmp.open("wb") as f:
-            tomli_w.dump(data, f)
-        os.replace(tmp, path)
+        # Durable, and a unique temp name per save: this writer had no lock
+        # and a fixed .tmp name, so two saves of one template could
+        # interleave.  See fsutil.atomic_write_bytes.
+        atomic_write_bytes(path, tomli_w.dumps(data).encode("utf-8"))
     except OSError as exc:
         _log.error("Failed to save template to %s: %s", path, exc)
-        tmp.unlink(missing_ok=True)
         raise
 
 

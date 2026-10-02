@@ -5,7 +5,7 @@
 An open-source, cross-platform SSTV (Slow Scan Television) transceiver for amateur
 radio. Receives and decodes SSTV images live off your radio, and encodes and
 transmits images back, with optional Hamlib, direct serial, or TCI (ExpertSDR2 /
-SunSDR2 / AetherSDR) rig control.
+SunSDR2 / AetherSDR / Lyra) rig control.
 
 **Status: Beta (v0.6.13) — ready for user testing and feedback.** TX and RX paths work
 end-to-end across all 22 supported modes, with a built-in QSO logbook (v0.4), an image
@@ -36,7 +36,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
   well-maintained scientific dependencies.
 - **Real radio control** via Hamlib's `rigctld` TCP daemon, direct serial
   (Icom CI-V, Kenwood/Elecraft, Yaesu CAT, DTR/RTS PTT), or TCI WebSocket
-  (ExpertSDR2 / ExpertSDR3 / AetherSDR / SunSDR2) — so any supported radio
+  (ExpertSDR2 / ExpertSDR3 / AetherSDR / SunSDR2 / Lyra) — so any supported radio
   works out of the box without an external daemon.
 - **Decoder written from scratch** because no maintained Python SSTV decoder exists
   on PyPI today. Algorithms mirror the well-known C reference `slowrx`.
@@ -244,7 +244,8 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history. &nbsp;|&nbsp;
     auto-detected from the radio's own response, no per-model setting needed.
   - **PTT Only (DTR/RTS)** -- simple serial PTT via DTR or RTS line
 - **TCI (v0.3.5)** -- WebSocket-based control for the Expert Electronics
-  SunSDR2 family (ExpertSDR2 / ExpertSDR3) and the AetherSDR. A single
+  SunSDR2 family (ExpertSDR2 / ExpertSDR3), the AetherSDR, and [Lyra](https://github.com/N8SDR1/Lyra-SDR-cpp)
+  (Hermes Lite 2 / 2+; Band Plan DIGU/DIGL confirmed by its author). A single
   `ws://host:port` connection (default `127.0.0.1:40001`) carries both CAT
   control and binary PCM audio, so rig control and RX/TX audio share one
   transport with no virtual audio cables required.
@@ -617,9 +618,10 @@ with what you tried and what happened.
   does the green/amber match indicator track what you'd expect?
 - **Rig control edge cases**. Mid-session USB unplug; rigctld daemon crash; Icom
   CI-V addresses other than the default 0x94; Kenwood/Yaesu protocol quirks.
-- **TCI rigs** (v0.3.5). If you have an ExpertSDR2/3, AetherSDR, or another
-  TCI-speaking SDR, on-air reports are especially valuable — this path is
-  newly added and has only been validated against one AetherSDR setup.
+- **TCI rigs** (v0.3.5). If you have an ExpertSDR2/3, AetherSDR, Lyra, or
+  another TCI-speaking SDR, on-air reports are especially valuable. This path
+  has been validated against an AetherSDR setup and against Lyra (DIGU/DIGL
+  Band Plan tuning, confirmed by N8SDR).
   Confirm TCI connect, RX audio routing, full SSTV TX, and CW ID over TCI.
 - **FFT waterfall** (v0.3.5). Toggle View → Waterfall and confirm RX traffic
   paints a cool palette and TX audio paints a warm palette during a

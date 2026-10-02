@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from open_sstv.radio.exceptions import RigCommandError
 from open_sstv.radio.serial_rig import IcomCIVRig, KenwoodRig, YaesuRig
 
 
@@ -935,3 +936,62 @@ class TestPortOpensWithLinesLow:
         fake = self._opened(monkeypatch)
         assert fake.dtr is False
         assert fake.rts is False
+
+
+# ---------------------------------------------------------------------------
+# 2026-10 stability audit: a late reply must not answer the next command
+# ---------------------------------------------------------------------------
+
+class _ByteStreamSerial:
+    """Serial stand-in serving a fixed byte stream: whatever the rig had in
+    flight when our command went out, then our reply."""
+
+    def __init__(self, stream: bytes) -> None:
+        self._buf = bytearray(stream)
+        self.timeout = 0.5
+        self.written: list[bytes] = []
+
+    @property
+    def in_waiting(self) -> int:
+        return len(self._buf)
+
+    def read(self, n: int = 1) -> bytes:
+        out = bytes(self._buf[:n])
+        del self._buf[:n]
+        return out
+
+    def write(self, data: bytes) -> int:
+        self.written.append(data)
+        return len(data)
+
+    def reset_input_buffer(self) -> None:
+        # The stale frame lands *after* our flush, which is the race.
+        pass
+
+
+def _civ(payload: bytes, to: int = 0xE0, frm: int = 0x94) -> bytes:
+    return b"\xfe\xfe" + bytes([to, frm]) + payload + b"\xfd"
+
+
+#: A late reply to an earlier get_freq: 7.074 MHz.  Its third byte (0x40)
+#: is non-zero, so read as a get_ptt reply it means "transmitting".
+_STALE_FREQ = _civ(bytes([0x03, 0x00, 0x40, 0x07, 0x07, 0x00]))
+
+
+def test_get_ptt_skips_a_late_frequency_reply(rig: IcomCIVRig) -> None:
+    rig._ser = _ByteStreamSerial(_STALE_FREQ + _civ(b"\x1c\x00\x00"))
+    assert rig.get_ptt() is False, "a stale freq reply was read as PTT keyed"
+
+
+def test_set_ptt_off_sees_its_own_ng_behind_a_late_reply(rig: IcomCIVRig) -> None:
+    """The unkey rejected (NG) must be reported, not masked as success by a
+    stale data frame that happened to arrive first."""
+    rig._ser = _ByteStreamSerial(_STALE_FREQ + _civ(b"\xfa"))
+    with pytest.raises(RigCommandError, match="NG"):
+        rig.set_ptt(False)
+
+
+def test_get_freq_skips_a_late_ack(rig: IcomCIVRig) -> None:
+    payload = bytes([0x03, 0x00, 0x00, 0x23, 0x14, 0x00])  # 14.230 MHz
+    rig._ser = _ByteStreamSerial(_civ(b"\xfb") + _civ(payload))
+    assert rig.get_freq() == 14_230_000

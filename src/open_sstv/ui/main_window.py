@@ -71,6 +71,7 @@ threads, and finally close the rig.
 from __future__ import annotations
 
 import datetime
+import io
 import logging
 import subprocess
 import threading
@@ -82,6 +83,42 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 _log = logging.getLogger(__name__)
+
+#: Back-off between attempts to restart RX capture after the input device
+#: was lost (2026-10 stability audit).  After the last entry, it keeps
+#: retrying at that interval indefinitely: an unattended station should
+#: start receiving again whenever the device comes back, without anyone
+#: clicking Start.
+_AUDIO_RECOVERY_DELAYS_S: tuple[int, ...] = (5, 10, 20, 40, 60)
+
+#: Worker threads that wouldn't stop in time at shutdown, kept referenced
+#: until the process exits.
+#:
+#: The 2026-10 stability audit measured both earlier approaches with a
+#: thread busy in numpy:
+#:
+#: * ``QThread.terminate()`` (the old offline / connect fallback) never
+#:   stopped it.  5 runs in 6 the process then aborted with "QThread:
+#:   Destroyed while thread is still running" (exit 134), and 1 in 6 it hung
+#:   outright, the GIL having been taken away with its owner.
+#: * ``setParent(None)`` alone (the old TX / audio / RX / poll policy) aborted
+#:   5 runs in 5.  It only postponed the qFatal to interpreter shutdown,
+#:   when PySide destroys the still-running ``QThread``.
+#:
+#: What works, 5 runs in 5, is to detach, keep the ``(thread, worker)`` pair
+#: referenced here, and have ``app.main`` leave with ``os._exit()`` whenever
+#: this list isn't empty, so finalization never destroys a live thread.
+_DETACHED_AT_SHUTDOWN: list[tuple[object, object]] = []
+
+
+def _detach_running_thread(thread: QThread, worker: object, label: str) -> None:
+    """Hand a thread that won't stop to the process instead of killing it."""
+    _log.warning(
+        "%s did not stop in time at shutdown; detaching it to exit "
+        "without terminate()", label,
+    )
+    thread.setParent(None)
+    _DETACHED_AT_SHUTDOWN.append((thread, worker))
 
 from PySide6.QtCore import (
     QEventLoop,
@@ -121,6 +158,7 @@ from open_sstv.config.schema import AppConfig
 from open_sstv.config.store import last_corrupt_backup, load_config, save_config
 from open_sstv.config.templates import load_templates
 from open_sstv.core.modes import Mode
+from open_sstv.fsutil import atomic_write_bytes
 from open_sstv.logbook import QSO, LogbookCoordinator, QsoLoggingError, UdpQsoLogger
 from open_sstv.radio.band_plan import (
     FLEX_PROTOCOL,
@@ -776,6 +814,18 @@ class MainWindow(QMainWindow):
         #: the capture flow must not run against a closing window /
         #: closed store.
         self._closing: bool = False
+        #: True while auto-saves keep failing.  Only the first failure in a
+        #: streak gets a modal dialog; see _autosave_image.
+        self._autosave_failing: bool = False
+        #: RX auto-resume after an involuntary device loss (2026-10 audit).
+        #: Capture used to stop for good on a device loss, so a one-second
+        #: USB glitch ended reception for the night on an unattended station.
+        self._audio_recovery_active: bool = False
+        self._audio_recovery_attempt: int = 0
+        self._audio_recovery_reason: str = ""
+        self._audio_recovery_timer = QTimer(self)
+        self._audio_recovery_timer.setSingleShot(True)
+        self._audio_recovery_timer.timeout.connect(self._attempt_audio_recovery)
         #: Set by ``closeEvent`` only once its teardown has actually run to
         #: completion.  Deliberately NOT ``_closing``: that one means "we are
         #: shutting down, stand down from new work" and is set by other code
@@ -2594,38 +2644,82 @@ class MainWindow(QMainWindow):
         from an already-warm device can reach ``feed_chunk`` before the
         reset slot runs.  The one-shot ``reset_done → start_capture``
         connection sequences the two steps deterministically.
+
+        This is the user's own Start/Stop, so it takes over from any RX
+        auto-resume in progress.
         """
+        self._cancel_audio_recovery()
         if start:
-            # Clear any stale device-loss / stream-error state from the
-            # previous session so _on_rx_started and _on_rx_stopped behave
-            # correctly for this new attempt.
-            self._last_rx_disconnect_msg = ""
-            self._last_rx_audio_error_msg = ""
-            # Defensive: if _on_rx_started never fired (e.g. stream-open
-            # failed last time), the suppress flag may still be True.
-            # Clear it here so the next status updates are visible.
-            self._suppress_rx_status_updates = False
-            # Reset the decoder + sample counter so each new capture session
-            # starts from zero rather than accumulating across stop/restart
-            # cycles (bug R-1: counter climbed past 127s with no image).
-            # Defer the start-capture request until reset_done arrives so
-            # the two worker threads are ordered correctly (OP-05).
-            #
-            # Arm the one-shot: reset_done is connected once, at
-            # construction, to a real slot on this window, so it lands on
-            # the GUI thread.  The flag makes it one-shot without the
-            # connect/disconnect dance a closure needed — and without the
-            # H7 failure where a second click before the first reset
-            # completed left two closures connected and started capture
-            # twice ("already running").
-            self._start_capture_armed = True
-            self._request_rx_reset.emit()
+            self._begin_capture()
         else:
             # Cancel any in-flight decode before stopping audio so the tail
             # flush triggered by audio_worker.stopped doesn't block the worker
             # thread for several seconds on a large buffer.
             self._rx_worker.request_cancel()
             self._request_stop_capture.emit()
+
+    def _begin_capture(self) -> None:
+        """Start capture: the Start button, and each RX auto-resume attempt."""
+        # Clear any stale device-loss / stream-error state from the
+        # previous session so _on_rx_started and _on_rx_stopped behave
+        # correctly for this new attempt.
+        self._last_rx_disconnect_msg = ""
+        self._last_rx_audio_error_msg = ""
+        # Defensive: if _on_rx_started never fired (e.g. stream-open
+        # failed last time), the suppress flag may still be True.
+        # Clear it here so the next status updates are visible.
+        self._suppress_rx_status_updates = False
+        # Reset the decoder + sample counter so each new capture session
+        # starts from zero rather than accumulating across stop/restart
+        # cycles (bug R-1: counter climbed past 127s with no image).
+        # Defer the start-capture request until reset_done arrives so
+        # the two worker threads are ordered correctly (OP-05).
+        #
+        # Arm the one-shot: reset_done is connected once, at
+        # construction, to a real slot on this window, so it lands on
+        # the GUI thread.  The flag makes it one-shot without the
+        # connect/disconnect dance a closure needed — and without the
+        # H7 failure where a second click before the first reset
+        # completed left two closures connected and started capture
+        # twice ("already running").
+        self._start_capture_armed = True
+        self._request_rx_reset.emit()
+
+    # --- RX auto-resume after a device loss (2026-10 stability audit) -----
+
+    def _schedule_audio_recovery(self) -> None:
+        """Arm the next attempt to restart capture, with back-off."""
+        delays = _AUDIO_RECOVERY_DELAYS_S
+        delay = delays[min(self._audio_recovery_attempt, len(delays) - 1)]
+        self._audio_recovery_attempt += 1
+        reason = self._audio_recovery_reason or "Audio input lost."
+        msg = f"{reason} Retrying in {delay} s (attempt {self._audio_recovery_attempt})."
+        self._rx_panel.set_status(msg)
+        self.statusBar().showMessage(msg)
+        self._audio_recovery_timer.start(delay * 1000)
+
+    @Slot()
+    def _attempt_audio_recovery(self) -> None:
+        if not self._audio_recovery_active or self._closing or self._capture_running:
+            return
+        # Starting capture resets the decoder, which would lift the RX gate
+        # while a TX is on the air.  Wait for the TX to end instead.
+        if not self._tx_worker.wait_for_idle(timeout=0):
+            self._audio_recovery_timer.start(5_000)
+            return
+        n = self._audio_recovery_attempt
+        if n <= len(_AUDIO_RECOVERY_DELAYS_S) or n % 10 == 0:
+            _log.info("RX audio recovery: attempt %d to restart capture", n)
+        self._input_device_needs_relookup = True  # USB re-plug renumbers devices
+        self._begin_capture()
+        # Success shows up as _on_rx_started.  A failure arrives as
+        # error + stopped, and _on_rx_stopped schedules the next attempt.
+
+    def _cancel_audio_recovery(self) -> None:
+        self._audio_recovery_timer.stop()
+        self._audio_recovery_active = False
+        self._audio_recovery_attempt = 0
+        self._audio_recovery_reason = ""
 
     @Slot()
     def _start_capture_after_reset(self) -> None:
@@ -2667,6 +2761,13 @@ class MainWindow(QMainWindow):
         self._capture_running = True
         self._suppress_rx_status_updates = False
         self._rx_panel.set_capturing(True)
+        if self._audio_recovery_active:
+            _log.info(
+                "RX audio recovered after %d attempt(s)", self._audio_recovery_attempt
+            )
+            self._cancel_audio_recovery()
+            self.statusBar().showMessage("Audio input recovered — capturing")
+            return
         self.statusBar().showMessage("Capturing")
 
     @Slot()
@@ -2691,6 +2792,8 @@ class MainWindow(QMainWindow):
         else:
             self._rx_panel.set_status("Not listening — click Start to begin.")
             self.statusBar().showMessage("Ready")
+        if self._audio_recovery_active and not self._closing:
+            self._schedule_audio_recovery()
 
     @Slot(str)
     def _on_audio_device_lost(self, message: str) -> None:
@@ -2703,6 +2806,13 @@ class MainWindow(QMainWindow):
         # Signal _start_once that it must re-resolve the saved device
         # name on the next capture start.
         self._input_device_needs_relookup = True
+        # An involuntary loss: keep trying to restart capture once the
+        # stream has stopped (_on_rx_stopped), rather than waiting for
+        # someone to click Start.
+        if not self._closing:
+            if not self._audio_recovery_active:
+                self._audio_recovery_reason = message
+            self._audio_recovery_active = True
 
     @Slot(str)
     def _on_rx_status_update(self, text: str) -> None:
@@ -2753,12 +2863,27 @@ class MainWindow(QMainWindow):
     ) -> Path | None:
         """Resolve the filename template and write ``image`` to disk.
 
-        Returns the saved path on success, ``None`` on failure (a
-        warning dialog is shown for OSError).  Shared by the RX and TX
-        auto-save call sites so both consume the same
+        Returns the saved path on success, ``None`` on failure.  Shared by
+        the RX and TX auto-save call sites so both consume the same
         ``autosave_filename_pattern`` and ``autosave_file_format``
         config fields.
+
+        2026-10 stability audit:
+
+        * The image is encoded in memory and written with
+          ``atomic_write_bytes``.  PIL used to write straight to the final
+          path, so a full disk left a truncated image in the gallery.
+        * ``ValueError`` is caught as well as ``OSError``.  PIL raises it
+          for an unknown or unsuitable format, and it used to escape the
+          slot, skipping the logbook draft that follows.
+        * Only the first failure in a streak opens a modal dialog.  Later
+          ones go to the status bar and the log, until a save succeeds.  A
+          full disk on an unattended station used to stack one dialog per
+          decoded image, and nobody, including the remote page, could see
+          or dismiss them.
         """
+        from PIL import Image  # noqa: PLC0415
+
         save_dir = Path(self._config.images_save_dir)
         ctx = self._build_save_context(mode, direction)
         try:
@@ -2769,10 +2894,26 @@ class MainWindow(QMainWindow):
                 ctx,
                 file_format=self._config.autosave_file_format,
             )
-            image.save(str(path))
-        except OSError as exc:
-            QMessageBox.warning(self, "Save failed", str(exc))
+            fmt = Image.registered_extensions().get(path.suffix.lower())
+            if fmt is None:
+                raise ValueError(f"unknown image format {path.suffix!r}")
+            buf = io.BytesIO()
+            image.save(buf, format=fmt)
+            atomic_write_bytes(path, buf.getvalue())
+        except (OSError, ValueError) as exc:
+            _log.error("auto-save failed: %s", exc)
+            if not self._autosave_failing:
+                self._autosave_failing = True
+                QMessageBox.warning(
+                    self,
+                    "Save failed",
+                    f"{exc}\n\nFurther auto-save failures will appear in "
+                    "the status bar until a save succeeds.",
+                )
+            else:
+                self.statusBar().showMessage(f"Auto-save failed: {exc}", 10_000)
             return None
+        self._autosave_failing = False
         self.statusBar().showMessage(f"{status_verb} {path.name}", 3000)
         return path
 
@@ -3225,8 +3366,12 @@ class MainWindow(QMainWindow):
             if thread.objectName() == "rig-connect-thread" and thread.isRunning():
                 thread.quit()
                 if not thread.wait(2000):
-                    thread.terminate()
-                    thread.wait(500)
+                    # Blocked in rig.open() (a serial open or TCP connect).
+                    # Detach rather than terminate(): see
+                    # _DETACHED_AT_SHUTDOWN.
+                    _detach_running_thread(
+                        thread, self._connect_worker, "rig connect thread"
+                    )
 
         # Drop the worker reference only after all threads have stopped.
         # Clearing it earlier would destroy the C++ QObject while the worker
@@ -3929,14 +4074,15 @@ class MainWindow(QMainWindow):
            exit at the next opportunity.  No-op if the worker is
            mid-``encode()`` because the event loop is blocked on
            ``run()`` returning.
-        2. ``thread.wait(timeout)`` — block the GUI thread for up to
-           10 s to let an in-flight encode complete.  Covers Robot
-           36 / PD / Wraase / Scottie / Martin / Pasokon P3-P5.  A
-           Pasokon P7 mid-encode may exceed this; we fall through.
-        3. ``thread.terminate() + wait(1000)`` as a last resort.  Qt
-           docs warn that ``terminate`` can leave the worker in a
-           half-deinit state, but a half-deinit worker on a process
-           about to ``exit()`` anyway is preferable to ``qFatal``.
+        2. ``thread.wait(timeout)`` — block the GUI thread briefly to
+           let an in-flight encode/decode finish.  The result is
+           discarded anyway (the window is closing), so this only buys
+           a tidy exit.  It was 10 s per thread, which pushed the rest
+           of shutdown back by up to 20 s; it's now 2 s.
+        3. Detach a thread that's still running (see
+           ``_DETACHED_AT_SHUTDOWN``).  This used to ``terminate()`` it,
+           which can kill the thread while it holds the GIL and hang
+           the whole process at exit (2026-10 stability audit).
 
         Same shape as the ``_abort_connect`` shutdown drain for the
         ``_RigConnectWorker``.  Safe to call when no worker is in
@@ -3951,15 +4097,10 @@ class MainWindow(QMainWindow):
                 continue
             try:
                 thread.quit()
-                if not thread.wait(10_000):
-                    # Stage 3: force-terminate.  We prefer a slightly
-                    # ugly process exit over a qFatal abort.
-                    _log.warning(
-                        "%s did not exit cleanly in 10 s; terminating",
-                        attr_thread,
+                if not thread.wait(2_000):
+                    _detach_running_thread(
+                        thread, getattr(self, attr_worker, None), attr_thread
                     )
-                    thread.terminate()
-                    thread.wait(1000)
             except RuntimeError:
                 # Thread C++ object already destroyed (e.g. closeEvent
                 # firing twice via aboutToQuit + the X button).
@@ -3980,6 +4121,9 @@ class MainWindow(QMainWindow):
         if self._teardown_complete:
             event.accept()
             return
+        # No more RX auto-resume attempts once shutdown starts.
+        self._audio_recovery_timer.stop()
+        self._audio_recovery_active = False
 
         # Audit #3: flag first.  The shutdown drain below can deliver
         # one final queued image_complete (stop-flush, RX watchdog);
@@ -3994,9 +4138,16 @@ class MainWindow(QMainWindow):
             self._persist_audio_gain()
 
         # v0.6 (Phase 3c): reclaim control first — unkeys any in-flight
-        # remote TX and drops the lease — then stop the read-only server.
-        # Both are independent of the rig/worker teardown below.
+        # remote TX and drops the lease.
         self._remote_control.reclaim_local()
+        # 2026-10 audit: stop a *local* transmission now as well.  This used
+        # to happen only after the remote-server stop (up to 7 s of joins),
+        # the connect abort (2.5 s) and the offline-worker drain (20 s), so
+        # quitting mid-TX could keep PTT keyed for half a minute.
+        # request_stop() is thread-safe and returns at once.  The worker
+        # unwinds and unkeys on its own thread while the rest of the
+        # teardown runs, and wait_for_idle() further down confirms it.
+        self._tx_worker.request_stop()
         self._stop_remote_server()
 
         # Abort any in-flight rig connect first — the QThread is a child of
@@ -4147,30 +4298,25 @@ class MainWindow(QMainWindow):
             # A leaked thread at exit beats an abort (same policy the
             # offline-worker drain documents).
             if not self._tx_thread.wait(500):
-                _logging.getLogger(__name__).warning(
-                    "TX worker thread still running at close — detaching "
-                    "from the window to avoid QThread destruction abort"
+                _detach_running_thread(
+                    self._tx_thread, self._tx_worker, "TX worker thread"
                 )
-                self._tx_thread.setParent(None)
 
-        for thread in (
-            self._audio_thread,
-            self._rx_thread,
-            self._rig_poll_thread,
-            self._update_thread,
+        for thread, worker in (
+            (self._audio_thread, self._audio_worker),
+            (self._rx_thread, self._rx_worker),
+            (self._rig_poll_thread, self._rig_poll_worker),
+            (self._update_thread, self._update_worker),
         ):
             thread.quit()
             if not thread.wait(4000):
                 # v0.4.0 audit high #4: same detach-over-abort policy as
                 # the TX thread above — a wedged Core Audio stop() or a
-                # long P7 decode must not turn quit into a qFatal.
-                import logging as _logging2
-                _logging2.getLogger(__name__).warning(
-                    "%s did not stop within 4 s at close — detaching from "
-                    "the window to avoid QThread destruction abort",
-                    thread.objectName() or "worker thread",
+                # long P7 decode must not turn quit into a qFatal.  (And
+                # app.main must then os._exit(); see _DETACHED_AT_SHUTDOWN.)
+                _detach_running_thread(
+                    thread, worker, thread.objectName() or "worker thread"
                 )
-                thread.setParent(None)
 
         # v0.4 (audit #3): close the logbook's SQLite connection only
         # now — every worker thread that could emit a completion has

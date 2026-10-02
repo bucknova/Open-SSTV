@@ -63,7 +63,11 @@ def make_test_image(width: int, height: int) -> Image.Image:
     # Diagonal grey stripe so the image has high-frequency structure
     for i in range(min(width, height)):
         arr[i, i, :] = 200
-    return Image.fromarray(arr, mode="RGB")
+    # No mode= argument: Pillow deprecated it (removed in Pillow 13), and a
+    # uint8 (H, W, 3) array is inferred as RGB anyway.
+    img = Image.fromarray(arr)
+    assert img.mode == "RGB", img.mode
+    return img
 
 
 def encode_to_wav_bytes(image: Image.Image, mode: Mode) -> bytes:

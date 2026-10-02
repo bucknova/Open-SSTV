@@ -328,10 +328,11 @@ class TestResolveTuneMode:
         CAT command was never verified.
 
         Adding a protocol here is a deliberate decision.  The two SDR keys
-        (#68) are verified against their published specs rather than
-        hardware: TCI lists "DIGL, DIGU" among its modulations, and SmartSDR
-        slice modes include DIGU / DIGL (already used by radio.flex).  In
-        both, the data mode is a plain named mode.  Icom (a separate CI-V
+        (#68) come from the published specs: TCI lists "DIGL, DIGU" among its
+        modulations, and SmartSDR slice modes include DIGU / DIGL (already
+        used by radio.flex).  In both, the data mode is a plain named mode.
+        TCI has since been confirmed on hardware (N8SDR, Lyra on a Hermes
+        Lite 2, 2026-10-02); Flex is still spec-only.  Icom (a separate CI-V
         sub-command) and Kenwood/Elecraft (model-specific) are still out,
         for the reasons in band_plan.DATA_MODE_BY_PROTOCOL.
         """
