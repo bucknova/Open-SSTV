@@ -145,7 +145,17 @@ def test_set_ptt_keys_and_unkeys(
 
 def test_get_strength(client: RigctldClient, fake: FakeRigctld) -> None:
     fake.strength_db = -42
-    assert client.get_strength() == -42
+    assert client.get_strength() == -115
+
+
+def test_get_strength_converts_s9_relative_to_dbm(
+    client: RigctldClient, fake: FakeRigctld
+) -> None:
+    """Hamlib STRENGTH is dB relative to S9: 0 → S9 (-73 dBm), -36 → S3."""
+    fake.strength_db = 0
+    assert client.get_strength() == -73
+    fake.strength_db = -36
+    assert client.get_strength() == -109
 
 
 def test_get_strength_accepts_echo_header_with_argument(
@@ -154,7 +164,7 @@ def test_get_strength_accepts_echo_header_with_argument(
     """``get_level: STRENGTH`` is an echoed header, not a data field."""
     fake.echo_header = True
     fake.strength_db = -24
-    assert client.get_strength() == -24
+    assert client.get_strength() == -97
 
 
 # === ping ===
