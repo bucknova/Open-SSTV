@@ -43,6 +43,9 @@ from open_sstv.radio.exceptions import RigCommandError, RigConnectionError
 
 _log = logging.getLogger(__name__)
 
+#: S9 in dBm — Hamlib STRENGTH is relative to this.
+_S9_DBM = -73
+
 
 class RigctldClient:
     """Synchronous client for hamlib's ``rigctld`` daemon.
@@ -141,11 +144,15 @@ class RigctldClient:
         self._send_recv(f"T {1 if on else 0}")
 
     def get_strength(self) -> int:
-        # +l STRENGTH → "STRENGTH: -73\nRPRT 0"
+        # +l STRENGTH → "STRENGTH: -36\nRPRT 0"
+        # Hamlib reports STRENGTH in dB *relative to S9* (S9 = 0, S3 = -36),
+        # while RigBackend.get_strength() is dBm (S9 = -73).  Convert so the
+        # S-meter doesn't pin at S9 for every signal.
         body = self._send_recv("l STRENGTH")
         if not body:
             raise RigCommandError("empty STRENGTH response", command="l STRENGTH")
-        return _parse_int(body[0], field="strength", command="l STRENGTH")
+        rel_db = _parse_int(body[0], field="strength", command="l STRENGTH")
+        return rel_db + _S9_DBM
 
     def ping(self) -> None:
         """Cheapest round-trip we can do — verifies the daemon is alive."""
