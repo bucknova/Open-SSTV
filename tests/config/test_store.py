@@ -170,11 +170,17 @@ def test_autosave_file_format_normalised_on_load(tmp_path: Path) -> None:
 
 
 def test_load_corrupt_toml_returns_defaults(tmp_path: Path) -> None:
-    """Genuine TOML parse error → fall back to defaults (not a crash)."""
+    """Genuine TOML parse error → fall back to defaults (not a crash).
+
+    v0.6.14 audit C-H2: ``first_launch_seen`` stays True — a config file
+    existed, so this is not a fresh install, and showing the Welcome
+    dialog would save defaults straight over the user's (backed-up)
+    settings.
+    """
     p = tmp_path / "config.toml"
     p.write_bytes(b"[[[ not valid toml")
     loaded = load_config(path=p)
-    assert loaded == AppConfig()
+    assert loaded == AppConfig(first_launch_seen=True)
 
 
 def test_load_corrupt_toml_backs_up_file(tmp_path: Path) -> None:
@@ -189,7 +195,7 @@ def test_load_corrupt_toml_backs_up_file(tmp_path: Path) -> None:
     loaded = load_config(path=p)
 
     backup = p.with_suffix(p.suffix + ".corrupt")
-    assert loaded == AppConfig()
+    assert loaded == AppConfig(first_launch_seen=True)
     assert not p.exists()  # corpse moved aside, not left to re-trip
     assert backup.exists()
     assert backup.read_bytes() == b"[[[ not valid toml"
@@ -218,15 +224,120 @@ def test_clean_load_clears_corrupt_marker(tmp_path: Path) -> None:
     assert last_corrupt_backup() is None
 
 
-def test_load_wrong_typed_value_backs_up_and_defaults(tmp_path: Path) -> None:
-    """M1/M2: a value that parses as TOML but blows up AppConfig
-    construction (string where int is expected) is treated like
-    corruption — defaults + backup, never a startup crash."""
+def test_load_wrong_typed_value_resets_only_that_field(tmp_path: Path) -> None:
+    """M1/M2, refined by v0.6.14 audit C-H1: a value that parses as TOML
+    but has the wrong type resets *that field* to its default — the rest
+    of the user's settings survive, and nothing is banished to
+    ``.corrupt``.  Never a startup crash."""
+    from open_sstv.config.store import last_corrupt_backup
+
     p = tmp_path / "config.toml"
-    p.write_text('rigctld_port = "not-a-port"\n', encoding="utf-8")
+    p.write_text(
+        'rigctld_port = "not-a-port"\ncallsign = "W0AEZ"\n', encoding="utf-8"
+    )
     loaded = load_config(path=p)
-    assert loaded == AppConfig()
+    assert loaded.rigctld_port == AppConfig().rigctld_port
+    assert loaded.callsign == "W0AEZ"
+    assert p.exists()
+    assert not p.with_suffix(p.suffix + ".corrupt").exists()
+    assert last_corrupt_backup() is None
+
+
+# === v0.6.14 audit C-H1: per-field type coercion ===
+
+
+def test_wrong_typed_string_field_does_not_crash() -> None:
+    """``log_level = 5`` used to raise AttributeError from ``.strip()``
+    and crash every launch."""
+    cfg = AppConfig(log_level=5)  # type: ignore[arg-type]
+    assert cfg.log_level == "INFO"
+    for name in ("rx_capture_prompt", "udp_log_format", "rig_ptt_line",
+                 "tx_banner_size", "autosave_file_format", "rx_audio_format"):
+        AppConfig(**{name: 7})  # must not raise
+
+
+def test_numeric_callsign_is_coerced_to_string() -> None:
+    """``callsign = 123`` crashed later in ``.upper()``."""
+    cfg = AppConfig(callsign=123, grid_square=42)  # type: ignore[arg-type]
+    assert cfg.callsign == "123"
+    assert cfg.grid_square == "42"
+    assert cfg.callsign.upper() == "123"
+
+
+def test_wrong_typed_fields_reset_individually() -> None:
+    cfg = AppConfig(
+        auto_save="yes",            # bool field, string → default
+        ptt_delay_s="fast",         # float field, junk → default
+        rigctld_port=4533.0,        # integral float → int
+        cw_id_wpm="25",             # numeric string → int
+        audio_input_gain="1.5",     # numeric string → float
+        audio_input_device=["x"],   # str | None field, list → default
+        sample_rate=None,           # int field, None → default
+        callsign="W0AEZ",
+    )  # type: ignore[arg-type]
+    assert cfg.auto_save is False
+    assert cfg.ptt_delay_s == AppConfig().ptt_delay_s
+    assert cfg.rigctld_port == 4533 and isinstance(cfg.rigctld_port, int)
+    assert cfg.cw_id_wpm == 25
+    assert cfg.audio_input_gain == 1.5
+    assert cfg.audio_input_device is None
+    assert cfg.sample_rate == 48_000
+    assert cfg.callsign == "W0AEZ"
+
+
+def test_non_finite_and_bool_numbers_reset() -> None:
+    cfg = AppConfig(
+        test_tone_freq_lo=float("nan"),
+        rigctld_port=True,  # bool is not a port number
+        rx_watchdog_timeout_s=float("inf"),
+    )  # type: ignore[arg-type]
+    assert cfg.test_tone_freq_lo == 700.0
+    assert cfg.rigctld_port == 4532
+    assert cfg.rx_watchdog_timeout_s == AppConfig().rx_watchdog_timeout_s
+
+
+def test_load_bad_fields_keeps_the_rest(tmp_path: Path) -> None:
+    p = tmp_path / "config.toml"
+    p.write_text(
+        'log_level = 5\ncallsign = 123\nrigctld_port = 4533\n'
+        'audio_output_device = "USB Audio CODEC"\n',
+        encoding="utf-8",
+    )
+    loaded = load_config(path=p)
+    assert loaded.log_level == "INFO"
+    assert loaded.callsign == "123"
+    assert loaded.rigctld_port == 4533
+    assert loaded.audio_output_device == "USB Audio CODEC"
+    assert not p.with_suffix(p.suffix + ".corrupt").exists()
+
+
+def test_load_attribute_error_is_backstopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Any AttributeError escaping AppConfig construction is treated like
+    corruption (backup + defaults), never a startup crash."""
+    p = tmp_path / "config.toml"
+    p.write_text('callsign = "W0AEZ"\n', encoding="utf-8")
+
+    real_post_init = AppConfig.__post_init__
+    calls = {"n": 0}
+
+    def _boom_once(self: AppConfig) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise AttributeError("simulated")
+        real_post_init(self)
+
+    monkeypatch.setattr(AppConfig, "__post_init__", _boom_once)
+    loaded = load_config(path=p)
+    assert isinstance(loaded, AppConfig)
     assert p.with_suffix(p.suffix + ".corrupt").exists()
+
+
+def test_ptt_delay_fallback_matches_default() -> None:
+    """A non-finite ptt_delay_s falls back to the field default, not a
+    different hard-coded number (v0.6.14 audit nit)."""
+    assert AppConfig(ptt_delay_s=float("nan")).ptt_delay_s == AppConfig().ptt_delay_s
 
 
 def test_schema_validates_hand_edited_fields() -> None:

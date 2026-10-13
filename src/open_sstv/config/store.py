@@ -169,10 +169,16 @@ def load_config(path: Path | None = None) -> AppConfig:
         known = {f.name for f in fields(AppConfig)}
         filtered = {k: v for k, v in raw.items() if k in known}
         return AppConfig(**filtered)
-    except (tomllib.TOMLDecodeError, UnicodeDecodeError, TypeError, ValueError):
-        # TypeError/ValueError cover wrong-typed values that parse as
-        # TOML but blow up AppConfig construction or __post_init__
-        # validation (e.g. ``rigctld_port = "abc"``) — M1/M2, v0.3 audit.
+    except (
+        tomllib.TOMLDecodeError, UnicodeDecodeError, TypeError, ValueError,
+        AttributeError,
+    ):
+        # Wrong-typed *values* no longer land here: v0.6.14 audit C-H1
+        # made ``AppConfig.__post_init__`` coerce each field to its
+        # annotated type and reset only the bad one.  TypeError /
+        # ValueError / AttributeError stay as a backstop so a future
+        # validation slip (e.g. a ``.strip()`` on a non-str) degrades to
+        # "defaults + backup" instead of crashing every launch.
         #
         # M2 (v0.3 audit): don't just reset to defaults — the corrupt
         # file holds the user's callsign, devices, and rig setup, and
@@ -196,7 +202,10 @@ def load_config(path: Path | None = None) -> AppConfig:
                 "Config file %s is corrupt (backup failed: %s) — using defaults",
                 path, exc,
             )
-        return AppConfig()
+        # v0.6.14 audit C-H2: a config file existed, so this is not a
+        # fresh install.  Without this the Welcome dialog appeared and its
+        # save wrote defaults over the user's settings path.
+        return AppConfig(first_launch_seen=True)
 
 
 def last_corrupt_backup() -> Path | None:
