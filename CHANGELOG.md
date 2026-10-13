@@ -9,6 +9,14 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The S-meter now works over rigctld.** It showed S9 for every signal,
+  because Hamlib reports signal strength relative to S9 while Open-SSTV
+  expected dBm. A signal the radio shows as S3 now reads S3. Thanks to
+  David Horvath ([#79](https://github.com/bucknova/Open-SSTV/pull/79)),
+  who found and fixed it on a Yaesu FT-450D.
+
 ---
 
 ## [0.6.14] — 2026-10-01
