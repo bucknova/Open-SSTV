@@ -1593,15 +1593,10 @@ class RxWorker(QObject):
         # Legacy ``flush_samples`` override (explicit int) still wins
         # for back-compat with tests that pin a tight flush size.
         self._flush_samples_override: int | None = flush_samples
-        self._flush_samples_incremental_idle: int = int(
-            _DECODE_FLUSH_INTERVAL_S_INCREMENTAL_IDLE * sample_rate
-        )
-        self._flush_samples_incremental_decoding: int = int(
-            _DECODE_FLUSH_INTERVAL_S_INCREMENTAL_DECODING * sample_rate
-        )
-        self._flush_samples_batch: int = int(
-            _DECODE_FLUSH_INTERVAL_S_BATCH * sample_rate
-        )
+        self._flush_samples_incremental_idle: int = 0
+        self._flush_samples_incremental_decoding: int = 0
+        self._flush_samples_batch: int = 0
+        self._compute_flush_thresholds()
         # Legacy public attribute: many existing tests read this
         # directly to assert the configured threshold.  It now
         # reflects the IDLE threshold of the active path, which is
@@ -1644,17 +1639,13 @@ class RxWorker(QObject):
         happens on the worker's own event loop (never racing with
         ``feed_chunk``).
         """
+        # v0.6.14 audit UI-M2: Settings OK used to re-send every value,
+        # so an unrelated settings change rebuilt the decoder and threw
+        # away the image being received.  Rebuild only on a real change.
+        if enabled == self._weak_signal:
+            return
         self._weak_signal = enabled
-        self._decoder = Decoder(
-            self._sample_rate,
-            weak_signal=enabled,
-            incremental_decode=self._incremental_decode,
-        )
-        self._decoder.set_cancel_event(self._cancel_event)
-        # OP2-16: discard pre-toggle audio so the new decoder doesn't see
-        # stale samples from the old decoder's time window.
-        self._scratch.clear()
-        self._scratch_samples = 0
+        self._rebuild_decoder()
 
     @Slot(int)
     def set_watchdog_timeout(self, seconds: int) -> None:
@@ -1677,16 +1668,10 @@ class RxWorker(QObject):
         Decorated ``@Slot(bool)`` so the GUI thread can dispatch this via a
         queued signal, guaranteeing the rebuild happens on the worker thread.
         """
+        if enabled == self._incremental_decode:
+            return  # v0.6.14 audit UI-M2: no-op when unchanged
         self._incremental_decode = enabled
-        self._decoder = Decoder(
-            self._sample_rate,
-            weak_signal=self._weak_signal,
-            incremental_decode=enabled,
-        )
-        self._decoder.set_cancel_event(self._cancel_event)
-        # OP2-16: discard pre-toggle audio (matches set_sample_rate pattern).
-        self._scratch.clear()
-        self._scratch_samples = 0
+        self._rebuild_decoder()
 
     @Slot(bool)
     def set_final_slant_correction(self, enabled: bool) -> None:
@@ -1731,9 +1716,10 @@ class RxWorker(QObject):
         """Update the sample rate and reconstruct the internal Decoder.
 
         Should be called only when capture is not running — the new
-        Decoder discards any in-flight buffered audio. The caller
-        (``MainWindow._apply_config``) shows a status-bar notice asking
-        the user to restart capture when the rate changes mid-session.
+        Decoder discards any in-flight buffered audio, and the decoder
+        must run at the rate the stream delivers.  ``MainWindow`` defers
+        a mid-capture change to the next capture start (v0.6.14 audit
+        UI-M2) and asks the user to restart capture.
 
         Decorated ``@Slot(int)`` so the GUI thread can dispatch this via a
         queued signal, guaranteeing the rebuild happens on the worker thread.
@@ -1741,20 +1727,64 @@ class RxWorker(QObject):
         OP-12: ``_total_samples`` is also zeroed so the "Xs buffered"
         status label isn't briefly off-by-rate after a mid-session change.
         """
+        if sample_rate == self._sample_rate:
+            return  # v0.6.14 audit UI-M2: no-op when unchanged
         self._sample_rate = sample_rate
-        self._decoder = Decoder(
-            sample_rate,
-            weak_signal=self._weak_signal,
-            incremental_decode=self._incremental_decode,
-        )
-        self._decoder.set_cancel_event(self._cancel_event)
-        self._scratch.clear()
-        self._scratch_samples = 0
-        self._total_samples = 0
+        # v0.6.14 audit UI-M2: the flush thresholds are sample counts
+        # derived from the rate.  They were computed once in __init__ and
+        # never followed a rate change.
+        self._compute_flush_thresholds()
+        self._rebuild_decoder()
 
     @property
     def sample_rate(self) -> int:
         return self._sample_rate
+
+    def _compute_flush_thresholds(self) -> None:
+        """(Re)derive the per-state flush sample counts from the rate."""
+        rate = self._sample_rate
+        self._flush_samples_incremental_idle = int(
+            _DECODE_FLUSH_INTERVAL_S_INCREMENTAL_IDLE * rate
+        )
+        self._flush_samples_incremental_decoding = int(
+            _DECODE_FLUSH_INTERVAL_S_INCREMENTAL_DECODING * rate
+        )
+        self._flush_samples_batch = int(_DECODE_FLUSH_INTERVAL_S_BATCH * rate)
+
+    def _rebuild_decoder(self) -> None:
+        """Replace the Decoder after a configuration change.
+
+        Shared by ``set_weak_signal``, ``set_incremental_decode`` and
+        ``set_sample_rate``.  Any partial decode dies with the old Decoder,
+        so the worker's own decode state is dropped with it.
+
+        v0.6.14 audit UI-M2: ``_decoding`` and the watchdog fields used to
+        survive the rebuild.  The new Decoder was IDLE but the worker still
+        thought it was mid-image, so a few seconds later the watchdog
+        "timed out" and emitted the stale partial as a finished image.
+        That triggered auto-save and the logbook prompt for a decode that
+        had in fact been thrown away.
+        """
+        was_decoding = self._decoding
+        self._decoder = Decoder(
+            self._sample_rate,
+            weak_signal=self._weak_signal,
+            incremental_decode=self._incremental_decode,
+        )
+        self._decoder.set_cancel_event(self._cancel_event)
+        # OP2-16: discard pre-change audio so the new decoder doesn't see
+        # stale samples from the old decoder's time window.
+        self._scratch.clear()
+        self._scratch_samples = 0
+        # OP-12: zero the counter so the "Xs buffered" label isn't off.
+        self._total_samples = 0
+        self._decoding = False
+        self._reset_watchdog_state()
+        self._flush_samples = self._current_flush_samples()
+        if was_decoding:
+            self.status_update.emit(
+                "Decoder settings changed — partial image discarded."
+            )
 
     # === slots ===
 

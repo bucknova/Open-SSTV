@@ -1022,6 +1022,14 @@ class MainWindow(QMainWindow):
         # that pushed it to the worker was ``_apply_config``, which
         # only fired when the user re-opened Settings.
         self._rx_worker.set_input_gain(self._config.audio_input_gain)
+        # v0.6.14 audit UI-M2: what the RxWorker was last told, so
+        # _apply_config only sends (and the worker only rebuilds its
+        # decoder for) values that actually changed.  _rx_decoder_rate is
+        # also the rate the capture stream runs at, which the waterfall
+        # needs for its frequency axis.
+        self._rx_applied_weak_signal: bool = self._config.rx_weak_signal_mode
+        self._rx_applied_incremental: bool = self._config.incremental_decode
+        self._rx_decoder_rate: int = self._config.sample_rate
         self._rx_worker.moveToThread(self._rx_thread)
         self._rx_thread.finished.connect(self._rx_worker.deleteLater)
         self._rx_thread.start()
@@ -2327,12 +2335,20 @@ class MainWindow(QMainWindow):
         # Emit via queued signals so decoder rebuilds happen on the worker
         # thread, not the GUI thread (H-02 fix; OP-09 extended to cover
         # set_final_slant_correction too).
-        self._rx_weak_signal_changed.emit(self._config.rx_weak_signal_mode)
+        #
+        # v0.6.14 audit UI-M2: the two settings that rebuild the decoder
+        # are sent only when they changed.  Re-sending them on every OK
+        # destroyed whatever image was being received.
+        if self._config.rx_weak_signal_mode != self._rx_applied_weak_signal:
+            self._rx_applied_weak_signal = self._config.rx_weak_signal_mode
+            self._rx_weak_signal_changed.emit(self._config.rx_weak_signal_mode)
         self._rx_watchdog_timeout_changed.emit(self._config.rx_watchdog_timeout_s)
         self._rx_final_slant_correction_changed.emit(
             self._config.apply_final_slant_correction
         )
-        self._rx_incremental_decode_changed.emit(self._config.incremental_decode)
+        if self._config.incremental_decode != self._rx_applied_incremental:
+            self._rx_applied_incremental = self._config.incremental_decode
+            self._rx_incremental_decode_changed.emit(self._config.incremental_decode)
         self._tx_worker.set_tx_banner(
             self._config.tx_banner_enabled,
             self._config.callsign,
@@ -2355,7 +2371,14 @@ class MainWindow(QMainWindow):
         # encode/capture start).  Both go via queued signals so the
         # change lands on the receiving worker's own event loop (OP-09).
         self._tx_sample_rate_changed.emit(self._config.sample_rate)
-        self._rx_sample_rate_changed.emit(self._config.sample_rate)
+        # v0.6.14 audit UI-M2: the RX decoder must run at the rate the
+        # capture stream delivers.  Rebuilding it at the new rate while
+        # the stream kept the old one desynced every line.  With capture
+        # running, leave both alone: _begin_capture syncs the decoder
+        # before the next stream opens (the caller tells the user to
+        # restart capture).
+        if not self._capture_running:
+            self._sync_rx_sample_rate()
         # TX panel needs the rate too so the progress-bar elapsed/total
         # seconds label is correct at 44.1 kHz (OP-06).
         self._tx_panel.set_sample_rate(self._config.sample_rate)
@@ -2368,6 +2391,37 @@ class MainWindow(QMainWindow):
         # the freshly-saved config (the service reads the live config, so
         # host/port/token changes are picked up on restart).
         self._apply_remote_server()
+
+    def _effective_rx_sample_rate(self) -> int:
+        """The rate the next capture stream will deliver.
+
+        PortAudio opens at the configured rate.  A TCI server dictates its
+        own (the worker negotiates 48 kHz), so the configured rate means
+        nothing for TCI input.
+        """
+        if isinstance(self._audio_worker, TciInputStreamWorker):
+            try:
+                return int(self._audio_worker.sample_rate)
+            except Exception:  # noqa: BLE001 — connection already gone
+                _log.debug("TCI sample rate unavailable", exc_info=True)
+        return int(self._config.sample_rate)
+
+    def _sync_rx_sample_rate(self) -> None:
+        """Bring the RX decoder and the waterfall to the capture rate.
+
+        Only call while no capture stream is running.  The rate change is
+        a queued signal to the RX thread.  Callers that reset the decoder
+        afterwards (``_begin_capture``, ``_swap_audio_worker``) emit it
+        first, so the rebuild lands before the reset and the first chunk.
+        (v0.6.14 audit UI-M2, and the waterfall Low: its rate was set once
+        at creation and never followed Settings or a switch to TCI.)
+        """
+        rate = self._effective_rx_sample_rate()
+        if rate != self._rx_decoder_rate:
+            self._rx_decoder_rate = rate
+            self._rx_sample_rate_changed.emit(rate)
+        if self._waterfall_window is not None:
+            self._waterfall_window.set_sample_rate(rate)
 
     # === TX slots ===
 
@@ -2683,6 +2737,10 @@ class MainWindow(QMainWindow):
         # completed left two closures connected and started capture
         # twice ("already running").
         self._start_capture_armed = True
+        # v0.6.14 audit UI-M2: apply a sample-rate change deferred while
+        # the previous stream ran.  Emitted before the reset so both land
+        # on the RX thread, in order, ahead of the first chunk.
+        self._sync_rx_sample_rate()
         self._request_rx_reset.emit()
 
     # --- RX auto-resume after a device loss (2026-10 stability audit) -----
@@ -3799,6 +3857,9 @@ class MainWindow(QMainWindow):
         # the same one-shot _set_capture uses, so start_capture is ordered
         # after the reset instead of racing it on a second worker thread.
         self._start_capture_armed = bool(was_capturing)
+        # The new source may run at a different rate (TCI dictates 48 kHz
+        # whatever Settings says).  Rebuild the decoder before the reset.
+        self._sync_rx_sample_rate()
         self._request_rx_reset.emit()
 
     # === Waterfall ===
@@ -3809,7 +3870,9 @@ class MainWindow(QMainWindow):
         if checked:
             if self._waterfall_window is None:
                 self._waterfall_window = WaterfallWindow(self)
-                self._waterfall_window.set_sample_rate(self._config.sample_rate)
+                # The rate the RX stream actually runs at (TCI dictates
+                # its own), not the configured one.  v0.6.14 audit.
+                self._waterfall_window.set_sample_rate(self._rx_decoder_rate)
                 self._waterfall_window.closed.connect(
                     lambda: self._waterfall_action.setChecked(False)
                 )
