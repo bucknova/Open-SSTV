@@ -9,6 +9,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.6.15] — 2026-10-13
+
 ### Fixed
 
 - **The S-meter now works over rigctld.** It showed S9 for every signal,
