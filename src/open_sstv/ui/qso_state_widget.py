@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from open_sstv.templates.model import QSOState
+from open_sstv.ui.log_qso_dialog import GRID_MAX_LEN, install_uppercase
 
 # Common SSTV RST reports in the combo history (descending quality).
 _RST_PRESETS: tuple[str, ...] = (
@@ -76,6 +77,11 @@ class QSOStateWidget(QWidget):
         super().__init__(parent)
 
         self._prev_tocall: str = ""
+        #: ``%q`` / ``{qso_serial}``: this session's QSO number, starting
+        #: at 1 and advanced by *Clear QSO* after a contact with a ToCall.
+        #: v0.6.14 audit: QSOState.serial was never set, so the token
+        #: always rendered 0.
+        self._serial: int = 1
 
         # --- Debounce timer ---
         self._debounce = QTimer(self)
@@ -95,8 +101,17 @@ class QSOStateWidget(QWidget):
         self._tocall = QLineEdit()
         self._tocall.setPlaceholderText("W0XYZ")
         self._tocall.setMaximumWidth(100)
-        self._tocall.textChanged.connect(self._on_tocall_changed)
+        install_uppercase(self._tocall)
+        self._tocall.textChanged.connect(self._on_field_changed)
         row1.addWidget(self._tocall)
+
+        self._serial_label = QLabel()
+        self._serial_label.setToolTip(
+            "QSO number this session — the %q / {qso_serial} template token. "
+            "Clear QSO advances it."
+        )
+        row1.addWidget(self._serial_label)
+        self._update_serial_label()
 
         row1.addWidget(QLabel("RSTs:"))
         self._rst = QComboBox()
@@ -169,7 +184,8 @@ class QSOStateWidget(QWidget):
         self._grid = QLineEdit()
         self._grid.setPlaceholderText("EN34")
         self._grid.setMaximumWidth(70)
-        self._grid.textChanged.connect(self._on_grid_changed)
+        self._grid.setMaxLength(GRID_MAX_LEN)
+        install_uppercase(self._grid)
         row2.addWidget(self._grid)
         row2.addStretch(1)
         layout.addLayout(row2)
@@ -195,7 +211,21 @@ class QSOStateWidget(QWidget):
             rst=self._rst.currentText().strip() or "595",
             tocall_name=self._name.text().strip(),
             note=self._note.text().strip(),
+            serial=self._serial,
         )
+
+    @property
+    def serial(self) -> int:
+        return self._serial
+
+    def set_serial(self, serial: int) -> None:
+        """Set the QSO number (``%q``); values below 1 become 1."""
+        self._serial = max(1, int(serial))
+        self._update_serial_label()
+        self._on_field_changed()
+
+    def _update_serial_label(self) -> None:
+        self._serial_label.setText(f"#{self._serial}")
 
     def get_contact_fields(self) -> tuple[str, str, str]:
         """Return ``(rst_received, qth, grid)`` describing the contact.
@@ -215,7 +245,14 @@ class QSOStateWidget(QWidget):
 
     @Slot()
     def clear(self) -> None:
-        """Wipe all fields and emit state_changed immediately."""
+        """Wipe all fields and emit state_changed immediately.
+
+        A contact that had a ToCall counts as finished, so the QSO
+        number advances for the next one.
+        """
+        if self._tocall.text().strip():
+            self._serial += 1
+            self._update_serial_label()
         self._prev_tocall = ""
         self._tocall.blockSignals(True)
         self._rst.blockSignals(True)
@@ -238,30 +275,6 @@ class QSOStateWidget(QWidget):
         self._emit_state()
 
     # === Slots ===
-
-    @Slot(str)
-    def _on_tocall_changed(self, text: str) -> None:
-        # Uppercase-on-type.
-        upper = text.upper()
-        if upper != text:
-            cursor = self._tocall.cursorPosition()
-            self._tocall.blockSignals(True)
-            self._tocall.setText(upper)
-            self._tocall.setCursorPosition(cursor)
-            self._tocall.blockSignals(False)
-        self._on_field_changed(upper)
-
-    @Slot(str)
-    def _on_grid_changed(self, text: str) -> None:
-        # Uppercase-on-type, same as ToCall — grid squares are
-        # conventionally written upper-case (e.g. "EN34").
-        upper = text.upper()
-        if upper != text:
-            cursor = self._grid.cursorPosition()
-            self._grid.blockSignals(True)
-            self._grid.setText(upper)
-            self._grid.setCursorPosition(cursor)
-            self._grid.blockSignals(False)
 
     @Slot()
     @Slot(str)

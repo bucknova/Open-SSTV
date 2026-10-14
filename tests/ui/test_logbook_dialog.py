@@ -249,7 +249,8 @@ class TestEditFlow:
         def fake_exec(self: object) -> int:
             # Simulate the operator changing the notes field then Save.
             self._comment.setText("after")  # type: ignore[attr-defined]
-            return int(QDialog.DialogCode.Accepted)
+            self.accept()  # type: ignore[attr-defined]  # runs on_save (C-M9)
+            return int(self.result())  # type: ignore[attr-defined]
 
         monkeypatch.setattr(mod.LogQsoDialog, "exec", fake_exec)
         dlg = LogbookDialog(coordinator)
@@ -289,7 +290,8 @@ class TestEditAliasing:
 
         def fake_exec(self: object) -> int:
             self._comment.setText("edited-but-never-saved")  # type: ignore[attr-defined]
-            return int(QDialog.DialogCode.Accepted)
+            self.accept()  # type: ignore[attr-defined]  # save fails → stays open
+            return int(self.result())  # type: ignore[attr-defined]
 
         def boom(self: object, qso: object) -> object:
             raise RuntimeError("disk on fire")

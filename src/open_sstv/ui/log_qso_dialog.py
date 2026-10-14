@@ -13,23 +13,26 @@ Opened in two roles:
   stack of paper-log entries without re-opening the dialog chain.
 
 The dialog mutates the ``QSO`` it was given only inside
-``result_qso()`` — callers persist the result; the dialog never
-touches the store itself.
+``result_qso()``.  Callers either persist the result after ``exec()`` or
+pass ``on_save`` — then a failed save keeps the dialog open with the
+operator's typing intact (v0.6.14 audit C-M9).
 """
 from __future__ import annotations
 
-from datetime import UTC
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt, Slot
+from PySide6.QtCore import QDate, QDateTime, Qt, QTimeZone, Slot
 from PySide6.QtWidgets import (
     QComboBox,
+    QDateTimeEdit,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -38,9 +41,49 @@ from PySide6.QtWidgets import (
 from open_sstv.ui.utils import pil_to_pixmap
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from PIL.Image import Image as PILImage
 
     from open_sstv.logbook.model import QSO
+
+#: Maidenhead locators are at most 8 characters (EN34ab12).
+GRID_MAX_LEN = 8
+
+
+def qdate_day_start_utc(d: QDate, *, local: bool = True) -> datetime:
+    """Midnight on picker day *d*, as an aware UTC datetime.
+
+    ``local=True`` treats the day as a *local* calendar day (the Logbook
+    filter, audit #5: UTC midnight hid this evening's QSOs west of UTC);
+    ``local=False`` as a UTC day (the Gallery, whose captions are UTC).
+    Shared so the two dialogs stop carrying copies (v0.6.14 audit nit).
+    """
+    if local:
+        return datetime(d.year(), d.month(), d.day()).astimezone(UTC)
+    return datetime(d.year(), d.month(), d.day(), tzinfo=UTC)
+
+
+def install_uppercase(edit: QLineEdit) -> None:
+    """Upper-case *edit*'s text as it is typed, keeping the cursor put.
+
+    One implementation for every callsign / grid field (v0.6.14 audit
+    nit: three near-identical handlers).  ``textChanged`` listeners see
+    only the upper-cased text — the rewrite happens with signals blocked
+    and then re-emits once.
+    """
+    def _on_changed(text: str) -> None:
+        upper = text.upper()
+        if upper == text:
+            return
+        cursor = edit.cursorPosition()
+        edit.blockSignals(True)
+        edit.setText(upper)
+        edit.setCursorPosition(cursor)
+        edit.blockSignals(False)
+        edit.textChanged.emit(upper)
+
+    edit.textChanged.connect(_on_changed)
 
 #: Same preset ladder as the TX panel's QSO-state bar.
 _RSV_PRESETS: tuple[str, ...] = (
@@ -71,11 +114,18 @@ class LogQsoDialog(QDialog):
         *,
         preview_image: PILImage | None = None,
         allow_save_and_new: bool = False,
+        editable_facts: bool = False,
+        on_save: Callable[[QSO], object] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._qso = qso
         self._save_and_new = False
+        #: v0.6.14 audit C-M9: Logbook New/Edit can set direction, time,
+        #: mode and frequency (paper-log back-entry).  The capture flow
+        #: keeps them read-only — they are facts of the completion.
+        self._editable_facts = editable_facts
+        self._on_save = on_save
 
         is_edit = qso.id is not None
         verb = "Edit QSO" if is_edit else "Log QSO"
@@ -96,11 +146,14 @@ class LogQsoDialog(QDialog):
 
         facts = QFormLayout()
         facts.setHorizontalSpacing(8)
-        facts.addRow("Direction:", QLabel(qso.direction))
-        facts.addRow("Mode:", QLabel(qso.mode or "—"))
-        time_s = qso.time_utc.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-        facts.addRow("Time:", QLabel(time_s))
-        facts.addRow("Frequency:", QLabel(format_frequency(qso.frequency_hz)))
+        if editable_facts:
+            self._build_editable_facts(facts, qso)
+        else:
+            facts.addRow("Direction:", QLabel(qso.direction))
+            facts.addRow("Mode:", QLabel(qso.mode or "—"))
+            time_s = qso.time_utc.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+            facts.addRow("Time:", QLabel(time_s))
+            facts.addRow("Frequency:", QLabel(format_frequency(qso.frequency_hz)))
         left.addLayout(facts)
         left.addStretch(1)
         root.addLayout(left)
@@ -112,7 +165,7 @@ class LogQsoDialog(QDialog):
 
         self._callsign = QLineEdit(qso.callsign)
         self._callsign.setPlaceholderText("W0XYZ")
-        self._callsign.textChanged.connect(self._uppercase_callsign)
+        install_uppercase(self._callsign)
         form.addRow("Callsign:", self._callsign)
 
         self._rsv_sent = self._rsv_combo(qso.rsv_sent)
@@ -130,6 +183,8 @@ class LogQsoDialog(QDialog):
 
         self._grid = QLineEdit(qso.grid)
         self._grid.setPlaceholderText("EN34")
+        self._grid.setMaxLength(GRID_MAX_LEN)
+        install_uppercase(self._grid)
         form.addRow("Grid:", self._grid)
 
         self._comment = QLineEdit(qso.comment)
@@ -165,6 +220,11 @@ class LogQsoDialog(QDialog):
     def result_qso(self) -> QSO:
         """The QSO with the form's edits applied.  Call after accept."""
         q = self._qso
+        if self._editable_facts:
+            q.direction = self._direction.currentText()  # type: ignore[assignment]
+            q.time_utc = self._time_utc_value()
+            q.mode = self._mode.currentText().strip()
+            q.frequency_hz = self._frequency_value()
         q.callsign = self._callsign.text().strip().upper()
         q.rsv_sent = self._rsv_sent.currentText().strip()
         q.rsv_received = self._rsv_received.currentText().strip()
@@ -179,7 +239,73 @@ class LogQsoDialog(QDialog):
         """True when the dialog was accepted via *Save & New*."""
         return self._save_and_new
 
+    def accept(self) -> None:  # noqa: D401 — Qt override
+        """Validate and, with ``on_save``, persist before closing.
+
+        v0.6.14 audit C-M9: the Logbook saved *after* the dialog closed,
+        so a failed save threw away everything the operator typed.  Now a
+        bad frequency or a store error keeps the dialog open.
+        """
+        if self._editable_facts and self._freq.text().strip():
+            if self._frequency_value() is None:
+                QMessageBox.warning(
+                    self, "Invalid frequency",
+                    "Enter the frequency in MHz, e.g. 14.230 — or leave it blank.",
+                )
+                self._save_and_new = False
+                return
+        if self._on_save is not None:
+            try:
+                self._on_save(self.result_qso())
+            except Exception as exc:  # noqa: BLE001 — surface, keep the form
+                QMessageBox.warning(self, "Save failed", str(exc))
+                self._save_and_new = False
+                return
+        super().accept()
+
     # === Internals ===
+
+    def _build_editable_facts(self, facts: QFormLayout, qso: QSO) -> None:
+        from open_sstv.logbook.coordinator import MODE_DISPLAY_NAMES  # noqa: PLC0415
+
+        self._direction = QComboBox()
+        self._direction.addItems(["TX", "RX"])
+        self._direction.setCurrentText(qso.direction)
+        facts.addRow("Direction:", self._direction)
+
+        self._time_edit = QDateTimeEdit()
+        self._time_edit.setTimeZone(QTimeZone.utc())
+        self._time_edit.setDisplayFormat("yyyy-MM-dd HH:mm:ss 'UTC'")
+        self._time_edit.setCalendarPopup(True)
+        self._time_edit.setDateTime(
+            QDateTime.fromSecsSinceEpoch(
+                int(qso.time_utc.timestamp()), QTimeZone.utc()
+            )
+        )
+        facts.addRow("Time:", self._time_edit)
+
+        self._mode = QComboBox()
+        self._mode.setEditable(True)
+        self._mode.addItems(list(MODE_DISPLAY_NAMES.values()))
+        self._mode.setCurrentText(qso.mode)
+        facts.addRow("Mode:", self._mode)
+
+        self._freq = QLineEdit(
+            f"{qso.frequency_hz / 1_000_000:.6f}".rstrip("0").rstrip(".")
+            if qso.frequency_hz else ""
+        )
+        self._freq.setPlaceholderText("MHz, e.g. 14.230")
+        facts.addRow("Freq (MHz):", self._freq)
+
+    def _time_utc_value(self) -> datetime:
+        secs = self._time_edit.dateTime().toSecsSinceEpoch()
+        return datetime.fromtimestamp(secs, tz=UTC)
+
+    def _frequency_value(self) -> int | None:
+        from open_sstv.logbook.adif import mhz_str_to_hz  # noqa: PLC0415
+
+        text = self._freq.text().strip().replace(",", ".")
+        return mhz_str_to_hz(text) if text else None
 
     def _rsv_combo(self, current: str) -> QComboBox:
         combo = QComboBox()
@@ -221,20 +347,16 @@ class LogQsoDialog(QDialog):
             )
         )
 
-    @Slot(str)
-    def _uppercase_callsign(self, text: str) -> None:
-        upper = text.upper()
-        if upper != text:
-            cursor = self._callsign.cursorPosition()
-            self._callsign.blockSignals(True)
-            self._callsign.setText(upper)
-            self._callsign.setCursorPosition(cursor)
-            self._callsign.blockSignals(False)
-
     @Slot()
     def _on_save_and_new(self) -> None:
         self._save_and_new = True
         self.accept()
 
 
-__all__ = ["LogQsoDialog", "format_frequency"]
+__all__ = [
+    "GRID_MAX_LEN",
+    "LogQsoDialog",
+    "format_frequency",
+    "install_uppercase",
+    "qdate_day_start_utc",
+]
