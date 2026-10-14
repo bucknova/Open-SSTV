@@ -448,7 +448,12 @@ def test_tci_reconnect_in_unkey_retry_resubscribes_rx_audio(qapp) -> None:
     w = TxWorker(rig=rig, ptt_delay_s=0)
     w._unkey_with_retry(rig)
     assert rig.calls == [False, False]
-    assert rig.connection.sent == ["audio_start:0;"]
+    # v0.6.14 sweep: the full RX setup TciInputStreamWorker.start sends,
+    # not a bare audio_start.
+    from open_sstv.radio.tci import RX_AUDIO_SETUP_COMMANDS
+
+    assert rig.connection.sent == list(RX_AUDIO_SETUP_COMMANDS)
+    assert RX_AUDIO_SETUP_COMMANDS[-1] == "audio_start:0;"
     assert rig.connection.subscribed
 
 

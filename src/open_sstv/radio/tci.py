@@ -79,31 +79,96 @@ _AUDIO_FMT_FLOAT32 = 3
 #: plus the 64-byte header is ~16 KB — so 64 KB leaves 4x headroom.
 _MAX_FRAME_BYTES: int = 64 * 1024
 
+#: v0.6.14 sweep: largest *reassembled* message.  The per-frame cap alone
+#: let a server stream an endless run of small continuation frames, each
+#: under the limit, that websocket-client concatenates without bound.
+#: Same 64 KB budget: no legitimate TCI message is bigger than one frame.
+_MAX_MESSAGE_BYTES: int = 64 * 1024
 
-def _install_frame_size_cap(ws: object, limit: int = _MAX_FRAME_BYTES) -> None:
+
+def _install_frame_size_cap(
+    ws: object,
+    limit: int = _MAX_FRAME_BYTES,
+    message_limit: int = _MAX_MESSAGE_BYTES,
+) -> None:
     """Reject oversized frames *before* their payload is read (S-L9).
 
     websocket-client exposes no max-size option, so wrap the instance's
     frame-header length parser: once the declared length is known and too
     big, raise instead of letting ``recv_strict`` allocate it.  The recv
     loop treats that like any other protocol error (connection lost).
-    Best-effort — a websocket-client without this internal is left as is.
+
+    v0.6.14 sweep: also wrap the continuation-frame accumulator so a
+    fragmented message is bounded in *total* (``message_limit``), not just
+    per frame — over the cap, the partial message is discarded and the
+    link dropped exactly as for an oversized frame.
+
+    Best-effort — a websocket-client without these internals is left as is.
     """
     try:
         fb = ws.frame_buffer  # type: ignore[attr-defined]
         original = fb.recv_length
     except AttributeError:
         _log.debug("TCI: websocket-client has no frame_buffer; frame cap not installed")
+    else:
+
+        def _capped_recv_length() -> None:
+            original()
+            if fb.length is not None and fb.length > limit:
+                raise RigConnectionError(
+                    f"TCI: server sent a {fb.length}-byte frame (limit {limit}) — dropping link"
+                )
+
+        fb.recv_length = _capped_recv_length
+
+    try:
+        cont = ws.cont_frame  # type: ignore[attr-defined]
+        original_add = cont.add
+    except AttributeError:
+        _log.debug("TCI: websocket-client has no cont_frame; message cap not installed")
         return
 
-    def _capped_recv_length() -> None:
-        original()
-        if fb.length is not None and fb.length > limit:
+    def _capped_add(frame: object) -> None:
+        original_add(frame)
+        data = cont.cont_data
+        if data is not None and len(data[1]) > message_limit:
+            size = len(data[1])
+            cont.cont_data = None          # free the partial message now
+            cont.recving_frames = None
             raise RigConnectionError(
-                f"TCI: server sent a {fb.length}-byte frame (limit {limit}) — dropping link"
+                f"TCI: server sent a {size}+-byte fragmented message "
+                f"(limit {message_limit}) — dropping link"
             )
 
-    fb.recv_length = _capped_recv_length
+    cont.add = _capped_add
+
+
+#: RX audio subscription: negotiate 48 kHz / float32 / mono, then start
+#: receiver 0's stream.  AetherSDR echoes each command back as
+#: confirmation.  v0.6.14 sweep: one definition shared by
+#: ``TciInputStreamWorker.start`` and the TX unkey-retry re-subscribe — the
+#: latter used to send a bare ``audio_start:0;`` after a reconnect, so a
+#: fresh server session streamed RX audio in its *default* format.
+RX_AUDIO_SETUP_COMMANDS: tuple[str, ...] = (
+    "audio_samplerate:48000;",
+    "audio_stream_sample_type:float32;",
+    "audio_stream_channels:1;",
+    "audio_start:0;",
+)
+
+
+def subscribe_rx_audio(conn: object) -> None:
+    """Send the full RX audio setup on *conn* and mark it subscribed.
+
+    *conn* is a ``TciConnection`` (duck-typed: ``send`` +
+    ``mark_rx_audio_subscribed``).  Raises whatever ``send`` raises; the
+    subscription flag is only set once every command went out.
+    """
+    for cmd in RX_AUDIO_SETUP_COMMANDS:
+        conn.send(cmd)  # type: ignore[attr-defined]
+    # H6: announce the subscription so TxWorker doesn't double-start (and
+    # double-leak) the RX stream on each transmission.
+    conn.mark_rx_audio_subscribed(True)  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
@@ -425,10 +490,12 @@ class TciConnection:
                 if not self._closed:
                     _log.warning("TCI: recv error — connection lost (%s)", exc)
                 break
-            if len(data) > _MAX_FRAME_BYTES:
-                # S-L9 belt-and-braces: a fragmented message is reassembled
-                # by websocket-client from individually-capped frames.
-                _log.warning("TCI: dropped %d-byte message (over the frame cap)", len(data))
+            if len(data) > _MAX_MESSAGE_BYTES:
+                # S-L9 belt-and-braces: the reassembly cap installed by
+                # ``_install_frame_size_cap`` normally drops the link first
+                # (v0.6.14 sweep); this catches a websocket-client without
+                # the ``cont_frame`` internal.
+                _log.warning("TCI: dropped %d-byte message (over the message cap)", len(data))
                 continue
             if opcode == 1:  # TEXT
                 text = data.decode("utf-8", errors="replace").strip()
@@ -764,4 +831,4 @@ class TciRig:
                 pass
 
 
-__all__ = ["TciConnection", "TciRig"]
+__all__ = ["RX_AUDIO_SETUP_COMMANDS", "TciConnection", "TciRig", "subscribe_rx_audio"]

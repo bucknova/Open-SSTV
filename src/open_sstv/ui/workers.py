@@ -107,6 +107,7 @@ from open_sstv.core.encoder import DEFAULT_SAMPLE_RATE, encode
 from open_sstv.core.modes import MODE_TABLE, Mode
 from open_sstv.radio.base import ManualRig, Rig
 from open_sstv.radio.exceptions import RigCommandError
+from open_sstv.radio.tci import subscribe_rx_audio
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -1676,13 +1677,6 @@ class TxWorker(QObject):
                     )
                     time.sleep(_UNKEY_RETRY_DELAY_S)
                     continue
-                if rx_was_subscribed:
-                    try:
-                        tci_conn.send("audio_start:0;")  # type: ignore[union-attr]
-                        tci_conn.mark_rx_audio_subscribed(True)  # type: ignore[union-attr]
-                        _log.info("TCI reconnected during unkey — RX audio re-subscribed")
-                    except Exception as exc:  # noqa: BLE001 — unkey matters more
-                        _log.warning("TCI audio_start after reconnect failed: %s", exc)
             try:
                 rig.set_ptt(False)
             except Exception as exc:  # noqa: BLE001
@@ -1702,6 +1696,18 @@ class TxWorker(QObject):
                     "reconnect",
                     attempt + 1,
                 )
+                if rx_was_subscribed:
+                    # Re-subscribe only once the rig is unkeyed (v0.6.14
+                    # sweep: unkey first — four sends no longer delay it),
+                    # and send the full setup (rate / format / channels +
+                    # audio_start) rather than a bare audio_start: a fresh
+                    # server session otherwise streams RX audio in its
+                    # default format.
+                    try:
+                        subscribe_rx_audio(tci_conn)
+                        _log.info("TCI reconnected during unkey — RX audio re-subscribed")
+                    except Exception as exc:  # noqa: BLE001
+                        _log.warning("TCI RX audio re-subscribe after reconnect failed: %s", exc)
             return
         self.error.emit(
             f"Could not unkey rig after {_UNKEY_ATTEMPTS} attempts: "
