@@ -644,6 +644,32 @@ class TestRemoteTab:
         dlg.accept()
         assert dlg.result() == dlg.DialogCode.Accepted
 
+    def test_non_ascii_token_refused_on_save(self, qtbot) -> None:
+        """v0.6.14 sweep: a browser can't send a non-ASCII Bearer token."""
+        dlg = SettingsDialog(config=AppConfig(callsign="W0AEZ"), rig_connected=False)
+        qtbot.addWidget(dlg)
+        dlg._remote_enabled.setChecked(True)
+        dlg._remote_token.setText("schlüssel-sehr-lang-genug")
+        dlg.accept()
+        assert dlg.result() != dlg.DialogCode.Accepted
+        assert not dlg._remote_token_error.isHidden()
+        assert "ascii" in dlg._remote_token_error.text().lower()
+        pm = dlg._remote_qr.pixmap()
+        assert pm is None or pm.isNull()
+        assert "ascii" in dlg._remote_qr.text().lower()
+        dlg._remote_token.setText("schluessel-sehr-lang-genug")
+        assert dlg._remote_token_error.isHidden()
+        dlg.accept()
+        assert dlg.result() == dlg.DialogCode.Accepted
+
+    def test_short_token_message_mentions_length(self, qtbot) -> None:
+        dlg = SettingsDialog(config=AppConfig(callsign="W0AEZ"), rig_connected=False)
+        qtbot.addWidget(dlg)
+        dlg._remote_enabled.setChecked(True)
+        dlg._remote_token.setText("demo")
+        dlg.accept()
+        assert "too short" in dlg._remote_token_error.text().lower()
+
     def test_blank_token_saves(self, qtbot) -> None:
         dlg = SettingsDialog(config=AppConfig(callsign="W0AEZ"), rig_connected=False)
         qtbot.addWidget(dlg)

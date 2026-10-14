@@ -1138,4 +1138,4 @@ class RemoteServer:
         return f"http://{self._host}:{self._port}/?token={self._token}"
 
 
-__all__ = ["MIN_TOKEN_LEN", "RemoteServer", "token_is_strong"]
+__all__ = ["MIN_TOKEN_LEN", "RemoteServer", "token_chars_ok", "token_is_strong"]
