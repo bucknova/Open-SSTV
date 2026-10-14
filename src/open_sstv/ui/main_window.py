@@ -175,8 +175,10 @@ from open_sstv.remote import (
     ComposeService,
     ControlPlane,
     EventHub,
+    MIN_TOKEN_LEN,
     GalleryService,
     RemoteServer,
+    token_is_strong,
 )
 from open_sstv.templates import TokenContext, build_autosave_filename, run_migration
 from open_sstv.ui.audio_level_strip import AudioLevelStrip
@@ -1281,7 +1283,11 @@ class MainWindow(QMainWindow):
         # must not count as a change, or the server would restart on every
         # settings save and churn the URL.
         srv = self._remote_server
-        token_changed = bool(cfg.remote_token) and srv is not None and srv.token != cfg.remote_token
+        # v0.6.14 audit S-M2: a too-short configured token is ignored by the
+        # server (it mints a random one), so treat it like blank here too —
+        # otherwise it never matches and every settings save restarts.
+        usable_token = cfg.remote_token if token_is_strong(cfg.remote_token) else ""
+        token_changed = bool(usable_token) and srv is not None and srv.token != usable_token
         if running and srv is not None and (
             not want
             or srv.host != cfg.remote_host
@@ -1318,9 +1324,19 @@ class MainWindow(QMainWindow):
         # bundled into diagnostics exports.  The token-bearing URL still
         # goes to the (ephemeral, on-screen) status bar and indicator.
         _log.info("remote gallery server started on %s:%d", cfg.remote_host, cfg.remote_port)
-        self.statusBar().showMessage(
-            f"Remote gallery server running — open {self._remote_server.url}", 10000
-        )
+        if self._remote_server.token_rejected:
+            # S-M2: don't silently break an existing install's short token —
+            # say why the link changed and where to fix it.
+            self.statusBar().showMessage(
+                f"Remote access token is shorter than {MIN_TOKEN_LEN} characters, so a "
+                "random one is in use this session — open Settings → Remote to set "
+                f"or regenerate it.  Link: {self._remote_server.url}",
+                30000,
+            )
+        else:
+            self.statusBar().showMessage(
+                f"Remote gallery server running — open {self._remote_server.url}", 10000
+            )
         self._show_remote_indicator(self._remote_server.url)
 
     def _show_remote_indicator(self, url: str) -> None:
@@ -1330,9 +1346,14 @@ class MainWindow(QMainWindow):
         this machine even when the server is bound to the LAN (0.0.0.0),
         while the tooltip shows the real bind URL for phones on the network.
         """
+        import html  # noqa: PLC0415
+
         local = url.replace("0.0.0.0", "127.0.0.1")
+        # v0.6.14 audit (Info): the URL embeds the operator-typed token —
+        # escape it before it lands in a rich-text href.
         self._remote_status_label.setText(
-            f'<a href="{local}" style="color:#2fa36b; text-decoration:none">'
+            f'<a href="{html.escape(local, quote=True)}" '
+            'style="color:#2fa36b; text-decoration:none">'
             "\N{LARGE GREEN CIRCLE} Remote on</a>"
         )
         self._remote_status_label.setToolTip(
@@ -1856,7 +1877,15 @@ class MainWindow(QMainWindow):
         """Show a persistent status-bar link when a newer release is found."""
         from PySide6.QtWidgets import QLabel
 
-        lbl = QLabel(f'<a href="{url}">Open-SSTV {version} available</a>')
+        import html  # noqa: PLC0415
+
+        # v0.6.14 audit S-L7: both values came off the network into a
+        # link-opening rich-text label — escape them (the worker also
+        # fences the URL to our releases page).
+        lbl = QLabel(
+            f'<a href="{html.escape(url, quote=True)}">'
+            f"Open-SSTV {html.escape(version)} available</a>"
+        )
         lbl.setOpenExternalLinks(True)
         lbl.setContentsMargins(0, 0, 8, 0)
         self.statusBar().addPermanentWidget(lbl)
@@ -1941,6 +1970,10 @@ class MainWindow(QMainWindow):
             tx_image=self._tx_panel.current_image,
             parent=self,
         )
+        # S-M2: let the Remote tab show a QR for the token the running server
+        # generated, so a blank (auto) token is scannable too.
+        if self._remote_server is not None:
+            dlg.set_remote_live_token(self._remote_server.token)
         # Route Test Tone from the dialog through the same path as the Radio
         # panel button (queued signal → TxWorker on its own thread).
         dlg.test_tone_requested.connect(self._on_test_tone_requested)
