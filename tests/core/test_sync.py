@@ -8,7 +8,7 @@ Two layers, mirroring ``test_vis.py``:
   not raw audio. Faster and easier to reason about than building a full
   phase-continuous signal for every test.
 * **Integration** — encode a real image with PySSTV, run the full
-  decode pipeline (audio → IF → ``detect_vis`` → ``find_line_starts``)
+  decode pipeline (audio → IF → ``detect_vis`` → candidates → grid walk)
   and assert the line-start grid matches the mode's expected geometry.
   This is the test the v1 plan calls for ("240 line starts spaced ~150 ms
   apart with std-dev < 1 sample").
@@ -22,10 +22,28 @@ from PIL import Image
 from open_sstv.core.demod import instantaneous_frequency
 from open_sstv.core.encoder import encode
 from open_sstv.core.modes import MODE_TABLE, Mode
-from open_sstv.core.sync import find_leader, find_line_starts
+from open_sstv.core.sync import (
+    find_sync_candidates,
+    line0_sync_hint,
+    walk_sync_grid,
+)
 from open_sstv.core.vis import detect_vis
 
 # === helpers ===
+
+
+def find_line_starts(freq_track, fs, spec, start_idx=0, *, hint=None):
+    """Candidates → grid walk, the composition every decoder uses.
+
+    (``sync.find_line_starts`` itself was test-only and was removed in
+    the v0.6.14 audit cleanup; this keeps its tests meaningful.)
+    """
+    line_samples = spec.line_time_ms / 1000.0 * fs
+    cands = find_sync_candidates(
+        freq_track, fs, spec.sync_pulse_ms,
+        line_period_samples=line_samples, start_idx=start_idx,
+    )
+    return walk_sync_grid(cands, line_samples, spec.height, first_slot_hint=hint)
 
 
 def _make_freq_track(
@@ -45,26 +63,6 @@ def _make_freq_track(
     if not out:
         return np.array([], dtype=np.float64)
     return np.concatenate(out)
-
-
-def _synthesize_leader_freq_track(fs: int = 48_000) -> np.ndarray:
-    """Frequency track for a full VIS leader (300 ms + 10 ms break + 300 ms +
-    30 ms start bit + 30 ms data zero). Used to exercise ``find_leader``.
-
-    The trailing data tone (1300 Hz) keeps the start bit run from extending
-    to the very end of the buffer, so the leader detector must actually
-    *detect* the boundary rather than coincidentally hit the buffer end.
-    """
-    return _make_freq_track(
-        [
-            (1900.0, 0.300),
-            (1200.0, 0.010),
-            (1900.0, 0.300),
-            (1200.0, 0.030),  # start bit
-            (1300.0, 0.030),  # one data bit so the run is bounded
-        ],
-        fs,
-    )
 
 
 def _synthesize_line_freq_track(
@@ -87,48 +85,6 @@ def _synthesize_line_freq_track(
         segments.append((1200.0, sync_dur_s))
         segments.append((1900.0, body_dur_s))
     return _make_freq_track(segments, fs)
-
-
-# === find_leader unit tests ===
-
-
-def test_find_leader_locates_start_bit_in_synthetic_leader() -> None:
-    fs = 48_000
-    track = _synthesize_leader_freq_track(fs)
-    idx = find_leader(track, fs)
-    assert idx is not None
-    # The start bit begins at 300 + 10 + 300 = 610 ms into the track.
-    expected = int(round(0.610 * fs))
-    # Allow ±2 ms slop for the boxcar smoother's leading-edge correction.
-    assert abs(idx - expected) < int(0.002 * fs)
-
-
-def test_find_leader_returns_none_for_empty_buffer() -> None:
-    assert find_leader(np.array([], dtype=np.float64), 48_000) is None
-
-
-def test_find_leader_returns_none_for_2d_input() -> None:
-    assert find_leader(np.zeros((10, 2), dtype=np.float64), 48_000) is None
-
-
-def test_find_leader_returns_none_for_constant_non_sync_track() -> None:
-    track = np.full(48_000, 1900.0, dtype=np.float64)
-    assert find_leader(track, 48_000) is None
-
-
-def test_find_leader_rejects_short_sync_runs() -> None:
-    """A 10 ms sync run (the mid-leader break) must NOT register as a
-    leader — only ≥20 ms runs should."""
-    fs = 48_000
-    track = _make_freq_track(
-        [
-            (1900.0, 0.100),
-            (1200.0, 0.010),  # break — too short
-            (1900.0, 0.100),
-        ],
-        fs,
-    )
-    assert find_leader(track, fs) is None
 
 
 # === find_line_starts unit tests ===
@@ -425,3 +381,95 @@ def test_find_line_starts_robot36_spacing_is_150ms(
     np.testing.assert_allclose(diffs_ms.mean(), 150.0, rtol=0.005)
     # Sub-sample equivalent of the synthetic bound: 5 samples @ 48 kHz = ~0.1 ms.
     assert diffs_ms.std() < 0.15
+
+
+# === v0.6.14 audit D-H1: missed sync on line 0 / 1 ===
+
+
+_P = 7200.0  # Robot 36 line period at 48 kHz
+_HINT = 1000.0  # line-0 sync position (vis_end for LINE_START modes)
+
+
+def _grid_cands(missing: set[int], n: int = 240) -> list[int]:
+    return [int(_HINT + i * _P) for i in range(n) if i not in missing]
+
+
+def test_walk_grid_missed_line1_sync_keeps_line0_anchor_without_hint() -> None:
+    """Gap of 2·P out of line 0 must still anchor on line 0 (it used to
+    anchor on line 2 and lose two rows)."""
+    grid = walk_sync_grid(_grid_cands({1}), _P, 240)
+    assert len(grid) == 240
+    assert grid[0] == int(_HINT)
+    assert grid[1] == int(round(_HINT + _P))
+    assert grid[239] == int(_HINT + 239 * _P)
+
+
+@pytest.mark.parametrize("missing", [{0}, {0, 1}, {1}, {0, 2}])
+def test_walk_grid_extrapolates_missed_leading_syncs_from_hint(missing) -> None:
+    grid = walk_sync_grid(_grid_cands(missing), _P, 240, first_slot_hint=_HINT)
+    assert len(grid) == 240
+    expected = [int(_HINT + i * _P) for i in range(240)]
+    assert max(abs(g - e) for g, e in zip(grid, expected, strict=True)) <= 1
+
+
+def test_walk_grid_hint_skips_off_lattice_leading_candidate() -> None:
+    """A stray candidate between the VIS and line 0 that happens to be
+    one period before line 1 (line 0 missed) used to become row 0."""
+    cands = [int(_HINT + 0.4 * _P)] + _grid_cands({0})
+    grid = walk_sync_grid(cands, _P, 240, first_slot_hint=_HINT)
+    assert abs(grid[0] - _HINT) <= 1
+    assert abs(grid[1] - (_HINT + _P)) <= 1
+
+
+def test_line0_hint_scottie_offset() -> None:
+    spec = MODE_TABLE[Mode.SCOTTIE_S1]
+    # sep + G + sep + B = 1.5 + 138.24 + 1.5 + 138.24 ms
+    assert line0_sync_hint(spec, 48_000, 0) == pytest.approx(279.48 * 48)
+    assert line0_sync_hint(MODE_TABLE[Mode.MARTIN_M1], 48_000, 123) == 123.0
+
+
+@pytest.mark.parametrize("missing", [{0}, {1}, {0, 1}])
+def test_robot36_real_audio_missed_leading_sync_keeps_rows_and_parity(missing) -> None:
+    """End to end on real encoder audio: blank the line-0/1 sync pulses
+    and the grid must still start at line 0 (so Robot 36 even rows stay
+    Cr, odd rows Cb)."""
+    fs = 48_000
+    spec = MODE_TABLE[Mode.ROBOT_36]
+    audio = encode(Image.new("RGB", (320, 240), (90, 160, 30)), Mode.ROBOT_36,
+                   sample_rate=fs).astype(np.float64) / 32768.0
+    inst = instantaneous_frequency(audio, fs)
+    _code, vis_end = detect_vis(audio, fs)
+    clean = find_line_starts(inst, fs, spec, start_idx=vis_end)
+    n_sync = int(spec.sync_pulse_ms / 1000 * fs)
+    damaged = inst.copy()
+    for line in missing:
+        s = clean[line]
+        damaged[s - 50:s + n_sync + 50] = 1500.0
+    hint = line0_sync_hint(spec, fs, vis_end)
+    got = find_line_starts(damaged, fs, spec, start_idx=vis_end, hint=hint)
+    assert len(got) == spec.height
+    assert max(abs(a - b) for a, b in zip(got, clean, strict=True)) <= 3
+
+
+# === v0.6.14 audit: line-0 run clipped by the search start ===
+
+
+def test_clipped_leading_run_is_backdated_to_match_the_grid() -> None:
+    """A run in progress at ``start_idx`` (line 0 abutting the VIS stop
+    bit) has no visible leading edge; its start must be inferred from the
+    trailing edge so it's on the same footing as every other line (it used
+    to land ~0.3 ms early on real audio)."""
+    fs = 48_000
+    spec = MODE_TABLE[Mode.MARTIN_M4]
+    track = _synthesize_line_freq_track(spec, 6, fs)
+    # Prepend a 30 ms "stop bit" at sync level, then search from inside
+    # the merged run, 5 ms after the true sync start.
+    stop = np.full(int(0.030 * fs), 1200.0)
+    full = np.concatenate([stop, track])
+    line_samples = spec.line_time_ms / 1000 * fs
+    cands = find_sync_candidates(
+        full, fs, spec.sync_pulse_ms, line_samples,
+        start_idx=stop.size + int(0.001 * fs),
+    )
+    assert abs(cands[0] - stop.size) <= 2
+    assert abs((cands[1] - cands[0]) - line_samples) <= 2
