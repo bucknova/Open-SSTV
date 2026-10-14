@@ -720,7 +720,15 @@ class MainWindow(QMainWindow):
         #: Raw RX audio buffer set by ``_on_rx_audio_ready`` and consumed by
         #: ``_on_rx_image_complete``.  Both fire from the same worker ``_dispatch``
         #: call, so the audio is always available when the image handler runs.
-        self._pending_rx_audio: tuple | None = None  # (audio_f64, sample_rate)
+        #: v0.6.14 audit: tagged with the live decode's mode and VIS, and
+        #: only the live path consumes it, so an offline-decoded image that
+        #: lands in between can never be saved with the live recording.
+        self._pending_rx_audio: tuple | None = None  # (audio_f64, sample_rate, mode, vis)
+        #: Same streak logic as ``_autosave_failing``, for RX audio saves.
+        self._rx_audio_save_failing: bool = False
+        #: True between ``_on_tx_started`` raising the RX gate and
+        #: ``_schedule_rx_resume`` lifting it (v0.6.14 audit).
+        self._rx_gate_raised: bool = False
         #: OP-47: remembers whether the 1 Hz rig-poll timer was running when
         #: TX started, so ``_unlock_rig_controls`` can resume it only if the
         #: rig is still connected. The poll is *suspended* for the duration
@@ -2511,6 +2519,7 @@ class MainWindow(QMainWindow):
         if self._rig_poll_was_active:
             self._rig_poll_timer.stop()
         # Gate the RX decoder to prevent self-decode through loopback (R-2).
+        self._rx_gate_raised = True  # v0.6.14 audit: see _schedule_rx_resume
         self._request_rx_gate.emit(True)
         self._rx_panel.set_status("RX paused during TX.")
 
@@ -2547,9 +2556,24 @@ class MainWindow(QMainWindow):
         TX-period audio bleeds into the next RX attempt.  The gate-off
         also calls RxWorker.reset() so the counter and decoder start clean.
         """
-        # OP2-19: guard against post-close firing — isVisible() is False
-        # once closeEvent has run, so the callback becomes a no-op.
-        QTimer.singleShot(50, lambda: self.isVisible() and self._request_rx_gate.emit(False))
+        # v0.6.14 audit: lift the gate only if _on_tx_started raised it.
+        # A TX that failed before transmission_started never gated RX, and
+        # lifting anyway reset the decoder, destroying a decode in progress.
+        # The error and complete/abort paths may both get here; the flag
+        # makes the second call a no-op.
+        if not self._rx_gate_raised:
+            return
+        self._rx_gate_raised = False
+
+        def _lift() -> None:
+            # OP2-19: guard against post-close firing — isVisible() is False
+            # once closeEvent has run, so the callback becomes a no-op.
+            # And if a new TX raised the gate again within the 50 ms, leave
+            # it raised.
+            if self.isVisible() and not self._rx_gate_raised:
+                self._request_rx_gate.emit(False)
+
+        QTimer.singleShot(50, _lift)
 
     @Slot(object, object)
     def _on_tx_image_prepared(self, image: object, mode: object) -> None:
@@ -2991,7 +3015,7 @@ class MainWindow(QMainWindow):
         on the GUI thread in order — the audio is always buffered by the time
         ``_on_rx_image_complete`` runs.
         """
-        self._pending_rx_audio = (audio, sample_rate)
+        self._pending_rx_audio = (audio, sample_rate, mode, vis_code)
 
     @Slot(object, object, int)
     def _on_rx_image_complete(
@@ -3005,8 +3029,15 @@ class MainWindow(QMainWindow):
         logging, and the capture dialog costs one Esc to dismiss when
         they aren't (noise trigger, test decode).
         """
-        pending_audio = self._pending_rx_audio
-        self._pending_rx_audio = None
+        # v0.6.14 audit: only a live completion takes the live recording,
+        # and only when it's for the same transmission (mode and VIS).
+        # Offline decodes never record audio, so they leave the slot alone.
+        pending_audio: tuple | None = None
+        if not offline:
+            pending = self._pending_rx_audio
+            self._pending_rx_audio = None
+            if pending is not None and pending[2] == mode and pending[3] == vis_code:
+                pending_audio = (pending[0], pending[1])
 
         pil_image: PILImage = image  # type: ignore[assignment]
         save_path: Path | None = None
@@ -3123,6 +3154,23 @@ class MainWindow(QMainWindow):
         if fmt not in ("wav", "flac"):
             fmt = "wav"
 
+        def _fail(message: str) -> None:
+            # v0.6.14 audit: follow _autosave_image — one modal per failure
+            # streak, then the status bar.  A full disk on an unattended
+            # station used to stack one dialog per decoded image.
+            # getattr: tests call this unbound on a minimal stand-in.
+            _log.error("RX audio save failed: %s", message)
+            if not getattr(self, "_rx_audio_save_failing", False):
+                self._rx_audio_save_failing = True
+                QMessageBox.warning(
+                    self,
+                    "Audio save failed",
+                    f"{message}\n\nFurther audio save failures will appear "
+                    "in the status bar until a save succeeds.",
+                )
+            else:
+                self.statusBar().showMessage(f"Audio save failed: {message}", 10_000)
+
         if alongside is not None:
             out_path = alongside.with_suffix(f".{fmt}")
         else:
@@ -3137,37 +3185,40 @@ class MainWindow(QMainWindow):
                     file_format=fmt,
                 )
             except OSError as exc:
-                QMessageBox.warning(self, "Audio save failed", str(exc))
+                _fail(str(exc))
                 return None
 
+        # v0.6.14 audit: encode in memory, then atomic_write_bytes, like the
+        # image auto-save.  Writing straight to the final path left a
+        # truncated WAV/FLAC beside the image on a full disk.  This also
+        # keeps H-4 (audit 4.7/v0.2.9) intact: the path never reaches
+        # wave/soundfile as a str, so non-ASCII Windows paths go through
+        # pathlib's wide-char API.
         try:
+            buf = io.BytesIO()
             if fmt == "wav":
                 pcm = (np.clip(arr, -1.0, 1.0) * 32767.0).astype(np.int16)
-                # H-4 (audit 4.7/v0.2.9): open via pathlib.Path.open so
-                # non-ASCII characters in *out_path* on Windows go through
-                # the wide-char OS API.  Passing ``str(out_path)`` directly
-                # to wave.open would encode through the active ANSI code
-                # page and mangle paths containing emoji or non-ANSI
-                # characters under non-UTF-8 locales.
-                with out_path.open("wb") as raw, wave.open(raw, "wb") as wf:
+                with wave.open(buf, "wb") as wf:
                     wf.setnchannels(1)
                     wf.setsampwidth(2)
                     wf.setframerate(sample_rate)
                     wf.writeframes(pcm.tobytes())
             else:
                 import soundfile as sf  # noqa: PLC0415 — lazy optional dep
-                sf.write(str(out_path), arr, sample_rate, subtype="PCM_16")
-        except OSError as exc:
-            QMessageBox.warning(self, "Audio save failed", str(exc))
-            return None
+                sf.write(buf, arr, sample_rate, subtype="PCM_16", format="FLAC")
+            atomic_write_bytes(out_path, buf.getvalue())
         except ImportError:
-            QMessageBox.warning(
-                self,
-                "Audio save failed",
+            _fail(
                 "FLAC recording requires the 'soundfile' package.\n"
-                'Install it with:  pip install "open-sstv[flac]"',
+                'Install it with:  pip install "open-sstv[flac]"'
             )
             return None
+        except (OSError, RuntimeError, ValueError, wave.Error) as exc:
+            # RuntimeError: soundfile's LibsndfileError used to escape the
+            # slot (v0.6.14 audit).
+            _fail(str(exc))
+            return None
+        self._rx_audio_save_failing = False
         self.statusBar().showMessage(f"Audio saved {out_path.name}", 3000)
         return out_path
 
@@ -3209,12 +3260,24 @@ class MainWindow(QMainWindow):
             "PNG (*.png);;JPEG (*.jpg *.jpeg);;All files (*)",
         )
         if path_str:
+            # v0.6.14 audit: PIL raised ValueError for an unknown extension
+            # and it escaped the slot; the write also went straight to the
+            # final path.  No extension means PNG (the first filter);
+            # encode in memory and replace atomically, like auto-save.
+            from PIL import Image  # noqa: PLC0415
+
+            path = Path(path_str)
+            if not path.suffix:
+                path = path.with_suffix(".png")
             try:
-                pil_image.save(path_str)
-                self.statusBar().showMessage(
-                    f"Saved {Path(path_str).name}", 3000
-                )
-            except OSError as exc:
+                fmt = Image.registered_extensions().get(path.suffix.lower())
+                if fmt is None:
+                    raise ValueError(f"unknown image format {path.suffix!r}")
+                buf = io.BytesIO()
+                pil_image.save(buf, format=fmt)
+                atomic_write_bytes(path, buf.getvalue())
+                self.statusBar().showMessage(f"Saved {path.name}", 3000)
+            except (OSError, ValueError) as exc:
                 QMessageBox.warning(self, "Save failed", str(exc))
 
     @Slot()
