@@ -466,6 +466,31 @@ class TestHeaders:
             assert "python" not in headers["server"].lower()
 
 
+class TestPageTokenHandling:
+    """The page side of S-M1 / S-L4 and the lease-id Info finding."""
+
+    @pytest.fixture
+    def html(self) -> str:
+        from open_sstv.remote.page import render_page
+
+        return render_page()
+
+    def test_fetches_use_bearer_header(self, html: str) -> None:
+        assert '"Bearer " + token' in html
+        # No fetch() puts the token in its URL any more.
+        assert "fetch(q(" not in html
+
+    def test_token_moved_out_of_url(self, html: str) -> None:
+        assert 'sessionStorage.setItem("sstv_token"' in html
+        assert "history.replaceState" in html
+
+    def test_lease_id_uses_crypto(self, html: str) -> None:
+        assert "crypto.randomUUID" in html and "crypto.getRandomValues" in html
+
+    def test_cooldown_has_a_message(self, html: str) -> None:
+        assert "cooldown:" in html
+
+
 # --- S-L5: per-IP SSE cap -----------------------------------------------
 
 
