@@ -23,6 +23,7 @@ from pathlib import Path
 
 import platformdirs
 
+from open_sstv.fsutil import sweep_stale_temps
 from open_sstv.templates.model import Template
 from open_sstv.templates.toml_io import (
     SchemaVersionError,
@@ -111,7 +112,12 @@ def _bundled_templates_dir() -> Path:
 
 
 def _cleanup_stale_tmp_files(tdir: Path) -> None:
-    """Remove any ``*.toml.tmp`` files left behind in *tdir* (M-6).
+    """Remove save temps left behind in *tdir* (M-6).
+
+    v0.6.14 audit: ``save_template`` writes through
+    ``fsutil.atomic_write_bytes`` (``.name.toml.<random>.tmp``), but this
+    sweep only matched the old ``name.toml.tmp`` shape and so was dead.
+    Both shapes are swept now; fresh temps (a save in flight) are kept.
 
     ``save_template`` writes via a sibling ``.tmp`` + ``os.replace``;
     on the ``OSError`` branch it unlinks its own tmp, but a hard kill
@@ -124,6 +130,7 @@ def _cleanup_stale_tmp_files(tdir: Path) -> None:
     ``config/store.py`` cleanup pattern; failures are logged at debug
     and never block the listing.
     """
+    sweep_stale_temps(tdir, ".*.toml.*.tmp")
     try:
         for tmp in tdir.glob("*.toml.tmp"):
             try:
@@ -211,6 +218,33 @@ def get_templates_by_role(
     return results
 
 
+def slugify(name: str) -> str:
+    """Filename stem for a template *name*: spaces → underscores,
+    lowercased, only ``[a-z0-9_-]`` kept; ``"template"`` if nothing is."""
+    safe = name.strip().replace(" ", "_").replace("/", "_").lower()
+    safe = "".join(c for c in safe if c.isalnum() or c in "_-")
+    return safe or "template"
+
+
+def path_for_name(name: str, templates_dir: Path | None = None) -> Path:
+    """The file a template called *name* naturally saves to (may exist)."""
+    tdir = templates_dir if templates_dir is not None else default_templates_dir()
+    return tdir / f"{slugify(name)}.toml"
+
+
+def unique_path_for_name(name: str, templates_dir: Path | None = None) -> Path:
+    """A path for *name* that doesn't exist yet: ``slug.toml``, else
+    ``slug_2.toml``, ``slug_3.toml``, …"""
+    tdir = templates_dir if templates_dir is not None else default_templates_dir()
+    stem = slugify(name)
+    candidate = tdir / f"{stem}.toml"
+    n = 2
+    while candidate.exists():
+        candidate = tdir / f"{stem}_{n}.toml"
+        n += 1
+    return candidate
+
+
 def save(
     template: Template,
     templates_dir: Path | None = None,
@@ -219,16 +253,20 @@ def save(
 ) -> Path:
     """Save *template* to *templates_dir*, returning the path written.
 
-    If *filename* is not provided, derives it from the template name:
-    spaces → underscores, lowercased, ``.toml`` suffix.
-    Existing files are overwritten.
+    With an explicit *filename* that file is written (overwritten if it
+    exists) — the caller has decided, e.g. Save on an open template or a
+    confirmed overwrite.
+
+    Without one, the filename is derived from the template name and
+    **never overwrites**: v0.6.14 audit C-M5 found that a new template
+    named like an existing one ("CQSSTV") silently replaced that file —
+    starters included.  A taken slug gets a ``_2``, ``_3``, … suffix.
     """
     tdir = templates_dir if templates_dir is not None else default_templates_dir()
     if filename is None:
-        safe = template.name.strip().replace(" ", "_").replace("/", "_").lower()
-        safe = "".join(c for c in safe if c.isalnum() or c in "_-")
-        filename = (safe or "template") + ".toml"
-    path = tdir / filename
+        path = unique_path_for_name(template.name, tdir)
+    else:
+        path = tdir / filename
     save_template(template, path)
     return path
 
@@ -272,10 +310,7 @@ def duplicate_template(path: Path) -> Path:
     new_name = base_name
     n = 2
     while True:
-        slug = "".join(
-            c for c in new_name.replace(" ", "_").replace("/", "_").lower()
-            if c.isalnum() or c in "_-"
-        ) or "template"
+        slug = slugify(new_name)
         # Both checks are deliberate, not redundant.  ``existing`` was
         # snapshotted from one ``glob()`` call before the loop, so it can
         # miss a sibling template that another process (a parallel CLI run,
@@ -423,6 +458,9 @@ __all__ = [
     "install_starter_pack",
     "list_templates",
     "load_by_path",
+    "path_for_name",
     "save",
+    "slugify",
     "starter_pack_installed",
+    "unique_path_for_name",
 ]

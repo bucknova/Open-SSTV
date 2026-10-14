@@ -59,68 +59,24 @@ from open_sstv.config.templates import (
 )
 from open_sstv.core.encoder import DEFAULT_SAMPLE_RATE
 from open_sstv.core.modes import MODE_TABLE, Mode
-
-
-def _make_tx_context(
-    mode: Mode,
-    photo: PILImage | None,
-    rx_image: PILImage | None = None,
-) -> TXContext:
-    """Build a TXContext for the given mode, photo, and selected RX image."""
-    spec = MODE_TABLE[mode]
-    return TXContext(
-        mode_display_name=mode.value,
-        frame_size=(spec.width, spec.display_height),
-        photo_image=photo,
-        rx_image=rx_image,
-    )
-
-
-def _center_crop_to_size(
-    photo: PILImage, target_w: int, target_h: int
-) -> PILImage:
-    """Center-crop *photo* to ``(target_w, target_h)``'s aspect ratio,
-    then LANCZOS-resize to those exact dimensions.  Returns *photo*
-    unchanged when its size already matches.
-
-    Used right before the template compositor so banners and overlays
-    sit at predictable positions regardless of the user's source image
-    dimensions.  The original image is never mutated — this returns a
-    new ``PIL.Image`` whenever a crop or resize is applied.
-    """
-    if photo.size == (target_w, target_h):
-        return photo
-
-    src_w, src_h = photo.size
-    target_aspect = target_w / target_h
-    src_aspect = src_w / src_h
-
-    if src_aspect > target_aspect:
-        # Source is wider than target — crop horizontal margins.
-        new_w = int(round(src_h * target_aspect))
-        x_off = (src_w - new_w) // 2
-        cropped = photo.crop((x_off, 0, x_off + new_w, src_h))
-    elif src_aspect < target_aspect:
-        # Source is taller than target — crop vertical margins.
-        new_h = int(round(src_w / target_aspect))
-        y_off = (src_h - new_h) // 2
-        cropped = photo.crop((0, y_off, src_w, y_off + new_h))
-    else:
-        cropped = photo
-
-    return cropped.resize((target_w, target_h), Image.Resampling.LANCZOS)
 from open_sstv.templates import manager as template_manager
-from open_sstv.templates.model import QSOState, Template, TXContext
+from open_sstv.templates.context import build_tx_context
+from open_sstv.templates.context import (
+    center_crop_to_size as _center_crop_to_size,  # noqa: F401 — test import
+)
+from open_sstv.templates.model import QSOState, Template
 from open_sstv.templates.renderer import render_template
 from open_sstv.ui.draw_text import draw_text_overlay
 from open_sstv.ui.image_editor import ImageEditorDialog
 from open_sstv.ui.qso_state_widget import QSOStateWidget
 from open_sstv.ui.quick_fill_dialog import QuickFillDialog
-from open_sstv.ui.template_editor import TemplateEditor
+from open_sstv.ui.template_editor import TemplateEditor, ask_overwrite_template
 from open_sstv.ui.template_gallery import TemplateGallery
 from open_sstv.ui.utils import pil_to_pixmap as _pil_to_pixmap
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from PIL.Image import Image as PILImage
 
     from open_sstv.config.schema import AppConfig
@@ -174,6 +130,10 @@ class TxPanel(QWidget):
         self._v2_templates: list[QSOTemplate] = templates or load_templates()
         self._sample_rate: int = DEFAULT_SAMPLE_RATE
         self._preview_source: QPixmap | None = None
+        #: v0.6.14 audit C-M4: returns MainWindow's last polled rig
+        #: frequency (Hz, or None) so ``%f`` / ``%b`` resolve at TX.
+        self._frequency_getter: Callable[[], int | None] | None = None
+        self._last_render_error: str = ""
 
         layout = QVBoxLayout(self)
 
@@ -343,6 +303,24 @@ class TxPanel(QWidget):
         """Ask the gallery to reload from disk (called after migration)."""
         self._gallery.reload_templates()
 
+    def set_frequency_getter(self, getter: Callable[[], int | None] | None) -> None:
+        """Wire the rig-frequency source for ``%f``/``{freq}``/``%b``/``{band}``.
+
+        v0.6.14 audit C-M4: no TXContext ever carried ``frequency_hz``, so
+        those tokens always rendered blank.  MainWindow passes a getter
+        for its rig-poll cache; it's read at render time, never stored.
+        """
+        self._frequency_getter = getter
+        self._gallery.set_frequency_getter(self._rig_frequency)
+
+    def _rig_frequency(self) -> int | None:
+        if self._frequency_getter is None:
+            return None
+        try:
+            return self._frequency_getter()
+        except Exception:  # noqa: BLE001 — a token must never break TX
+            return None
+
     def get_qso_state(self) -> QSOState:
         """Return the current QSO state from the QSO widget."""
         return self._qso_widget.get_state()
@@ -508,9 +486,21 @@ class TxPanel(QWidget):
         # the old file once the write succeeds.  Atomic-ish — if save fails
         # we leave the original untouched.
         old_path = path
+        # v0.6.14 audit C-M5: renaming onto another template's slug used to
+        # overwrite that file silently (starters included).  Ask first.
+        target = template_manager.path_for_name(new_name, old_path.parent)
+        filename: str | None = target.name
+        if target != old_path and target.exists():
+            choice = ask_overwrite_template(self, target)
+            if choice == "cancel":
+                return
+            if choice == "keep":
+                filename = None  # save() picks a free slug
         template.name = new_name
         try:
-            new_path = template_manager.save(template, old_path.parent)
+            new_path = template_manager.save(
+                template, old_path.parent, filename=filename
+            )
         except OSError as exc:
             QMessageBox.critical(
                 self, "Rename failed", f"Could not save renamed template:\n{exc}"
@@ -544,15 +534,9 @@ class TxPanel(QWidget):
                 self, "Delete failed", f"Could not delete template:\n{exc}"
             )
             return
-        # If the deleted template is currently selected, drop the selection
-        # so the main TX preview falls back to the bare photo.
-        if (
-            self._selected_template is not None
-            and self._selected_template.name == template.name
-        ):
-            self._selected_template = None
-            self.template_composited.emit(False)
-            self._refresh_composite_preview()
+        # If the deleted template was selected, the gallery reload emits
+        # ``template_selected(None)`` and the preview falls back to the
+        # bare image (v0.6.14 audit UI-M4).
         self._gallery.reload_templates()
         self._status.setText(f"Deleted: {path.name}")
 
@@ -572,6 +556,7 @@ class TxPanel(QWidget):
             templates_dir=self._templates_dir,
             current_photo=self._base_image,
             current_mode=self.selected_mode(),
+            frequency_getter=self._rig_frequency,
             parent=self,
         )
         editor.template_saved.connect(self._on_template_saved_in_editor)
@@ -581,8 +566,13 @@ class TxPanel(QWidget):
         editor.raise_()
 
     @Slot(object)
-    def _on_template_saved_in_editor(self, _path: Path) -> None:
+    def _on_template_saved_in_editor(self, path: Path) -> None:
+        # v0.6.14 audit C-M1: the reload alone kept the *old* Template
+        # object selected, so TX sent the pre-edit template until the
+        # card was clicked again.  Select the saved file explicitly; the
+        # gallery re-emits ``template_selected`` with the fresh object.
         self._gallery.reload_templates()
+        self._gallery.select_path(path)
 
     @Slot(int)
     def _on_editor_finished(self, _result: int) -> None:
@@ -628,6 +618,8 @@ class TxPanel(QWidget):
             return
         mode = self.selected_mode()
         composed = self._compose_for_emit()
+        if composed is None:
+            return
         self.transmit_requested.emit(composed, mode)
 
     @Slot()
@@ -643,22 +635,46 @@ class TxPanel(QWidget):
             return
         mode = self.selected_mode()
         composed = self._compose_for_emit()
+        if composed is None:
+            return
         self.export_to_audio_requested.emit(composed, mode)
 
-    def _compose_for_emit(self) -> PILImage:
-        """Return the image that Transmit / Export should emit.
+    def _compose_for_emit(self) -> PILImage | None:
+        """Return the image that Transmit / Export should emit, or ``None``
+        to abort.
 
         Shared by both click handlers so they can never drift.  If a
         v0.3 template is selected and a base photo is loaded, this
         returns the rendered composite; otherwise it returns the raw
         current image and TxWorker's banner system applies.
+
+        v0.6.14 audit UI-M4: a template render failure used to fall
+        through silently to the raw photo — the operator had seen the
+        composite and transmitted something else.  Now they are asked;
+        declining aborts.
         """
         if self._selected_template is not None and self._base_image is not None:
             composed = self._compose_template()
             if composed is not None:
                 return composed
+            if not self._confirm_send_without_template():
+                return None
         # Fallback: caller gets the current image; TxWorker's banner applies.
-        return self._current_image  # type: ignore[return-value]
+        return self._current_image
+
+    def _confirm_send_without_template(self) -> bool:
+        """Ask whether to send the bare image after a template failure."""
+        name = self._selected_template.name if self._selected_template else ""
+        answer = QMessageBox.warning(
+            self,
+            "Template failed",
+            f"The template \"{name}\" could not be rendered:\n\n"
+            f"{self._last_render_error}\n\n"
+            "Send the image without the template?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        return answer == QMessageBox.StandardButton.Yes
 
     # === Preview helpers ===
 
@@ -669,30 +685,31 @@ class TxPanel(QWidget):
         if self._app_config is None:
             return None
         mode = self.selected_mode()
-        spec = MODE_TABLE[mode]
-        # Center-crop+resize the source photo to the mode's native frame
-        # size before handing it to the renderer.  Keeps banner/overlay
-        # placement predictable regardless of the user's source image
-        # dimensions.  No-op when the photo already matches; never
-        # mutates ``self._base_image`` so the editor still sees the
-        # original.
-        photo = _center_crop_to_size(
-            self._base_image, spec.width, spec.display_height
-        )
+        # v0.6.14 audit C-M3/C-M4: the shared builder applies the same
+        # photo policy the editor, gallery and remote compose use (so the
+        # previews match the air) and carries the rig frequency.  Never
+        # mutates ``self._base_image``.
         qso = self._qso_widget.get_state()
-        ctx = _make_tx_context(mode, photo, self._rx_image)
+        ctx = build_tx_context(
+            self._selected_template, mode, self._base_image, self._rx_image,
+            frequency_hz=self._rig_frequency(),
+        )
         try:
             return render_template(self._selected_template, qso, self._app_config, ctx)
         except Exception as exc:  # noqa: BLE001
+            self._last_render_error = str(exc)
             self._status.setText(f"Template render failed: {exc}")
             return None
 
     def _refresh_composite_preview(self) -> None:
         """Update the main preview with the current template composite."""
         if self._selected_template is None or self._base_image is None:
-            # No template selected — show the raw loaded image.
-            if self._preview_source is None and self._base_image is not None:
-                self._preview_source = _pil_to_pixmap(self._base_image)
+            # No template selected — show exactly what Transmit would send
+            # (the current image).  v0.6.14 audit UI-M4: this used to keep
+            # whatever pixmap was there, so deselecting/deleting a template
+            # left the composite on screen while TX sent the bare photo.
+            if self._current_image is not None:
+                self._preview_source = _pil_to_pixmap(self._current_image)
             self._update_preview_pixmap()
             return
         composed = self._compose_template()
