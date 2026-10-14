@@ -134,6 +134,14 @@ class ComposeService:
                     pixels / 1e6, MAX_IMAGE_PIXELS / 1e6,
                 )
                 return None
+            # v0.6.14 audit S-L3: a phone JPEG is ~12 MP for a frame of at
+            # most 800x616.  Let the JPEG decoder downscale by 1/2..1/8 as it
+            # decodes (no-op for other formats) — a fraction of the memory
+            # and time.  A square target keeps both sides >= the frame's
+            # long edge whatever the EXIF orientation, so no quality is lost.
+            spec = MODE_TABLE[mode]
+            edge = max(spec.width, spec.display_height)
+            photo.draft(None, (edge, edge))
             photo.load()
             # Phone photos carry their orientation in an EXIF tag rather than
             # in the pixels; bake it in so the composited frame is upright

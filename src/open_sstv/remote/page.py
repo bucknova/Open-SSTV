@@ -2,9 +2,11 @@
 """The read-only gallery viewer page served at ``/``.
 
 A single self-contained HTML document (inline CSS + JS, no external
-resources).  It reads the token from its own URL query string and uses it
-for every API call, so the one URL the app logs
-(``http://host:port/?token=…``) is all the operator needs to open.
+resources).  It reads the token from its own URL query string, so the one
+URL the app shows (``http://host:port/?token=…``) is all the operator needs
+to open.  It then moves the token into sessionStorage, scrubs it from the
+address bar, and sends it as a Bearer header on every fetch (v0.6.14 audit
+S-M1/S-L4); only ``<img>`` and ``EventSource`` URLs still carry it.
 
 Phase 2 adds the **live view plane**: an ``EventSource`` on ``/api/events``
 (Server-Sent Events) drives a live panel that paints an in-progress decode
@@ -391,8 +393,35 @@ _PAGE = """<!doctype html>
   <button class="abort" id="onairAbort">■ Abort transmission</button>
 </div>
 <script>
-  const token = new URLSearchParams(location.search).get("token") || "";
+  // v0.6.14 audit S-L4: take the token from the URL once, keep it in this
+  // tab's sessionStorage, and scrub it from the address bar and history so
+  // it isn't left in browser history, bookmarks or screenshots.  If storage
+  // is unavailable the URL is left alone, or a reload would lose the token.
+  let token = "";
+  {
+    const params = new URLSearchParams(location.search);
+    token = params.get("token") || "";
+    try {
+      if (token) {
+        sessionStorage.setItem("sstv_token", token);
+        params.delete("token");
+        const rest = params.toString();
+        history.replaceState(null, "", location.pathname + (rest ? "?" + rest : "") + location.hash);
+      } else {
+        token = sessionStorage.getItem("sstv_token") || "";
+      }
+    } catch {}
+  }
+  // Query-string token: only for <img> and EventSource, which can't set
+  // headers.  The server redacts it from its access log (S-M1).
   const q = (p) => p + (p.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token);
+  // Everything fetch()ed sends the token as a Bearer header instead (S-M1),
+  // which also satisfies the server's Origin-or-Bearer POST rule (S-L1).
+  const api = (p, opts) => {
+    const o = Object.assign({}, opts || {});
+    o.headers = Object.assign({ Authorization: "Bearer " + token }, o.headers || {});
+    return fetch(p, o);
+  };
   const $ = (id) => document.getElementById(id);
   const grid = $("grid"), countEl = $("count"), live = $("live");
   let activeView = "gallery", galleryCount = "", logCount = "";
@@ -452,16 +481,19 @@ _PAGE = """<!doctype html>
   });
 
   function errMsg(e) {
-    return e.message === "unauthorized"
-      ? "Not authorized — check the token in the URL."
-      : "Could not reach the station — is Open-SSTV running?";
+    if (e.message === "unauthorized")
+      return "Not authorized — open the link (or scan the QR code) from the station again.";
+    if (e.message === "locked")
+      return "Too many wrong tokens from this device — wait a minute, then reload.";
+    return "Could not reach the station — is Open-SSTV running?";
   }
 
   async function load() {
     if (activeView === "gallery") countEl.textContent = "loading…";
     try {
-      const res = await fetch(q("/api/gallery"));
+      const res = await api("/api/gallery");
       if (res.status === 401) throw new Error("unauthorized");
+      if (res.status === 429) throw new Error("locked");
       if (!res.ok) throw new Error("HTTP " + res.status);
       const items = await res.json();
       galleryCount = items.length + (items.length === 1 ? " image" : " images");
@@ -482,8 +514,9 @@ _PAGE = """<!doctype html>
     const body = $("logBody"), empty = $("logEmpty");
     if (activeView === "logbook") countEl.textContent = "loading…";
     try {
-      const res = await fetch(q("/api/logbook"));
+      const res = await api("/api/logbook");
       if (res.status === 401) throw new Error("unauthorized");
+      if (res.status === 429) throw new Error("locked");
       if (!res.ok) throw new Error("HTTP " + res.status);
       const rows = await res.json();
       logCount = rows.length + (rows.length === 1 ? " QSO" : " QSOs");
@@ -590,9 +623,20 @@ _PAGE = """<!doctype html>
   // — the crop box matches this aspect so what you frame is exactly what the
   // station composites.  Never edit these numbers here; edit core/modes.py.
   const MODES = __OPEN_SSTV_MODES_JSON__;
+  // Lease client id (v0.6.14 audit, Info): crypto.randomUUID only exists in
+  // secure contexts (https / localhost), so a phone on http://LAN-IP falls
+  // back to getRandomValues; Math.random is the last resort.
+  function newClientId() {
+    try { if (crypto.randomUUID) return "c-" + crypto.randomUUID(); } catch {}
+    try {
+      const b = new Uint8Array(16); crypto.getRandomValues(b);
+      return "c-" + Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+    } catch {}
+    return "c-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+  }
   let clientId = sessionStorage.getItem("sstv_client");
   if (!clientId) {
-    clientId = "c-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+    clientId = newClientId();
     sessionStorage.setItem("sstv_client", clientId);
   }
   let txInfo = { state: "idle", lease_held: false, tx_enabled: false };
@@ -600,7 +644,7 @@ _PAGE = """<!doctype html>
 
   async function txPost(action, extra) {
     try {
-      const res = await fetch(q("/api/tx/" + action), {
+      const res = await api("/api/tx/" + action, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(Object.assign({ client: clientId }, extra || {})),
       });
@@ -616,6 +660,7 @@ _PAGE = """<!doctype html>
       not_lease_holder: "You don't have control right now.",
       confirm_expired: "The transmit request expired — try again.",
       bad_token: "The transmit request was invalid — try again.",
+      cooldown: "Please wait a few seconds between transmissions.",
     })[code] || ("Transmit request refused" + (code ? " (" + code + ")" : "") + ".");
   }
   function startHb() {
@@ -782,7 +827,7 @@ _PAGE = """<!doctype html>
   }
   async function loadComposeTemplates() {
     try {
-      const res = await fetch(q("/api/compose/templates"));
+      const res = await api("/api/compose/templates");
       if (!res.ok) { cHint("Could not load templates.", true); return; }
       const tpls = await res.json();
       const strip = $("cTpl"); strip.innerHTML = "";
@@ -906,7 +951,7 @@ _PAGE = """<!doctype html>
   async function renderComposePreview() {
     if (!cPhoto || !cTemplateId) return;
     try {
-      const res = await fetch(q("/api/compose/render"), {
+      const res = await api("/api/compose/render", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ photo: cPhoto, template_id: cTemplateId,
           mode: $("cMode").value, tokens: composeTokens() }),
@@ -927,7 +972,7 @@ _PAGE = """<!doctype html>
     cHint("Staging…");
     let stage;
     try {
-      stage = await fetch(q("/api/compose/stage"), {
+      stage = await api("/api/compose/stage", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ photo: cPhoto, template_id: cTemplateId,
           mode: $("cMode").value, tokens: composeTokens() }),

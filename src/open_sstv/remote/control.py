@@ -54,6 +54,12 @@ HEARTBEAT_TIMEOUT_S = 2.5
 #: An idle lease lapses if the holder goes silent this long, freeing it
 #: for another operator.  (During TX the faster dead-man's-switch applies.)
 LEASE_TIMEOUT_S = 15.0
+#: Minimum gap between the end of one remote transmission and the next
+#: remote ``request`` (v0.6.14 audit, Info — the design's "rate-limit
+#: tx.request" TODO).  Stops a scripted or stuck client from keying the
+#: rig back-to-back; long enough to notice and reclaim, short enough not
+#: to bother an operator sending a reply.
+MIN_TX_INTERVAL_S = 10.0
 
 
 class TxState(StrEnum):
@@ -70,7 +76,8 @@ class Result:
 
     ``error`` is a stable machine code (``"tx_disabled"``, ``"no_rig"``,
     ``"not_lease_holder"``, ``"busy"``, ``"bad_token"``,
-    ``"confirm_expired"``, ``"no_lease"``) the HTTP layer maps to a status.
+    ``"confirm_expired"``, ``"no_lease"``, ``"cooldown"``) the HTTP layer
+    maps to a status.
     """
 
     ok: bool
@@ -111,8 +118,13 @@ class ControlPlane:
         enabled: Callable[[], bool],
         rig_ready: Callable[[], bool] | None = None,
         tx_busy: Callable[[], bool] | None = None,
+        min_tx_interval_s: float = MIN_TX_INTERVAL_S,
     ) -> None:
         self._now = now
+        #: Remote-TX cooldown; 0 disables it.  See MIN_TX_INTERVAL_S.
+        self._min_tx_interval = max(0.0, min_tx_interval_s)
+        #: When the last remote transmission ended (None = never).
+        self._last_tx_end: float | None = None
         self._transmit = transmit
         self._unkey = unkey
         self._enabled = enabled
@@ -219,6 +231,11 @@ class ControlPlane:
             if self._tx_busy():
                 return Result(False, "busy")
             t = self._now()
+            if (
+                self._last_tx_end is not None
+                and t - self._last_tx_end < self._min_tx_interval
+            ):
+                return Result(False, "cooldown")
             self._lease_seen = t
             token = secrets.token_urlsafe(12)
             self._confirm_token = token
@@ -389,6 +406,10 @@ class ControlPlane:
 
     def _reset_locked(self) -> None:
         """Return the transmit lifecycle to IDLE (keeps the lease)."""
+        if self._state is TxState.TRANSMITTING:
+            # However it ended (finished, aborted, dead-man's-switch), start
+            # the remote-TX cooldown from here.
+            self._last_tx_end = self._now()
         self._state = TxState.IDLE
         self._confirm_token = None
         self._confirm_expires = 0.0
@@ -400,6 +421,7 @@ __all__ = [
     "CONFIRM_WINDOW_S",
     "HEARTBEAT_TIMEOUT_S",
     "LEASE_TIMEOUT_S",
+    "MIN_TX_INTERVAL_S",
     "ControlPlane",
     "Result",
     "TxState",

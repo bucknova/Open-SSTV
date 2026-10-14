@@ -573,7 +573,7 @@ class TestRemoteTab:
     def test_qr_rendered_when_enabled_with_token(self, qtbot) -> None:
         cfg = AppConfig(
             callsign="W0AEZ", remote_enabled=True, remote_host="0.0.0.0",
-            remote_port=8730, remote_token="demo",
+            remote_port=8730, remote_token="a-long-enough-token-1234",
         )
         dlg = SettingsDialog(config=cfg, rig_connected=False)
         qtbot.addWidget(dlg)
@@ -609,6 +609,83 @@ class TestRemoteTab:
         qtbot.addWidget(dlg)
         assert dlg._remote_tx.isChecked() is False
         assert dlg.result_config().remote_tx_enabled is False
+
+    # --- v0.6.14 audit S-M2 / S-M3 ---
+
+    def test_short_token_refused_on_save(self, qtbot) -> None:
+        dlg = SettingsDialog(config=AppConfig(callsign="W0AEZ"), rig_connected=False)
+        qtbot.addWidget(dlg)
+        dlg._remote_token.setText("demo")
+        dlg.accept()
+        assert dlg.result() != dlg.DialogCode.Accepted
+        assert not dlg._remote_token_error.isHidden()
+        # Fixing it clears the message and lets the dialog close.
+        dlg._remote_token.setText("x" * 16)
+        assert dlg._remote_token_error.isHidden()
+        dlg.accept()
+        assert dlg.result() == dlg.DialogCode.Accepted
+
+    def test_blank_token_saves(self, qtbot) -> None:
+        dlg = SettingsDialog(config=AppConfig(callsign="W0AEZ"), rig_connected=False)
+        qtbot.addWidget(dlg)
+        dlg._remote_token.setText("")
+        dlg.accept()
+        assert dlg.result() == dlg.DialogCode.Accepted
+
+    def test_regenerate_fills_a_strong_token(self, qtbot) -> None:
+        dlg = SettingsDialog(config=AppConfig(callsign="W0AEZ"), rig_connected=False)
+        qtbot.addWidget(dlg)
+        dlg._remote_regen.click()
+        first = dlg._remote_token.text()
+        assert len(first) >= 16
+        dlg._remote_regen.click()
+        assert dlg._remote_token.text() != first
+
+    def test_short_token_gets_no_qr(self, qtbot) -> None:
+        cfg = AppConfig(callsign="W0AEZ", remote_enabled=True, remote_token="demo")
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        pm = dlg._remote_qr.pixmap()
+        assert pm is None or pm.isNull()
+        assert "short" in dlg._remote_qr.text().lower()
+
+    def test_qr_shown_for_generated_live_token(self, qtbot, monkeypatch) -> None:
+        from PySide6.QtGui import QPixmap
+
+        urls: list[str] = []
+
+        def fake_qr(url: str) -> QPixmap:
+            urls.append(url)
+            pm = QPixmap(8, 8)
+            pm.fill()
+            return pm
+
+        monkeypatch.setattr(SettingsDialog, "_render_qr", staticmethod(fake_qr))
+        cfg = AppConfig(callsign="W0AEZ", remote_enabled=True, remote_token="")
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        dlg.set_remote_live_token("live-generated-token-abc")
+        assert urls and urls[-1].endswith("?token=live-generated-token-abc")
+        assert not dlg._remote_qr.pixmap().isNull()
+        # Changing the port means Save restarts the server with a new random
+        # token, so the live one would be a wrong QR — don't show it.
+        dlg._remote_port.setValue(cfg.remote_port + 1)
+        pm = dlg._remote_qr.pixmap()
+        assert pm is None or pm.isNull()
+
+    def test_cleartext_warning_only_for_lan_plus_tx(self, qtbot) -> None:
+        cfg = AppConfig(callsign="W0AEZ", remote_enabled=True)
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        warn = dlg._remote_lan_tx_warning
+        assert warn.isHidden()
+        dlg._remote_tx.setChecked(True)
+        assert warn.isHidden()  # loopback only: no network exposure
+        dlg._remote_lan.setChecked(True)
+        assert not warn.isHidden()
+        assert "not encrypted" in warn.text()
+        dlg._remote_tx.setChecked(False)
+        assert warn.isHidden()
 
 
 class TestFlexRadioDirect:

@@ -351,3 +351,40 @@ def test_cached_link_cannot_point_off_site(qtbot, real_cache_reader) -> None:
     assert received == [
         ("9.9.9", "https://github.com/bucknova/Open-SSTV/releases/latest")
     ]
+
+
+# v0.6.14 audit S-L7: the network path skipped the releases-page fence the
+# cache path applies, and a non-string tag_name crashed the worker.
+
+
+@pytest.mark.parametrize("bad_url", [
+    "https://example.com/evil", "javascript:alert(1)", None, 42,
+    "https://github.com/bucknova/Open-SSTV-evil/releases/",
+])
+def test_network_link_cannot_point_off_site(qtbot, bad_url) -> None:
+    worker = UpdateCheckerWorker()
+    received: list[tuple[str, str]] = []
+    worker.update_available.connect(lambda v, u: received.append((v, u)))
+    body = json.dumps({"tag_name": "v9.9.9", "html_url": bad_url}).encode()
+    resp = _mock_response("v9.9.9")
+    resp.read = MagicMock(return_value=body)
+    with patch("open_sstv.ui.update_checker.urllib.request.urlopen", return_value=resp):
+        worker.check()
+    assert received == [
+        ("9.9.9", "https://github.com/bucknova/Open-SSTV/releases/latest")
+    ]
+
+
+@pytest.mark.parametrize("bad_tag", [None, 10, ["v9"], {"v": 9}])
+def test_non_string_tag_is_ignored(qtbot, bad_tag) -> None:
+    worker = UpdateCheckerWorker()
+    received: list[tuple[str, str]] = []
+    done: list[bool] = []
+    worker.update_available.connect(lambda v, u: received.append((v, u)))
+    worker.check_complete.connect(lambda: done.append(True))
+    body = json.dumps({"tag_name": bad_tag, "html_url": None}).encode()
+    resp = _mock_response("v9.9.9")
+    resp.read = MagicMock(return_value=body)
+    with patch("open_sstv.ui.update_checker.urllib.request.urlopen", return_value=resp):
+        worker.check()  # must not raise
+    assert received == [] and done == [True]

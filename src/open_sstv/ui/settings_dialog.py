@@ -63,6 +63,7 @@ from open_sstv.radio.serial_rig import (
     SERIAL_RIG_PROTOCOLS,
     create_serial_rig,
 )
+from open_sstv.remote.server import MIN_TOKEN_LEN, token_is_strong
 from open_sstv.templates import TokenContext
 
 #: Common Hamlib radio models (model_id, display_name).
@@ -593,9 +594,33 @@ class SettingsDialog(QDialog):
 
         self._remote_token = QLineEdit(self._config.remote_token)
         self._remote_token.setPlaceholderText("blank = generate a random one at launch")
-        form.addRow("Access token:", self._remote_token)
+        # v0.6.14 audit S-M2: one click to a strong fixed token, so nobody
+        # has to invent one (operator-chosen tokens were often "demo").
+        self._remote_regen = QPushButton("Regenerate")
+        self._remote_regen.setToolTip(
+            "Fill in a new random token.  Phones using the old link will need "
+            "the new one (scan the QR again)."
+        )
+        self._remote_regen.clicked.connect(self._regenerate_remote_token)
+        token_row = QHBoxLayout()
+        token_row.addWidget(self._remote_token, 1)
+        token_row.addWidget(self._remote_regen)
+        form.addRow("Access token:", token_row)
+
+        self._remote_token_error = QLabel(
+            f"Too short — use at least {MIN_TOKEN_LEN} characters, leave it "
+            "blank, or click Regenerate."
+        )
+        self._remote_token_error.setWordWrap(True)
+        self._remote_token_error.setStyleSheet("color: #c0392b; font-size: 11px;")
+        self._remote_token_error.setVisible(False)
+        form.addRow(self._remote_token_error)
+        #: The running server's token (set by MainWindow), so a blank (auto)
+        #: token still gets a scannable QR.
+        self._remote_live_token = ""
 
         self._remote_url = QLabel()
+        self._remote_url.setTextFormat(Qt.PlainText)  # token text is never markup
         self._remote_url.setWordWrap(True)
         self._remote_url.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._remote_url.setStyleSheet("font-family: monospace; font-size: 11px;")
@@ -635,6 +660,19 @@ class SettingsDialog(QDialog):
         tx_note.setWordWrap(True)
         tx_note.setStyleSheet("color: gray; font-size: 10px;")
         tx_form.addWidget(tx_note)
+        # v0.6.14 audit S-M3: there's no TLS yet, so with LAN access on the
+        # token crosses the network in cleartext on every request.
+        self._remote_lan_tx_warning = QLabel(
+            "⚠ Network access + remote transmit: the link is <b>not encrypted</b>. "
+            "Anyone who can watch traffic on this network can read the token "
+            "and key your rig.  Use it only on a network you trust (your home "
+            "LAN or a private VPN such as WireGuard/Tailscale) — never on "
+            "public or shared Wi-Fi."
+        )
+        self._remote_lan_tx_warning.setTextFormat(Qt.RichText)
+        self._remote_lan_tx_warning.setWordWrap(True)
+        self._remote_lan_tx_warning.setStyleSheet("color: #c0392b; font-size: 11px;")
+        tx_form.addWidget(self._remote_lan_tx_warning)
         layout.addWidget(tx_group)
         layout.addStretch(1)
 
@@ -642,8 +680,52 @@ class SettingsDialog(QDialog):
         self._remote_lan.toggled.connect(self._update_remote_url)
         self._remote_port.valueChanged.connect(self._update_remote_url)
         self._remote_token.textChanged.connect(self._update_remote_url)
+        self._remote_lan.toggled.connect(self._update_remote_warnings)
+        self._remote_tx.toggled.connect(self._update_remote_warnings)
+        self._remote_enabled.toggled.connect(self._update_remote_warnings)
         self._update_remote_url()
+        self._update_remote_warnings()
         return tab
+
+    @Slot()
+    def _update_remote_warnings(self) -> None:
+        """S-M3: show the cleartext warning only when it applies."""
+        self._remote_lan_tx_warning.setVisible(
+            self._remote_enabled.isChecked()
+            and self._remote_lan.isChecked()
+            and self._remote_tx.isChecked()
+        )
+
+    @Slot()
+    def _regenerate_remote_token(self) -> None:
+        """Fill the token field with a fresh 128-bit random token (S-M2)."""
+        import secrets  # noqa: PLC0415
+
+        self._remote_token.setText(secrets.token_urlsafe(16))
+
+    def set_remote_live_token(self, token: str) -> None:
+        """Tell the Remote tab which token the running server is using."""
+        self._remote_live_token = token
+        self._update_remote_url()
+
+    def _remote_token_ok(self) -> bool:
+        token = self._remote_token.text().strip()
+        return not token or token_is_strong(token)
+
+    def accept(self) -> None:  # noqa: D102
+        # v0.6.14 audit S-M2: refuse to save a too-short fixed token — it is
+        # the only thing between the network and the rig's PTT.
+        if not self._remote_token_ok():
+            self._remote_token_error.setVisible(True)
+            tabs = self.findChild(QTabWidget)
+            if tabs is not None:
+                for i in range(tabs.count()):
+                    if tabs.tabText(i) == "Remote":
+                        tabs.setCurrentIndex(i)
+                        break
+            self._remote_token.setFocus()
+            return
+        super().accept()
 
     @staticmethod
     def _detect_lan_ip() -> str:
@@ -691,6 +773,9 @@ class SettingsDialog(QDialog):
     @Slot()
     def _update_remote_url(self) -> None:
         """Refresh the browse-URL hint and QR from the Remote-tab widgets."""
+        # Hide a stale "too short" error as soon as the field is fixed.
+        if self._remote_token_ok():
+            self._remote_token_error.setVisible(False)
         if not self._remote_enabled.isChecked():
             self._remote_url.setText("(enable above to get a link)")
             self._remote_qr.clear()
@@ -699,13 +784,32 @@ class SettingsDialog(QDialog):
         host = self._detect_lan_ip() if self._remote_lan.isChecked() else "127.0.0.1"
         port = self._remote_port.value()
         token = self._remote_token.text().strip()
+        # v0.6.14 audit S-M2: a blank token is the recommended (random)
+        # setting, so it gets a QR too — from the running server's token, as
+        # long as Save won't restart the server under a new one (it does if
+        # the binding changes).
+        binding_unchanged = (
+            self._config.remote_enabled
+            and port == self._config.remote_port
+            and (self._config.remote_host == "0.0.0.0") == self._remote_lan.isChecked()
+            and not token_is_strong(self._config.remote_token)
+        )
+        if not token and self._remote_live_token and binding_unchanged:
+            token = self._remote_live_token
         tok = token if token else "‹auto›"
         self._remote_url.setText(f"http://{host}:{port}/?token={tok}")
-        # A scannable QR needs the real token; a blank (auto) token isn't
-        # known until the server starts, so nudge toward setting one.
         if not token:
             self._remote_qr.clear()
-            self._remote_qr.setText("Set a token above for a scannable code")
+            self._remote_qr.setText(
+                "A random token is made when the server starts — the QR shows "
+                "here after Save (or click Regenerate)"
+            )
+            return
+        if not token_is_strong(token):
+            self._remote_qr.clear()
+            self._remote_qr.setText(
+                f"Token too short (minimum {MIN_TOKEN_LEN} characters) — no QR"
+            )
             return
         pix = self._render_qr(f"http://{host}:{port}/?token={token}")
         if pix is not None:

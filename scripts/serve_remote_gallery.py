@@ -80,7 +80,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1", help="bind address (default loopback)")
     parser.add_argument("--port", type=int, default=8731, help="port (default 8731)")
-    parser.add_argument("--token", default="demo", help="access token (default 'demo')")
+    # v0.6.14 audit S-M2: fixed tokens must be >= 16 chars; blank = random.
+    parser.add_argument("--token", default="", help="access token, >= 16 chars (default: random)")
     parser.add_argument("--count", type=int, default=6, help="synthetic image count")
     parser.add_argument(
         "--fake",

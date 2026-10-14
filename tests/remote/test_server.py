@@ -18,7 +18,9 @@ from open_sstv.remote.control import ControlPlane
 from open_sstv.remote.server import RemoteServer
 from open_sstv.remote.service import GalleryService
 
-TOKEN = "test-token-123"
+# >= MIN_TOKEN_LEN (16): a shorter fixed token is refused at server start
+# (v0.6.14 audit S-M2) and the server would mint a random one instead.
+TOKEN = "test-token-1234567890"
 
 
 def _img(path: Path, size: tuple[int, int] = (32, 24)) -> Path:
@@ -73,9 +75,11 @@ def _post(
     origin: str | None = None,
 ) -> tuple[int, dict]:
     url = f"http://127.0.0.1:{srv.port}{path}"
-    if token is not None:
-        url += f"?token={token}"
     headers = {"Content-Type": "application/json"}
+    # The page sends the token as a Bearer header on fetch() (v0.6.14 audit
+    # S-M1); a POST with neither Bearer nor Origin is refused (S-L1).
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
     if origin is not None:
         headers["Origin"] = origin
     req = urllib.request.Request(  # noqa: S310 — localhost test
@@ -126,9 +130,11 @@ def _post_raw(
     origin: str | None = None,
 ) -> tuple[int, bytes, str]:
     url = f"http://127.0.0.1:{srv.port}{path}"
-    if token is not None:
-        url += f"?token={token}"
     headers = {"Content-Type": "application/json"}
+    # The page sends the token as a Bearer header on fetch() (v0.6.14 audit
+    # S-M1); a POST with neither Bearer nor Origin is refused (S-L1).
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
     if origin is not None:
         headers["Origin"] = origin
     req = urllib.request.Request(  # noqa: S310 — localhost test
