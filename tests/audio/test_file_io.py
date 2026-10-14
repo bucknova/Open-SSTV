@@ -100,29 +100,74 @@ def test_load_wav_8bit_is_centered(tmp_path: Path) -> None:
     np.testing.assert_allclose(loaded, np.zeros(100), atol=1e-4)
 
 
-def test_load_wav_unsupported_sample_width_raises(tmp_path: Path) -> None:
-    """WAV files with non-1/2/4 byte sample widths are rejected.
+def _riff(fmt_chunk: bytes, data: bytes) -> bytes:
+    body = b"WAVE" + b"fmt " + struct.pack("<I", len(fmt_chunk)) + fmt_chunk
+    body += b"data" + struct.pack("<I", len(data)) + data
+    return b"RIFF" + struct.pack("<I", len(body)) + body
 
-    Stdlib ``wave`` itself rejects most exotic widths at write time, so
-    we have to construct one by hand to test the loader's branch.
-    """
+
+def test_load_wav_24bit_pcm(tmp_path: Path) -> None:
+    """v0.6.14 audit D-M2: 24-bit PCM used to be rejected outright."""
+    values = [0, 2**22, -(2**22), 2**23 - 1, -(2**23)]
+    data = b"".join(int(v).to_bytes(3, "little", signed=True) for v in values)
+    fmt = struct.pack("<HHIIHH", 1, 1, 48000, 48000 * 3, 3, 24)
+    wav_path = tmp_path / "pcm24.wav"
+    wav_path.write_bytes(_riff(fmt, data))
+
+    loaded, fs = load_audio_file(wav_path)
+
+    assert fs == 48_000
+    np.testing.assert_allclose(loaded, [0.0, 0.5, -0.5, 1.0, -1.0], atol=1e-6)
+
+
+def test_load_wav_unsupported_sample_width_raises(tmp_path: Path) -> None:
+    """A 5-byte integer sample width is still rejected cleanly."""
+    data = b"\x00" * 50
+    fmt = struct.pack("<HHIIHH", 1, 1, 48000, 48000 * 5, 5, 40)
     wav_path = tmp_path / "weird.wav"
-    # 3-byte sample width — not unheard-of in 24-bit PCM but the loader
-    # doesn't support it.  Hand-write a minimal RIFF/WAVE header.
-    data = b"\x00\x00\x00" * 10  # 10 frames of zero, 24-bit
-    header = (
-        b"RIFF"
-        + struct.pack("<I", 36 + len(data))
-        + b"WAVE"
-        + b"fmt "
-        + struct.pack("<IHHIIHH", 16, 1, 1, 48000, 48000 * 3, 3, 24)
-        + b"data"
-        + struct.pack("<I", len(data))
-        + data
-    )
-    wav_path.write_bytes(header)
+    wav_path.write_bytes(_riff(fmt, data))
 
     with pytest.raises(ValueError, match="unsupported WAV sample width"):
+        load_audio_file(wav_path)
+
+
+def test_load_wav_float32_via_scipy(tmp_path: Path) -> None:
+    """D-M2: IEEE-float WAV (format 3) — what SDR software writes."""
+    from scipy.io import wavfile
+
+    samples = np.array([[0.25, -0.25], [0.5, 0.5], [-1.0, -0.5]], dtype=np.float32)
+    wav_path = tmp_path / "float.wav"
+    wavfile.write(wav_path, 44_100, samples)
+
+    loaded, fs = load_audio_file(wav_path)
+
+    assert fs == 44_100
+    assert loaded.dtype == np.float64
+    np.testing.assert_allclose(loaded, [0.0, 0.5, -0.75], atol=1e-7)
+
+
+def test_load_wav_extensible_float(tmp_path: Path) -> None:
+    """D-M2: WAVE_FORMAT_EXTENSIBLE wrapping IEEE float."""
+    samples = np.array([0.1, -0.2, 0.3], dtype="<f4")
+    float_guid = struct.pack("<IHH", 3, 0x0000, 0x0010) + bytes(
+        [0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71]
+    )
+    fmt = struct.pack("<HHIIHH", 0xFFFE, 1, 48000, 48000 * 4, 4, 32)
+    fmt += struct.pack("<HHI", 22, 32, 0x4) + float_guid
+    wav_path = tmp_path / "ext_float.wav"
+    wav_path.write_bytes(_riff(fmt, samples.tobytes()))
+
+    loaded, fs = load_audio_file(wav_path)
+
+    assert fs == 48_000
+    np.testing.assert_allclose(loaded, [0.1, -0.2, 0.3], atol=1e-7)
+
+
+def test_load_wav_empty_file_raises_value_error(tmp_path: Path) -> None:
+    """A zero-byte .wav raised a bare EOFError from ``wave``."""
+    wav_path = tmp_path / "empty.wav"
+    wav_path.write_bytes(b"")
+    with pytest.raises(ValueError, match="empty or truncated"):
         load_audio_file(wav_path)
 
 
