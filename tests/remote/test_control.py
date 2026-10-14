@@ -8,6 +8,7 @@ from open_sstv.remote.control import (
     CONFIRM_WINDOW_S,
     HEARTBEAT_TIMEOUT_S,
     LEASE_TIMEOUT_S,
+    MIN_TX_INTERVAL_S,
     ControlPlane,
     TxState,
 )
@@ -425,3 +426,52 @@ class TestCallbacksNotInvokedUnderLock:
         plane.confirm("phone", token)
         plane.abort("phone")  # fires slow_unkey
         assert observed == ["idle"]
+
+
+# v0.6.14 audit (Info): no minimum gap between remote transmissions — the
+# design's "rate-limit tx.request" TODO.  A stuck or scripted client could
+# key the rig back-to-back.
+class TestTxCooldown:
+    def test_request_refused_inside_cooldown(self) -> None:
+        clock, spy = Clock(), Spy()
+        cp = _armed(clock, spy)
+        cp.on_tx_finished()
+        clock.advance(MIN_TX_INTERVAL_S - 1.0)
+        res = cp.request("A", "img2", "martin_m1")
+        assert not res.ok and res.error == "cooldown"
+        assert cp.status()["state"] == TxState.IDLE.value
+
+    def test_request_allowed_after_cooldown(self) -> None:
+        clock, spy = Clock(), Spy()
+        cp = _armed(clock, spy)
+        cp.on_tx_finished()
+        clock.advance(MIN_TX_INTERVAL_S + 0.1)
+        assert cp.request("A", "img2", "martin_m1").ok
+
+    def test_cooldown_starts_after_abort_too(self) -> None:
+        clock, spy = Clock(), Spy()
+        cp = _armed(clock, spy)
+        assert cp.abort("A").ok
+        clock.advance(1.0)
+        assert cp.request("A", "img2", "martin_m1").error == "cooldown"
+
+    def test_unconfirmed_request_does_not_start_cooldown(self) -> None:
+        # Only a transmission that actually keyed counts.
+        clock, spy = Clock(), Spy()
+        cp = _cp(clock, spy)
+        assert cp.take_lease("A").ok
+        assert cp.request("A", "img1", "martin_m1").ok
+        assert cp.abort("A").ok
+        assert cp.request("A", "img1", "martin_m1").ok
+
+    def test_cooldown_configurable_and_disableable(self) -> None:
+        clock, spy = Clock(), Spy()
+        cp = ControlPlane(
+            now=clock, transmit=spy.transmit, unkey=spy.unkey,
+            enabled=lambda: True, min_tx_interval_s=0.0,
+        )
+        assert cp.take_lease("A").ok
+        tok = cp.request("A", "img1", "martin_m1").token
+        assert tok is not None and cp.confirm("A", tok).ok
+        cp.on_tx_finished()
+        assert cp.request("A", "img2", "martin_m1").ok
