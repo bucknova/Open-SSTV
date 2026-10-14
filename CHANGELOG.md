@@ -16,7 +16,7 @@ again. Each fix has a regression test.
 ### Security
 
 - **Remote access is harder to attack.** Fixed tokens must be at least
-  16 characters; a shorter one from an older version is replaced by a random
+  16 plain-ASCII characters; a shorter one from an older version is replaced by a random
   token for the session, with a status-bar note. Settings has a
   **Regenerate** button and shows a QR code for the generated token too.
   Repeated wrong tokens from one address are locked out for a growing time.
@@ -51,11 +51,15 @@ again. Each fix has a regression test.
 - **Unplugging the USB codec mid-TX unkeys within about 2 seconds**
   instead of waiting for the watchdog.
 - A single missed reply from the radio during TX no longer aborts the
-  transmission; three in a row still do.
+  transmission; three in a row still do — including a radio that has gone
+  silent behind a still-running rigctld.
 - A Stop pressed just before a transmission starts is no longer lost.
 - After a USB re-plug, TX audio goes to the radio, not the speakers.
 - TCI: a second receiver no longer changes the shown frequency or S-meter,
-  and RX audio survives a reconnect during unkey.
+  and RX audio (at the right sample rate) survives a reconnect during unkey.
+- A rig that finishes connecting during a transmission is attached once the
+  transmission ends, and a connection that completes after its timeout no
+  longer leaves the serial port locked.
 - A second **Connect** after a timed-out one no longer hangs on
   "Connecting…", and one missed rig poll no longer shows "Connection lost".
 
@@ -88,7 +92,9 @@ again. Each fix has a regression test.
   before discarding unsaved changes.
 - The image editor's OK applies the crop, and text lands where you put it.
 - **ADIF export is correct for non-SSTV contacts** (an imported FT8 contact
-  went out as SSTV) and keeps BAND; one bad record no longer aborts an import.
+  went out as SSTV) and keeps BAND, while SSTV contacts imported from other
+  loggers ("Martin 1", "SC2-180") stay SSTV; one bad record no longer aborts
+  an import.
 - The logbook's **New…** can set the date, time, mode and frequency.
 - Plus many smaller fixes; see the audit document.
 
