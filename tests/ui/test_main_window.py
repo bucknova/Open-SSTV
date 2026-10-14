@@ -1149,7 +1149,7 @@ class TestAudioDeviceReplug:
         # Patch find_input_device_by_name to return the fresh device.
         monkeypatch.setattr(
             "open_sstv.ui.main_window.find_input_device_by_name",
-            lambda _name: fresh_device,
+            lambda _name, host_api=None: fresh_device,
         )
 
         # Capture what device index reaches audio_worker.start().
