@@ -299,6 +299,16 @@ _RIG_HEALTH_INTERVAL_S: float = 1.0
 #: 1 s cadence still catches a real unplug within a few seconds.
 _RIG_HEALTH_FAIL_THRESHOLD: int = 3
 
+#: Hamlib ``RPRT`` codes that mean "rigctld is up but has lost the radio"
+#: — v0.6.14 sweep.  A rigctld whose radio was unplugged or powered off
+#: answers every ping with ``RPRT -5`` (RIG_ETIMEOUT) or ``-6``
+#: (RIG_EIO), so treating every coded reply as "link alive" meant a dead
+#: radio was never detected during TX.  These count as health strikes:
+#: -5 ETIMEOUT, -6 EIO, -8 EPROTO, -13 EBUSERROR, -14 EBUSBUSY.  Every
+#: other code (-1 EINVAL, -4 ENIMPL, -9 ERJCTED, -11 ENAVAIL, Flex's
+#: positive 0x5000xxxx errors, ...) is a rejection from a live radio.
+_RIG_LINK_DOWN_RPRT: frozenset[int] = frozenset({-5, -6, -8, -13, -14})
+
 #: How long to wait for the health-monitor thread to finish at TX end.
 #: One blocked CAT round-trip is at most ~2 s (rigctld socket timeout),
 #: so 3 s lets a wedged ping drain before we touch the rig to unkey.
@@ -320,9 +330,11 @@ class _RigHealthMonitor:
     nothing more to learn, and the unkey path needs the (serial) backend
     lock free.  v0.6.14 audit T-M4: "dead" means
     ``_RIG_HEALTH_FAIL_THRESHOLD`` consecutive failures, and a
-    ``RigCommandError`` that carries an ``rprt`` code never counts — the
-    backend answered (``RPRT -5``, a Flex error code), so the link is up
-    even if that one read was refused.
+    ``RigCommandError`` that carries an ``rprt`` code does not count — the
+    backend answered (``RPRT -9``, a Flex error code), so the link is up
+    even if that one read was refused.  v0.6.14 sweep: except the
+    link-down codes in ``_RIG_LINK_DOWN_RPRT`` (``RPRT -5`` / ``-6`` from
+    a rigctld that has lost the radio), which are strikes.
     """
 
     def __init__(self, rig: Rig) -> None:
@@ -347,9 +359,10 @@ class _RigHealthMonitor:
             try:
                 self._rig.get_ptt()
             except RigCommandError as exc:
-                if exc.rprt is not None:
+                if exc.rprt is not None and exc.rprt not in _RIG_LINK_DOWN_RPRT:
                     # The backend replied with a clean rejection code:
-                    # the link is alive.  Not a strike.
+                    # the link is alive.  Not a strike.  (Link-down codes
+                    # such as RPRT -5/-6 fall through — v0.6.14 sweep.)
                     _log.debug("rig health: ping refused (%s) — link alive", exc)
                     consecutive = 0
                     continue

@@ -223,6 +223,37 @@ def test_health_consecutive_failures_trip(monkeypatch: pytest.MonkeyPatch) -> No
     assert isinstance(m.failure, OSError)
 
 
+class _AlwaysRaisingRig:
+    name = "always"
+
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+        self.pings = 0
+
+    def get_ptt(self) -> bool:
+        self.pings += 1
+        raise self.exc
+
+
+@pytest.mark.parametrize("code", [-5, -6, -8, -13, -14])
+def test_health_link_down_rprt_trips_after_threshold(
+    monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    """v0.6.14 sweep: rigctld that lost the radio answers RPRT -5/-6."""
+    rig = _AlwaysRaisingRig(RigCommandError(f"RPRT {code}", command="t", rprt=code))
+    m = _run_monitor(rig, monkeypatch, 0.3)
+    assert isinstance(m.failure, RigCommandError)
+    assert rig.pings == workers._RIG_HEALTH_FAIL_THRESHOLD
+
+
+@pytest.mark.parametrize("code", [-1, -4, -9, -11, 0x50000016])
+def test_health_alive_rejection_codes_not_strikes(
+    monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    rig = _AlwaysRaisingRig(RigCommandError("refused", command="t", rprt=code))
+    assert _run_monitor(rig, monkeypatch, 0.2).failure is None
+
+
 # --- T-M5 / T-L4 ---
 
 
