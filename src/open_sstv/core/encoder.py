@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """SSTV encoder — thin facade over PySSTV.
 
-PySSTV (MIT) already implements the encoder for every mode we care about
-*except* Robot 36, whose upstream class emits a "single-line" format that
-virtually no real-world decoder can understand. This module patches that
-one mode with ``Robot36LinePair``, a subclass that emits the canonical
-line-pair format used by MMSSTV, SimpleSSTV (iOS), and over-the-air
-transmissions — where one sync pulse covers two image rows.
+PySSTV (MIT) already implements the encoder for most modes we care about.
+This module patches the ones it gets wrong:
+
+* Robot 36 — ``Robot36LinePair`` builds each row pair together and sends
+  pair-averaged chroma (Cr on the even row, Cb on the odd row), every row
+  with its own sync, which is what MMSSTV, SimpleSSTV (iOS) and slowrx
+  expect.
+* Scottie S1 / S2 / DX (and S3 / S4) — spec channel timing; PySSTV's
+  scan/gap split is 1.1 % short per channel (v0.6.14 audit D-L3).
+* Martin M2 / Scottie S2 — 320 px wide, not upstream's 160.
 
 For all other modes, the PySSTV class is used as-is. This module exists
 so the rest of the app never imports ``pysstv`` directly: it gives us one
@@ -43,13 +47,11 @@ from pysstv.color import (
     PasokonP5,
     PasokonP7,
     Robot36,
-    ScottieDX,
-    ScottieS1,
     WraaseSC2120,
     WraaseSC2180,
 )
+from pysstv.color import Color
 from pysstv.color import MartinM2 as _UpstreamMartinM2
-from pysstv.color import ScottieS2 as _UpstreamScottieS2
 from pysstv.sstv import (
     FREQ_BLACK,
     FREQ_SYNC,
@@ -169,7 +171,7 @@ class Robot36LinePair(Robot36):
 
 
 # ---------------------------------------------------------------------------
-# Corrected upstream widths: Martin M2 and Scottie S2
+# Corrected upstream widths: Martin M2 (and Scottie S2, see ScottieS2 below)
 # ---------------------------------------------------------------------------
 # PySSTV ships ``MartinM2.WIDTH = 160`` and ``ScottieS2.WIDTH = 160``, which
 # misreads the protocol.  M2 and S2 halve the *pixel dwell time*, not the
@@ -192,9 +194,61 @@ class MartinM2(_UpstreamMartinM2):
     WIDTH = 320
 
 
-class ScottieS2(_UpstreamScottieS2):
-    """Scottie S2 — 320×256, VIS 56, ~71 s.  Upstream says 160 wide; wrong."""
+# ---------------------------------------------------------------------------
+# Scottie: spec channel timing (v0.6.14 audit D-L3)
+# ---------------------------------------------------------------------------
+# PySSTV's ``ScottieS1`` shortens each colour scan by one 1.5 ms gap
+# (``SCAN = 138.24 - INTER_CH_GAP``) and pads *both* sides of every channel
+# with a gap.  The line period (428.22 ms) and the channel start times come
+# out right, but the pixel dwell is 1.1 % short, so every spec-following
+# decoder — MMSSTV, slowrx (``modespec.c``: S1 PixelTime 0.4320 ms),
+# QSSTV, and phone apps — reads the last ~3.5 px of each channel as black.
+# The spec (Barber, "Proposal for SSTV Mode Specifications"; Dayton paper)
+# line is::
+#
+#     SEP 1.5 | G 138.24 | SEP 1.5 | B 138.24 | SYNC 9 | PORCH 1.5 | R 138.24
+#
+# (S2: 88.064 ms scans, DX: 345.6 ms — PySSTV's ScottieDX comment cites the
+# Dayton paper for 345.6 and then subtracts the gap.)  Same 428.22 ms line,
+# same channel starts; only the scan / gap split changes.  ``modes.py`` and
+# both decoders use the same split.
+
+class ScottieS1(SSTV):
+    """Scottie S1 — 320×256, VIS 60, ~110 s, spec channel timing."""
+    VIS_CODE = 0x3C
     WIDTH = 320
+    HEIGHT = 256
+    SYNC = 9.0
+    SEPARATOR = 1.5
+    SCAN = 138.24
+
+    def on_init(self):
+        self.pixels = self.image.convert("RGB").load()
+
+    def gen_image_tuples(self):
+        msec_pixel = self.SCAN / self.WIDTH
+        pixels = self.pixels
+        for line in range(self.HEIGHT):
+            for color in (Color.green, Color.blue, Color.red):
+                if color is Color.red:
+                    yield FREQ_SYNC, self.SYNC
+                    yield FREQ_BLACK, self.SEPARATOR  # porch after sync
+                else:
+                    yield FREQ_BLACK, self.SEPARATOR  # separator before G / B
+                for col in range(self.WIDTH):
+                    yield byte_to_freq(pixels[col, line][color.value]), msec_pixel
+
+
+class ScottieS2(ScottieS1):
+    """Scottie S2 — 320×256, VIS 56, ~71 s.  (Upstream also says 160 wide.)"""
+    VIS_CODE = 0x38
+    SCAN = 88.064
+
+
+class ScottieDX(ScottieS1):
+    """Scottie DX — 320×256, VIS 76, ~269 s."""
+    VIS_CODE = 0x4C
+    SCAN = 345.6
 
 
 # ---------------------------------------------------------------------------

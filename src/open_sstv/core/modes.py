@@ -93,7 +93,7 @@ class ModeSpec:
     color_layout: tuple[str, ...]
     """Channel labels in transmission order. ``("G","B","R")`` for Martin /
     Scottie, ``("Y","C")`` for Robot 36 (Y every line, chroma alternating
-    B-Y on even lines / R-Y on odd lines)."""
+    R-Y on even lines / B-Y on odd lines)."""
     sync_position: SyncPosition
 
     @property
@@ -147,22 +147,36 @@ _MARTIN_M1_SYNC_MS = 4.862     # 1200 Hz horizontal sync pulse (same for M1 and 
 # Scottie S1 — most common US mode, ~110 s. Sync pulse separates B from R
 # within each line, not between lines (the defining oddity of Scottie modes).
 # S2 (~71 s, half pixel clock — still 320×256) and DX (high-quality, ~269 s)
-# share the same sync/porch. slowrx has S2 at ImgWidth 320, PixelTime
-# 0.2752e-3 → 320 × 0.2752 = 88.064 ms, which is this SCAN plus one gap.
-_SCOTTIE_S1_SCAN_MS = 138.24 - 1.5  # = 136.74 ms (PySSTV: SCAN = TOTAL - INTER_CH_GAP)
-_SCOTTIE_S2_SCAN_MS = 86.564
-_SCOTTIE_DX_SCAN_MS = 344.1
-_SCOTTIE_S1_PORCH_MS = 1.5           # same for S1, S2, DX
+# share the same sync/separator timing. Per line (Barber, "Proposal for SSTV
+# Mode Specifications" / Dayton paper; slowrx ``modespec.c``)::
+#
+#     SEP 1.5 | G scan | SEP 1.5 | B scan | SYNC 9 | PORCH 1.5 | R scan
+#
+# with scan = 320 × pixel time: S1 0.4320 ms → 138.24, S2 0.2752 → 88.064,
+# DX 1.0800 → 345.6. Line = sync + 3 × 1.5 + 3 × scan (S1 428.22 ms).
+#
+# v0.6.14 audit D-L3: these used to be PySSTV's split — scan shortened by
+# 1.5 ms (136.74 / 86.564 / 344.1) with *two* 1.5 ms gaps around every
+# channel. Same line period and channel start times, but a 1.1 % short
+# pixel dwell, so spec decoders (MMSSTV, slowrx, QSSTV) showed a ~3.5 px
+# black bar at the right of each channel and we squeezed real Scottie
+# into 98.9 % of the width. TX and RX now both use the spec split.
+_SCOTTIE_S1_SCAN_MS = 138.24
+_SCOTTIE_S2_SCAN_MS = 88.064
+_SCOTTIE_DX_SCAN_MS = 345.6
+_SCOTTIE_S1_PORCH_MS = 1.5           # separator/porch; same for S1, S2, DX
 _SCOTTIE_S1_SYNC_MS = 9.0            # same for S1, S2, DX
 
 # Robot 36 — most common HF / ISS SSTV mode, 36 s exact for 320×240. YUV not
-# RGB: Y on every line, chroma channel alternates B-Y on even / R-Y on odd.
-_ROBOT_36_Y_SCAN_MS = 88.0
-_ROBOT_36_C_SCAN_MS = 44.0
-_ROBOT_36_INTER_CH_GAP_MS = 4.5
-_ROBOT_36_INTER_CH_PORCH_MS = 1.5
-_ROBOT_36_SYNC_MS = 9.0
-_ROBOT_36_SYNC_PORCH_MS = 3.0
+# RGB: Y on every line, chroma channel alternates R-Y on even / B-Y on odd
+# lines. Every line carries its own sync (150 ms period). Public because
+# ``core/robot36_dsp.py`` derives the decoder's scan offsets from them.
+ROBOT_36_Y_SCAN_MS = 88.0
+ROBOT_36_C_SCAN_MS = 44.0
+ROBOT_36_INTER_CH_GAP_MS = 4.5
+ROBOT_36_INTER_CH_PORCH_MS = 1.5
+ROBOT_36_SYNC_MS = 9.0
+ROBOT_36_SYNC_PORCH_MS = 3.0
 
 # PD family — YCbCr line-pair format (one sync per two image rows).
 # Per super-line: SYNC(20 ms) + PORCH(2.08 ms) + Y0 + Cr + Cb + Y1,
@@ -230,11 +244,11 @@ MODE_TABLE: dict[Mode, ModeSpec] = {
         height=256,
         sync_pulse_ms=_SCOTTIE_S1_SYNC_MS,
         sync_porch_ms=_SCOTTIE_S1_PORCH_MS,
-        # 1 sync (mid-line, before R) + 6 porches (before/after each of G, B, R)
-        # + 3 channel scans. Note: NO sync at start of line for Scottie.
+        # 1 sync (mid-line, before R) + 3 separators (before G, before B,
+        # after sync) + 3 channel scans. Note: NO sync at start of line.
         line_time_ms=(
             _SCOTTIE_S1_SYNC_MS
-            + 6 * _SCOTTIE_S1_PORCH_MS
+            + 3 * _SCOTTIE_S1_PORCH_MS
             + 3 * _SCOTTIE_S1_SCAN_MS
         ),
         color_layout=("G", "B", "R"),
@@ -245,16 +259,16 @@ MODE_TABLE: dict[Mode, ModeSpec] = {
         vis_code=0x08,  # 8
         width=320,
         height=240,
-        sync_pulse_ms=_ROBOT_36_SYNC_MS,
-        sync_porch_ms=_ROBOT_36_SYNC_PORCH_MS,
+        sync_pulse_ms=ROBOT_36_SYNC_MS,
+        sync_porch_ms=ROBOT_36_SYNC_PORCH_MS,
         # SYNC + SYNC_PORCH + Y_SCAN + INTER_CH_GAP + PORCH + C_SCAN = 150 ms
         line_time_ms=(
-            _ROBOT_36_SYNC_MS
-            + _ROBOT_36_SYNC_PORCH_MS
-            + _ROBOT_36_Y_SCAN_MS
-            + _ROBOT_36_INTER_CH_GAP_MS
-            + _ROBOT_36_INTER_CH_PORCH_MS
-            + _ROBOT_36_C_SCAN_MS
+            ROBOT_36_SYNC_MS
+            + ROBOT_36_SYNC_PORCH_MS
+            + ROBOT_36_Y_SCAN_MS
+            + ROBOT_36_INTER_CH_GAP_MS
+            + ROBOT_36_INTER_CH_PORCH_MS
+            + ROBOT_36_C_SCAN_MS
         ),
         color_layout=("Y", "C"),
         sync_position=SyncPosition.LINE_START,
@@ -326,10 +340,10 @@ MODE_TABLE: dict[Mode, ModeSpec] = {
         height=256,
         sync_pulse_ms=_SCOTTIE_S1_SYNC_MS,
         sync_porch_ms=_SCOTTIE_S1_PORCH_MS,
-        # SYNC (mid-line, before R) + 6×PORCH + 3×SCAN
+        # SYNC (mid-line, before R) + 3×SEP + 3×SCAN
         line_time_ms=(
             _SCOTTIE_S1_SYNC_MS
-            + 6 * _SCOTTIE_S1_PORCH_MS
+            + 3 * _SCOTTIE_S1_PORCH_MS
             + 3 * _SCOTTIE_S2_SCAN_MS
         ),
         color_layout=("G", "B", "R"),
@@ -344,7 +358,7 @@ MODE_TABLE: dict[Mode, ModeSpec] = {
         sync_porch_ms=_SCOTTIE_S1_PORCH_MS,
         line_time_ms=(
             _SCOTTIE_S1_SYNC_MS
-            + 6 * _SCOTTIE_S1_PORCH_MS
+            + 3 * _SCOTTIE_S1_PORCH_MS
             + 3 * _SCOTTIE_DX_SCAN_MS
         ),
         color_layout=("G", "B", "R"),
@@ -364,7 +378,7 @@ MODE_TABLE: dict[Mode, ModeSpec] = {
         sync_porch_ms=_SCOTTIE_S1_PORCH_MS,
         line_time_ms=(
             _SCOTTIE_S1_SYNC_MS
-            + 6 * _SCOTTIE_S1_PORCH_MS
+            + 3 * _SCOTTIE_S1_PORCH_MS
             + 3 * _SCOTTIE_S1_SCAN_MS
         ),
         color_layout=("G", "B", "R"),
@@ -379,7 +393,7 @@ MODE_TABLE: dict[Mode, ModeSpec] = {
         sync_porch_ms=_SCOTTIE_S1_PORCH_MS,
         line_time_ms=(
             _SCOTTIE_S1_SYNC_MS
-            + 6 * _SCOTTIE_S1_PORCH_MS
+            + 3 * _SCOTTIE_S1_PORCH_MS
             + 3 * _SCOTTIE_S2_SCAN_MS
         ),
         color_layout=("G", "B", "R"),

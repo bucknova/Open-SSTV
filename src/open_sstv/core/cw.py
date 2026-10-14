@@ -65,7 +65,10 @@ def _make_tone(
         wave[:ramp_n] *= np.linspace(0.0, 1.0, ramp_n)
         wave[-ramp_n:] *= np.linspace(1.0, 0.0, ramp_n)
 
-    return (wave * amplitude * 32767.0).astype(np.int16)
+    # v0.6.14 audit (cw low): ``peak_dbfs > 0`` gives amplitude > 1, and a
+    # bare int16 cast wraps the overshoot to the opposite rail (loud
+    # broadband clicks on air). Clip to full scale instead.
+    return np.clip(wave * amplitude * 32767.0, -32767.0, 32767.0).astype(np.int16)
 
 
 def make_cw(

@@ -130,6 +130,62 @@ def test_decode_empty_wav_emits_error(qapp, tmp_path: Path) -> None:
     assert "empty" in log["error"][0][0].lower()
 
 
+@pytest.mark.parametrize("exc", [EOFError("eof"), RuntimeError("boom"), MemoryError()])
+def test_decode_any_exception_still_emits_finished_once(
+    qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exc: BaseException
+) -> None:
+    """v0.6.14 audit UI-M5: an uncaught exception (EOFError from an empty
+    WAV was the live case) skipped ``finished``, so the owning thread
+    never quit and Decode Audio stayed disabled for the session."""
+    import open_sstv.ui.offline_workers as ow
+
+    def _raise(_path):
+        raise exc
+
+    monkeypatch.setattr(ow, "load_audio_file", _raise)
+    worker = OfflineDecodeWorker()
+    log = _collect(worker, "image_complete", "error", "finished")
+
+    worker.decode(str(tmp_path / "x.wav"))
+
+    assert len(log["image_complete"]) == 0
+    assert len(log["error"]) == 1
+    assert len(log["finished"]) == 1
+
+
+def test_decode_zero_byte_wav_emits_error_and_finished(qapp, tmp_path: Path) -> None:
+    wav_path = tmp_path / "zero.wav"
+    wav_path.write_bytes(b"")
+    worker = OfflineDecodeWorker()
+    log = _collect(worker, "image_complete", "error", "finished")
+
+    worker.decode(str(wav_path))
+
+    assert len(log["error"]) == 1
+    assert len(log["finished"]) == 1
+
+
+def test_encode_unexpected_exception_still_emits_finished_once(
+    qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import open_sstv.ui.offline_workers as ow
+
+    def _raise(*_a, **_k):
+        raise RuntimeError("pysstv exploded")
+
+    monkeypatch.setattr(ow, "encode", _raise)
+    worker = OfflineEncodeWorker()
+    log = _collect(worker, "encode_complete", "error", "finished")
+
+    worker.encode_from_image(
+        Image.new("RGB", (320, 240)), Mode.ROBOT_36, 48_000, str(tmp_path / "o.wav")
+    )
+
+    assert len(log["encode_complete"]) == 0
+    assert len(log["error"]) == 1
+    assert len(log["finished"]) == 1
+
+
 # ---------------------------------------------------------------------------
 # OfflineEncodeWorker
 # ---------------------------------------------------------------------------

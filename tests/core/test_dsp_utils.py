@@ -2,7 +2,7 @@
 """Unit tests for ``open_sstv.core.dsp_utils``.
 
 These exercise the three primitives the decoder pipeline depends on:
-audio format conversion, sample-rate conversion, and bandpass filter
+audio format conversion, run extraction, and bandpass filter
 construction. All run on synthetic NumPy buffers — no audio device, no
 PySSTV — so they're fast and headless-CI safe.
 """
@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from scipy.signal import sosfiltfilt
 
-from open_sstv.core.dsp_utils import bandpass_sos, resample_to, to_mono_float32
+from open_sstv.core.dsp_utils import bandpass_sos, find_runs, to_mono_float32
 
 # === to_mono_float32 ===
 
@@ -70,44 +70,30 @@ def test_to_mono_float32_rejects_unsupported_dtype() -> None:
         to_mono_float32(samples)
 
 
-# === resample_to ===
+def test_to_mono_float32_stereo_int16_is_scaled_before_mixdown() -> None:
+    """v0.6.14 audit D-M2: ``mean`` promoted stereo int16 to float64 and
+    the float passthrough then returned it unscaled (±32768)."""
+    stereo = np.array([[16384, 16384], [-32768, -32768]], dtype=np.int16)
+    out = to_mono_float32(stereo)
+    np.testing.assert_allclose(out, [0.5, -1.0], atol=1e-6)
 
 
-def test_resample_to_no_op_when_rates_match() -> None:
-    samples = np.linspace(0.0, 1.0, 100, dtype=np.float32)
-    out = resample_to(samples, 48_000, 48_000)
-    np.testing.assert_array_equal(out, samples)
+@pytest.mark.parametrize(
+    ("dtype", "lo", "mid", "hi"),
+    [(np.uint8, 0, 128, 255), (np.uint16, 0, 32768, 65535)],
+)
+def test_to_mono_float32_unsigned_is_recentred(dtype, lo, mid, hi) -> None:
+    """v0.6.14 audit D-M2: unsigned PCM (offset binary) used to raise."""
+    out = to_mono_float32(np.array([lo, mid, hi], dtype=dtype))
+    assert out.dtype == np.float32
+    np.testing.assert_allclose(out, [-1.0, 0.0, 1.0], atol=1e-2)
 
 
-def test_resample_to_halves_length_when_downsampling() -> None:
-    samples = np.zeros(48_000, dtype=np.float32)
-    out = resample_to(samples, 48_000, 24_000)
-    # resample_poly may differ by a few samples at the boundary.
-    assert abs(len(out) - 24_000) <= 2
-
-
-def test_resample_to_doubles_length_when_upsampling() -> None:
-    samples = np.zeros(24_000, dtype=np.float32)
-    out = resample_to(samples, 24_000, 48_000)
-    assert abs(len(out) - 48_000) <= 2
-
-
-def test_resample_to_preserves_a_pure_tone() -> None:
-    """A 1 kHz tone resampled 48k → 24k should still be a 1 kHz tone."""
-    fs_in, fs_out, freq = 48_000, 24_000, 1_000.0
-    t = np.arange(fs_in) / fs_in
-    tone = np.sin(2 * np.pi * freq * t).astype(np.float32)
-    resampled = resample_to(tone, fs_in, fs_out)
-    # Sanity: still a sinusoid with similar amplitude.
-    assert resampled.std() == pytest.approx(tone.std(), rel=0.05)
-
-
-def test_resample_to_rejects_non_positive_rates() -> None:
-    samples = np.zeros(100, dtype=np.float32)
-    with pytest.raises(ValueError, match="positive"):
-        resample_to(samples, 0, 48_000)
-    with pytest.raises(ValueError, match="positive"):
-        resample_to(samples, 48_000, -1)
+def test_find_runs_basic() -> None:
+    mask = np.array([1, 1, 0, 0, 1, 0, 1, 1, 1], dtype=bool)
+    assert find_runs(mask) == [(0, 2), (4, 5), (6, 9)]
+    assert find_runs(np.zeros(0, dtype=bool)) == []
+    assert find_runs(np.zeros(4, dtype=bool)) == []
 
 
 # === bandpass_sos ===

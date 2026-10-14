@@ -2432,17 +2432,18 @@ class RxWorker(QObject):
                 # with clock drift; harmful for weak/noisy signals where
                 # false-positive syncs corrupt the polyfit.
                 #
-                # Robot 36 is explicitly excluded: the incremental path uses
-                # the slowrx color pipeline (direct integer YCbCr→RGB matrix)
-                # while decode_wav/_decode_robot36 uses the older median+PIL
-                # path.  Substituting the batch result would silently swap
-                # pipelines, producing visibly different colors.  Users who
-                # need slant correction for Robot 36 should use a hardware or
-                # software sample-rate lock instead.
+                # Robot 36 is excluded because the re-decode would gain
+                # nothing: decode_wav builds Robot 36's grid with the same
+                # walk (no least-squares slant fit, OP2-15) and the same
+                # slowrx sampler / colour matrix (core.robot36_dsp) as the
+                # live path (v0.6.14 audit nit: this comment used to claim
+                # a different colour pipeline).  Users who need slant
+                # correction for Robot 36 should use a hardware or software
+                # sample-rate lock instead.
                 if event.mode == Mode.ROBOT_36:
                     _log.debug(
                         "slant-correction re-decode skipped for Robot 36 "
-                        "(batch and incremental paths use different color pipelines)"
+                        "(decode_wav does not slant-fit Robot 36)"
                     )
                 elif self._cancel_event.is_set():
                     # Stop / RX-reset was requested while the worker was

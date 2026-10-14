@@ -12,15 +12,12 @@ encode→decode round-trip on the command line without bringing up Qt
 or audio hardware. This is the headless smoke test for the entire
 RX pipeline.
 
-Note: Robot 36 images decoded here use the batch median+PIL color
-pipeline rather than the slowrx-style integer matrix used by the GUI's
-incremental decoder. Output colors may differ slightly between the two
-paths.
+Robot 36 images decoded here run through the same slowrx-style sampler
+and colour matrix (``core.robot36_dsp``) as the GUI's live decoder.
 
-We read WAVs with stdlib ``wave`` rather than ``scipy.io.wavfile`` so
-the CLI works on a stripped-down install (someone running on a Pi
-with only the bare minimum). Multi-channel WAVs are mixed down to
-mono via ``dsp_utils.to_mono_float32``.
+Audio loading is ``audio.file_io.load_audio_file``: WAV (8/16/24/32-bit
+PCM via stdlib ``wave``, float / EXTENSIBLE via ``scipy.io.wavfile``) and
+FLAC (optional ``soundfile``). Multi-channel audio is mixed to mono.
 
 Exit codes:
     0  success — image decoded and written
@@ -47,17 +44,15 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "Decode an SSTV WAV file into an image. The mode is detected "
             "automatically from the VIS header. Returns a non-zero exit "
-            "code if no SSTV header is found in the audio. "
-            "Note: Robot 36 images are decoded with the batch (median+PIL) "
-            "pipeline; the GUI live decoder uses the slowrx-style path and "
-            "may produce slightly different colors for Robot 36."
+            "code if no SSTV header is found in the audio."
         ),
     )
     parser.add_argument(
         "wav",
         type=Path,
-        help="Input WAV file. 16-bit mono PCM is the canonical format; "
-             "stereo and other widths are accepted and mixed down.",
+        help="Input WAV (or FLAC) file. 16-bit mono PCM is the canonical "
+             "format; 8/24/32-bit PCM, float WAVs and stereo are accepted "
+             "and mixed down.",
     )
     parser.add_argument(
         "-o",
@@ -104,8 +99,14 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         samples, fs = _read_wav(args.wav)
-    except (OSError, ValueError, wave.Error) as exc:
+    except (OSError, ValueError, EOFError, wave.Error) as exc:
+        # v0.6.14 audit (CLI low): EOFError (empty .wav from stdlib wave)
+        # used to escape as a traceback.
         print(f"sstv-app-decode: failed to read WAV: {exc}", file=sys.stderr)
+        return 1
+    except ImportError as exc:
+        # FLAC input without the optional ``soundfile`` package.
+        print(f"sstv-app-decode: {exc}", file=sys.stderr)
         return 1
 
     result = decode_wav(samples, fs)

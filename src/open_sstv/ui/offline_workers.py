@@ -103,45 +103,46 @@ class OfflineDecodeWorker(QObject):
         Public so unit tests can drive the worker synchronously without
         going through ``thread.started``.  Production callers should
         use the ``__init__(path)`` + ``thread.started → run`` pattern.
+
+        v0.6.14 audit UI-M5: every exception is caught and ``finished``
+        is emitted from a ``finally`` — an uncaught ``EOFError`` from an
+        empty WAV used to skip ``finished``, so the owning thread never
+        quit and "Decode Audio" stayed disabled for the session.
         """
+        try:
+            self._decode(path)
+        except Exception as exc:  # noqa: BLE001 — bubble anything to UI
+            _log.exception("offline decode raised")
+            self.error.emit(f"Decode failed: {exc}")
+        finally:
+            self.finished.emit()
+
+    def _decode(self, path: str) -> None:
         try:
             samples, fs = load_audio_file(Path(path))
         except FileNotFoundError as exc:
             self.error.emit(str(exc))
-            self.finished.emit()
             return
         except ImportError as exc:
             # FLAC requested but soundfile not installed.
             self.error.emit(str(exc))
-            self.finished.emit()
             return
-        except (ValueError, wave.Error) as exc:
+        except (ValueError, EOFError, wave.Error) as exc:
             self.error.emit(f"Could not read audio file: {exc}")
-            self.finished.emit()
             return
 
         if samples.size == 0:
             self.error.emit("Audio file is empty.")
-            self.finished.emit()
             return
 
-        try:
-            result = decode_wav(samples, fs)
-        except Exception as exc:  # noqa: BLE001 — bubble anything to UI
-            _log.exception("offline decode raised")
-            self.error.emit(f"Decode failed: {exc}")
-            self.finished.emit()
-            return
-
+        result = decode_wav(samples, fs)
         if result is None:
             self.error.emit(
                 "No SSTV header found in file, or detected mode is not supported."
             )
-            self.finished.emit()
             return
 
         self.image_complete.emit(result.image, result.mode, result.vis_code)
-        self.finished.emit()
 
 
 class OfflineEncodeWorker(QObject):
@@ -205,18 +206,27 @@ class OfflineEncodeWorker(QObject):
         use the ``__init__(image, mode, …)`` + ``thread.started → run``
         pattern, because PySide6 6.11's ``Q_ARG`` cannot marshal PIL
         images or StrEnum modes across a queued ``invokeMethod`` call.
+
+        v0.6.14 audit UI-M5: like the decode worker, ``finished`` is
+        emitted from a ``finally`` so no exception path can strand the
+        owning thread.
         """
         try:
-            samples = encode(image, mode, sample_rate=sample_rate)
-        except (ValueError, OSError) as exc:
-            self.error.emit(f"Encode failed: {exc}")
-            self.finished.emit()
-            return
+            self._encode(image, mode, sample_rate, output_path)
         except Exception as exc:  # noqa: BLE001 — PySSTV can raise generic exceptions
             _log.exception("offline encode raised")
             self.error.emit(f"Encode failed: {exc}")
+        finally:
             self.finished.emit()
-            return
+
+    def _encode(
+        self,
+        image: PILImage,
+        mode: Mode,
+        sample_rate: int,
+        output_path: str,
+    ) -> None:
+        samples = encode(image, mode, sample_rate=sample_rate)
 
         out = Path(output_path)
         # Write to a sibling .tmp then atomically rename (same pattern as
@@ -244,12 +254,10 @@ class OfflineEncodeWorker(QObject):
             except OSError:
                 pass  # best-effort cleanup; the error below is what matters
             self.error.emit(f"Could not write WAV: {exc}")
-            self.finished.emit()
             return
 
         duration_s = samples.size / sample_rate
         self.encode_complete.emit(str(out), float(duration_s), mode)
-        self.finished.emit()
 
 
 __all__ = ["OfflineDecodeWorker", "OfflineEncodeWorker"]

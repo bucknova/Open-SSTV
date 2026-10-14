@@ -125,3 +125,47 @@ def test_slant_corrected_line_starts_empty_candidates_returns_empty() -> None:
 def test_slant_corrected_line_starts_invalid_params_return_empty() -> None:
     assert slant_corrected_line_starts([0, 7200, 14400], 0.0, 240) == []
     assert slant_corrected_line_starts([0, 7200, 14400], 7200.0, 0) == []
+
+
+# === v0.6.14 audit D-H3 / D-H1 ===
+
+
+def _trailing_noise_candidates(start: float, period: float, n: int) -> list[int]:
+    """Irregular sync-band crossings after the image (CW ID, noise)."""
+    steps = np.random.default_rng(0).uniform(0.3, 1.0, n) * period
+    return [int(start + x) for x in np.cumsum(steps)]
+
+
+def test_slant_ignores_candidates_after_the_image() -> None:
+    """Candidates past slot max_lines-1 used to enter the unweighted fit
+    and skew every line (D-H3)."""
+    period = 7200.0
+    image = [int(1000 + i * period) for i in range(240)]
+    cands = image + _trailing_noise_candidates(image[-1], period, 60)
+    starts = slant_corrected_line_starts(cands, period, 240)
+    assert max(abs(a - b) for a, b in zip(starts, image, strict=True)) <= 1
+
+
+def test_slant_refit_rejects_in_image_outliers() -> None:
+    """A few spurious candidates that still round onto a slot (and win
+    the keep-first dedup) are dropped by the one-shot MAD refit."""
+    period = 7200.0
+    image = [int(1000 + i * period) for i in range(240)]
+    cands = list(image)
+    for slot in (10, 50, 90, 130, 170, 210):
+        cands[slot] = image[slot] - 1500  # inside ±25 %, wrong by ~3 ms
+    fit = fit_line_timing(sorted(cands), period, max_lines=240)
+    assert fit is not None
+    intercept, slope = fit
+    assert abs(slope - period) < 0.05
+    assert abs(intercept - 1000) < 2
+
+
+def test_slant_hint_extrapolates_missed_line0() -> None:
+    """With the line-0 hint the fit numbers slots from the true line 0,
+    even if line 0 and line 1 syncs were both missed (D-H1)."""
+    period = 7200.0
+    cands = [int(1000 + i * period) for i in range(2, 240)]
+    starts = slant_corrected_line_starts(cands, period, 240, first_slot_hint=1000.0)
+    assert abs(starts[0] - 1000) <= 1
+    assert abs(starts[239] - (1000 + 239 * period)) <= 1

@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from open_sstv.core.demod import instantaneous_frequency
+from open_sstv.core.dsp_utils import find_runs
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -152,7 +153,7 @@ def detect_vis(
     min_start_bit_samples = int(round((0.015 if weak_signal else 0.017) * fs))
 
     sync_mask = (smooth > 1100.0) & (smooth < 1300.0)
-    runs = _find_runs(sync_mask)
+    runs = find_runs(sync_mask)
 
     # Merge runs separated by gaps shorter than 5 ms. At lower signal
     # levels, brief noise spikes in the FM demod can split a 30 ms
@@ -189,15 +190,26 @@ def detect_vis(
         # by the 1900 Hz leader tone. Without this, noise bursts with
         # valid-parity bit patterns (especially 0x00 — all zeros, even
         # parity) create false VIS detections.
-        leader_end = max(0, run_start - int(round(0.005 * fs)))  # skip transition
-        leader_start = max(0, leader_end - leader_check_samples)
-        if leader_end > leader_start:
-            leader_region = leader_smooth[leader_start:leader_end]
-            leader_in_band = float(np.mean(
-                (leader_region > 1800.0) & (leader_region < 2000.0)
-            ))
-            if leader_in_band < leader_frac_threshold:
-                continue
+        #
+        # v0.6.14 audit (VIS low): a start-bit run too close to the buffer
+        # start to have a full check window in front of it used to skip
+        # the leader check entirely (``leader_end == leader_start == 0``)
+        # or judge it on a few ms of audio. That is exactly the situation
+        # after an unknown-VIS trim in ``Decoder._feed_idle`` (the buffer
+        # restarts 200 ms before the rejected header), so noise right at
+        # the head of the buffer sailed through. No room for the leader
+        # means no leader: treat it as a failed check. The second leader
+        # half is 300 ms, so a real header always has the 200 ms window.
+        leader_end = run_start - int(round(0.005 * fs))  # skip transition
+        leader_start = leader_end - leader_check_samples
+        if leader_start < 0:
+            continue
+        leader_region = leader_smooth[leader_start:leader_end]
+        leader_in_band = float(np.mean(
+            (leader_region > 1800.0) & (leader_region < 2000.0)
+        ))
+        if leader_in_band < leader_frac_threshold:
+            continue
 
         # The first data bit follows the start bit by exactly bit_samples.
         # Aligning to ``run_start`` rather than ``run_end`` is more robust
@@ -256,24 +268,6 @@ def detect_vis(
         return (code, last_chunk_end)
 
     return None
-
-
-def _find_runs(mask: NDArray[np.bool_]) -> list[tuple[int, int]]:
-    """Return ``[(start, end), …]`` for each maximal True run in ``mask``.
-
-    ``end`` is exclusive (slice-friendly). Empty input returns an empty
-    list. Used by ``detect_vis`` to find candidate start-bit regions.
-    """
-    if mask.size == 0:
-        return []
-    diff = np.diff(mask.astype(np.int8))
-    starts = (np.where(diff == 1)[0] + 1).tolist()
-    ends = (np.where(diff == -1)[0] + 1).tolist()
-    if mask[0]:
-        starts.insert(0, 0)
-    if mask[-1]:
-        ends.append(int(mask.size))
-    return list(zip(starts, ends, strict=True))
 
 
 __all__ = [
