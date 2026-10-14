@@ -1800,7 +1800,7 @@ class TestRemoteStatusIndicator:
             window._apply_remote_server()
             srv = window._remote_server
             assert srv is not None and srv.token_rejected
-            assert "shorter than" in window.statusBar().currentMessage()
+            assert "plain-ASCII characters" in window.statusBar().currentMessage()
             assert "demo" != srv.token
             window._config.remote_port = srv.port  # as a saved config would hold
             window._apply_remote_server()
