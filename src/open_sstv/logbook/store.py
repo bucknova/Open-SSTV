@@ -249,9 +249,16 @@ class LogbookStore:
         """
         cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(qsos)")}
         if "band" not in cols:
-            self._conn.execute(
-                "ALTER TABLE qsos ADD COLUMN band TEXT NOT NULL DEFAULT ''"
-            )
+            try:
+                self._conn.execute(
+                    "ALTER TABLE qsos ADD COLUMN band TEXT NOT NULL DEFAULT ''"
+                )
+            except sqlite3.OperationalError as exc:
+                # v0.6.14 sweep: another connection opening the same old DB
+                # can add the column between our PRAGMA and ALTER; the end
+                # state is exactly what we wanted.
+                if "duplicate column" not in str(exc).lower():
+                    raise
 
     # -- CRUD ----------------------------------------------------------
 
