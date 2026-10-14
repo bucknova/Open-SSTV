@@ -3714,6 +3714,57 @@ class MainWindow(QMainWindow):
 
         self._start_rig_connect_thread(rig, _on_success, _on_error)
 
+    def _stop_audio_worker_bounded(self, worker: object, timeout_ms: int) -> bool:
+        """Run *worker*'s ``stop()`` on its own thread; wait at most
+        *timeout_ms* for it to finish.  Returns ``False`` on timeout.
+
+        H8: BlockingQueuedConnection would freeze the GUI forever if
+        stream.stop()/close() hangs, so this posts ``stop`` queued and
+        pumps a nested event loop until the worker acknowledges or the
+        timer fires.  Queued signals (and other housekeeping slots) keep
+        running meanwhile.
+
+        v0.6.14 audit UI-M6: the acknowledgement is ``stop_finished``,
+        which every ``stop()`` call emits.  Waiting on ``stopped`` (only
+        emitted when a stream was running) made every swap or quit with
+        capture idle sit out the whole budget and then log a false "wedged
+        worker" warning.  ``stop_finished`` also stays correct if a start
+        is still queued ahead of the stop: the queue is FIFO, so the
+        acknowledgement comes only after that stream has been stopped.
+        """
+        done_signal = getattr(worker, "stop_finished", None)
+        if done_signal is None:  # duck-typed worker without the ack
+            done_signal = worker.stopped  # type: ignore[attr-defined]
+        done = threading.Event()
+
+        def _on_done() -> None:
+            done.set()
+
+        loop = QEventLoop()
+        timer = QTimer()
+        timer.setSingleShot(True)
+        timer.timeout.connect(loop.quit)
+        for slot in (_on_done, loop.quit):
+            try:
+                done_signal.connect(slot, Qt.ConnectionType.QueuedConnection)
+            except Exception:  # noqa: BLE001 — worker already deleted
+                pass
+        QMetaObject.invokeMethod(
+            worker,  # type: ignore[arg-type]
+            "stop",
+            Qt.ConnectionType.QueuedConnection,
+        )
+        timer.start(timeout_ms)
+        if not done.is_set():
+            loop.exec()
+        timer.stop()
+        for slot in (_on_done, loop.quit):
+            try:
+                done_signal.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+        return done.is_set()
+
     def _swap_audio_worker(self, new_worker: object) -> None:
         """Hot-swap the audio input worker on the audio thread.
 
@@ -3754,43 +3805,7 @@ class MainWindow(QMainWindow):
         was_capturing = self._capture_running
 
         _SWAP_STOP_TIMEOUT_MS = 2000  # 2 s is generous for any real stop
-        _stop_completed = threading.Event()
-
-        def _on_swap_stop_done() -> None:
-            _stop_completed.set()
-
-        old.stopped.connect(  # type: ignore[union-attr]
-            _on_swap_stop_done, Qt.ConnectionType.QueuedConnection
-        )
-        QMetaObject.invokeMethod(
-            old,  # type: ignore[arg-type]
-            "stop",
-            Qt.ConnectionType.QueuedConnection,
-        )
-
-        # Pump events for up to _SWAP_STOP_TIMEOUT_MS while waiting for the
-        # worker to finish.  QEventLoop runs nested event processing on
-        # the GUI thread so queued ``stopped`` signals (and any other
-        # housekeeping slots) still fire; a QTimer enforces the hard cap.
-        _swap_loop = QEventLoop()
-        _swap_timer = QTimer()
-        _swap_timer.setSingleShot(True)
-        _swap_timer.timeout.connect(_swap_loop.quit)
-        old.stopped.connect(_swap_loop.quit, Qt.ConnectionType.QueuedConnection)  # type: ignore[union-attr]
-        _swap_timer.start(_SWAP_STOP_TIMEOUT_MS)
-        if not _stop_completed.is_set():
-            _swap_loop.exec()
-        _swap_timer.stop()
-        try:
-            old.stopped.disconnect(_on_swap_stop_done)  # type: ignore[union-attr]
-        except (RuntimeError, TypeError):
-            pass
-        try:
-            old.stopped.disconnect(_swap_loop.quit)  # type: ignore[union-attr]
-        except (RuntimeError, TypeError):
-            pass
-
-        if not _stop_completed.is_set():
+        if not self._stop_audio_worker_bounded(old, _SWAP_STOP_TIMEOUT_MS):
             _log.warning(
                 "Audio worker stop() did not complete within %d ms — "
                 "proceeding with teardown; the wedged worker will leak "
@@ -4266,41 +4281,11 @@ class MainWindow(QMainWindow):
         # event loop could exit without running stop() — leaving the
         # TCI ``audio_stop:0;`` unsent and the server still subscribed
         # when ``self._rig.close()`` ran below.  Mirror the H8 pattern:
-        # wait for the worker's ``stopped`` signal with a bounded event
-        # loop before letting the thread quit.
-        _stop_done = threading.Event()
-
-        def _on_close_stop_done() -> None:
-            _stop_done.set()
-
-        try:
-            self._audio_worker.stopped.connect(  # type: ignore[union-attr]
-                _on_close_stop_done, Qt.ConnectionType.QueuedConnection
-            )
-        except Exception:  # noqa: BLE001
-            pass
-        self._request_stop_capture.emit()
-
-        _close_loop = QEventLoop()
-        _close_timer = QTimer()
-        _close_timer.setSingleShot(True)
-        _close_timer.timeout.connect(_close_loop.quit)
-        try:
-            self._audio_worker.stopped.connect(  # type: ignore[union-attr]
-                _close_loop.quit, Qt.ConnectionType.QueuedConnection
-            )
-        except Exception:  # noqa: BLE001
-            pass
-        _close_timer.start(2000)
-        if not _stop_done.is_set():
-            _close_loop.exec()
-        _close_timer.stop()
-        for _slot in (_on_close_stop_done, _close_loop.quit):
-            try:
-                self._audio_worker.stopped.disconnect(_slot)  # type: ignore[union-attr]
-            except (RuntimeError, TypeError):
-                pass
-        if not _stop_done.is_set():
+        # wait for the worker to acknowledge with a bounded event loop
+        # before letting the thread quit.  (v0.6.14 audit UI-M6: the ack is
+        # ``stop_finished``, so an idle worker no longer costs 2 s and a
+        # false "did not complete" warning on every quit.)
+        if not self._stop_audio_worker_bounded(self._audio_worker, 2000):
             # Name the backend: this fires on every quit for some
             # Windows/MME setups, and the old message blamed TCI even for
             # PortAudio users, which sent at least one bug report down the

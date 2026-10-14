@@ -65,6 +65,9 @@ class TciInputStreamWorker(QObject):
     stopped = Signal()
     error = Signal(str)
     stream_error = Signal(str)     # emitted on connection loss
+    #: Ends every ``stop()`` call, running or not — see the matching
+    #: signal on ``InputStreamWorker`` (v0.6.14 audit UI-M6).
+    stop_finished = Signal()
 
     def __init__(self, tci_rig: object, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -146,7 +149,17 @@ class TciInputStreamWorker(QObject):
 
     @Slot()
     def stop(self) -> None:
-        """Unsubscribe from TCI audio and flush pending chunks."""
+        """Unsubscribe from TCI audio and flush pending chunks.
+
+        Emits ``stopped`` only if a subscription was running, and
+        ``stop_finished`` always (v0.6.14 audit UI-M6).
+        """
+        try:
+            self._stop_subscription()
+        finally:
+            self.stop_finished.emit()
+
+    def _stop_subscription(self) -> None:
         if not self._running:
             return
 
