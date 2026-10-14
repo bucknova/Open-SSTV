@@ -178,3 +178,29 @@ class TestDecompressionCap:
         assert svc.render(small.getvalue(), template_id, {}, "scottie_s1") is not None
 
         assert svc.render(payload, template_id, {}, "scottie_s1") is None
+
+
+class TestJpegDraftDecode:
+    """v0.6.14 audit S-L3: big JPEGs are downscaled while decoding."""
+
+    def test_large_jpeg_decoded_at_reduced_size(self, service, monkeypatch) -> None:
+        from open_sstv.core.modes import MODE_TABLE, Mode
+        from open_sstv.remote import compose as compose_mod
+
+        seen: list[tuple[int, int]] = []
+        real = compose_mod.render_template
+
+        def spy(template, qso, cfg, ctx):  # noqa: ANN001, ANN202
+            seen.append(ctx.photo_image.size)
+            return real(template, qso, cfg, ctx)
+
+        monkeypatch.setattr(compose_mod, "render_template", spy)
+        tid = service.list_templates()[0]["id"]
+        img = service.render(_photo_bytes((4000, 3000)), tid, {}, Mode.SCOTTIE_S1.value)
+        spec = MODE_TABLE[Mode.SCOTTIE_S1]
+        assert img is not None and img.size == (spec.width, spec.display_height)
+        (decoded,) = seen
+        edge = max(spec.width, spec.display_height)
+        # Smaller than the upload, yet never below the frame on either side.
+        assert decoded[0] < 4000 and decoded[1] < 3000
+        assert min(decoded) >= edge
