@@ -107,6 +107,17 @@ def _open_port(
     Constructing portless, clearing both lines, then opening keeps them low
     from the start.  ``SerialPttRig`` raises its configured line only when
     it actually keys.
+
+    Known residual (v0.6.14 sweep), Linux: the kernel's tty layer raises
+    DTR and RTS itself inside ``open(2)`` (``tty_port_block_til_ready``
+    → ``tty_port_raise_dtr_rts`` whenever the stored baud rate is
+    non-zero, ``O_NONBLOCK`` or not) *before* pyserial gets the file
+    descriptor; pyserial can only lower them afterwards with a
+    ``TIOCMBIC`` ioctl.  A PTT line wired to DTR or RTS can therefore see
+    a blip of a few milliseconds at Connect, and nothing at the Python
+    level can prevent it.  Most radios never key on a pulse that short;
+    an operator who does see a TX flash on connect should key PTT by CAT
+    command instead, or use an interface with a PTT delay/filter.
     """
     ser = serial.Serial()
     ser.port = port
