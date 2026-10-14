@@ -64,7 +64,6 @@ the one shared implementation, ``demod.sample_pixels`` (Robot 36:
 """
 from __future__ import annotations
 
-import math
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import numpy as np

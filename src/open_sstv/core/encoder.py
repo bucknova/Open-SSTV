@@ -42,6 +42,7 @@ from pysstv.color import (
     PD180,
     PD240,
     PD290,
+    Color,
     MartinM1,
     PasokonP3,
     PasokonP5,
@@ -50,7 +51,6 @@ from pysstv.color import (
     WraaseSC2120,
     WraaseSC2180,
 )
-from pysstv.color import Color
 from pysstv.color import MartinM2 as _UpstreamMartinM2
 from pysstv.sstv import (
     FREQ_BLACK,
