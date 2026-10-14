@@ -531,6 +531,19 @@ class _RigConnectRelay(QObject):
     @Slot(object)
     def on_succeeded(self, rig: Rig) -> None:
         if self._cancel.is_set():
+            # v0.6.14 sweep: the worker saw no cancel and emitted, but the
+            # timeout / Cancel won the race before this queued slot ran.
+            # Nobody will adopt this rig — close it, or the port leaks (an
+            # exclusive COM handle on Windows blocks every later Connect).
+            # Off the GUI thread: a serial close can block on the backend.
+            def _close() -> None:
+                try:
+                    rig.close()
+                except Exception:  # noqa: BLE001 — abandoned; never raise
+                    pass
+
+            _log.info("rig connect succeeded after timeout/cancel — closing it")
+            threading.Thread(target=_close, name="sstv-rig-late-close", daemon=True).start()
             return
         self._cancel.set()  # prevent late timeout from also calling on_error
         self._timer.stop()
@@ -891,6 +904,10 @@ class MainWindow(QMainWindow):
         self._connect_worker: _RigConnectWorker | None = None
         self._connect_timeout_timer: QTimer | None = None
         self._connect_relay: _RigConnectRelay | None = None
+        #: v0.6.14 sweep: (thread, worker, relay) of superseded attempts
+        #: whose thread is still blocked in open() — see
+        #: ``_retire_connect_attempt``.
+        self._retired_connects: list[tuple[QThread, object, object]] = []
 
         # In-flight offline encode/decode workers.  Stored as instance
         # attributes (not locals) for the same reason as _connect_worker:
@@ -3523,12 +3540,46 @@ class MainWindow(QMainWindow):
             self._connect_rigctld()
 
     def _connect_in_progress(self) -> bool:
-        if self._pending_rigctld_connect is not None or self._connect_thread is not None:
+        """True while the *current* connect attempt is live.
+
+        v0.6.14 sweep: this used to also refuse while any connect thread
+        was still running — so a timed-out attempt whose thread stayed
+        blocked in ``open()`` (a wedged serial driver, a black-holed TCP
+        connect) locked the operator out of Connect until it returned,
+        possibly forever.  A timed-out / cancelled attempt is over: its
+        late success is closed by ``_RigConnectRelay.on_succeeded``, its
+        ``finished`` is ignored by the sender check in
+        ``_on_connect_thread_finished``, and its objects are kept alive in
+        ``_retired_connects`` until its thread exits.
+        """
+        if self._pending_rigctld_connect is not None:
             return True
-        return any(
-            t.objectName() == "rig-connect-thread" and t.isRunning()
-            for t in self.findChildren(QThread)
-        )
+        if self._connect_thread is None:
+            return False
+        cancel = self._connect_cancel
+        return cancel is None or not cancel.is_set()
+
+    def _retire_connect_attempt(self) -> None:
+        """Park the current attempt's thread/worker/relay until it exits.
+
+        v0.6.14 sweep: a timed-out attempt's thread may still be inside
+        ``worker.run()``; dropping the Python refs would destroy the C++
+        worker mid-run (crash) and the relay before a queued late success
+        reaches it (port leak).  ``_on_connect_thread_finished`` releases
+        the entry when that thread exits.
+        """
+        thread = self._connect_thread
+        if thread is not None:
+            self._retired_connects.append(
+                (thread, self._connect_worker, self._connect_relay)
+            )
+        self._connect_thread = None
+        self._connect_cancel = None
+        self._connect_worker = None
+        self._connect_relay = None
+        if self._connect_timeout_timer is not None:
+            self._connect_timeout_timer.stop()
+            self._connect_timeout_timer = None
 
     def _start_rig_connect_thread(
         self,
@@ -3548,6 +3599,10 @@ class MainWindow(QMainWindow):
         message if the rig never responds.  The cancel event lets the caller
         (cancel button, timeout, closeEvent) suppress any late emit.
         """
+        # v0.6.14 sweep: a timed-out attempt may still own a thread blocked
+        # in open(); park it rather than dropping its refs.
+        if self._connect_thread is not None:
+            self._retire_connect_attempt()
         cancel = threading.Event()
         self._connect_cancel = cancel
 
@@ -3616,6 +3671,13 @@ class MainWindow(QMainWindow):
         # wipe a newer attempt's worker/relay/timer.
         sender = self.sender()
         if isinstance(sender, QThread) and sender is not thread:
+            # A retired attempt's thread exited: release its objects.
+            for entry in [e for e in self._retired_connects if e[0] is sender]:
+                self._retired_connects.remove(entry)
+                try:
+                    sender.started.disconnect(entry[1].run)  # type: ignore[union-attr]
+                except (RuntimeError, TypeError, AttributeError):
+                    pass
             return
         worker = self._connect_worker
         # Explicitly break thread.started → worker.run before releasing Python
@@ -3652,16 +3714,12 @@ class MainWindow(QMainWindow):
         edge case where a timeout fired and the user started a second attempt
         before the first thread finished its blocking C call.
         """
-        timer = self._connect_timeout_timer
         cancel = self._connect_cancel
         self._pending_rigctld_connect = None  # cancels a pending auto-launch connect
-        self._connect_thread = None
-        self._connect_cancel = None
-        self._connect_timeout_timer = None
-        self._connect_relay = None
-
-        if timer is not None:
-            timer.stop()
+        # v0.6.14 sweep: park (not drop) the worker/relay — the thread may
+        # still be inside worker.run(), and the relay must stay alive to
+        # close a late success.  Released when the thread's finished fires.
+        self._retire_connect_attempt()  # also stops the timeout timer
         if cancel is not None:
             cancel.set()
 
@@ -3672,14 +3730,11 @@ class MainWindow(QMainWindow):
                     # Blocked in rig.open() (a serial open or TCP connect).
                     # Detach rather than terminate(): see
                     # _DETACHED_AT_SHUTDOWN.
-                    _detach_running_thread(
-                        thread, self._connect_worker, "rig connect thread"
+                    worker = next(
+                        (w for t, w, _r in self._retired_connects if t is thread),
+                        None,
                     )
-
-        # Drop the worker reference only after all threads have stopped.
-        # Clearing it earlier would destroy the C++ QObject while the worker
-        # thread might still be executing worker.run(), which crashes.
-        self._connect_worker = None
+                    _detach_running_thread(thread, worker, "rig connect thread")
 
     def _connect_serial(self) -> None:
         """Create a direct serial rig backend and start polling.

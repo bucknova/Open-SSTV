@@ -218,6 +218,64 @@ def test_stale_connect_thread_finish_does_not_clobber_new_attempt(
     window._connect_thread = None
 
 
+def test_relay_closes_rig_that_succeeds_after_timeout(qtbot) -> None:
+    """v0.6.14 sweep: the worker emitted succeeded, then the timeout won
+    the race before the queued slot ran — the opened rig must be closed."""
+    from PySide6.QtCore import QTimer
+
+    from open_sstv.ui.main_window import _RigConnectRelay
+
+    cancel = threading.Event()
+    adopted: list[object] = []
+    relay = _RigConnectRelay(adopted.append, lambda m: None, QThread(), QTimer(), cancel)
+    cancel.set()  # timeout fired first
+    rig = MagicMock()
+    relay.on_succeeded(rig)
+    qtbot.waitUntil(lambda: rig.close.called, timeout=2000)
+    assert adopted == []
+
+
+def test_timed_out_blocked_attempt_does_not_lock_out_connect(
+    qtbot, window: MainWindow
+) -> None:
+    """v0.6.14 sweep: a timed-out attempt whose thread is still blocked in
+    open() must not refuse new connects; its late success is closed and
+    its finished leaves the new attempt alone."""
+    release = threading.Event()
+    closed: list[int] = []
+
+    class _Slow(FakeRig):
+        def open(self) -> None:
+            release.wait(5)
+
+        def close(self) -> None:
+            closed.append(1)
+
+    window._CONNECT_TIMEOUT_S = 0.05  # type: ignore[misc]
+    errors: list[str] = []
+    window._start_rig_connect_thread(_Slow(), lambda r: None, errors.append)
+    old_thread = window._connect_thread
+    old_done: list[int] = []
+    old_thread.finished.connect(lambda: old_done.append(1))
+    qtbot.waitUntil(lambda: errors != [], timeout=2000)  # timed out
+    assert not window._connect_in_progress()
+
+    # A second attempt starts while the first is still blocked.
+    successes: list[object] = []
+    fast = FakeRig()
+    window._start_rig_connect_thread(fast, successes.append, errors.append)
+    new_thread = window._connect_thread
+    assert new_thread is not old_thread
+    assert any(t is old_thread for t, _w, _r in window._retired_connects)
+    qtbot.waitUntil(lambda: successes == [fast], timeout=2000)
+
+    release.set()  # the stale attempt's open() now "succeeds"
+    qtbot.waitUntil(lambda: old_done == [1], timeout=3000)
+    qtbot.waitUntil(lambda: closed == [1], timeout=2000)
+    qtbot.waitUntil(lambda: window._retired_connects == [], timeout=2000)
+    assert successes == [fast]
+
+
 def test_double_click_during_rigctld_launch_delay(
     qtbot, window: MainWindow, monkeypatch: pytest.MonkeyPatch
 ) -> None:
