@@ -24,6 +24,19 @@ What we support
   case, and submode formatting (accepts ``Martin M1``, ``MartinM1``,
   ``MARTINM1``).  Unknown tags ignored silently.
 
+Non-ASCII text (v0.6.14 sweep decision)
+───────────────────────────────────────
+Strictly, ADI String fields (NAME, QTH, COMMENT …) are ASCII-only and
+international text belongs in the ``*_INTL`` fields — which the spec
+forbids in ADI files (ADX only).  We write UTF-8 values as-is, with the
+length prefix counting **bytes** (``<NAME:12>Jörg Ñoño``), and read them
+back the same way.  Reason: transliterating to ASCII would silently
+destroy operators' names and QTHs, and the mainstream loggers and
+services (Log4OM, N1MM+, WSJT-X, Club Log, QRZ) accept UTF-8 ADI with
+byte counts; a byte-counted length is also what keeps a strict-ASCII
+parser in sync, since it skips exactly the right number of bytes even if
+it renders them as mojibake.  ``*_INTL`` fields are never emitted.
+
 What we don't support
 ─────────────────────
 - ADIF data types (``<FOO:5:N>...``) — type code parsed and discarded.
@@ -72,8 +85,10 @@ class AdifParseError(ValueError):
 # v0.6.14 audit C-M8: the writer hard-coded MODE=SSTV and put *any* mode in
 # SUBMODE, so an imported FT8 contact went out as MODE=SSTV SUBMODE=FT8
 # and LoTW / Club Log rejected or mis-filed it.  SUBMODE is now written
-# only for recognised SSTV modes; anything else goes out under its own
-# MODE (with the ADIF parent MODE where the enumeration nests it).
+# only for recognised SSTV modes; ADIF modes/submodes go out under their
+# own MODE (with the ADIF parent MODE where the enumeration nests it).
+# v0.6.14 sweep: names that are neither fall back to MODE=SSTV with the
+# name as SUBMODE (see ``adif_mode_fields``).
 
 #: SSTV mode names other loggers (MMSSTV, QSSTV, Log4OM) write that
 #: Open-SSTV doesn't transmit, so imported rows still export as SSTV.
@@ -150,6 +165,19 @@ _ADIF_SUBMODES: dict[str, tuple[str, ...]] = {
     "TOR": ("AMTORFEC", "GTOR", "NAVTEX", "SITORB"),
 }
 
+#: ADIF 3.1.4 Mode enumeration (current, non-import-only values).  The
+#: exported MODE must be one of these — v0.6.14 sweep.  ``FSK`` (parent of
+#: the SCAMP submodes above) is included so every parent in
+#: ``_ADIF_SUBMODES`` is itself a valid MODE.
+ADIF_MODES: frozenset[str] = frozenset((
+    "AM", "ARDOP", "ATV", "CHIP", "CLO", "CONTESTI", "CW", "DIGITALVOICE",
+    "DOMINO", "DYNAMIC", "FAX", "FM", "FSK", "FSK441", "FT8", "HELL", "ISCAT",
+    "JT4", "JT6M", "JT9", "JT44", "JT65", "MFSK", "MSK144", "MT63", "OLIVIA",
+    "OPERA", "PAC", "PAX", "PKT", "PSK", "PSK2K", "Q15", "QRA64", "ROS",
+    "RTTY", "RTTYM", "SSB", "SSTV", "T10", "THOR", "THRB", "TOR", "V4",
+    "VOI", "WINMOR", "WSPR",
+))
+
 _SUBMODE_PARENT: dict[str, str] = {
     sub: parent for parent, subs in _ADIF_SUBMODES.items() for sub in subs
 }
@@ -176,8 +204,17 @@ def adif_mode_fields(mode: str) -> tuple[str, str]:
 
     - empty / "SSTV" → ``("SSTV", "")`` (our own contacts are SSTV)
     - a recognised SSTV mode → ``("SSTV", "MartinM1")``
-    - anything else → its own MODE (``"FT8"``), or the ADIF parent with
-      the submode (``FT4`` → ``("MFSK", "FT4")``).
+    - a known ADIF submode → its parent (``FT4`` → ``("MFSK", "FT4")``)
+    - an exact ADIF MODE → ``("FT8", "")``
+    - anything else → ``("SSTV", compact)``.
+
+    v0.6.14 sweep: the last rule used to be "anything else is its own
+    MODE", which sent SSTV submodes from other loggers (``SC2-180``,
+    ``P3``, ``Martin1``, ``Robot 36C`` …) out as invalid ADIF MODEs —
+    import keeps only SUBMODE, so the fact that MODE was SSTV is gone by
+    export time.  This is an SSTV logger: an unrecognised name is far more
+    likely an SSTV submode than a mode, and MODE must always come from
+    the ADIF Mode enumeration.
     """
     mode = (mode or "").strip()
     if not mode or mode.upper() == "SSTV":
@@ -188,7 +225,10 @@ def adif_mode_fields(mode: str) -> tuple[str, str]:
     parent = _SUBMODE_PARENT.get(upper)
     if parent is not None and parent != upper:
         return (parent, upper)
-    return (upper, "")
+    if upper in ADIF_MODES:
+        return (upper, "")
+    return ("SSTV", mode_to_submode(mode))
+
 
 def mode_to_submode(mode: str) -> str:
     """Convert a QSO ``mode`` field to ADIF SUBMODE form (no spaces)."""
@@ -512,6 +552,19 @@ def _build_qso(record: dict[str, str], *, mode_table: Iterable[str] = ()) -> QSO
     mode_str = record.get("MODE", "").strip()
     if submode:
         mode = submode_to_mode(submode, table=mode_table)
+        # v0.6.14 sweep: only SUBMODE is stored, and export maps it back
+        # to its parent via the ADIF submode table (or to SSTV for
+        # anything unrecognised).  A non-SSTV parent with a submode that
+        # table doesn't know (MODE=PSK SUBMODE=PSK9999X) would therefore
+        # come back out as MODE=SSTV; store the parent MODE instead — the
+        # submode detail is optional in ADIF, the MODE is not.
+        parent = mode_str.upper()
+        if (
+            parent in ADIF_MODES
+            and parent != "SSTV"
+            and submode.upper() not in _SUBMODE_PARENT
+        ):
+            mode = parent
     else:
         mode = mode_str  # "SSTV" or whatever the source put
 
