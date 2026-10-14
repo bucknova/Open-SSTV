@@ -720,7 +720,15 @@ class MainWindow(QMainWindow):
         #: Raw RX audio buffer set by ``_on_rx_audio_ready`` and consumed by
         #: ``_on_rx_image_complete``.  Both fire from the same worker ``_dispatch``
         #: call, so the audio is always available when the image handler runs.
-        self._pending_rx_audio: tuple | None = None  # (audio_f64, sample_rate)
+        #: v0.6.14 audit: tagged with the live decode's mode and VIS, and
+        #: only the live path consumes it, so an offline-decoded image that
+        #: lands in between can never be saved with the live recording.
+        self._pending_rx_audio: tuple | None = None  # (audio_f64, sample_rate, mode, vis)
+        #: Same streak logic as ``_autosave_failing``, for RX audio saves.
+        self._rx_audio_save_failing: bool = False
+        #: True between ``_on_tx_started`` raising the RX gate and
+        #: ``_schedule_rx_resume`` lifting it (v0.6.14 audit).
+        self._rx_gate_raised: bool = False
         #: OP-47: remembers whether the 1 Hz rig-poll timer was running when
         #: TX started, so ``_unlock_rig_controls`` can resume it only if the
         #: rig is still connected. The poll is *suspended* for the duration
@@ -1022,6 +1030,14 @@ class MainWindow(QMainWindow):
         # that pushed it to the worker was ``_apply_config``, which
         # only fired when the user re-opened Settings.
         self._rx_worker.set_input_gain(self._config.audio_input_gain)
+        # v0.6.14 audit UI-M2: what the RxWorker was last told, so
+        # _apply_config only sends (and the worker only rebuilds its
+        # decoder for) values that actually changed.  _rx_decoder_rate is
+        # also the rate the capture stream runs at, which the waterfall
+        # needs for its frequency axis.
+        self._rx_applied_weak_signal: bool = self._config.rx_weak_signal_mode
+        self._rx_applied_incremental: bool = self._config.incremental_decode
+        self._rx_decoder_rate: int = self._config.sample_rate
         self._rx_worker.moveToThread(self._rx_thread)
         self._rx_thread.finished.connect(self._rx_worker.deleteLater)
         self._rx_thread.start()
@@ -2318,6 +2334,11 @@ class MainWindow(QMainWindow):
         self._tx_worker.set_ptt_delay(self._config.ptt_delay_s)
         new_input = find_input_device_by_name(self._config.audio_input_device)
         self._input_device = new_input
+        if new_input is None and self._config.audio_input_device:
+            # v0.6.14 audit UI-M3: the saved device is unplugged (Settings
+            # now keeps it as "(not connected)").  Look it up again at the
+            # next capture start so plugging it back in is enough.
+            self._input_device_needs_relookup = True
         self._rx_worker.set_input_gain(self._config.audio_input_gain)
         # Keep the always-on audio strip in sync with a Settings save
         # (overdrive first so the TX ceiling is right before the clamp).
@@ -2327,12 +2348,20 @@ class MainWindow(QMainWindow):
         # Emit via queued signals so decoder rebuilds happen on the worker
         # thread, not the GUI thread (H-02 fix; OP-09 extended to cover
         # set_final_slant_correction too).
-        self._rx_weak_signal_changed.emit(self._config.rx_weak_signal_mode)
+        #
+        # v0.6.14 audit UI-M2: the two settings that rebuild the decoder
+        # are sent only when they changed.  Re-sending them on every OK
+        # destroyed whatever image was being received.
+        if self._config.rx_weak_signal_mode != self._rx_applied_weak_signal:
+            self._rx_applied_weak_signal = self._config.rx_weak_signal_mode
+            self._rx_weak_signal_changed.emit(self._config.rx_weak_signal_mode)
         self._rx_watchdog_timeout_changed.emit(self._config.rx_watchdog_timeout_s)
         self._rx_final_slant_correction_changed.emit(
             self._config.apply_final_slant_correction
         )
-        self._rx_incremental_decode_changed.emit(self._config.incremental_decode)
+        if self._config.incremental_decode != self._rx_applied_incremental:
+            self._rx_applied_incremental = self._config.incremental_decode
+            self._rx_incremental_decode_changed.emit(self._config.incremental_decode)
         self._tx_worker.set_tx_banner(
             self._config.tx_banner_enabled,
             self._config.callsign,
@@ -2355,7 +2384,14 @@ class MainWindow(QMainWindow):
         # encode/capture start).  Both go via queued signals so the
         # change lands on the receiving worker's own event loop (OP-09).
         self._tx_sample_rate_changed.emit(self._config.sample_rate)
-        self._rx_sample_rate_changed.emit(self._config.sample_rate)
+        # v0.6.14 audit UI-M2: the RX decoder must run at the rate the
+        # capture stream delivers.  Rebuilding it at the new rate while
+        # the stream kept the old one desynced every line.  With capture
+        # running, leave both alone: _begin_capture syncs the decoder
+        # before the next stream opens (the caller tells the user to
+        # restart capture).
+        if not self._capture_running:
+            self._sync_rx_sample_rate()
         # TX panel needs the rate too so the progress-bar elapsed/total
         # seconds label is correct at 44.1 kHz (OP-06).
         self._tx_panel.set_sample_rate(self._config.sample_rate)
@@ -2368,6 +2404,37 @@ class MainWindow(QMainWindow):
         # the freshly-saved config (the service reads the live config, so
         # host/port/token changes are picked up on restart).
         self._apply_remote_server()
+
+    def _effective_rx_sample_rate(self) -> int:
+        """The rate the next capture stream will deliver.
+
+        PortAudio opens at the configured rate.  A TCI server dictates its
+        own (the worker negotiates 48 kHz), so the configured rate means
+        nothing for TCI input.
+        """
+        if isinstance(self._audio_worker, TciInputStreamWorker):
+            try:
+                return int(self._audio_worker.sample_rate)
+            except Exception:  # noqa: BLE001 — connection already gone
+                _log.debug("TCI sample rate unavailable", exc_info=True)
+        return int(self._config.sample_rate)
+
+    def _sync_rx_sample_rate(self) -> None:
+        """Bring the RX decoder and the waterfall to the capture rate.
+
+        Only call while no capture stream is running.  The rate change is
+        a queued signal to the RX thread.  Callers that reset the decoder
+        afterwards (``_begin_capture``, ``_swap_audio_worker``) emit it
+        first, so the rebuild lands before the reset and the first chunk.
+        (v0.6.14 audit UI-M2, and the waterfall Low: its rate was set once
+        at creation and never followed Settings or a switch to TCI.)
+        """
+        rate = self._effective_rx_sample_rate()
+        if rate != self._rx_decoder_rate:
+            self._rx_decoder_rate = rate
+            self._rx_sample_rate_changed.emit(rate)
+        if self._waterfall_window is not None:
+            self._waterfall_window.set_sample_rate(rate)
 
     # === TX slots ===
 
@@ -2452,6 +2519,7 @@ class MainWindow(QMainWindow):
         if self._rig_poll_was_active:
             self._rig_poll_timer.stop()
         # Gate the RX decoder to prevent self-decode through loopback (R-2).
+        self._rx_gate_raised = True  # v0.6.14 audit: see _schedule_rx_resume
         self._request_rx_gate.emit(True)
         self._rx_panel.set_status("RX paused during TX.")
 
@@ -2488,9 +2556,24 @@ class MainWindow(QMainWindow):
         TX-period audio bleeds into the next RX attempt.  The gate-off
         also calls RxWorker.reset() so the counter and decoder start clean.
         """
-        # OP2-19: guard against post-close firing — isVisible() is False
-        # once closeEvent has run, so the callback becomes a no-op.
-        QTimer.singleShot(50, lambda: self.isVisible() and self._request_rx_gate.emit(False))
+        # v0.6.14 audit: lift the gate only if _on_tx_started raised it.
+        # A TX that failed before transmission_started never gated RX, and
+        # lifting anyway reset the decoder, destroying a decode in progress.
+        # The error and complete/abort paths may both get here; the flag
+        # makes the second call a no-op.
+        if not self._rx_gate_raised:
+            return
+        self._rx_gate_raised = False
+
+        def _lift() -> None:
+            # OP2-19: guard against post-close firing — isVisible() is False
+            # once closeEvent has run, so the callback becomes a no-op.
+            # And if a new TX raised the gate again within the 50 ms, leave
+            # it raised.
+            if self.isVisible() and not self._rx_gate_raised:
+                self._request_rx_gate.emit(False)
+
+        QTimer.singleShot(50, _lift)
 
     @Slot(object, object)
     def _on_tx_image_prepared(self, image: object, mode: object) -> None:
@@ -2683,6 +2766,10 @@ class MainWindow(QMainWindow):
         # completed left two closures connected and started capture
         # twice ("already running").
         self._start_capture_armed = True
+        # v0.6.14 audit UI-M2: apply a sample-rate change deferred while
+        # the previous stream ran.  Emitted before the reset so both land
+        # on the RX thread, in order, ahead of the first chunk.
+        self._sync_rx_sample_rate()
         self._request_rx_reset.emit()
 
     # --- RX auto-resume after a device loss (2026-10 stability audit) -----
@@ -2928,7 +3015,7 @@ class MainWindow(QMainWindow):
         on the GUI thread in order — the audio is always buffered by the time
         ``_on_rx_image_complete`` runs.
         """
-        self._pending_rx_audio = (audio, sample_rate)
+        self._pending_rx_audio = (audio, sample_rate, mode, vis_code)
 
     @Slot(object, object, int)
     def _on_rx_image_complete(
@@ -2942,8 +3029,15 @@ class MainWindow(QMainWindow):
         logging, and the capture dialog costs one Esc to dismiss when
         they aren't (noise trigger, test decode).
         """
-        pending_audio = self._pending_rx_audio
-        self._pending_rx_audio = None
+        # v0.6.14 audit: only a live completion takes the live recording,
+        # and only when it's for the same transmission (mode and VIS).
+        # Offline decodes never record audio, so they leave the slot alone.
+        pending_audio: tuple | None = None
+        if not offline:
+            pending = self._pending_rx_audio
+            self._pending_rx_audio = None
+            if pending is not None and pending[2] == mode and pending[3] == vis_code:
+                pending_audio = (pending[0], pending[1])
 
         pil_image: PILImage = image  # type: ignore[assignment]
         save_path: Path | None = None
@@ -3060,6 +3154,23 @@ class MainWindow(QMainWindow):
         if fmt not in ("wav", "flac"):
             fmt = "wav"
 
+        def _fail(message: str) -> None:
+            # v0.6.14 audit: follow _autosave_image — one modal per failure
+            # streak, then the status bar.  A full disk on an unattended
+            # station used to stack one dialog per decoded image.
+            # getattr: tests call this unbound on a minimal stand-in.
+            _log.error("RX audio save failed: %s", message)
+            if not getattr(self, "_rx_audio_save_failing", False):
+                self._rx_audio_save_failing = True
+                QMessageBox.warning(
+                    self,
+                    "Audio save failed",
+                    f"{message}\n\nFurther audio save failures will appear "
+                    "in the status bar until a save succeeds.",
+                )
+            else:
+                self.statusBar().showMessage(f"Audio save failed: {message}", 10_000)
+
         if alongside is not None:
             out_path = alongside.with_suffix(f".{fmt}")
         else:
@@ -3074,37 +3185,40 @@ class MainWindow(QMainWindow):
                     file_format=fmt,
                 )
             except OSError as exc:
-                QMessageBox.warning(self, "Audio save failed", str(exc))
+                _fail(str(exc))
                 return None
 
+        # v0.6.14 audit: encode in memory, then atomic_write_bytes, like the
+        # image auto-save.  Writing straight to the final path left a
+        # truncated WAV/FLAC beside the image on a full disk.  This also
+        # keeps H-4 (audit 4.7/v0.2.9) intact: the path never reaches
+        # wave/soundfile as a str, so non-ASCII Windows paths go through
+        # pathlib's wide-char API.
         try:
+            buf = io.BytesIO()
             if fmt == "wav":
                 pcm = (np.clip(arr, -1.0, 1.0) * 32767.0).astype(np.int16)
-                # H-4 (audit 4.7/v0.2.9): open via pathlib.Path.open so
-                # non-ASCII characters in *out_path* on Windows go through
-                # the wide-char OS API.  Passing ``str(out_path)`` directly
-                # to wave.open would encode through the active ANSI code
-                # page and mangle paths containing emoji or non-ANSI
-                # characters under non-UTF-8 locales.
-                with out_path.open("wb") as raw, wave.open(raw, "wb") as wf:
+                with wave.open(buf, "wb") as wf:
                     wf.setnchannels(1)
                     wf.setsampwidth(2)
                     wf.setframerate(sample_rate)
                     wf.writeframes(pcm.tobytes())
             else:
                 import soundfile as sf  # noqa: PLC0415 — lazy optional dep
-                sf.write(str(out_path), arr, sample_rate, subtype="PCM_16")
-        except OSError as exc:
-            QMessageBox.warning(self, "Audio save failed", str(exc))
-            return None
+                sf.write(buf, arr, sample_rate, subtype="PCM_16", format="FLAC")
+            atomic_write_bytes(out_path, buf.getvalue())
         except ImportError:
-            QMessageBox.warning(
-                self,
-                "Audio save failed",
+            _fail(
                 "FLAC recording requires the 'soundfile' package.\n"
-                'Install it with:  pip install "open-sstv[flac]"',
+                'Install it with:  pip install "open-sstv[flac]"'
             )
             return None
+        except (OSError, RuntimeError, ValueError, wave.Error) as exc:
+            # RuntimeError: soundfile's LibsndfileError used to escape the
+            # slot (v0.6.14 audit).
+            _fail(str(exc))
+            return None
+        self._rx_audio_save_failing = False
         self.statusBar().showMessage(f"Audio saved {out_path.name}", 3000)
         return out_path
 
@@ -3146,12 +3260,24 @@ class MainWindow(QMainWindow):
             "PNG (*.png);;JPEG (*.jpg *.jpeg);;All files (*)",
         )
         if path_str:
+            # v0.6.14 audit: PIL raised ValueError for an unknown extension
+            # and it escaped the slot; the write also went straight to the
+            # final path.  No extension means PNG (the first filter);
+            # encode in memory and replace atomically, like auto-save.
+            from PIL import Image  # noqa: PLC0415
+
+            path = Path(path_str)
+            if not path.suffix:
+                path = path.with_suffix(".png")
             try:
-                pil_image.save(path_str)
-                self.statusBar().showMessage(
-                    f"Saved {Path(path_str).name}", 3000
-                )
-            except OSError as exc:
+                fmt = Image.registered_extensions().get(path.suffix.lower())
+                if fmt is None:
+                    raise ValueError(f"unknown image format {path.suffix!r}")
+                buf = io.BytesIO()
+                pil_image.save(buf, format=fmt)
+                atomic_write_bytes(path, buf.getvalue())
+                self.statusBar().showMessage(f"Saved {path.name}", 3000)
+            except (OSError, ValueError) as exc:
                 QMessageBox.warning(self, "Save failed", str(exc))
 
     @Slot()
@@ -3656,6 +3782,57 @@ class MainWindow(QMainWindow):
 
         self._start_rig_connect_thread(rig, _on_success, _on_error)
 
+    def _stop_audio_worker_bounded(self, worker: object, timeout_ms: int) -> bool:
+        """Run *worker*'s ``stop()`` on its own thread; wait at most
+        *timeout_ms* for it to finish.  Returns ``False`` on timeout.
+
+        H8: BlockingQueuedConnection would freeze the GUI forever if
+        stream.stop()/close() hangs, so this posts ``stop`` queued and
+        pumps a nested event loop until the worker acknowledges or the
+        timer fires.  Queued signals (and other housekeeping slots) keep
+        running meanwhile.
+
+        v0.6.14 audit UI-M6: the acknowledgement is ``stop_finished``,
+        which every ``stop()`` call emits.  Waiting on ``stopped`` (only
+        emitted when a stream was running) made every swap or quit with
+        capture idle sit out the whole budget and then log a false "wedged
+        worker" warning.  ``stop_finished`` also stays correct if a start
+        is still queued ahead of the stop: the queue is FIFO, so the
+        acknowledgement comes only after that stream has been stopped.
+        """
+        done_signal = getattr(worker, "stop_finished", None)
+        if done_signal is None:  # duck-typed worker without the ack
+            done_signal = worker.stopped  # type: ignore[attr-defined]
+        done = threading.Event()
+
+        def _on_done() -> None:
+            done.set()
+
+        loop = QEventLoop()
+        timer = QTimer()
+        timer.setSingleShot(True)
+        timer.timeout.connect(loop.quit)
+        for slot in (_on_done, loop.quit):
+            try:
+                done_signal.connect(slot, Qt.ConnectionType.QueuedConnection)
+            except Exception:  # noqa: BLE001 — worker already deleted
+                pass
+        QMetaObject.invokeMethod(
+            worker,  # type: ignore[arg-type]
+            "stop",
+            Qt.ConnectionType.QueuedConnection,
+        )
+        timer.start(timeout_ms)
+        if not done.is_set():
+            loop.exec()
+        timer.stop()
+        for slot in (_on_done, loop.quit):
+            try:
+                done_signal.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+        return done.is_set()
+
     def _swap_audio_worker(self, new_worker: object) -> None:
         """Hot-swap the audio input worker on the audio thread.
 
@@ -3696,43 +3873,7 @@ class MainWindow(QMainWindow):
         was_capturing = self._capture_running
 
         _SWAP_STOP_TIMEOUT_MS = 2000  # 2 s is generous for any real stop
-        _stop_completed = threading.Event()
-
-        def _on_swap_stop_done() -> None:
-            _stop_completed.set()
-
-        old.stopped.connect(  # type: ignore[union-attr]
-            _on_swap_stop_done, Qt.ConnectionType.QueuedConnection
-        )
-        QMetaObject.invokeMethod(
-            old,  # type: ignore[arg-type]
-            "stop",
-            Qt.ConnectionType.QueuedConnection,
-        )
-
-        # Pump events for up to _SWAP_STOP_TIMEOUT_MS while waiting for the
-        # worker to finish.  QEventLoop runs nested event processing on
-        # the GUI thread so queued ``stopped`` signals (and any other
-        # housekeeping slots) still fire; a QTimer enforces the hard cap.
-        _swap_loop = QEventLoop()
-        _swap_timer = QTimer()
-        _swap_timer.setSingleShot(True)
-        _swap_timer.timeout.connect(_swap_loop.quit)
-        old.stopped.connect(_swap_loop.quit, Qt.ConnectionType.QueuedConnection)  # type: ignore[union-attr]
-        _swap_timer.start(_SWAP_STOP_TIMEOUT_MS)
-        if not _stop_completed.is_set():
-            _swap_loop.exec()
-        _swap_timer.stop()
-        try:
-            old.stopped.disconnect(_on_swap_stop_done)  # type: ignore[union-attr]
-        except (RuntimeError, TypeError):
-            pass
-        try:
-            old.stopped.disconnect(_swap_loop.quit)  # type: ignore[union-attr]
-        except (RuntimeError, TypeError):
-            pass
-
-        if not _stop_completed.is_set():
+        if not self._stop_audio_worker_bounded(old, _SWAP_STOP_TIMEOUT_MS):
             _log.warning(
                 "Audio worker stop() did not complete within %d ms — "
                 "proceeding with teardown; the wedged worker will leak "
@@ -3799,6 +3940,9 @@ class MainWindow(QMainWindow):
         # the same one-shot _set_capture uses, so start_capture is ordered
         # after the reset instead of racing it on a second worker thread.
         self._start_capture_armed = bool(was_capturing)
+        # The new source may run at a different rate (TCI dictates 48 kHz
+        # whatever Settings says).  Rebuild the decoder before the reset.
+        self._sync_rx_sample_rate()
         self._request_rx_reset.emit()
 
     # === Waterfall ===
@@ -3809,7 +3953,9 @@ class MainWindow(QMainWindow):
         if checked:
             if self._waterfall_window is None:
                 self._waterfall_window = WaterfallWindow(self)
-                self._waterfall_window.set_sample_rate(self._config.sample_rate)
+                # The rate the RX stream actually runs at (TCI dictates
+                # its own), not the configured one.  v0.6.14 audit.
+                self._waterfall_window.set_sample_rate(self._rx_decoder_rate)
                 self._waterfall_window.closed.connect(
                     lambda: self._waterfall_action.setChecked(False)
                 )
@@ -4203,41 +4349,11 @@ class MainWindow(QMainWindow):
         # event loop could exit without running stop() — leaving the
         # TCI ``audio_stop:0;`` unsent and the server still subscribed
         # when ``self._rig.close()`` ran below.  Mirror the H8 pattern:
-        # wait for the worker's ``stopped`` signal with a bounded event
-        # loop before letting the thread quit.
-        _stop_done = threading.Event()
-
-        def _on_close_stop_done() -> None:
-            _stop_done.set()
-
-        try:
-            self._audio_worker.stopped.connect(  # type: ignore[union-attr]
-                _on_close_stop_done, Qt.ConnectionType.QueuedConnection
-            )
-        except Exception:  # noqa: BLE001
-            pass
-        self._request_stop_capture.emit()
-
-        _close_loop = QEventLoop()
-        _close_timer = QTimer()
-        _close_timer.setSingleShot(True)
-        _close_timer.timeout.connect(_close_loop.quit)
-        try:
-            self._audio_worker.stopped.connect(  # type: ignore[union-attr]
-                _close_loop.quit, Qt.ConnectionType.QueuedConnection
-            )
-        except Exception:  # noqa: BLE001
-            pass
-        _close_timer.start(2000)
-        if not _stop_done.is_set():
-            _close_loop.exec()
-        _close_timer.stop()
-        for _slot in (_on_close_stop_done, _close_loop.quit):
-            try:
-                self._audio_worker.stopped.disconnect(_slot)  # type: ignore[union-attr]
-            except (RuntimeError, TypeError):
-                pass
-        if not _stop_done.is_set():
+        # wait for the worker to acknowledge with a bounded event loop
+        # before letting the thread quit.  (v0.6.14 audit UI-M6: the ack is
+        # ``stop_finished``, so an idle worker no longer costs 2 s and a
+        # false "did not complete" warning on every quit.)
+        if not self._stop_audio_worker_bounded(self._audio_worker, 2000):
             # Name the backend: this fires on every quit for some
             # Windows/MME setups, and the old message blamed TCI even for
             # PortAudio users, which sent at least one bug report down the

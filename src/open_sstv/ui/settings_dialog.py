@@ -714,6 +714,22 @@ class SettingsDialog(QDialog):
         else:
             self._remote_qr.setText("(QR unavailable)")
 
+    @staticmethod
+    def _keep_absent_device(combo: QComboBox, saved_name: str | None) -> None:
+        """Keep a saved device selectable while it is unplugged.
+
+        v0.6.14 audit UI-M3: a USB codec that was off or unplugged when
+        Settings opened matched no combo entry, so the combo sat on
+        "System default" and OK, pressed for any unrelated change,
+        overwrote the saved name.  The device is now listed as
+        "<name> (not connected)" with the saved name as its data, so OK
+        keeps it and capture picks it up again once it's plugged back in.
+        """
+        if not saved_name or combo.findData(saved_name) >= 0:
+            return
+        combo.addItem(f"{saved_name} (not connected)", saved_name)
+        combo.setCurrentIndex(combo.count() - 1)
+
     def _build_audio_tab(self) -> QWidget:
         tab = QWidget()
         form = QFormLayout(tab)
@@ -728,6 +744,7 @@ class SettingsDialog(QDialog):
             self._input_devices.append(dev)
             if dev.name == self._config.audio_input_device:
                 self._input_combo.setCurrentIndex(self._input_combo.count() - 1)
+        self._keep_absent_device(self._input_combo, self._config.audio_input_device)
         form.addRow("Input device:", self._input_combo)
 
         # Output device
@@ -756,6 +773,7 @@ class SettingsDialog(QDialog):
                 self._output_combo.setCurrentIndex(
                     self._output_combo.count() - 1
                 )
+        self._keep_absent_device(self._output_combo, self._config.audio_output_device)
         form.addRow("Output device:", self._output_combo)
 
         # Sample rate
@@ -771,11 +789,13 @@ class SettingsDialog(QDialog):
         gain_group = QGroupBox("Software Gain")
         gain_layout = QFormLayout(gain_group)
 
-        # Input gain slider (0–200% in 1% steps)
+        # Input gain slider (0–200% in 1% steps).  round(), not int():
+        # 0.29 * 100 is 28.999…, and truncating it ratcheted the saved gain
+        # down 1 % on every OK (v0.6.14 audit).
         in_row = QHBoxLayout()
         self._input_gain_slider = QSlider(Qt.Orientation.Horizontal)
         self._input_gain_slider.setRange(0, 200)
-        self._input_gain_slider.setValue(int(self._config.audio_input_gain * 100))
+        self._input_gain_slider.setValue(round(self._config.audio_input_gain * 100))
         self._input_gain_label = QLabel(f"{self._config.audio_input_gain * 100:.0f}%")
         self._input_gain_label.setFixedWidth(45)
         self._input_gain_slider.valueChanged.connect(
@@ -791,7 +811,7 @@ class SettingsDialog(QDialog):
         out_row = QHBoxLayout()
         self._output_gain_slider = QSlider(Qt.Orientation.Horizontal)
         self._output_gain_slider.setRange(0, 200 if _overdrive_on else 100)
-        self._output_gain_slider.setValue(int(self._config.audio_output_gain * 100))
+        self._output_gain_slider.setValue(round(self._config.audio_output_gain * 100))
         self._output_gain_label = QLabel(f"{self._config.audio_output_gain * 100:.0f}%")
         self._output_gain_label.setFixedWidth(45)
         self._output_gain_slider.valueChanged.connect(

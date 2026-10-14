@@ -54,6 +54,7 @@ from PySide6.QtWidgets import (
 
 from open_sstv.core.modes import Mode
 from open_sstv.ui.image_gallery import ImageGalleryWidget, _pil_to_pixmap
+from open_sstv.ui.utils import scaled_pixmap_for
 from open_sstv.ui.workers import RX_LISTENING
 
 #: How long without a "still listening" heartbeat before the indicator
@@ -322,12 +323,9 @@ class RxPanel(QWidget):
     def _update_preview_pixmap(self) -> None:
         if self._preview_source is None or self._preview_source.isNull():
             return
+        # v0.6.14 audit: scale at device pixels so HiDPI isn't blurry.
         self._preview.setPixmap(
-            self._preview_source.scaled(
-                self._preview.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
+            scaled_pixmap_for(self._preview_source, self._preview)
         )
 
     @Slot(object, object)

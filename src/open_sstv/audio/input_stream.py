@@ -138,6 +138,14 @@ class InputStreamWorker(QObject):
     stopped = Signal()
     error = Signal(str)
     stream_error = Signal(str)  # emitted on device-loss; triggers clean stop
+    #: Emitted at the end of EVERY ``stop()`` call, after ``stopped`` when
+    #: a stream was running and on its own when there was nothing to stop.
+    #: ``stopped`` keeps meaning "capture ended" for the UI; this is the
+    #: acknowledgement MainWindow's bounded swap/quit waits listen for.
+    #: Without it an idle worker answered nothing, and every swap or quit
+    #: with capture off sat out the 2 s budget and logged a false "wedged
+    #: worker" warning (v0.6.14 audit UI-M6).
+    stop_finished = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -316,8 +324,16 @@ class InputStreamWorker(QObject):
         """Stop the PortAudio stream and flush any buffered chunks.
 
         Idempotent: calling ``stop`` on an already-stopped worker is
-        a no-op and does not emit ``stopped`` a second time.
+        a no-op and does not emit ``stopped`` a second time.  It does
+        emit ``stop_finished``, which every call ends with (v0.6.14
+        audit UI-M6).
         """
+        try:
+            self._stop_stream()
+        finally:
+            self.stop_finished.emit()
+
+    def _stop_stream(self) -> None:
         if self._stream is None:
             return
 

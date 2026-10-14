@@ -715,3 +715,35 @@ def test_pa_finished_callback_sets_device_lost_flag(
     # stop() leaves the flag set; start() will clear it after _pa_reset().
     assert worker._device_lost is True
     assert worker.is_running is False
+
+
+# === v0.6.14 audit UI-M6: stop() always acknowledges ===
+
+
+def test_stop_without_start_still_emits_stop_finished(qapp) -> None:
+    """Swap and quit wait for an acknowledgement of their stop() request.
+    An idle worker used to emit nothing, so they sat out the full 2 s
+    timeout and logged a false "wedged worker" warning."""
+    worker = InputStreamWorker()
+    log = _record_signals(worker)
+    done: list[bool] = []
+    worker.stop_finished.connect(lambda: done.append(True))
+
+    worker.stop()
+
+    assert done == [True]
+    assert log["stopped"] == [], "stopped still means a stream was stopped"
+
+
+def test_stop_emits_stop_finished_after_stopped(
+    qapp, fake_stream_cls: type[_FakeStream]
+) -> None:
+    worker = InputStreamWorker()
+    events: list[str] = []
+    worker.stopped.connect(lambda: events.append("stopped"))
+    worker.stop_finished.connect(lambda: events.append("finished"))
+    worker.start()
+
+    worker.stop()
+
+    assert events == ["stopped", "finished"]
