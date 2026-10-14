@@ -23,7 +23,7 @@ import platformdirs
 import tomli_w
 
 from open_sstv.config.schema import AppConfig
-from open_sstv.fsutil import atomic_write_bytes
+from open_sstv.fsutil import atomic_write_bytes, sweep_stale_temps, temp_glob
 
 _APP_NAME = "open_sstv"
 _CONFIG_FILENAME = "config.toml"
@@ -91,7 +91,13 @@ def _serialize_for_toml(value: Any) -> Any:
 
 
 def _cleanup_stale_tmp(path: Path) -> None:
-    """Delete ``<path>.tmp`` if it exists.
+    """Delete orphaned save temps beside *path*.
+
+    v0.6.14 audit: ``save_config`` writes through
+    ``fsutil.atomic_write_bytes``, whose temps are
+    ``.config.toml.<random>.tmp`` — this sweep still only looked for the
+    pre-fsutil ``config.toml.tmp`` and so never found anything.  It now
+    sweeps both shapes (the legacy name may linger from an old build).
 
     Called by ``load_config`` to opportunistically clean up the tmp file
     left behind when a previous ``save_config`` was killed between
@@ -106,6 +112,8 @@ def _cleanup_stale_tmp(path: Path) -> None:
     Any error from ``unlink`` is logged at debug and swallowed — a
     stale tmp blocking nothing is acceptable; the load must proceed.
     """
+    if path.parent.is_dir():
+        sweep_stale_temps(path.parent, temp_glob(path.name))
     tmp = path.with_suffix(path.suffix + ".tmp")
     if not tmp.exists():
         return

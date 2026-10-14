@@ -525,3 +525,17 @@ def test_gallery_extra_dirs_bad_value_coerced(tmp_path: Path) -> None:
     # A hand-edited scalar must not crash load — __post_init__ resets it.
     cfg = AppConfig(gallery_extra_dirs="oops")  # type: ignore[arg-type]
     assert cfg.gallery_extra_dirs == []
+
+
+def test_stale_fsutil_temp_is_swept_on_load(tmp_path: Path) -> None:
+    """v0.6.14 audit: the sweep looked for ``config.toml.tmp`` while
+    fsutil writes ``.config.toml.<random>.tmp`` — it never fired."""
+    import os
+
+    p = tmp_path / "config.toml"
+    save_config(AppConfig(callsign="W0AEZ"), path=p)
+    stale = tmp_path / ".config.toml.x1y2z3.tmp"
+    stale.write_text("half")
+    os.utime(stale, (1_000_000_000, 1_000_000_000))
+    assert load_config(path=p).callsign == "W0AEZ"
+    assert not stale.exists()

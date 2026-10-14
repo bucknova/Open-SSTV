@@ -15,10 +15,18 @@ saves of the same file interleave.  (2026-10 stability audit.)
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
+
+#: A temp file younger than this may belong to a save still in flight
+#: (another thread or process); never sweep it.
+STALE_TEMP_MIN_AGE_S: float = 60.0
 
 
 def atomic_write_bytes(path: Path, data: bytes) -> None:
@@ -69,4 +77,45 @@ def _fsync_directory(directory: Path) -> None:
         os.close(dir_fd)
 
 
-__all__ = ["atomic_write_bytes"]
+def temp_glob(name: str) -> str:
+    """Glob pattern matching ``atomic_write_bytes`` temps for file *name*
+    (``.<name>.<random>.tmp``)."""
+    return f".{name}.*.tmp"
+
+
+def sweep_stale_temps(
+    directory: Path,
+    pattern: str,
+    *,
+    min_age_s: float = STALE_TEMP_MIN_AGE_S,
+) -> int:
+    """Delete files in *directory* matching *pattern* older than *min_age_s*.
+
+    v0.6.14 audit: the config and template stale-tmp sweeps still looked
+    for the old fixed ``<name>.tmp`` names after the writers moved to
+    ``atomic_write_bytes``'s ``.<name>.<random>.tmp``, so a temp orphaned
+    by a hard kill was never cleaned up.  Callers pass ``temp_glob(...)``.
+    The age floor keeps a sweep from deleting a temp another save is
+    still writing.  Best effort: errors are logged and swallowed.
+    Returns the number of files removed.
+    """
+    removed = 0
+    now = time.time()
+    try:
+        candidates = list(Path(directory).glob(pattern))
+    except OSError as exc:
+        _log.debug("Stale-temp sweep of %s failed: %s", directory, exc)
+        return 0
+    for tmp in candidates:
+        try:
+            if now - tmp.stat().st_mtime < min_age_s:
+                continue
+            tmp.unlink()
+            removed += 1
+            _log.info("Removed stale temp file: %s", tmp)
+        except OSError as exc:
+            _log.debug("Could not remove stale temp %s: %s", tmp, exc)
+    return removed
+
+
+__all__ = ["atomic_write_bytes", "sweep_stale_temps", "temp_glob"]
