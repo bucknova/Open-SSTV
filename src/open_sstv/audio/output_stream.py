@@ -167,6 +167,22 @@ _HEALTH_CHECK_INTERVAL_S = 1.0
 #: enough not to busy-loop.
 _POLL_INTERVAL_S = 0.05
 
+#: v0.6.14 audit T-M6: abort when the playback position hasn't moved for
+#: this long.  A device that stops pulling audio (USB codec unplugged
+#: mid-TX on some host APIs, a suspended PipeWire node) never raises and
+#: never finishes, so without this the TX sat keyed until the playback
+#: watchdog — about 8 minutes on Pasokon P7.  Driver buffers are tens of
+#: milliseconds, so 2 s of no progress is never a healthy stream.
+_STALL_TIMEOUT_S = 2.0
+
+#: Initial size of the callback's gain scratch buffer, in frames.  Grown
+#: (once) if a driver ever asks for a bigger block — see T-L7 below.
+_GAIN_SCRATCH_FRAMES = 8192
+
+
+class PlaybackStalledError(RuntimeError):
+    """The output device stopped consuming audio mid-playback (T-M6)."""
+
 
 def _describe_device(device: object, route_to_pipewire_sink: PipeWireSink | None = None) -> str:
     """Best-effort ``name (host API)`` for logs.  Never raises."""
@@ -345,43 +361,56 @@ def play_blocking(
         finished = threading.Event()
         #: Handoff from the real-time audio callback to the polling loop
         #: below — see the module docstring and ``_CALLBACK_QUEUE_SIZE``.
-        cb_queue: queue.Queue[tuple[np.ndarray | None, int, int]] = queue.Queue(
+        cb_queue: queue.Queue[tuple[int, int, float]] = queue.Queue(
             maxsize=_CALLBACK_QUEUE_SIZE
         )
         want_callbacks = progress_callback is not None or chunk_callback is not None
+        #: Count of callbacks that reported status flags (underflow etc.),
+        #: logged from the polling loop — never from the callback (T-L7).
+        status_flags_seen = 0
+        # v0.6.14 audit T-L7: no logging and no per-callback numpy
+        # allocation on PortAudio's real-time thread.  The live-gain path
+        # scales into this preallocated buffer instead of building three
+        # temporaries per callback; the waterfall chunk is sliced from
+        # ``samples`` by the polling loop instead of copied here.
+        is_int = np.issubdtype(samples.dtype, np.integer)
+        if is_int:
+            _info = np.iinfo(samples.dtype)
+            clip_lo, clip_hi = float(_info.min), float(_info.max)
+        else:
+            clip_lo, clip_hi = -1.0, 1.0
+        gain_scratch = (
+            np.empty(_GAIN_SCRATCH_FRAMES, dtype=np.float64)
+            if gain_provider is not None
+            else None
+        )
 
         def _audio_callback(outdata, frames, _time_info, status) -> None:
-            nonlocal position
+            nonlocal position, status_flags_seen, gain_scratch
             if status:
                 # Non-fatal (e.g. an output underflow blip) — PortAudio
-                # already handles the underlying recovery; just note it.
-                _log.debug("TX audio callback status flags: %s", status)
+                # already handles the underlying recovery; just count it.
+                status_flags_seen += 1
             if stop_event is not None and stop_event.is_set():
                 outdata.fill(0)
                 raise sd.CallbackStop
-            end = min(position + frames, total)
-            n = end - position
-            chunk = samples[position:end]
-            if gain_provider is not None:
-                gain = gain_provider()
-                if gain != 1.0:
-                    # Clip to the sample dtype's range so float math
-                    # doesn't wrap on int16 overflow. We mirror the
-                    # pre-scale path in workers.py for consistency.
-                    if np.issubdtype(chunk.dtype, np.integer):
-                        info = np.iinfo(chunk.dtype)
-                        chunk = np.clip(
-                            chunk.astype(np.float64) * gain,
-                            info.min,
-                            info.max,
-                        ).astype(chunk.dtype)
-                    else:
-                        chunk = np.clip(
-                            chunk.astype(np.float64) * gain,
-                            -1.0,
-                            1.0,
-                        ).astype(chunk.dtype)
-            outdata[:n, 0] = chunk
+            start = position
+            end = min(start + frames, total)
+            n = end - start
+            chunk = samples[start:end]
+            gain = gain_provider() if gain_provider is not None else 1.0
+            if gain != 1.0 and gain_scratch is not None:
+                # Clip to the sample dtype's range so float math
+                # doesn't wrap on int16 overflow. We mirror the
+                # pre-scale path in workers.py for consistency.
+                if n > gain_scratch.size:  # rare: driver asked for a bigger block
+                    gain_scratch = np.empty(n, dtype=np.float64)
+                buf = gain_scratch[:n]
+                np.multiply(chunk, gain, out=buf)
+                np.clip(buf, clip_lo, clip_hi, out=buf)
+                outdata[:n, 0] = buf  # casts back to the stream dtype
+            else:
+                outdata[:n, 0] = chunk
             if n < frames:
                 outdata[n:, 0] = 0
             position = end
@@ -390,11 +419,23 @@ def play_blocking(
                 # dropping samples from) the real-time audio thread over —
                 # the polling loop will catch up on the next entries.
                 with contextlib.suppress(queue.Full):
-                    cb_queue.put_nowait(
-                        (chunk.copy() if chunk_callback is not None else None, position, total)
-                    )
+                    cb_queue.put_nowait((start, end, gain))
             if position >= total:
                 raise sd.CallbackStop
+
+        def _deliver(start: int, end: int, gain: float) -> None:
+            """Fire the UI callbacks for one played block (polling thread)."""
+            if chunk_callback is not None:
+                chunk = samples[start:end]
+                if gain != 1.0:
+                    chunk = np.clip(
+                        chunk.astype(np.float64) * gain, clip_lo, clip_hi
+                    ).astype(samples.dtype)
+                else:
+                    chunk = chunk.copy()
+                chunk_callback(chunk)
+            if progress_callback is not None:
+                progress_callback(end, total)
 
         global _active_stream, _active_device_desc
         desc = _describe_device(device, route_to_pipewire_sink)
@@ -430,10 +471,43 @@ def play_blocking(
                 route_active_stream_to_sink(route_to_pipewire_sink, before_sink_input_ids)
             try:
                 _last_check = time.monotonic()
+                # T-M6 stall clock starts *after* the (possibly slow)
+                # pactl routing above, so routing time can't count.
+                _last_pos = position
+                _last_progress_t = time.monotonic()
+                _flags_logged = 0
                 while not finished.is_set():
                     if stop_event is not None and stop_event.is_set():
                         stream.abort()
                         break
+
+                    if status_flags_seen != _flags_logged:
+                        _flags_logged = status_flags_seen
+                        _log.debug(
+                            "TX audio callback reported status flags "
+                            "(%d callbacks so far)", _flags_logged,
+                        )
+
+                    # v0.6.14 audit T-M6: playback stall detection.  Once
+                    # every sample has been handed over (position == total)
+                    # the stream is just draining its buffers, which is
+                    # not a stall.
+                    now = time.monotonic()
+                    if position != _last_pos:
+                        _last_pos = position
+                        _last_progress_t = now
+                    elif position < total and now - _last_progress_t >= _STALL_TIMEOUT_S:
+                        stream.abort()
+                        _log.error(
+                            "TX playback stalled: no audio consumed for %.1f s "
+                            "at sample %d/%d (%s)",
+                            now - _last_progress_t, position, total, desc,
+                        )
+                        raise PlaybackStalledError(
+                            f"audio output stopped consuming samples for "
+                            f"{_STALL_TIMEOUT_S:.0f} s ({desc}) — device "
+                            "unplugged or suspended?"
+                        )
 
                     # Periodic health check — e.g. a serial-port ping to
                     # detect USB unplug mid-TX.  The callable emits any
@@ -453,26 +527,20 @@ def play_blocking(
                             break
 
                     try:
-                        chunk, played, chunk_total = cb_queue.get(timeout=_POLL_INTERVAL_S)
+                        start, end, gain = cb_queue.get(timeout=_POLL_INTERVAL_S)
                     except queue.Empty:
                         continue
-                    if chunk_callback is not None and chunk is not None:
-                        chunk_callback(chunk)
-                    if progress_callback is not None:
-                        progress_callback(played, chunk_total)
+                    _deliver(start, end, gain)
 
                 # Drain whatever's left in the queue so the final
                 # progress/chunk update isn't silently lost when we broke
                 # out (or finished naturally) between poll iterations.
                 while True:
                     try:
-                        chunk, played, chunk_total = cb_queue.get_nowait()
+                        start, end, gain = cb_queue.get_nowait()
                     except queue.Empty:
                         break
-                    if chunk_callback is not None and chunk is not None:
-                        chunk_callback(chunk)
-                    if progress_callback is not None:
-                        progress_callback(played, chunk_total)
+                    _deliver(start, end, gain)
             finally:
                 with _tx_state_lock:
                     _active_stream = None
@@ -540,4 +608,4 @@ def stop() -> None:
             _log.warning("output_stream.stop: abort failed: %s (%s)", exc, desc)
 
 
-__all__ = ["is_tx_active", "play_blocking", "run_if_tx_idle", "stop"]
+__all__ = ["PlaybackStalledError", "is_tx_active", "play_blocking", "run_if_tx_idle", "stop"]

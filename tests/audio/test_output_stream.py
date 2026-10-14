@@ -596,3 +596,137 @@ def test_chunk_callback_receives_every_chunk() -> None:
     for chunk in seen:
         assert chunk.ndim == 1
         assert int(chunk[0]) == 777
+
+
+# --- v0.6.14 audit T-M6 / T-L7 ---
+
+
+class _StallingStream(_FakeCallbackStream):
+    """Delivers *n_good* callbacks, then the device stops pulling audio:
+    no more callbacks, no CallbackStop, no finished_callback — what a USB
+    codec unplugged mid-TX looks like on some host APIs."""
+
+    def __init__(self, *, n_good: int = 2, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._n_good = n_good
+
+    def _pump(self) -> None:
+        for _ in range(self._n_good):
+            outdata = np.zeros((self._blocksize, 1), dtype=self._dtype)
+            self._callback(outdata, self._blocksize, None, None)
+            self.writes.append(outdata.copy())
+        # Wedged: wait to be aborted, never finish on our own.
+        self._stop_flag.wait(10)
+        if self._finished_callback is not None:
+            self._finished_callback()
+
+
+def test_playback_stall_aborts_instead_of_waiting_for_watchdog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T-M6: no position advance for ``_STALL_TIMEOUT_S`` must abort the
+    stream and raise, so the TX worker unkeys within seconds instead of
+    holding PTT until the playback watchdog (minutes on long modes)."""
+    monkeypatch.setattr(output_stream, "_STALL_TIMEOUT_S", 0.2)
+    created: list[_StallingStream] = []
+
+    def factory(**kwargs):
+        fake = _StallingStream(**kwargs)
+        created.append(fake)
+        return fake
+
+    sr = 48000
+    samples = np.zeros(sr * 60, dtype=np.int16)
+    t0 = time.monotonic()
+    with patch("open_sstv.audio.output_stream.sd.OutputStream", side_effect=factory):
+        with pytest.raises(output_stream.PlaybackStalledError):
+            output_stream.play_blocking(
+                samples, sr, progress_callback=lambda *_: None,
+            )
+    assert time.monotonic() - t0 < 5.0
+    assert created[0].aborted
+    assert not output_stream.is_tx_active()
+
+
+def test_draining_tail_is_not_a_stall(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Once every sample was handed over the stream only drains its
+    buffers — position stops moving legitimately and must not trip T-M6."""
+    monkeypatch.setattr(output_stream, "_STALL_TIMEOUT_S", 0.05)
+
+    class _SlowFinish(_FakeCallbackStream):
+        def _pump(self) -> None:
+            while True:
+                outdata = np.zeros((self._blocksize, 1), dtype=self._dtype)
+                try:
+                    self._callback(outdata, self._blocksize, None, None)
+                except sd.CallbackStop:
+                    break
+            time.sleep(0.3)  # device latency drain, well past the timeout
+            if self._finished_callback is not None:
+                self._finished_callback()
+
+    with patch(
+        "open_sstv.audio.output_stream.sd.OutputStream",
+        side_effect=lambda **kw: _SlowFinish(**kw),
+    ):
+        output_stream.play_blocking(
+            np.zeros(4800 * 2, dtype=np.int16), 48000,
+            progress_callback=lambda *_: None,
+        )
+
+
+def test_callback_does_not_log(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T-L7: status flags are counted in the RT callback and logged from
+    the polling thread — never via ``logging`` on PortAudio's thread."""
+    callback_threads: set[int] = set()
+    log_threads: list[int] = []
+
+    real_debug = output_stream._log.debug
+
+    def _spy_debug(*a, **k):
+        log_threads.append(threading.get_ident())
+        return real_debug(*a, **k)
+
+    monkeypatch.setattr(output_stream._log, "debug", _spy_debug)
+
+    class _FlaggingStream(_FakeCallbackStream):
+        def _pump(self) -> None:
+            callback_threads.add(threading.get_ident())
+            try:
+                while True:
+                    outdata = np.zeros((self._blocksize, 1), dtype=self._dtype)
+                    try:
+                        self._callback(outdata, self._blocksize, None, "output underflow")
+                    except sd.CallbackStop:
+                        break
+                    time.sleep(0.01)
+            finally:
+                if self._finished_callback is not None:
+                    self._finished_callback()
+
+    with patch(
+        "open_sstv.audio.output_stream.sd.OutputStream",
+        side_effect=lambda **kw: _FlaggingStream(**kw),
+    ):
+        output_stream.play_blocking(
+            np.zeros(4800 * 5, dtype=np.int16), 48000,
+            progress_callback=lambda *_: None,
+            gain_provider=lambda: 0.5,
+        )
+    assert log_threads, "status flags should still be logged (from the poll loop)"
+    assert not callback_threads & set(log_threads)
+
+
+def test_chunk_callback_sees_live_gain() -> None:
+    """The waterfall chunk is now sliced in the polling loop (T-L7); it
+    must still reflect the gain that was applied to that block."""
+    samples = np.full(4800 * 2, 10_000, dtype=np.int16)
+    seen: list[np.ndarray] = []
+    patcher, _created = _patch_output_stream()
+    with patcher:
+        output_stream.play_blocking(
+            samples, 48000,
+            chunk_callback=seen.append,
+            gain_provider=lambda: 0.5,
+        )
+    assert [int(c.max()) for c in seen] == [5000, 5000]
