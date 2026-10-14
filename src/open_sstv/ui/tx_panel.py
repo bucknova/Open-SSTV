@@ -720,11 +720,17 @@ class TxPanel(QWidget):
     def _update_preview_pixmap(self) -> None:
         if self._preview_source is None or self._preview_source.isNull():
             return
+        # HiDPI (v0.6.14 audit UI nit): scaling to the *logical* label size
+        # left a Retina preview at half resolution, upscaled and blurry.
+        # Scale to device pixels and tag the pixmap with the ratio so Qt
+        # draws it 1:1.
+        dpr = self._preview.devicePixelRatioF() or 1.0
         scaled = self._preview_source.scaled(
-            self._preview.size(),
+            self._preview.size() * dpr,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
+        scaled.setDevicePixelRatio(dpr)
         annotated = self._paint_target_outline(scaled)
         self._preview.setPixmap(annotated)
         self._update_tx_target_status()
@@ -747,8 +753,11 @@ class TxPanel(QWidget):
         tgt_aspect = tw / th
         aspect_match = abs(src_aspect - tgt_aspect) / tgt_aspect < 0.01
 
-        pw = pixmap.width()
-        ph = pixmap.height()
+        # QPainter on a pixmap with a devicePixelRatio works in logical
+        # coordinates, so measure the pixmap in logical pixels too.
+        dpr = pixmap.devicePixelRatio() or 1.0
+        pw = int(round(pixmap.width() / dpr))
+        ph = int(round(pixmap.height() / dpr))
         if tgt_aspect > src_aspect:
             box_w = pw
             box_h = int(round(pw / tgt_aspect))

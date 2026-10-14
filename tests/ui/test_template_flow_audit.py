@@ -253,3 +253,25 @@ def test_editor_close_clean_does_not_ask(
     monkeypatch.setattr(ed, "_ask_save_changes", _fail)
     ed.reject()
     assert not ed.isVisible()
+
+
+# --- HiDPI preview (v0.6.14 audit UI nit) ----------------------------------
+
+
+def test_preview_pixmap_is_rendered_at_device_pixel_ratio(
+    panel: TxPanel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    panel._preview.resize(400, 300)
+    monkeypatch.setattr(type(panel._preview), "devicePixelRatioF", lambda self: 2.0)
+    # QLabel.pixmap() re-rasterises to the real (offscreen, 1.0) screen
+    # ratio, so capture what the panel hands to setPixmap instead.
+    shown: list = []
+    monkeypatch.setattr(
+        type(panel._preview), "setPixmap", lambda self, p: shown.append(p)
+    )
+    panel._update_preview_pixmap()
+    pix = shown[-1]
+    assert pix.devicePixelRatio() == 2.0
+    # Device pixels ≈ 2× the logical fit (the 200x100 photo fits 400 wide).
+    assert pix.width() == 800
+    assert pix.height() == 400
