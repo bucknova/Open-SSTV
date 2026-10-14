@@ -436,3 +436,22 @@ class TestSdrDataModes:
     @pytest.mark.parametrize("protocol", [TCI_PROTOCOL, FLEX_PROTOCOL])
     def test_fm_has_no_data_variant(self, protocol: str) -> None:
         assert resolve_tune_mode("FM", protocol, "data") == "FM"
+
+
+class TestV0614BandPlanNit:
+    """v0.6.14 audit: US 75 m spot added; restricted spots carry a note;
+    nothing removed (7.171 is the worldwide calling frequency)."""
+
+    def _by_freq(self) -> dict:
+        return {e.freq_hz: e for e in SSTV_BAND_PLAN}
+
+    def test_us_75m_spot_present_and_unrestricted(self) -> None:
+        e = self._by_freq()[3_845_000]
+        assert e.rig_mode == "LSB"
+        assert not e.note
+
+    def test_existing_spots_kept_with_licence_notes(self) -> None:
+        by = self._by_freq()
+        for hz in (7_171_000, 3_733_000, 3_740_000):
+            assert hz in by
+            assert "licence" in by[hz].note

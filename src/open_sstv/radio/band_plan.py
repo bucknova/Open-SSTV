@@ -43,6 +43,9 @@ class BandEntry:
     region:
         Informal region tag — ``"HF"``, ``"VHF"``, or ``"UHF"``.  Used
         to insert separators between groups in the menu.
+    note:
+        Optional licence-privilege caveat shown as the menu tooltip
+        (v0.6.14 audit band-plan nit).  Empty for unrestricted entries.
     """
 
     label: str
@@ -51,6 +54,22 @@ class BandEntry:
     passband_hz: int
     primary: bool = False
     region: str = "HF"
+    note: str = ""
+
+
+#: v0.6.14 audit band-plan nit: these calling frequencies sit in segments
+#: some licence classes can't use for phone/image.  Shown as tooltips, not
+#: enforced — privileges vary by country and class.
+_NOTE_US_40M = (
+    "Worldwide SSTV calling frequency.  US: inside the 40 m phone segment "
+    "for Advanced/Extra only (General phone starts at 7.175 MHz) — check "
+    "your licence privileges."
+)
+_NOTE_US_80M = (
+    "Outside US General-class phone privileges (General phone on 75 m is "
+    "3.800–4.000 MHz; 3.845 MHz is the usual US SSTV spot) — check your "
+    "licence privileges."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +122,7 @@ SSTV_BAND_PLAN: list[BandEntry] = [
         rig_mode="LSB",
         passband_hz=2_700,
         region="HF",
+        note=_NOTE_US_40M,
     ),
     BandEntry(
         label="40m — 7.165 MHz (EU)",
@@ -117,10 +137,21 @@ SSTV_BAND_PLAN: list[BandEntry] = [
         rig_mode="LSB",
         passband_hz=2_700,
         region="HF",
+        note=_NOTE_US_80M,
     ),
     BandEntry(
         label="80m — 3.740 MHz (EU)",
         freq_hz=3_740_000,
+        rig_mode="LSB",
+        passband_hz=2_700,
+        region="HF",
+        note=_NOTE_US_80M,
+    ),
+    BandEntry(
+        # v0.6.14 audit: the US 75 m SSTV activity frequency, inside
+        # General-class phone privileges.
+        label="75m — 3.845 MHz (US)",
+        freq_hz=3_845_000,
         rig_mode="LSB",
         passband_hz=2_700,
         region="HF",

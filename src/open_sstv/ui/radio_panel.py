@@ -138,13 +138,18 @@ class RadioPanel(QWidget):
     def _build_band_menu(self) -> QMenu:
         """Build the SSTV band-plan popup menu from ``SSTV_BAND_PLAN``."""
         menu = QMenu(self)
+        # v0.6.14 audit: licence-privilege notes ride on the tooltips.
+        menu.setToolTipsVisible(True)
         last_region: str = ""
         for entry in SSTV_BAND_PLAN:
             if last_region and entry.region != last_region:
                 menu.addSeparator()
             last_region = entry.region
 
-            action = QAction(entry.label, self)
+            label = f"{entry.label}  ⚠" if entry.note else entry.label
+            action = QAction(label, self)
+            if entry.note:
+                action.setToolTip(entry.note)
             # Capture loop variable by default-arg binding.
             action.triggered.connect(
                 lambda _checked=False,
