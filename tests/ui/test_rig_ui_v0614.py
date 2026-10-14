@@ -92,6 +92,38 @@ def test_remote_tx_failing_before_keying_returns_plane_to_idle(window: MainWindo
     assert calls == ["idle"]
 
 
+def test_remote_tx_busy_includes_dispatched_but_unstarted_local_tx(
+    window: MainWindow,
+) -> None:
+    """v0.6.14 sweep: a local TX dispatched (queued slot not yet run, worker
+    still idle) must read busy to the control plane's HTTP thread."""
+    window._tx_worker.note_tx_requested = lambda: None  # type: ignore[method-assign]
+    window._request_test_tone = MagicMock()  # slot never runs: worker idle
+    assert window._tx_worker.wait_for_idle(0.0)
+    assert window._remote_tx_busy() is False
+    window._on_test_tone_requested()
+    assert window._tx_requests_in_flight == 1
+    result: list[bool] = []
+    t = threading.Thread(target=lambda: result.append(window._remote_tx_busy()))
+    t.start()
+    t.join()
+    assert result == [True]
+    window._on_tx_finished()
+    assert window._remote_tx_busy() is False
+
+
+def test_remote_request_refused_while_local_tx_queued(window: MainWindow) -> None:
+    plane = window._remote_control
+    plane._enabled = lambda: True  # type: ignore[method-assign]
+    plane._rig_ready = lambda: True  # type: ignore[method-assign]
+    assert plane.take_lease("c1").ok
+    window._tx_requests_in_flight = 1
+    res = plane.request("c1", "img", "robot36")
+    assert not res.ok and res.error == "busy"
+    window._tx_requests_in_flight = 0
+    assert plane.request("c1", "img", "robot36").ok
+
+
 # --- T-M1: user disconnect while TX unwinding defers teardown ---
 
 

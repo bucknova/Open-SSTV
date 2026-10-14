@@ -812,7 +812,11 @@ class MainWindow(QMainWindow):
             # then keyed for the remote image with the plane reporting idle
             # — abort answering "busy", reclaim_local a no-op, and the
             # dead-man's-switch never armed.
-            tx_busy=lambda: not self._tx_worker.wait_for_idle(0.0),
+            # v0.6.14 sweep: also busy for a TX dispatched but not yet
+            # started (worker still idle, its queued slot not run) — read
+            # via the thread-safe Event mirror, as this runs on the HTTP
+            # thread.
+            tx_busy=self._remote_tx_busy,
         )
         self._remote_tx_request.connect(
             self._on_remote_tx_request, Qt.ConnectionType.QueuedConnection
@@ -885,7 +889,9 @@ class MainWindow(QMainWindow):
         #: controls lock when this goes above zero (at request time, not
         #: at ``transmission_started``) and unlock only when it returns to
         #: zero — i.e. when the worker is idle, unkey retries included.
-        self._tx_requests_in_flight: int = 0
+        #: A property: every write also updates ``_tx_in_flight_evt``.
+        self._tx_in_flight_evt = threading.Event()
+        self._tx_requests_in_flight = 0
         #: Token for the 500 ms "let rigctld bind" delay after an auto-
         #: launch; a Cancel or a second Connect invalidates it (UI low).
         self._pending_rigctld_connect: object | None = None
@@ -2621,6 +2627,31 @@ class MainWindow(QMainWindow):
         self._rx_gate_raised = True  # v0.6.14 audit: see _schedule_rx_resume
         self._request_rx_gate.emit(True)
         self._rx_panel.set_status("RX paused during TX.")
+
+    @property
+    def _tx_requests_in_flight(self) -> int:
+        return self._tx_in_flight_count
+
+    @_tx_requests_in_flight.setter
+    def _tx_requests_in_flight(self, count: int) -> None:
+        # GUI thread only.  v0.6.14 sweep: mirror "> 0" into an Event so
+        # the remote control plane (HTTP thread) can read it safely.
+        self._tx_in_flight_count = count
+        if count > 0:
+            self._tx_in_flight_evt.set()
+        else:
+            self._tx_in_flight_evt.clear()
+
+    def _remote_tx_busy(self) -> bool:
+        """``ControlPlane.tx_busy``: called on the HTTP thread.
+
+        Busy while any TX is dispatched (GUI bookkeeping, via the Event
+        mirror) or the worker is not idle.  v0.6.14 sweep: the worker-idle
+        check alone answered "not busy" for a local TX whose queued
+        ``transmit`` slot hadn't started yet, so a remote request could be
+        granted and queue behind it.
+        """
+        return self._tx_in_flight_evt.is_set() or not self._tx_worker.wait_for_idle(0.0)
 
     def _begin_tx_request(self) -> None:
         """Bookkeeping for one TX dispatched to the worker (GUI thread).
