@@ -147,6 +147,18 @@ _HARD_SYNC_LOWER_HZ: float = 1300.0
 _MIN_LINE_SYNC_RATIO: float = 0.5
 _MAX_LINE_SYNC_RATIO: float = 2.0
 
+#: Systematic delay of the trailing-edge (sync → 1500 Hz porch) threshold
+#: crossing on the bandpassed IF track, added back when a sync start is
+#: inferred as ``run_end − nominal_length`` (see ``find_sync_candidates``).
+#: Measured on encoder audio across all mode families: −2 … −4.6 samples
+#: at 48 kHz before this correction.
+_TRAILING_EDGE_LAG_S: float = 0.00008
+
+#: Furthest the trailing-edge estimate may move a sync start ahead of its
+#: leading-edge threshold crossing. The leading edge is ≤ ~0.25 ms late on
+#: clean audio; anything beyond this means the pulse is not nominal length.
+_MAX_EDGE_BACKDATE_S: float = 0.0003
+
 #: Allowed slack on the inter-line spacing when validating consecutive
 #: candidates. 25 % is generous enough to absorb any plausible TX/RX clock
 #: drift while still rejecting spurious mid-line sync-band crossings.
@@ -263,24 +275,47 @@ def find_sync_candidates(
     if not runs:
         return []
 
-    # v0.6.14 audit (live line-0 offset): a run that is already in
-    # progress at ``start_idx`` has no observable leading edge — its start
-    # is just the slice boundary. That is always the case for line 0 of a
-    # LINE_START mode, whose sync abuts the 1200 Hz VIS stop bit, and for
-    # a sync straddling the incremental decoder's search-window start.
-    # Every *other* run's start is a threshold crossing partway down the
-    # porch→sync ramp (~0.3 ms late at 48 kHz), so the clipped run read
-    # ~0.3 ms early relative to the rest of the grid — about one pixel on
-    # Martin M4 for the live (non-slant-fitted) decoder. Back-date a
-    # clipped run from its (observable) trailing edge using the typical
-    # length of the runs that do have both edges.
-    first_start, first_end = runs[0]
-    if first_start == 0 and sync_mask[0]:
-        full = [e - b for b, e in runs[1:]]
-        typical = float(np.median(full)) if full else sync_samples
-        runs[0] = (int(round(first_end - typical)), first_end)
-
-    return [start_idx + run_start for run_start, _ in runs]
+    # Where each sync *starts*. The threshold crossing of the leading
+    # edge is a biased estimate: the threshold sits near the sync floor
+    # (~1310 Hz) and the bandpassed IF falls slowly (~1 ms ramp), so it is
+    # crossed late — ~0.2 ms late when the edge comes down from image
+    # content (Scottie / Wraase B, PD Y1, Robot 36 chroma), ~0.03 ms when
+    # it comes down from a 1500 Hz porch (Martin). Every mode has a
+    # 1500 Hz porch *after* its sync, so the trailing edge (1200 → 1500)
+    # is the same shape everywhere: ``end − nominal_length`` lands within
+    # ~0.1 ms of the true start regardless of image content (measured SD
+    # 0.4–1.6 samples vs. 1–4 for the leading edge), and a fixed small
+    # correction removes the rest.
+    #
+    # The trailing estimate may only move a start *earlier* than the
+    # leading-edge crossing (which is never early on a clean edge), and by
+    # at most ``_MAX_EDGE_BACKDATE_S`` — so a transmitter whose sync is
+    # shorter or longer than nominal degrades to the old estimate instead
+    # of shifting the whole image.
+    #
+    # This matters for Scottie's spec layout (v0.6.14 audit D-L3), where
+    # B runs straight into the sync with no porch: a 0.2 ms-late grid
+    # read the sync into B's last pixel. It also fixes the v0.6.14 audit
+    # "live line-0 offset" (~0.3 ms, ~1 px on Martin M4): a run already in
+    # progress at ``start_idx`` — line 0 of a LINE_START mode abuts the
+    # 1200 Hz VIS stop bit — has no leading edge at all, so it now takes
+    # its start from the trailing edge like every other line.
+    lag = _TRAILING_EDGE_LAG_S * fs
+    back = _MAX_EDGE_BACKDATE_S * fs
+    starts: list[int] = []
+    for run_start, run_end in runs:
+        if run_end >= sliced.size:
+            # No trailing edge yet (run cut off by the buffer end).
+            starts.append(run_start)
+            continue
+        est = run_end - sync_samples + lag
+        if run_start == 0 and sync_mask[0]:
+            # Leading edge clipped by the slice start: trailing edge only.
+            starts.append(int(round(est)))
+            continue
+        est = max(run_start - back, est)
+        starts.append(int(round(min(float(run_start), est))))
+    return [start_idx + st for st in starts]
 
 
 def first_sync_offset_samples(spec: ModeSpec, fs: int) -> float:

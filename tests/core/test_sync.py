@@ -451,19 +451,19 @@ def test_robot36_real_audio_missed_leading_sync_keeps_rows_and_parity(missing) -
     assert max(abs(a - b) for a, b in zip(got, clean, strict=True)) <= 3
 
 
-# === v0.6.14 audit: line-0 run clipped by the search start ===
+# === v0.6.14 audit: sync start timing (line-0 offset, D-L3) ===
 
 
-def test_clipped_leading_run_is_backdated_to_match_the_grid() -> None:
+def test_clipped_leading_run_takes_start_from_trailing_edge() -> None:
     """A run in progress at ``start_idx`` (line 0 abutting the VIS stop
-    bit) has no visible leading edge; its start must be inferred from the
-    trailing edge so it's on the same footing as every other line (it used
-    to land ~0.3 ms early on real audio)."""
+    bit) has no visible leading edge; its start must come from the
+    trailing edge so it's on the same footing as every other line (it
+    used to land ~0.3 ms early on real audio)."""
     fs = 48_000
     spec = MODE_TABLE[Mode.MARTIN_M4]
     track = _synthesize_line_freq_track(spec, 6, fs)
     # Prepend a 30 ms "stop bit" at sync level, then search from inside
-    # the merged run, 5 ms after the true sync start.
+    # the merged run, 1 ms after the true sync start.
     stop = np.full(int(0.030 * fs), 1200.0)
     full = np.concatenate([stop, track])
     line_samples = spec.line_time_ms / 1000 * fs
@@ -471,5 +471,42 @@ def test_clipped_leading_run_is_backdated_to_match_the_grid() -> None:
         full, fs, spec.sync_pulse_ms, line_samples,
         start_idx=stop.size + int(0.001 * fs),
     )
-    assert abs(cands[0] - stop.size) <= 2
-    assert abs((cands[1] - cands[0]) - line_samples) <= 2
+    # (The synthetic track has instant steps, so the ~4-sample trailing-
+    # edge lag correction tuned for real bandpassed audio shows up here.)
+    assert abs(cands[0] - stop.size) <= 5
+    assert abs((cands[1] - cands[0]) - line_samples) <= 5
+
+
+@pytest.mark.parametrize(
+    "mode", [Mode.MARTIN_M4, Mode.SCOTTIE_S4, Mode.ROBOT_36, Mode.PD_50, Mode.WRAASE_SC2_120]
+)
+def test_sync_candidates_are_unbiased_on_encoder_audio(mode: Mode) -> None:
+    """Candidate starts sit within ~1 sample of the encoder's true sync
+    starts for every mode family. The leading-edge threshold crossing was
+    ~10 samples (0.2 ms) late whenever the edge came down from image
+    content, which a porch-less layout (spec Scottie: B runs straight into
+    the sync — v0.6.14 audit D-L3) turns into a corrupted last B pixel."""
+    from open_sstv.core.decoder import _bandpass  # noqa: PLC0415
+    from open_sstv.core.encoder import _PYSSTV_CLASSES  # noqa: PLC0415
+
+    fs = 48_000
+    spec = MODE_TABLE[mode]
+    cls = _PYSSTV_CLASSES[mode]
+    rng = np.random.default_rng(7)
+    img = Image.fromarray(rng.integers(0, 256, (cls.HEIGHT, cls.WIDTH, 3), dtype=np.uint8))
+    sstv = cls(img, fs, 16)
+    t_ms = 0.0
+    true: list[float] = []
+    for freq, dur in sstv.gen_freq_bits():
+        if freq == 1200 and abs(dur - spec.sync_pulse_ms) < 1e-6:
+            true.append(t_ms * fs / 1000)
+        t_ms += dur
+    audio = np.fromiter(sstv.gen_samples(), dtype=np.int16) / 32768.0
+    inst = instantaneous_frequency(_bandpass(audio, fs), fs)
+    cands = np.asarray(find_sync_candidates(
+        inst, fs, spec.sync_pulse_ms, spec.line_time_ms / 1000 * fs,
+        start_idx=int(true[0]) - 100,
+    ))
+    err = np.array([cands[np.argmin(np.abs(cands - x))] - x for x in true])
+    assert abs(err.mean()) < 2.0
+    assert np.abs(err).max() < 8.0
