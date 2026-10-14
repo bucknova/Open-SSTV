@@ -25,11 +25,20 @@ from open_sstv.core.decoder import (
     _decode_robot36_dispatch,
     decode_wav,
 )
-from open_sstv.core.dsp_utils import resample_to
 from open_sstv.core.encoder import encode
 from open_sstv.core.modes import MODE_TABLE, Mode
 
 # === helpers ===
+
+
+def _resample(samples: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
+    """Polyphase resample — test tooling for simulating TX/RX clock drift."""
+    from math import gcd  # noqa: PLC0415
+
+    from scipy.signal import resample_poly  # noqa: PLC0415
+
+    g = gcd(src_rate, dst_rate)
+    return resample_poly(samples, dst_rate // g, src_rate // g)
 
 
 def _to_float(samples_int16: np.ndarray) -> np.ndarray:
@@ -275,7 +284,7 @@ def test_decode_wav_robot36_clock_drift_round_trip() -> None:
     clean = _to_float(encode(original, Mode.ROBOT_36, sample_rate=fs_claimed))
 
     # Resample to the "actual" (slower) rate, then lie to the decoder.
-    drifted = resample_to(clean, fs_claimed, fs_actual)
+    drifted = _resample(clean, fs_claimed, fs_actual)
     result = decode_wav(drifted, fs_claimed)
 
     assert result is not None, "clock-drifted Robot 36 returned None"
