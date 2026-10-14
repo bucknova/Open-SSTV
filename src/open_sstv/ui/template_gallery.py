@@ -50,12 +50,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from open_sstv.templates.context import build_tx_context
 from open_sstv.templates.manager import (
     last_skipped_templates,
     list_templates,
     load_by_path,
 )
-from open_sstv.templates.context import build_tx_context
 from open_sstv.templates.model import QSOState, Template
 from open_sstv.templates.renderer import render_template
 from open_sstv.ui.utils import pil_to_pixmap

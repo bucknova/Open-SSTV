@@ -157,8 +157,9 @@ def test_rig_frequency_reaches_tx_context(
 def test_rename_onto_existing_asks_and_cancel_keeps_both(
     panel: TxPanel, tdir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import open_sstv.ui.tx_panel as tx_mod
     from PySide6.QtWidgets import QInputDialog
+
+    import open_sstv.ui.tx_panel as tx_mod
 
     monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Beta", True)))
     asked: list[Path] = []
@@ -175,8 +176,9 @@ def test_rename_onto_existing_asks_and_cancel_keeps_both(
 def test_rename_onto_existing_keep_both(
     panel: TxPanel, tdir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import open_sstv.ui.tx_panel as tx_mod
     from PySide6.QtWidgets import QInputDialog
+
+    import open_sstv.ui.tx_panel as tx_mod
 
     monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Beta", True)))
     monkeypatch.setattr(tx_mod, "ask_overwrite_template", lambda parent, target: "keep")
@@ -198,8 +200,9 @@ def _editor(qtbot, tdir: Path, template: Template, path: Path | None) -> Templat
 def test_editor_save_as_onto_existing_asks(
     qtbot, tdir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import open_sstv.ui.template_editor as ed_mod
     from PySide6.QtWidgets import QMessageBox
+
+    import open_sstv.ui.template_editor as ed_mod
 
     monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
     ed = _editor(qtbot, tdir, _tpl("Beta", text="NEW"), None)

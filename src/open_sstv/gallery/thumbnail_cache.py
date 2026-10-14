@@ -113,15 +113,25 @@ class ThumbnailCache:
         Orphans (source deleted, or re-rendered under a new key) age out
         by mtime.
         """
+        # v0.6.14 audit: ``sort(key=lambda p: p.stat()…)`` raised
+        # FileNotFoundError if a thumbnail vanished between the glob and the
+        # sort (a concurrent prune, or the remote server regenerating).
+        # Stat once, tolerating files that disappear.
+        stamped: list[tuple[float, Path]] = []
         try:
-            thumbs = [p for p in self._dir.glob("*.png") if p.is_file()]
+            for p in self._dir.glob("*.png"):
+                try:
+                    st = p.stat()
+                except OSError:
+                    continue
+                stamped.append((st.st_mtime, p))
         except OSError:
             return 0
-        if len(thumbs) <= max_files:
+        if len(stamped) <= max_files:
             return 0
-        thumbs.sort(key=lambda p: p.stat().st_mtime)  # oldest first
+        stamped.sort(key=lambda t: t[0])  # oldest first
         removed = 0
-        for p in thumbs[: len(thumbs) - max_files]:
+        for _mtime, p in stamped[: len(stamped) - max_files]:
             try:
                 p.unlink()
                 removed += 1

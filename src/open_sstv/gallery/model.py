@@ -17,7 +17,7 @@ auto-saved image the user never logged still shows a sensible date and
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -46,6 +46,8 @@ class GalleryItem:
     #: UTC date parsed from a ``YYYY-MM-DD`` run in the filename (the
     #: default ``%d`` token), or ``None``.
     parsed_date: date | None = None
+    #: UTC time from the ``%t`` run right after the date, or ``None``.
+    parsed_time: time | None = None
     #: Linked logbook record, or ``None`` for an unlogged file.
     qso: QSO | None = None
 
@@ -56,14 +58,18 @@ class GalleryItem:
         """Best available UTC timestamp for sorting / grouping by date."""
         if self.qso is not None:
             return self.qso.time_utc.astimezone(UTC)
+        from_mtime = datetime.fromtimestamp(self.mtime, tz=UTC)
         if self.parsed_date is not None:
-            return datetime(
-                self.parsed_date.year,
-                self.parsed_date.month,
-                self.parsed_date.day,
-                tzinfo=UTC,
-            )
-        return datetime.fromtimestamp(self.mtime, tz=UTC)
+            # v0.6.14 audit: a date-only parse pinned every image to UTC
+            # midnight — same-day images sorted arbitrarily, and the day
+            # could flip against the filter.  Prefer the filename's time,
+            # then the mtime when it agrees on the day; midday otherwise.
+            if self.parsed_time is not None:
+                return datetime.combine(self.parsed_date, self.parsed_time, tzinfo=UTC)
+            if from_mtime.date() == self.parsed_date:
+                return from_mtime
+            return datetime.combine(self.parsed_date, time(12, 0), tzinfo=UTC)
+        return from_mtime
 
     @property
     def display_mode(self) -> str:

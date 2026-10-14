@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import date
+from datetime import date, time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -51,6 +51,12 @@ _MODE_RE = re.compile(
     r"(?:^|[_-])(" + "|".join(re.escape(v) for v in _MODE_VALUES) + r")(?:[_-]|$)"
 )
 _DATE_RE = re.compile(r"(?:^|[_-])(\d{4})-(\d{2})-(\d{2})(?:[_-]|$)")
+#: The default pattern's ``%d_%t`` — a date immediately followed by an
+#: ``HHMMSS`` run.  Only trusted directly after the date so a mode like
+#: ``pd_120`` or a callsign digit run is never read as a time.
+_DATE_TIME_RE = re.compile(
+    r"(?:^|[_-])\d{4}-\d{2}-\d{2}[_-](\d{2})(\d{2})(\d{2})(?:[_-]|$)"
+)
 
 
 def parse_mode(stem: str) -> str | None:
@@ -70,6 +76,17 @@ def parse_date(stem: str) -> date | None:
         return None  # e.g. 2026-13-40 — digits matched but not a real date
 
 
+def parse_time(stem: str) -> time | None:
+    """Return the UTC time from a ``YYYY-MM-DD_HHMMSS`` run, or ``None``."""
+    m = _DATE_TIME_RE.search(stem)
+    if not m:
+        return None
+    try:
+        return time(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
+
+
 def _item_for(path: Path) -> GalleryItem | None:
     """Build a ``GalleryItem`` for one file, or ``None`` if unreadable."""
     try:
@@ -84,6 +101,7 @@ def _item_for(path: Path) -> GalleryItem | None:
         size_bytes=st.st_size,
         parsed_mode=parse_mode(stem),
         parsed_date=parse_date(stem),
+        parsed_time=parse_time(stem),
     )
 
 
@@ -122,7 +140,12 @@ def scan_dirs(directories: Iterable[Path]) -> list[GalleryItem]:
     out: list[GalleryItem] = []
     for directory in directories:
         for item in scan_dir(directory):
-            key = item.path.as_posix()
+            # v0.6.14 audit: the key was the *unresolved* path, so the same
+            # file via a symlinked or ``..``-spelled extra dir showed twice.
+            try:
+                key = item.path.resolve().as_posix()
+            except (OSError, RuntimeError):
+                key = item.path.as_posix()
             if key in seen:
                 continue
             seen.add(key)
@@ -134,6 +157,7 @@ __all__ = [
     "IMAGE_EXTENSIONS",
     "parse_date",
     "parse_mode",
+    "parse_time",
     "scan_dir",
     "scan_dirs",
 ]

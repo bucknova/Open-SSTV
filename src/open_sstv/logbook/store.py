@@ -347,6 +347,19 @@ class LogbookStore:
         assert got is not None
         return got
 
+    def clear_image_path(self, qso_id: int) -> None:
+        """Unlink a QSO from its image file, touching nothing else.
+
+        v0.6.14 audit C-M7: the Gallery's Delete wrote back its whole
+        (possibly stale) QSO snapshot via ``update`` to clear this one
+        field, reverting any Logbook edit made since the gallery loaded.
+        A no-op if the row is gone.
+        """
+        self._conn.execute(
+            "UPDATE qsos SET image_path = NULL, updated_at = ? WHERE id = ?",
+            (_iso(datetime.now(UTC)), qso_id),
+        )
+
     def delete(self, qso_id: int) -> None:
         """Delete a QSO by id.  Raises ``ValueError`` if not found."""
         cur = self._conn.execute("DELETE FROM qsos WHERE id = ?", (qso_id,))
