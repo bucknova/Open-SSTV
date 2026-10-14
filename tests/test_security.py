@@ -15,7 +15,11 @@ from pathlib import Path
 import PIL.Image
 import pytest
 
-from open_sstv.security import MAX_IMAGE_PIXELS, apply_pil_security_limits
+from open_sstv.security import (
+    MAX_IMAGE_PIXELS,
+    PIL_MAX_IMAGE_PIXELS,
+    apply_pil_security_limits,
+)
 
 
 def test_max_image_pixels_is_32_mp() -> None:
@@ -29,7 +33,7 @@ def test_apply_pil_security_limits_sets_global() -> None:
     try:
         PIL.Image.MAX_IMAGE_PIXELS = 12345
         apply_pil_security_limits()
-        assert PIL.Image.MAX_IMAGE_PIXELS == MAX_IMAGE_PIXELS
+        assert PIL.Image.MAX_IMAGE_PIXELS == PIL_MAX_IMAGE_PIXELS
     finally:
         PIL.Image.MAX_IMAGE_PIXELS = saved
 
@@ -47,7 +51,23 @@ def test_package_import_applies_limit() -> None:
     try:
         PIL.Image.MAX_IMAGE_PIXELS = 1
         apply_pil_security_limits()
-        assert PIL.Image.MAX_IMAGE_PIXELS == MAX_IMAGE_PIXELS
+        assert PIL.Image.MAX_IMAGE_PIXELS == PIL_MAX_IMAGE_PIXELS
+    finally:
+        PIL.Image.MAX_IMAGE_PIXELS = saved
+
+
+def test_cap_is_really_32_mp_not_64() -> None:
+    """v0.6.14 audit (Info): Pillow raises only above 2x MAX_IMAGE_PIXELS, so
+    storing 32 MP there let 32-64 MP images decode.  The error must now fire
+    just over 32 MP and not at or under it."""
+    saved = PIL.Image.MAX_IMAGE_PIXELS
+    try:
+        apply_pil_security_limits()
+        PIL.Image._decompression_bomb_check((MAX_IMAGE_PIXELS, 1))  # at cap: ok
+        with pytest.raises(PIL.Image.DecompressionBombError):
+            PIL.Image._decompression_bomb_check((MAX_IMAGE_PIXELS + 1, 1))
+        with pytest.raises(PIL.Image.DecompressionBombError):
+            PIL.Image._decompression_bomb_check((7000, 7000))  # 49 MP
     finally:
         PIL.Image.MAX_IMAGE_PIXELS = saved
 
