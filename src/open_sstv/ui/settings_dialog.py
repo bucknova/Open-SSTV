@@ -15,6 +15,8 @@ from __future__ import annotations
 import datetime
 import logging
 import subprocess
+import threading
+from collections.abc import Callable
 
 import serial.tools.list_ports
 
@@ -58,6 +60,7 @@ from open_sstv.radio.band_plan import DATA_MODE_BY_PROTOCOL
 from open_sstv.radio.base import RigConnectionMode
 from open_sstv.radio.exceptions import RigError
 from open_sstv.radio.rigctld import RigctldClient, is_safe_rigctld_arg
+from open_sstv.radio.rigctld_launcher import launch_rigctld, stop_rigctld
 from open_sstv.radio.serial_rig import (
     ICOM_ADDRESSES,
     SERIAL_RIG_PROTOCOLS,
@@ -105,6 +108,10 @@ class SettingsDialog(QDialog):
     #: ``TxWorker.transmit_test_tone`` via the same queued-signal path as the
     #: Radio panel's Test Tone button.
     test_tone_requested = Signal()
+    #: Carries a zero-arg callable from a background "Test connection"
+    #: thread back to the GUI thread (v0.6.14 audit: the Test buttons used
+    #: to block the GUI for 2–8 s on an unreachable rig).
+    _bg_test_done = Signal(object)
 
     #: Emitted on every TX output gain slider tick so MainWindow can live-push
     #: the value to TxWorker without waiting for OK. Payload is the gain as a
@@ -119,6 +126,7 @@ class SettingsDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self._bg_test_done.connect(self._on_bg_test_done)
         self.setWindowTitle("Settings")
         # 480 px was too narrow for the Radio tab's rigctld group: the
         # group title ("rigctld — Hamlib Daemon"), the wrapped help label,
@@ -1150,6 +1158,21 @@ class SettingsDialog(QDialog):
         )
         rigctld_form.addRow("SSTV mode:", self._rigctld_tune_mode_combo)
 
+        # v0.6.14 audit T-L9: which PTT input rigctld keys.
+        self._rigctld_ptt_type_combo = QComboBox()
+        self._rigctld_ptt_type_combo.addItem("Default (T 1 — rig's choice)", "default")
+        self._rigctld_ptt_type_combo.addItem("Mic input (T 2)", "mic")
+        self._rigctld_ptt_type_combo.addItem("Data / rear input (T 3)", "data")
+        idx = self._rigctld_ptt_type_combo.findData(self._config.rigctld_ptt_type)
+        if idx >= 0:
+            self._rigctld_ptt_type_combo.setCurrentIndex(idx)
+        self._rigctld_ptt_type_combo.setToolTip(
+            "Which transmit input rigctld keys.  Default leaves it to the\n"
+            "Hamlib backend.  If your rig transmits but SSTV audio from the\n"
+            "USB/rear port is silent (common on Kenwood), pick Data."
+        )
+        rigctld_form.addRow("PTT type:", self._rigctld_ptt_type_combo)
+
         self._test_btn = QPushButton("Test rigctld Connection")
         self._test_btn.clicked.connect(self._test_connection)
         rigctld_form.addRow("", self._test_btn)
@@ -1471,6 +1494,45 @@ class SettingsDialog(QDialog):
             if addr is not None:
                 self._civ_address_spin.setValue(addr)
 
+    def _run_test_in_background(
+        self,
+        button: QPushButton,
+        work: Callable[[], object],
+        on_done: Callable[[bool, object], None],
+    ) -> None:
+        """Run a blocking rig test off the GUI thread (v0.6.14 audit).
+
+        *work* runs on a daemon thread; ``on_done(ok, result_or_exc)``
+        runs back on the GUI thread via the queued ``_bg_test_done``
+        signal.  The button is disabled meanwhile so a second click can't
+        open a second connection to the same port.
+        """
+        label = button.text()
+        button.setEnabled(False)
+        button.setText("Testing…")
+
+        def _finish(ok: bool, value: object) -> None:
+            button.setEnabled(True)
+            button.setText(label)
+            on_done(ok, value)
+
+        def _thread() -> None:
+            try:
+                value: object = work()
+                ok = True
+            except Exception as exc:  # noqa: BLE001 — reported on the GUI thread
+                value, ok = exc, False
+            try:
+                self._bg_test_done.emit(lambda: _finish(ok, value))
+            except RuntimeError:
+                pass  # dialog already destroyed — nobody to tell
+
+        threading.Thread(target=_thread, name="settings-rig-test", daemon=True).start()
+
+    @Slot(object)
+    def _on_bg_test_done(self, fn: object) -> None:
+        fn()  # type: ignore[operator]
+
     def _test_serial_connection(self) -> None:
         """Try to open and ping via the direct serial backend."""
         proto = self._serial_protocol_combo.currentText()
@@ -1484,45 +1546,56 @@ class SettingsDialog(QDialog):
             )
             return
 
-        try:
+        civ = self._civ_address_spin.value()
+        ptt_line = self._ptt_line_combo.currentData() or "DTR"
+
+        def _work() -> tuple[int, str]:
             rig = create_serial_rig(
                 protocol=proto,
                 port=port,
                 baud_rate=baud if baud else 9600,
-                ci_v_address=self._civ_address_spin.value(),
-                ptt_line=self._ptt_line_combo.currentData() or "DTR",
+                ci_v_address=civ,
+                ptt_line=ptt_line,
             )
             rig.open()
-            rig.ping()
-            freq = rig.get_freq()
-            mode, _ = rig.get_mode()
-            rig.close()
+            try:
+                rig.ping()
+                freq = rig.get_freq()
+                mode, _ = rig.get_mode()
+            finally:
+                rig.close()
+            return freq, mode
 
-            info_parts = [f"Connected via {proto} on {port}."]
-            if freq > 0:
-                info_parts.append(f"Frequency: {freq / 1_000_000:.6f} MHz")
-            if mode:
-                info_parts.append(f"Mode: {mode}")
-            QMessageBox.information(
-                self, "Connection successful", "\n".join(info_parts),
-            )
-            self._serial_status.setText("Connection OK")
-            self._serial_status.setStyleSheet("color: green;")
-        except RigError as exc:
-            QMessageBox.warning(
-                self, "Connection failed",
-                f"Could not connect via {proto} on {port}.\n\n"
-                f"Error: {exc}",
-            )
+        def _done(ok: bool, value: object) -> None:
+            if ok:
+                freq, mode = value  # type: ignore[misc]
+                info_parts = [f"Connected via {proto} on {port}."]
+                if freq > 0:
+                    info_parts.append(f"Frequency: {freq / 1_000_000:.6f} MHz")
+                if mode:
+                    info_parts.append(f"Mode: {mode}")
+                QMessageBox.information(
+                    self, "Connection successful", "\n".join(info_parts),
+                )
+                self._serial_status.setText("Connection OK")
+                self._serial_status.setStyleSheet("color: green;")
+                return
+            exc = value
+            if isinstance(exc, RigError):
+                QMessageBox.warning(
+                    self, "Connection failed",
+                    f"Could not connect via {proto} on {port}.\n\n"
+                    f"Error: {exc}",
+                )
+            else:
+                QMessageBox.warning(
+                    self, "Connection failed",
+                    f"Unexpected error:\n\n{exc}",
+                )
             self._serial_status.setText(f"Failed: {exc}")
             self._serial_status.setStyleSheet("color: red;")
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(
-                self, "Connection failed",
-                f"Unexpected error:\n\n{exc}",
-            )
-            self._serial_status.setText(f"Failed: {exc}")
-            self._serial_status.setStyleSheet("color: red;")
+
+        self._run_test_in_background(self._serial_test_btn, _work, _done)
 
     def _build_images_tab(self) -> QWidget:
         tab = QWidget()
@@ -1723,27 +1796,37 @@ class SettingsDialog(QDialog):
         """Try to connect and ping the rigctld daemon at the current settings."""
         host = self._rigctld_host.text().strip()
         port = self._rigctld_port.value()
-        try:
-            client = RigctldClient(host=host, port=port)
-            client.open()
-            client.ping()
-            freq = client.get_freq()
-            mode, _ = client.get_mode()
-            client.close()
-            QMessageBox.information(
-                self,
-                "Connection successful",
-                f"Connected to rigctld at {host}:{port}.\n\n"
-                f"Frequency: {freq / 1_000_000:.6f} MHz\n"
-                f"Mode: {mode}",
-            )
-        except Exception as exc:  # noqa: BLE001
+        ptt_type = self._rigctld_ptt_type_combo.currentData() or "default"
+
+        def _work() -> tuple[int, str]:
+            client = RigctldClient(host=host, port=port, ptt_type=ptt_type)
+            try:
+                client.open()
+                client.ping()
+                freq = client.get_freq()
+                mode, _ = client.get_mode()
+            finally:
+                client.close()
+            return freq, mode
+
+        def _done(ok: bool, value: object) -> None:
+            if ok:
+                freq, mode = value  # type: ignore[misc]
+                QMessageBox.information(
+                    self,
+                    "Connection successful",
+                    f"Connected to rigctld at {host}:{port}.\n\n"
+                    f"Frequency: {freq / 1_000_000:.6f} MHz\n"
+                    f"Mode: {mode}",
+                )
+                return
             # Catch *everything*, not just RigError: a non-RigError escaping
             # this slot leaves the button looking completely dead (no dialog,
             # and on a Windows GUI build the traceback goes to a stderr that
             # doesn't exist).  A diagnostic button must always say something.
+            exc = value
             _log.warning(
-                "rigctld connection test to %s:%d failed", host, port, exc_info=True
+                "rigctld connection test to %s:%d failed: %r", host, port, exc
             )
             QMessageBox.warning(
                 self,
@@ -1753,6 +1836,8 @@ class SettingsDialog(QDialog):
                 "Make sure rigctld is running, or use the launcher above.\n"
                 "Enable diagnostics logging for the full details.",
             )
+
+        self._run_test_in_background(self._test_btn, _work, _done)
 
     def _test_flex_connection(self) -> None:
         """Open a real SmartSDR session and report what the radio says."""
@@ -1767,21 +1852,33 @@ class SettingsDialog(QDialog):
                 "Enter the FlexRadio's IP address first.",
             )
             return
-        rig = FlexRig(host, port, slice_index=slice_index)
-        try:
-            rig.open()
-            freq = rig.get_freq()
-            mode, _ = rig.get_mode()
-            QMessageBox.information(
-                self,
-                "Connection successful",
-                f"Connected to FlexRadio at {host}:{port}.\n\n"
-                f"Slice {slice_index}: {freq / 1_000_000:.6f} MHz {mode}",
-            )
-        except Exception as exc:  # noqa: BLE001 — never fail silently
+
+        def _work() -> tuple[int, str]:
+            rig = FlexRig(host, port, slice_index=slice_index)
+            try:
+                rig.open()
+                freq = rig.get_freq()
+                mode, _ = rig.get_mode()
+            finally:
+                try:
+                    rig.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            return freq, mode
+
+        def _done(ok: bool, value: object) -> None:
+            if ok:
+                freq, mode = value  # type: ignore[misc]
+                QMessageBox.information(
+                    self,
+                    "Connection successful",
+                    f"Connected to FlexRadio at {host}:{port}.\n\n"
+                    f"Slice {slice_index}: {freq / 1_000_000:.6f} MHz {mode}",
+                )
+                return
+            exc = value
             _log.warning(
-                "FlexRadio connection test to %s:%d failed", host, port,
-                exc_info=True,
+                "FlexRadio connection test to %s:%d failed: %r", host, port, exc
             )
             QMessageBox.warning(
                 self,
@@ -1791,11 +1888,8 @@ class SettingsDialog(QDialog):
                 "Check the radio's IP address, that SmartSDR is running, and "
                 f"that slice {slice_index} is active.",
             )
-        finally:
-            try:
-                rig.close()
-            except Exception:  # noqa: BLE001
-                pass
+
+        self._run_test_in_background(self._flex_test_btn, _work, _done)
 
     def _launch_rigctld(self) -> None:
         """Spawn a rigctld process with the current radio settings."""
@@ -1826,20 +1920,12 @@ class SettingsDialog(QDialog):
             )
             return
 
-        cmd = ["rigctld", "-m", str(model_id), "-t", str(tcp_port)]
-        if serial_port:
-            cmd += ["-r", serial_port]
-        if baud_rate:
-            cmd += ["-s", str(baud_rate)]
-
         try:
-            # OP2-14: start_new_session=True isolates the child process so a
-            # GUI crash doesn't orphan rigctld holding the serial port.
-            self._rigctld_proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                start_new_session=True,
+            # v0.6.14 audit UI-H1: the shared launcher — absolute rigctld
+            # path from PATH (never the CWD), stderr drained so the daemon
+            # can't wedge on a full pipe after MainWindow adopts it.
+            self._rigctld_proc = launch_rigctld(
+                model_id, tcp_port, serial_port, baud_rate or 0
             )
             self._rigctld_status.setText(f"rigctld launched (PID {self._rigctld_proc.pid})")
             self._rigctld_status.setStyleSheet("color: green;")
@@ -1868,17 +1954,8 @@ class SettingsDialog(QDialog):
         "already stopped" so the dialog state stays consistent (OP-19).
         """
         if self._rigctld_proc is not None:
-            try:
-                self._rigctld_proc.terminate()
-                try:
-                    self._rigctld_proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    try:
-                        self._rigctld_proc.kill()
-                    except (ProcessLookupError, OSError):
-                        pass
-            except (ProcessLookupError, OSError):
-                pass
+            # v0.6.14 audit: shared helper reaps after kill() (no zombie).
+            stop_rigctld(self._rigctld_proc)
             self._rigctld_proc = None
             self._rigctld_status.setText("rigctld stopped.")
             self._rigctld_status.setStyleSheet("color: gray;")
@@ -2225,6 +2302,7 @@ class SettingsDialog(QDialog):
             rig_connection_mode=conn_mode,
             rigctld_host=self._rigctld_host.text().strip(),
             rigctld_port=self._rigctld_port.value(),
+            rigctld_ptt_type=self._rigctld_ptt_type_combo.currentData() or "default",
             tci_host=self._tci_host.text().strip(),
             tci_port=self._tci_port.value(),
             flex_host=self._flex_host.text().strip(),

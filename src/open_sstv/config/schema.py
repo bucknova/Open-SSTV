@@ -91,6 +91,11 @@ class AppConfig:
     rig_connection_mode: str = RigConnectionMode.MANUAL.value
     rigctld_host: str = "127.0.0.1"
     rigctld_port: int = 4532
+    #: v0.6.14 audit T-L9: which Hamlib PTT the rigctld backend keys —
+    #: "default" (``T 1``, the backend's choice, unchanged behaviour),
+    #: "mic" (``T 2``) or "data" (``T 3``, the rear/USB data input that
+    #: Kenwood ``TX1``-style rigs need for SSTV audio).
+    rigctld_ptt_type: str = "default"
     tci_host: str = "127.0.0.1"
     tci_port: int = 40001
     #: FlexRadio direct control (SmartSDR TCP API).  Host is the radio's
@@ -613,6 +618,14 @@ class AppConfig:
                 self.rig_tune_mode_policy, list(_VALID_TUNE_MODE_POLICIES),
             )
             self.rig_tune_mode_policy = "voice"
+
+        if self.rigctld_ptt_type not in ("default", "mic", "data"):
+            _log.warning(
+                "AppConfig: unknown rigctld_ptt_type %r (valid: default, "
+                "mic, data) — falling back to 'default'",
+                self.rigctld_ptt_type,
+            )
+            self.rigctld_ptt_type = "default"
 
         ptt_line = (self.rig_ptt_line or "").upper()
         if ptt_line not in _VALID_PTT_LINES:

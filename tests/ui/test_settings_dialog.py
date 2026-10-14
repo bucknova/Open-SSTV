@@ -52,7 +52,10 @@ class TestRejectKillsRigctld:
         mock_proc.pid = 12345
         mock_proc.wait.return_value = 0
 
-        with patch("subprocess.Popen", return_value=mock_proc):
+        with patch("subprocess.Popen", return_value=mock_proc), patch(
+            "open_sstv.radio.rigctld_launcher.find_rigctld_executable",
+            return_value="/usr/bin/rigctld",
+        ):
             # Simulate picking a radio model so the launch guard passes
             dialog._custom_model_id.setValue(1035)
             dialog._launch_rigctld()
@@ -72,7 +75,10 @@ class TestRejectKillsRigctld:
         mock_proc.pid = 12345
         mock_proc.wait.return_value = 0
 
-        with patch("subprocess.Popen", return_value=mock_proc):
+        with patch("subprocess.Popen", return_value=mock_proc), patch(
+            "open_sstv.radio.rigctld_launcher.find_rigctld_executable",
+            return_value="/usr/bin/rigctld",
+        ):
             dialog._custom_model_id.setValue(1035)
             dialog._launch_rigctld()
 
@@ -859,3 +865,71 @@ class TestSettingsRoundTripPreservesEveryField:
             f"Settings save did not preserve {lost} — every field without a "
             f"widget must be passed through from self._config"
         )
+
+
+# ---------------------------------------------------------------------------
+# v0.6.14 audit
+# ---------------------------------------------------------------------------
+
+
+class TestV0614RigItems:
+    def test_rigctld_test_button_does_not_block_gui(
+        self, qtbot, dialog: SettingsDialog, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The rigctld Test button used to run open()+ping() on the GUI
+        thread (2–8 s freeze on an unreachable rig)."""
+        import threading
+        import time
+
+        release = threading.Event()
+        shown: list[str] = []
+
+        class _SlowClient:
+            def __init__(self, **_kw) -> None:
+                pass
+
+            def open(self) -> None:
+                release.wait(5)
+
+            def ping(self) -> None:
+                pass
+
+            def get_freq(self) -> int:
+                return 14_230_000
+
+            def get_mode(self) -> tuple[str, int]:
+                return ("USB", 2400)
+
+            def close(self) -> None:
+                pass
+
+        monkeypatch.setattr("open_sstv.ui.settings_dialog.RigctldClient", _SlowClient)
+        monkeypatch.setattr(
+            "open_sstv.ui.settings_dialog.QMessageBox.information",
+            lambda *a, **k: shown.append(a[1]),
+        )
+        t0 = time.monotonic()
+        dialog._test_connection()
+        assert time.monotonic() - t0 < 0.5, "Test must return immediately"
+        assert not dialog._test_btn.isEnabled()
+        release.set()
+        qtbot.waitUntil(lambda: shown == ["Connection successful"], timeout=3000)
+        assert dialog._test_btn.isEnabled()
+
+    def test_ptt_type_round_trips(self, qtbot) -> None:
+        dlg = SettingsDialog(config=AppConfig(rigctld_ptt_type="data"))
+        qtbot.addWidget(dlg)
+        assert dlg.result_config().rigctld_ptt_type == "data"
+
+    def test_unknown_ptt_type_falls_back(self) -> None:
+        assert AppConfig(rigctld_ptt_type="bogus").rigctld_ptt_type == "default"
+
+    def test_stop_rigctld_reaps(self, dialog: SettingsDialog) -> None:
+        import subprocess as _sp
+
+        proc = MagicMock()
+        proc.wait.side_effect = [_sp.TimeoutExpired("rigctld", 3), 0]
+        dialog._rigctld_proc = proc
+        dialog._stop_rigctld()
+        proc.kill.assert_called_once()
+        assert proc.wait.call_count == 2, "kill() must be followed by a reap"
