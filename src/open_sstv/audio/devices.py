@@ -58,6 +58,29 @@ def invalidate_device_cache() -> None:
     _devices_cache = None
 
 
+#: v0.6.14 sweep: PortAudio host generation.  Bumped every time PortAudio
+#: is terminated and re-initialised (``input_stream._pa_reset``), which
+#: renumbers every device index in the process.  ``TxWorker`` compares it
+#: with the generation of its last output-device resolve, so a reset done
+#: by *any* path — RX device-loss recovery, an RX start after a replug
+#: while RX was stopped — forces a re-resolve before the next key-up
+#: without relying on the GUI to flag it.  An int store under the GIL;
+#: writers hold ``output_stream._tx_state_lock`` (``run_if_tx_idle``).
+_pa_generation: int = 0
+
+
+def portaudio_generation() -> int:
+    """Return the current PortAudio host generation (see above)."""
+    return _pa_generation
+
+
+def bump_portaudio_generation() -> None:
+    """Record a PortAudio terminate/initialize: indices may have changed."""
+    global _pa_generation
+    _pa_generation += 1
+    invalidate_device_cache()
+
+
 @dataclass(frozen=True, slots=True)
 class AudioDevice:
     """One PortAudio input or output device.
@@ -262,6 +285,7 @@ def find_input_device_by_name(
 
 __all__ = [
     "AudioDevice",
+    "bump_portaudio_generation",
     "default_input_device",
     "default_output_device",
     "find_input_device_by_name",
@@ -269,4 +293,5 @@ __all__ = [
     "invalidate_device_cache",
     "list_input_devices",
     "list_output_devices",
+    "portaudio_generation",
 ]

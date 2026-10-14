@@ -531,6 +531,19 @@ class _RigConnectRelay(QObject):
     @Slot(object)
     def on_succeeded(self, rig: Rig) -> None:
         if self._cancel.is_set():
+            # v0.6.14 sweep: the worker saw no cancel and emitted, but the
+            # timeout / Cancel won the race before this queued slot ran.
+            # Nobody will adopt this rig — close it, or the port leaks (an
+            # exclusive COM handle on Windows blocks every later Connect).
+            # Off the GUI thread: a serial close can block on the backend.
+            def _close() -> None:
+                try:
+                    rig.close()
+                except Exception:  # noqa: BLE001 — abandoned; never raise
+                    pass
+
+            _log.info("rig connect succeeded after timeout/cancel — closing it")
+            threading.Thread(target=_close, name="sstv-rig-late-close", daemon=True).start()
             return
         self._cancel.set()  # prevent late timeout from also calling on_error
         self._timer.stop()
@@ -799,7 +812,11 @@ class MainWindow(QMainWindow):
             # then keyed for the remote image with the plane reporting idle
             # — abort answering "busy", reclaim_local a no-op, and the
             # dead-man's-switch never armed.
-            tx_busy=lambda: not self._tx_worker.wait_for_idle(0.0),
+            # v0.6.14 sweep: also busy for a TX dispatched but not yet
+            # started (worker still idle, its queued slot not run) — read
+            # via the thread-safe Event mirror, as this runs on the HTTP
+            # thread.
+            tx_busy=self._remote_tx_busy,
         )
         self._remote_tx_request.connect(
             self._on_remote_tx_request, Qt.ConnectionType.QueuedConnection
@@ -872,7 +889,9 @@ class MainWindow(QMainWindow):
         #: controls lock when this goes above zero (at request time, not
         #: at ``transmission_started``) and unlock only when it returns to
         #: zero — i.e. when the worker is idle, unkey retries included.
-        self._tx_requests_in_flight: int = 0
+        #: A property: every write also updates ``_tx_in_flight_evt``.
+        self._tx_in_flight_evt = threading.Event()
+        self._tx_requests_in_flight = 0
         #: Token for the 500 ms "let rigctld bind" delay after an auto-
         #: launch; a Cancel or a second Connect invalidates it (UI low).
         self._pending_rigctld_connect: object | None = None
@@ -891,6 +910,16 @@ class MainWindow(QMainWindow):
         self._connect_worker: _RigConnectWorker | None = None
         self._connect_timeout_timer: QTimer | None = None
         self._connect_relay: _RigConnectRelay | None = None
+        #: v0.6.14 sweep: (thread, worker, relay) of superseded attempts
+        #: whose thread is still blocked in open() — see
+        #: ``_retire_connect_attempt``.
+        self._retired_connects: list[tuple[QThread, object, object]] = []
+        #: v0.6.14 sweep: a connect that succeeded while a TX was in
+        #: flight, adopted once the TX worker is idle — see
+        #: ``_defer_success_during_tx``.
+        self._deferred_connect_success: (
+            tuple[Rig, Callable[[Rig], None]] | None
+        ) = None
 
         # In-flight offline encode/decode workers.  Stored as instance
         # attributes (not locals) for the same reason as _connect_worker:
@@ -1027,7 +1056,10 @@ class MainWindow(QMainWindow):
         # v0.6.14 audit T-M5: re-resolve the configured device by name at
         # every TX start (not for an explicitly injected device).
         if not explicit_output_device:
-            self._tx_worker.set_output_device_name(self._config.audio_output_device)
+            self._tx_worker.set_output_device_name(
+                self._config.audio_output_device,
+                host_api=self._config.audio_output_host_api or None,
+            )
         self._tx_worker.moveToThread(self._tx_thread)
         # Standard Qt cleanup pattern: when the thread finishes, schedule
         # the worker for deletion. Without this the worker is left as an
@@ -2408,7 +2440,10 @@ class MainWindow(QMainWindow):
             host_api=self._config.audio_output_host_api or None,
         ) or find_pipewire_sink_by_name(self._config.audio_output_device)
         self._tx_worker.set_output_device(new_output)
-        self._tx_worker.set_output_device_name(self._config.audio_output_device)
+        self._tx_worker.set_output_device_name(
+            self._config.audio_output_device,
+            host_api=self._config.audio_output_host_api or None,
+        )
         self._tx_worker.set_output_gain(self._config.audio_output_gain)
         self._tx_worker.set_ptt_delay(self._config.ptt_delay_s)
         new_input = find_input_device_by_name(
@@ -2593,6 +2628,31 @@ class MainWindow(QMainWindow):
         self._request_rx_gate.emit(True)
         self._rx_panel.set_status("RX paused during TX.")
 
+    @property
+    def _tx_requests_in_flight(self) -> int:
+        return self._tx_in_flight_count
+
+    @_tx_requests_in_flight.setter
+    def _tx_requests_in_flight(self, count: int) -> None:
+        # GUI thread only.  v0.6.14 sweep: mirror "> 0" into an Event so
+        # the remote control plane (HTTP thread) can read it safely.
+        self._tx_in_flight_count = count
+        if count > 0:
+            self._tx_in_flight_evt.set()
+        else:
+            self._tx_in_flight_evt.clear()
+
+    def _remote_tx_busy(self) -> bool:
+        """``ControlPlane.tx_busy``: called on the HTTP thread.
+
+        Busy while any TX is dispatched (GUI bookkeeping, via the Event
+        mirror) or the worker is not idle.  v0.6.14 sweep: the worker-idle
+        check alone answered "not busy" for a local TX whose queued
+        ``transmit`` slot hadn't started yet, so a remote request could be
+        granted and queue behind it.
+        """
+        return self._tx_in_flight_evt.is_set() or not self._tx_worker.wait_for_idle(0.0)
+
     def _begin_tx_request(self) -> None:
         """Bookkeeping for one TX dispatched to the worker (GUI thread).
 
@@ -2677,6 +2737,9 @@ class MainWindow(QMainWindow):
         if self._rig_poll_was_active and not isinstance(self._rig, ManualRig):
             self._rig_poll_timer.start()
         self._rig_poll_was_active = False
+        # v0.6.14 sweep: adopt a rig whose connect finished mid-TX.
+        if self._tx_requests_in_flight <= 0:
+            self._run_deferred_connect_success()
 
     def _schedule_rx_resume(self) -> None:
         """Lift the RX gate 50 ms after TX ends.
@@ -3517,12 +3580,83 @@ class MainWindow(QMainWindow):
             self._connect_rigctld()
 
     def _connect_in_progress(self) -> bool:
-        if self._pending_rigctld_connect is not None or self._connect_thread is not None:
+        """True while the *current* connect attempt is live.
+
+        v0.6.14 sweep: this used to also refuse while any connect thread
+        was still running — so a timed-out attempt whose thread stayed
+        blocked in ``open()`` (a wedged serial driver, a black-holed TCP
+        connect) locked the operator out of Connect until it returned,
+        possibly forever.  A timed-out / cancelled attempt is over: its
+        late success is closed by ``_RigConnectRelay.on_succeeded``, its
+        ``finished`` is ignored by the sender check in
+        ``_on_connect_thread_finished``, and its objects are kept alive in
+        ``_retired_connects`` until its thread exits.
+        """
+        if (
+            self._pending_rigctld_connect is not None
+            or self._deferred_connect_success is not None
+        ):
             return True
-        return any(
-            t.objectName() == "rig-connect-thread" and t.isRunning()
-            for t in self.findChildren(QThread)
-        )
+        if self._connect_thread is None:
+            return False
+        cancel = self._connect_cancel
+        return cancel is None or not cancel.is_set()
+
+    def _defer_success_during_tx(
+        self, on_success: Callable[[Rig], None]
+    ) -> Callable[[Rig], None]:
+        """Wrap a connect success handler so it never runs mid-TX.
+
+        v0.6.14 sweep: a connect that completes while a transmission is
+        dispatched or on the air (e.g. Send pressed during the rigctld
+        auto-launch delay) used to adopt the rig immediately — swapping
+        ``tx_worker.set_rig`` / ``set_tci_connection`` and the RX audio
+        worker under a TX whose ``transmit`` slot may still be queued, and
+        restarting the rig poll that TX suspends (OP-47).  Adoption now
+        waits for ``_unlock_rig_controls`` (worker idle, unkey included).
+        """
+
+        def _guarded(rig: Rig) -> None:
+            if self._tx_requests_in_flight > 0:
+                _log.info("rig connected during TX — attaching it after the TX ends")
+                self._deferred_connect_success = (rig, on_success)
+                self.statusBar().showMessage(
+                    "Rig connected — it will be attached when the current "
+                    "transmission ends.", 5000,
+                )
+                return
+            on_success(rig)
+
+        return _guarded
+
+    def _run_deferred_connect_success(self) -> None:
+        pending = self._deferred_connect_success
+        self._deferred_connect_success = None
+        if pending is not None:
+            rig, on_success = pending
+            on_success(rig)
+
+    def _retire_connect_attempt(self) -> None:
+        """Park the current attempt's thread/worker/relay until it exits.
+
+        v0.6.14 sweep: a timed-out attempt's thread may still be inside
+        ``worker.run()``; dropping the Python refs would destroy the C++
+        worker mid-run (crash) and the relay before a queued late success
+        reaches it (port leak).  ``_on_connect_thread_finished`` releases
+        the entry when that thread exits.
+        """
+        thread = self._connect_thread
+        if thread is not None:
+            self._retired_connects.append(
+                (thread, self._connect_worker, self._connect_relay)
+            )
+        self._connect_thread = None
+        self._connect_cancel = None
+        self._connect_worker = None
+        self._connect_relay = None
+        if self._connect_timeout_timer is not None:
+            self._connect_timeout_timer.stop()
+            self._connect_timeout_timer = None
 
     def _start_rig_connect_thread(
         self,
@@ -3542,6 +3676,11 @@ class MainWindow(QMainWindow):
         message if the rig never responds.  The cancel event lets the caller
         (cancel button, timeout, closeEvent) suppress any late emit.
         """
+        # v0.6.14 sweep: a timed-out attempt may still own a thread blocked
+        # in open(); park it rather than dropping its refs.
+        if self._connect_thread is not None:
+            self._retire_connect_attempt()
+        on_success = self._defer_success_during_tx(on_success)
         cancel = threading.Event()
         self._connect_cancel = cancel
 
@@ -3610,6 +3749,13 @@ class MainWindow(QMainWindow):
         # wipe a newer attempt's worker/relay/timer.
         sender = self.sender()
         if isinstance(sender, QThread) and sender is not thread:
+            # A retired attempt's thread exited: release its objects.
+            for entry in [e for e in self._retired_connects if e[0] is sender]:
+                self._retired_connects.remove(entry)
+                try:
+                    sender.started.disconnect(entry[1].run)  # type: ignore[union-attr]
+                except (RuntimeError, TypeError, AttributeError):
+                    pass
             return
         worker = self._connect_worker
         # Explicitly break thread.started → worker.run before releasing Python
@@ -3646,18 +3792,23 @@ class MainWindow(QMainWindow):
         edge case where a timeout fired and the user started a second attempt
         before the first thread finished its blocking C call.
         """
-        timer = self._connect_timeout_timer
         cancel = self._connect_cancel
         self._pending_rigctld_connect = None  # cancels a pending auto-launch connect
-        self._connect_thread = None
-        self._connect_cancel = None
-        self._connect_timeout_timer = None
-        self._connect_relay = None
-
-        if timer is not None:
-            timer.stop()
+        # v0.6.14 sweep: park (not drop) the worker/relay — the thread may
+        # still be inside worker.run(), and the relay must stay alive to
+        # close a late success.  Released when the thread's finished fires.
+        self._retire_connect_attempt()  # also stops the timeout timer
         if cancel is not None:
             cancel.set()
+        # v0.6.14 sweep: a connect that succeeded mid-TX and is waiting to
+        # be adopted is abandoned too — close it so the port doesn't leak.
+        deferred = self._deferred_connect_success
+        self._deferred_connect_success = None
+        if deferred is not None:
+            try:
+                deferred[0].close()
+            except Exception:  # noqa: BLE001 — abandoned; never raise
+                pass
 
         for thread in self.findChildren(QThread):
             if thread.objectName() == "rig-connect-thread" and thread.isRunning():
@@ -3666,14 +3817,11 @@ class MainWindow(QMainWindow):
                     # Blocked in rig.open() (a serial open or TCP connect).
                     # Detach rather than terminate(): see
                     # _DETACHED_AT_SHUTDOWN.
-                    _detach_running_thread(
-                        thread, self._connect_worker, "rig connect thread"
+                    worker = next(
+                        (w for t, w, _r in self._retired_connects if t is thread),
+                        None,
                     )
-
-        # Drop the worker reference only after all threads have stopped.
-        # Clearing it earlier would destroy the C++ QObject while the worker
-        # thread might still be executing worker.run(), which crashes.
-        self._connect_worker = None
+                    _detach_running_thread(thread, worker, "rig connect thread")
 
     def _connect_serial(self) -> None:
         """Create a direct serial rig backend and start polling.

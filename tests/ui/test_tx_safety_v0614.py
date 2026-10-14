@@ -123,9 +123,38 @@ def test_watchdog_unkeys_directly_before_stopping(qapp) -> None:
     real_set = real.set_ptt
     real.set_ptt = lambda on: (order.append(f"ptt{int(on)}"), real_set(on))  # type: ignore[method-assign]
     orig_stop = w.request_stop
-    w.request_stop = lambda: (order.append("stop"), orig_stop())  # type: ignore[method-assign]
+    w.request_stop = lambda **kw: (order.append("stop"), orig_stop(**kw))  # type: ignore[method-assign]
     w._watchdog_fire(30.0, 0)
     assert order == ["ptt0", "stop"]
+
+
+def test_watchdog_does_not_cancel_queued_next_tx(qapp, image, _fast) -> None:
+    """v0.6.14 sweep: the watchdog stops the overrunning TX only — a
+    separately queued next transmission still runs."""
+    rig = PttRecorder()
+    w = TxWorker(rig=rig, ptt_delay_s=0)
+    log = _signals(w)
+    w.note_tx_requested()  # TX 1 dispatched and running
+    assert w._begin_tx_slot()
+    w.note_tx_requested()  # TX 2 queued behind it
+    w._watchdog_fire(30.0, 0)
+    assert w._stop_event.is_set()  # TX 1 is told to stop
+    w._end_tx_slot()
+    w.transmit(image, Mode.ROBOT_36)  # TX 2's queued slot
+    assert True in rig.calls, "queued TX must still key after a watchdog stop"
+    assert log["complete"] == [1]
+
+
+def test_operator_stop_still_cancels_queued_tx(qapp, image, _fast) -> None:
+    rig = PttRecorder()
+    w = TxWorker(rig=rig, ptt_delay_s=0)
+    w.note_tx_requested()
+    assert w._begin_tx_slot()
+    w.note_tx_requested()
+    w.request_stop()
+    w._end_tx_slot()
+    w.transmit(image, Mode.ROBOT_36)
+    assert True not in rig.calls
 
 
 # --- T-L2 ---
@@ -223,6 +252,37 @@ def test_health_consecutive_failures_trip(monkeypatch: pytest.MonkeyPatch) -> No
     assert isinstance(m.failure, OSError)
 
 
+class _AlwaysRaisingRig:
+    name = "always"
+
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+        self.pings = 0
+
+    def get_ptt(self) -> bool:
+        self.pings += 1
+        raise self.exc
+
+
+@pytest.mark.parametrize("code", [-5, -6, -8, -13, -14])
+def test_health_link_down_rprt_trips_after_threshold(
+    monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    """v0.6.14 sweep: rigctld that lost the radio answers RPRT -5/-6."""
+    rig = _AlwaysRaisingRig(RigCommandError(f"RPRT {code}", command="t", rprt=code))
+    m = _run_monitor(rig, monkeypatch, 0.3)
+    assert isinstance(m.failure, RigCommandError)
+    assert rig.pings == workers._RIG_HEALTH_FAIL_THRESHOLD
+
+
+@pytest.mark.parametrize("code", [-1, -4, -9, -11, 0x50000016])
+def test_health_alive_rejection_codes_not_strikes(
+    monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    rig = _AlwaysRaisingRig(RigCommandError("refused", command="t", rprt=code))
+    assert _run_monitor(rig, monkeypatch, 0.2).failure is None
+
+
 # --- T-M5 / T-L4 ---
 
 
@@ -303,6 +363,76 @@ def test_reresolution_prefers_previous_host_api(qapp, monkeypatch: pytest.Monkey
     assert devices.find_output_device_by_name("nope", host_api="MME") is None
 
 
+def test_portaudio_generation_bump_forces_reresolve(
+    qapp, image, _fast, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v0.6.14 sweep: a PortAudio reset by any path (e.g. RX start after a
+    replug while RX was stopped) re-resolves without the GUI stale flag."""
+    from open_sstv.audio import devices
+
+    stale, fresh = _dev(3), _dev(7)
+    lookup = MagicMock(return_value=fresh)
+    monkeypatch.setattr(workers, "find_output_device_by_name", lookup)
+    monkeypatch.setattr(workers, "list_output_devices", lambda: [fresh])
+    w = TxWorker(rig=PttRecorder(), output_device=stale, ptt_delay_s=0)
+    w.set_output_device_name("USB Audio CODEC")
+    w.transmit(image, Mode.ROBOT_36)
+    lookup.assert_not_called()
+    devices.bump_portaudio_generation()
+    w.transmit(image, Mode.ROBOT_36)
+    assert _fast["play"].call_args.kwargs["device"] is fresh
+    # ...and only once per generation.
+    w.transmit(image, Mode.ROBOT_36)
+    assert lookup.call_count == 1
+
+
+def test_pa_reset_bumps_generation(monkeypatch: pytest.MonkeyPatch) -> None:
+    from open_sstv.audio import devices, input_stream
+
+    monkeypatch.setattr(input_stream.sd, "_terminate", lambda: None, raising=False)
+    monkeypatch.setattr(input_stream.sd, "_initialize", lambda: None, raising=False)
+    before = devices.portaudio_generation()
+    input_stream.InputStreamWorker._pa_reset(MagicMock())
+    assert devices.portaudio_generation() == before + 1
+
+
+def test_device_query_holds_tx_state_lock(
+    qapp, image, _fast, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The enumeration can't overlap _pa_reset's sd._terminate()."""
+    held: list[bool] = []
+
+    def _list() -> list[AudioDevice]:
+        held.append(workers.output_stream._tx_state_lock.locked())
+        return [_dev(7)]
+
+    monkeypatch.setattr(workers, "list_output_devices", _list)
+    monkeypatch.setattr(workers, "find_output_device_by_name", lambda n, host_api=None: _dev(7))
+    w = TxWorker(rig=PttRecorder(), output_device=_dev(3), ptt_delay_s=0)
+    w.set_output_device_name("USB Audio CODEC")
+    w.mark_output_device_stale()
+    w.transmit(image, Mode.ROBOT_36)
+    assert held == [True]
+    assert not workers.output_stream._tx_state_lock.locked()
+
+
+def test_configured_host_api_preferred_when_missing_at_launch(
+    qapp, image, _fast, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v0.6.14 sweep: device missing at launch, configured WASAPI ->
+    resolves to the WASAPI twin, not MME (enumerated first)."""
+    from open_sstv.audio import devices
+
+    mme, wasapi = _dev(1, "MME"), _dev(9, "Windows WASAPI")
+    monkeypatch.setattr(devices, "list_output_devices", lambda: [mme, wasapi])
+    monkeypatch.setattr(workers, "list_output_devices", lambda: [mme, wasapi])
+    monkeypatch.setattr(workers, "find_output_device_by_name", devices.find_output_device_by_name)
+    w = TxWorker(rig=PttRecorder(), output_device=None, ptt_delay_s=0)
+    w.set_output_device_name("USB Audio CODEC", host_api="Windows WASAPI")
+    w.transmit(image, Mode.ROBOT_36)
+    assert _fast["play"].call_args.kwargs["device"] is wasapi
+
+
 def test_no_name_keeps_given_device(qapp, image, _fast) -> None:
     dev = _dev(3)
     w = TxWorker(rig=ManualRig(), output_device=dev, ptt_delay_s=0)
@@ -347,7 +477,12 @@ def test_tci_reconnect_in_unkey_retry_resubscribes_rx_audio(qapp) -> None:
     w = TxWorker(rig=rig, ptt_delay_s=0)
     w._unkey_with_retry(rig)
     assert rig.calls == [False, False]
-    assert rig.connection.sent == ["audio_start:0;"]
+    # v0.6.14 sweep: the full RX setup TciInputStreamWorker.start sends,
+    # not a bare audio_start.
+    from open_sstv.radio.tci import RX_AUDIO_SETUP_COMMANDS
+
+    assert rig.connection.sent == list(RX_AUDIO_SETUP_COMMANDS)
+    assert RX_AUDIO_SETUP_COMMANDS[-1] == "audio_start:0;"
     assert rig.connection.subscribed
 
 

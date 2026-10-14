@@ -91,6 +91,7 @@ from open_sstv.audio.devices import (
     find_output_device_by_name,
     invalidate_device_cache,
     list_output_devices,
+    portaudio_generation,
 )
 from open_sstv.audio.pipewire_route import PipeWireSink, find_pipewire_sink_by_name
 from open_sstv.core.cw import make_cw
@@ -106,6 +107,7 @@ from open_sstv.core.encoder import DEFAULT_SAMPLE_RATE, encode
 from open_sstv.core.modes import MODE_TABLE, Mode
 from open_sstv.radio.base import ManualRig, Rig
 from open_sstv.radio.exceptions import RigCommandError
+from open_sstv.radio.tci import subscribe_rx_audio
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -299,6 +301,16 @@ _RIG_HEALTH_INTERVAL_S: float = 1.0
 #: 1 s cadence still catches a real unplug within a few seconds.
 _RIG_HEALTH_FAIL_THRESHOLD: int = 3
 
+#: Hamlib ``RPRT`` codes that mean "rigctld is up but has lost the radio"
+#: — v0.6.14 sweep.  A rigctld whose radio was unplugged or powered off
+#: answers every ping with ``RPRT -5`` (RIG_ETIMEOUT) or ``-6``
+#: (RIG_EIO), so treating every coded reply as "link alive" meant a dead
+#: radio was never detected during TX.  These count as health strikes:
+#: -5 ETIMEOUT, -6 EIO, -8 EPROTO, -13 EBUSERROR, -14 EBUSBUSY.  Every
+#: other code (-1 EINVAL, -4 ENIMPL, -9 ERJCTED, -11 ENAVAIL, Flex's
+#: positive 0x5000xxxx errors, ...) is a rejection from a live radio.
+_RIG_LINK_DOWN_RPRT: frozenset[int] = frozenset({-5, -6, -8, -13, -14})
+
 #: How long to wait for the health-monitor thread to finish at TX end.
 #: One blocked CAT round-trip is at most ~2 s (rigctld socket timeout),
 #: so 3 s lets a wedged ping drain before we touch the rig to unkey.
@@ -320,9 +332,11 @@ class _RigHealthMonitor:
     nothing more to learn, and the unkey path needs the (serial) backend
     lock free.  v0.6.14 audit T-M4: "dead" means
     ``_RIG_HEALTH_FAIL_THRESHOLD`` consecutive failures, and a
-    ``RigCommandError`` that carries an ``rprt`` code never counts — the
-    backend answered (``RPRT -5``, a Flex error code), so the link is up
-    even if that one read was refused.
+    ``RigCommandError`` that carries an ``rprt`` code does not count — the
+    backend answered (``RPRT -9``, a Flex error code), so the link is up
+    even if that one read was refused.  v0.6.14 sweep: except the
+    link-down codes in ``_RIG_LINK_DOWN_RPRT`` (``RPRT -5`` / ``-6`` from
+    a rigctld that has lost the radio), which are strikes.
     """
 
     def __init__(self, rig: Rig) -> None:
@@ -347,9 +361,10 @@ class _RigHealthMonitor:
             try:
                 self._rig.get_ptt()
             except RigCommandError as exc:
-                if exc.rprt is not None:
+                if exc.rprt is not None and exc.rprt not in _RIG_LINK_DOWN_RPRT:
                     # The backend replied with a clean rejection code:
-                    # the link is alive.  Not a strike.
+                    # the link is alive.  Not a strike.  (Link-down codes
+                    # such as RPRT -5/-6 fall through — v0.6.14 sweep.)
                     _log.debug("rig health: ping refused (%s) — link alive", exc)
                     consecutive = 0
                     continue
@@ -597,6 +612,16 @@ class TxWorker(QObject):
         #: PortAudio query (and pactl on Linux), so it runs only then, or
         #: while the configured device is missing (v0.6.14 review).
         self._output_device_stale: bool = False
+        #: v0.6.14 sweep: the configured host API (``audio_output_host_api``)
+        #: — preferred over the current device's when re-resolving, so a
+        #: device that was missing at launch resolves to the operator's
+        #: WASAPI pick rather than its MME twin.
+        self._output_host_api: str | None = None
+        #: v0.6.14 sweep: ``devices.portaudio_generation()`` as of the last
+        #: resolve.  A PortAudio reset by any path (not just the ones the
+        #: GUI flags via ``mark_output_device_stale``) bumps the
+        #: generation and forces a re-resolve before the next key-up.
+        self._resolved_generation: int = portaudio_generation()
         #: Latches after the first MME warning so the advice is logged once
         #: per worker rather than on every transmission.
         self._mme_warned: bool = False
@@ -651,13 +676,18 @@ class TxWorker(QObject):
         """Change the output device at runtime (e.g. after settings save)."""
         self._output_device = device
 
-    def set_output_device_name(self, name: str | None) -> None:
+    def set_output_device_name(
+        self, name: str | None, host_api: str | None = None
+    ) -> None:
         """Record the configured output device name for per-TX re-resolution.
 
         v0.6.14 audit T-M5.  An empty name means "system default" and
-        disables re-resolution, as does ``None`` (the default).
+        disables re-resolution, as does ``None`` (the default).  *host_api*
+        is the configured ``audio_output_host_api`` (v0.6.14 sweep); empty
+        or ``None`` means "no preference".
         """
         self._output_device_name = name or None
+        self._output_host_api = host_api or None
 
     def mark_output_device_stale(self) -> None:
         """The device list changed (USB loss / PortAudio reset): re-resolve
@@ -665,18 +695,41 @@ class TxWorker(QObject):
         store)."""
         self._output_device_stale = True
 
+    @staticmethod
+    def _query_output_device(
+        name: str, host_api: str | None
+    ) -> tuple[AudioDevice | None, bool, int]:
+        """PortAudio lookup of *name*: ``(device, enumerated_any, generation)``.
+
+        v0.6.14 sweep: runs under ``output_stream._tx_state_lock`` — the
+        lock ``run_if_tx_idle`` holds across ``_pa_reset``'s
+        ``sd._terminate()`` / ``sd._initialize()`` — so the query can never
+        overlap a PortAudio teardown, and the generation read here is the
+        one the returned indices belong to.  The lock is not re-entrant;
+        nothing below takes it, and the caller is not yet inside
+        ``play_blocking``.  pactl lookups stay outside the lock so a slow
+        subprocess can't block ``output_stream.stop()``.
+        """
+        with output_stream._tx_state_lock:
+            generation = portaudio_generation()
+            invalidate_device_cache()
+            if not list_output_devices():
+                return None, False, generation
+            return find_output_device_by_name(name, host_api=host_api), True, generation
+
     def _resolve_output_device(self) -> AudioDevice | PipeWireSink | int | None:
         """Re-look-up the configured output device by name (T-M5 / T-L4).
 
-        Runs only when the device list is known to have changed
-        (:meth:`mark_output_device_stale`) or the configured device is
-        currently missing.  Returns the fresh device, or raises
-        ``LookupError`` when a device name is configured but no such
-        device exists right now — the caller refuses to key rather than
-        let PortAudio fall back to the system default (the speakers) while
-        the rig is transmitting.  Prefers the host API of the previously
-        resolved device so a WASAPI pick doesn't silently become its MME
-        twin (T-L4).
+        Runs only when the device list may have changed — the PortAudio
+        generation moved since the last resolve, or
+        :meth:`mark_output_device_stale` was called (v0.6.14 sweep) — or
+        the configured device is currently missing.  Returns the fresh
+        device, or raises ``LookupError`` when a device name is configured
+        but no such device exists right now — the caller refuses to key
+        rather than let PortAudio fall back to the system default (the
+        speakers) while the rig is transmitting.  Prefers the configured
+        host API, then that of the previously resolved device, so a
+        WASAPI pick doesn't silently become its MME twin (T-L4).
 
         An *empty* enumeration means PortAudio itself failed (it is logged
         and swallowed in ``devices``), not that the device is gone — keep
@@ -684,28 +737,41 @@ class TxWorker(QObject):
         """
         name = self._output_device_name
         current = self._output_device
-        if not name or (current is not None and not self._output_device_stale):
+        if not name:
             return current
-        invalidate_device_cache()
+        if (
+            current is not None
+            and not self._output_device_stale
+            and portaudio_generation() == self._resolved_generation
+        ):
+            return current
+        # Clear before querying so a mark that lands mid-query is kept.
+        self._output_device_stale = False
+        host_api = self._output_host_api or getattr(current, "host_api", None)
+        generation = portaudio_generation()
         fresh: AudioDevice | PipeWireSink | None
         if isinstance(current, PipeWireSink):
-            fresh = find_pipewire_sink_by_name(name) or find_output_device_by_name(name)
+            fresh = find_pipewire_sink_by_name(name)
+            if fresh is None:
+                fresh, _, generation = self._query_output_device(name, host_api)
         else:
-            if current is not None and not list_output_devices():
+            fresh, enumerated, generation = self._query_output_device(name, host_api)
+            if not enumerated and current is not None:
+                self._output_device_stale = True  # retry on the next TX
                 _log.warning(
                     "TX output device re-resolution skipped: audio device "
                     "enumeration returned nothing — keeping %r", current,
                 )
                 return current
-            fresh = find_output_device_by_name(
-                name, host_api=getattr(current, "host_api", None)
-            ) or find_pipewire_sink_by_name(name)
+            if fresh is None:
+                fresh = find_pipewire_sink_by_name(name)
         if fresh is None:
+            self._output_device_stale = True
             raise LookupError(name)
         if fresh != current:
             _log.info("TX output device re-resolved: %r -> %r", current, fresh)
         self._output_device = fresh
-        self._output_device_stale = False
+        self._resolved_generation = generation
         return fresh
 
     def set_output_gain(self, gain: float) -> None:
@@ -1611,13 +1677,6 @@ class TxWorker(QObject):
                     )
                     time.sleep(_UNKEY_RETRY_DELAY_S)
                     continue
-                if rx_was_subscribed:
-                    try:
-                        tci_conn.send("audio_start:0;")  # type: ignore[union-attr]
-                        tci_conn.mark_rx_audio_subscribed(True)  # type: ignore[union-attr]
-                        _log.info("TCI reconnected during unkey — RX audio re-subscribed")
-                    except Exception as exc:  # noqa: BLE001 — unkey matters more
-                        _log.warning("TCI audio_start after reconnect failed: %s", exc)
             try:
                 rig.set_ptt(False)
             except Exception as exc:  # noqa: BLE001
@@ -1637,6 +1696,18 @@ class TxWorker(QObject):
                     "reconnect",
                     attempt + 1,
                 )
+                if rx_was_subscribed:
+                    # Re-subscribe only once the rig is unkeyed (v0.6.14
+                    # sweep: unkey first — four sends no longer delay it),
+                    # and send the full setup (rate / format / channels +
+                    # audio_start) rather than a bare audio_start: a fresh
+                    # server session otherwise streams RX audio in its
+                    # default format.
+                    try:
+                        subscribe_rx_audio(tci_conn)
+                        _log.info("TCI reconnected during unkey — RX audio re-subscribed")
+                    except Exception as exc:  # noqa: BLE001
+                        _log.warning("TCI RX audio re-subscribe after reconnect failed: %s", exc)
             return
         self.error.emit(
             f"Could not unkey rig after {_UNKEY_ATTEMPTS} attempts: "
@@ -1645,17 +1716,24 @@ class TxWorker(QObject):
             "rig's TX time-out timer as a backstop)."
         )
 
-    def request_stop(self) -> None:
+    def request_stop(self, cancel_queued: bool = True) -> None:
         """Abort an in-flight transmission. Safe to call from any thread.
 
         Sets the stop flag and yanks PortAudio out of ``sd.wait()`` so
         the playback unwinds immediately. The worker thread then drops
         PTT and emits ``transmission_aborted``.
+
+        *cancel_queued* (the default, for the operator's Stop) also
+        cancels every transmission dispatched but not yet started (T-L2).
+        The playback watchdog passes ``False`` (v0.6.14 sweep): it is
+        about the *current* TX overrunning its budget, and must not
+        silently swallow a separately queued next transmission.
         """
         with self._stop_lock:
-            # T-L2: also cancel every transmission already dispatched
-            # but whose queued slot hasn't run yet.
-            self._stop_covers_upto = self._tx_requests_issued
+            if cancel_queued:
+                # T-L2: also cancel every transmission already dispatched
+                # but whose queued slot hasn't run yet.
+                self._stop_covers_upto = self._tx_requests_issued
             self._stop_event.set()
         output_stream.stop()
 
@@ -1729,7 +1807,8 @@ class TxWorker(QObject):
         # overdue — possibly wedged where request_stop() can't reach it —
         # so trusting the worker's own unwind to unkey is not enough.
         self.emergency_unkey()
-        self.request_stop()
+        # v0.6.14 sweep: stop only the overrunning TX, not a queued next one.
+        self.request_stop(cancel_queued=False)
 
 
 class RxWorker(QObject):

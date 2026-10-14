@@ -499,3 +499,51 @@ class TestFrameSizeCap:
         ws.frame_buffer = websocket._abnf.frame_buffer(_recv, True)
         _install_frame_size_cap(ws)
         assert ws.frame_buffer.recv_frame().data == payload
+
+    @staticmethod
+    def _stream_ws(frames: list[bytes]):  # type: ignore[no-untyped-def]
+        import websocket
+
+        buf = [b"".join(frames)]
+
+        def _recv(n: int) -> bytes:
+            data = buf[0][:n]
+            buf[0] = buf[0][n:]
+            return data
+
+        ws = websocket.WebSocket()
+        ws.frame_buffer = websocket._abnf.frame_buffer(_recv, True)
+        return ws
+
+    @staticmethod
+    def _frame(opcode: int, payload: bytes, fin: bool) -> bytes:
+        import struct as _struct
+
+        first = (0x80 if fin else 0) | opcode
+        return bytes([first, 126]) + _struct.pack("!H", len(payload)) + payload
+
+    def test_fragmented_message_capped_in_total(self) -> None:
+        """v0.6.14 sweep: many small continuation frames, each under the
+        frame cap, must not reassemble past the message cap."""
+        from open_sstv.radio.tci import _MAX_MESSAGE_BYTES, _install_frame_size_cap
+
+        chunk = b"\x00" * 16_000
+        frames = [self._frame(0x2, chunk, fin=False)]
+        frames += [self._frame(0x0, chunk, fin=False) for _ in range(20)]
+        ws = self._stream_ws(frames)
+        _install_frame_size_cap(ws)
+        with pytest.raises(RigConnectionError):
+            ws.recv_data()
+        assert ws.cont_frame.cont_data is None
+        assert _MAX_MESSAGE_BYTES == 64 * 1024
+
+    def test_small_fragmented_message_passes(self) -> None:
+        from open_sstv.radio.tci import _install_frame_size_cap
+
+        frames = [
+            self._frame(0x1, b"vfo:0,0,", fin=False),
+            self._frame(0x0, b"14230000;", fin=True),
+        ]
+        ws = self._stream_ws(frames)
+        _install_frame_size_cap(ws)
+        assert ws.recv_data() == (0x1, b"vfo:0,0,14230000;")

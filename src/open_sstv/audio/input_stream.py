@@ -57,7 +57,7 @@ from PySide6.QtCore import QObject, QTimer, Signal, Slot
 _log = logging.getLogger(__name__)
 
 from open_sstv.audio import macos_permissions
-from open_sstv.audio.devices import AudioDevice
+from open_sstv.audio.devices import AudioDevice, bump_portaudio_generation
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -647,6 +647,11 @@ class InputStreamWorker(QObject):
                 )
             except Exception as exc:  # noqa: BLE001
                 _log.warning("PortAudio _initialize() failed: %s", exc)
+            # v0.6.14 sweep: every device index may have moved.  Bumped
+            # unconditionally (still under the TX-state lock) so the TX
+            # worker re-resolves its output device before the next key-up,
+            # even when one of the calls above failed half-way.
+            bump_portaudio_generation()
 
         if not run_if_tx_idle(_do_reset):
             _log.warning(

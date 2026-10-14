@@ -92,6 +92,38 @@ def test_remote_tx_failing_before_keying_returns_plane_to_idle(window: MainWindo
     assert calls == ["idle"]
 
 
+def test_remote_tx_busy_includes_dispatched_but_unstarted_local_tx(
+    window: MainWindow,
+) -> None:
+    """v0.6.14 sweep: a local TX dispatched (queued slot not yet run, worker
+    still idle) must read busy to the control plane's HTTP thread."""
+    window._tx_worker.note_tx_requested = lambda: None  # type: ignore[method-assign]
+    window._request_test_tone = MagicMock()  # slot never runs: worker idle
+    assert window._tx_worker.wait_for_idle(0.0)
+    assert window._remote_tx_busy() is False
+    window._on_test_tone_requested()
+    assert window._tx_requests_in_flight == 1
+    result: list[bool] = []
+    t = threading.Thread(target=lambda: result.append(window._remote_tx_busy()))
+    t.start()
+    t.join()
+    assert result == [True]
+    window._on_tx_finished()
+    assert window._remote_tx_busy() is False
+
+
+def test_remote_request_refused_while_local_tx_queued(window: MainWindow) -> None:
+    plane = window._remote_control
+    plane._enabled = lambda: True  # type: ignore[method-assign]
+    plane._rig_ready = lambda: True  # type: ignore[method-assign]
+    assert plane.take_lease("c1").ok
+    window._tx_requests_in_flight = 1
+    res = plane.request("c1", "img", "robot36")
+    assert not res.ok and res.error == "busy"
+    window._tx_requests_in_flight = 0
+    assert plane.request("c1", "img", "robot36").ok
+
+
 # --- T-M1: user disconnect while TX unwinding defers teardown ---
 
 
@@ -216,6 +248,111 @@ def test_stale_connect_thread_finish_does_not_clobber_new_attempt(
     qtbot.wait(100)
     assert window._connect_thread is new_thread
     window._connect_thread = None
+
+
+def test_relay_closes_rig_that_succeeds_after_timeout(qtbot) -> None:
+    """v0.6.14 sweep: the worker emitted succeeded, then the timeout won
+    the race before the queued slot ran — the opened rig must be closed."""
+    from PySide6.QtCore import QTimer
+
+    from open_sstv.ui.main_window import _RigConnectRelay
+
+    cancel = threading.Event()
+    adopted: list[object] = []
+    relay = _RigConnectRelay(adopted.append, lambda m: None, QThread(), QTimer(), cancel)
+    cancel.set()  # timeout fired first
+    rig = MagicMock()
+    relay.on_succeeded(rig)
+    qtbot.waitUntil(lambda: rig.close.called, timeout=2000)
+    assert adopted == []
+
+
+def test_timed_out_blocked_attempt_does_not_lock_out_connect(
+    qtbot, window: MainWindow
+) -> None:
+    """v0.6.14 sweep: a timed-out attempt whose thread is still blocked in
+    open() must not refuse new connects; its late success is closed and
+    its finished leaves the new attempt alone."""
+    release = threading.Event()
+    closed: list[int] = []
+
+    class _Slow(FakeRig):
+        def open(self) -> None:
+            release.wait(5)
+
+        def close(self) -> None:
+            closed.append(1)
+
+    window._CONNECT_TIMEOUT_S = 0.05  # type: ignore[misc]
+    errors: list[str] = []
+    window._start_rig_connect_thread(_Slow(), lambda r: None, errors.append)
+    old_thread = window._connect_thread
+    old_done: list[int] = []
+    old_thread.finished.connect(lambda: old_done.append(1))
+    qtbot.waitUntil(lambda: errors != [], timeout=2000)  # timed out
+    assert not window._connect_in_progress()
+
+    # A second attempt starts while the first is still blocked.
+    successes: list[object] = []
+    fast = FakeRig()
+    window._start_rig_connect_thread(fast, successes.append, errors.append)
+    new_thread = window._connect_thread
+    assert new_thread is not old_thread
+    assert any(t is old_thread for t, _w, _r in window._retired_connects)
+    qtbot.waitUntil(lambda: successes == [fast], timeout=2000)
+
+    release.set()  # the stale attempt's open() now "succeeds"
+    qtbot.waitUntil(lambda: old_done == [1], timeout=3000)
+    qtbot.waitUntil(lambda: closed == [1], timeout=2000)
+    qtbot.waitUntil(lambda: window._retired_connects == [], timeout=2000)
+    assert successes == [fast]
+
+
+def test_set_connecting_keeps_button_disabled_during_tx(window: MainWindow) -> None:
+    """v0.6.14 sweep: the rigctld auto-launch path calls set_connecting
+    again after the 500 ms delay — it must not re-enable Cancel mid-TX."""
+    panel = window._radio_panel
+    panel.set_tx_active(True)
+    panel.set_connecting()
+    assert not panel._connect_btn.isEnabled()
+    panel.set_tx_active(False)
+    assert panel._connect_btn.isEnabled()
+    assert panel._connect_btn.text() == "Cancel"
+
+
+def test_connect_completing_mid_tx_is_adopted_after_tx(
+    qtbot, window: MainWindow
+) -> None:
+    """v0.6.14 sweep: no tx_worker.set_rig swap under an in-flight TX."""
+    window._tx_worker.note_tx_requested = lambda: None  # type: ignore[method-assign]
+    window._request_test_tone = MagicMock()  # keep the worker out of it
+    window._on_test_tone_requested()  # one TX dispatched
+    assert window._tx_requests_in_flight == 1
+    set_rig = MagicMock()
+    window._tx_worker.set_rig = set_rig  # type: ignore[method-assign]
+    adopted: list[object] = []
+
+    def _on_success(rig: object) -> None:
+        adopted.append(rig)
+        window._tx_worker.set_rig(rig)
+
+    rig = FakeRig()
+    window._start_rig_connect_thread(rig, _on_success, lambda m: None)
+    qtbot.waitUntil(lambda: window._deferred_connect_success is not None, timeout=2000)
+    assert adopted == [] and not set_rig.called
+    assert window._connect_in_progress()
+    window._on_tx_finished()
+    assert adopted == [rig]
+    set_rig.assert_called_once_with(rig)
+    assert window._deferred_connect_success is None
+
+
+def test_abort_closes_rig_waiting_for_tx_end(window: MainWindow) -> None:
+    rig = FakeRig()
+    window._deferred_connect_success = (rig, lambda r: None)  # type: ignore[assignment]
+    window._abort_connect()
+    assert "close" in rig.calls
+    assert window._deferred_connect_success is None
 
 
 def test_double_click_during_rigctld_launch_delay(
