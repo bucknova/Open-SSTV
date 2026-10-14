@@ -30,16 +30,31 @@ from open_sstv.templates.tokens import TokenContext, resolve_tokens
 # many utilities misbehave on the full Windows set — sanitising against
 # the superset lets users share save directories over SMB / NAS without
 # surprises.
-_FORBIDDEN_CHARS_RE = re.compile(r'[/\\:\*\?"<>\|\x00]')
+#
+# v0.6.14 audit: all C0 control characters (and DEL) are stripped too —
+# Windows rejects 0x01–0x1F outright and they wreck terminals elsewhere.
+_FORBIDDEN_CHARS_RE = re.compile(r'[/\\:\*\?"<>\|\x00-\x1f\x7f]')
+
+#: Windows reserved device names — ``CON.png`` or ``nul_1.png`` can't be
+#: created (or worse, writes to the device).  Matched case-insensitively
+#: against the part before the first dot.
+_WINDOWS_RESERVED: frozenset[str] = frozenset(
+    {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+    | {"COM\u00b9", "COM\u00b2", "COM\u00b3", "LPT\u00b9", "LPT\u00b2", "LPT\u00b3"}
+)
 
 # Whitespace sequences collapse to a single underscore.  Tabs and newlines
 # can appear if a user pastes a weird template string; this keeps the
 # resulting filename tidy.
 _WHITESPACE_RUN_RE = re.compile(r"\s+")
 
-# Hard cap on the resolved filename stem (before the extension).  200
-# leaves comfortable headroom for ``.png``/``.jpg``, collision suffixes
-# ``_NNN``, and typical save-directory path lengths on every OS we ship.
+# Hard cap on the resolved filename stem (before the extension), in
+# UTF-8 *bytes*.  200 leaves headroom for ``.png``/``.jpg`` and collision
+# suffixes under the 255-byte NAME_MAX of ext4/APFS.  v0.6.14 audit: this
+# was a character cap, so 200 non-ASCII characters (up to 800 bytes)
+# produced a name the filesystem rejected.
 _MAX_STEM_LENGTH = 200
 
 # Default separator when a token resolves to empty (e.g. no callsign set)
@@ -61,21 +76,34 @@ def sanitize_filename_component(raw: str) -> str:
     * Collapse runs of ``_`` or ``-`` longer than one to a single
       character (handles the case where a resolved token was empty
       and left neighbouring separators adjacent).
-    * Strip leading / trailing ``_``, ``-``, and whitespace.
-    * Cap length at :data:`_MAX_STEM_LENGTH`.
+    * Strip leading / trailing ``_``, ``-``, whitespace, and trailing
+      dots (Windows silently drops a trailing dot or space, so
+      ``name.`` and ``name`` would collide).
+    * Cap length at :data:`_MAX_STEM_LENGTH` UTF-8 bytes, never
+      splitting a character.
+    * Prefix ``_`` to a Windows reserved device name (``CON``, ``NUL``,
+      ``COM1``…).
 
     Returns the cleaned string.  If the input was entirely forbidden
     characters (so nothing survives), returns ``"sstv"`` as a last-ditch
     fallback — the file still needs a name.
     """
-    cleaned = _FORBIDDEN_CHARS_RE.sub("", raw)
-    cleaned = _WHITESPACE_RUN_RE.sub("_", cleaned)
+    # Whitespace first, so tabs / newlines become ``_`` before the
+    # control-character strip would delete them outright.
+    cleaned = _WHITESPACE_RUN_RE.sub("_", raw)
+    cleaned = _FORBIDDEN_CHARS_RE.sub("", cleaned)
     cleaned = _SEPARATOR_COLLAPSE_RE.sub(lambda m: m.group(0)[0], cleaned)
-    cleaned = cleaned.strip("_- \t\n")
-    if len(cleaned) > _MAX_STEM_LENGTH:
-        cleaned = cleaned[:_MAX_STEM_LENGTH].rstrip("_- ")
+    cleaned = cleaned.strip("_- \t\n").rstrip("._- ")
+    if len(cleaned.encode("utf-8")) > _MAX_STEM_LENGTH:
+        cleaned = (
+            cleaned.encode("utf-8")[:_MAX_STEM_LENGTH]
+            .decode("utf-8", errors="ignore")
+            .rstrip("_- .")
+        )
     if not cleaned:
         return "sstv"
+    if cleaned.split(".", 1)[0].upper() in _WINDOWS_RESERVED:
+        cleaned = "_" + cleaned
     return cleaned
 
 
