@@ -885,6 +885,37 @@ def _fit_text(
     return text, font
 
 
+#: Characters with a plain-ASCII stand-in, used when the layer's font has
+#: no glyph for them.  Ø comes from the slashed-zero callsign transform.
+_GLYPH_FALLBACKS: dict[str, str] = {"\u00d8": "0"}
+
+#: A codepoint no font maps — its rendering *is* the font's .notdef box.
+_UNMAPPED_CODEPOINT = "\U0010fffd"
+
+
+def _font_has_glyph(font: PIL.ImageFont.FreeTypeFont, ch: str) -> bool:
+    """True when *font* draws *ch* as something other than its .notdef box."""
+    try:
+        mask = font.getmask(ch)
+        notdef = font.getmask(_UNMAPPED_CODEPOINT)
+    except Exception:  # noqa: BLE001 — bitmap fallback fonts, odd builds
+        return True
+    return not (mask.size == notdef.size and bytes(mask) == bytes(notdef))
+
+
+def _substitute_missing_glyphs(font: PIL.ImageFont.FreeTypeFont, text: str) -> str:
+    """Replace characters the font can't draw with their ASCII stand-ins.
+
+    v0.6.14 audit: Orbitron (a starter-template font) has no Ø, so the
+    default slashed-zero transform put a tofu box in W0AEZ on the air.
+    A plain 0 beats a box.
+    """
+    for ch, stand_in in _GLYPH_FALLBACKS.items():
+        if ch in text and not _font_has_glyph(font, ch):
+            text = text.replace(ch, stand_in)
+    return text
+
+
 def _rasterize_text(
     layer: TextLayer,
     resolved_text: str,
@@ -893,6 +924,7 @@ def _rasterize_text(
 ) -> PIL.Image.Image:
     font_size_px = max(1, int(layer.font_size_pct / 100.0 * canvas_h))
     font = _load_font(layer.font_family, font_size_px)
+    resolved_text = _substitute_missing_glyphs(font, resolved_text)
 
     if layer.orientation == "stacked":
         text_img, x, y = _render_stacked_text(layer, resolved_text, canvas_w, canvas_h, font)
