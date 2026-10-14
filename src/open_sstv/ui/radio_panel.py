@@ -182,12 +182,15 @@ class RadioPanel(QWidget):
         """Show a connecting-in-progress state with a Cancel button.
 
         The button is relabelled "Cancel" and kept *enabled* so the user can
-        abort the attempt.  ``set_connected`` or ``set_connection_error`` will
-        restore the button when the attempt resolves.
+        abort the attempt — except during TX (v0.6.14 sweep): the rigctld
+        auto-launch path calls this again 500 ms after Connect, and an
+        unconditional ``setEnabled(True)`` re-enabled the button mid-TX.
+        ``set_connected`` or ``set_connection_error`` will restore the
+        button when the attempt resolves.
         """
         self._connecting = True
         self._connect_btn.setText("Cancel")
-        self._connect_btn.setEnabled(True)  # always clickable so Cancel works
+        self._update_connect_btn()  # clickable unless TX is active
         self._status_label.setText("Connecting…")
         self._status_label.setStyleSheet("color: orange;")
 

@@ -908,6 +908,12 @@ class MainWindow(QMainWindow):
         #: whose thread is still blocked in open() — see
         #: ``_retire_connect_attempt``.
         self._retired_connects: list[tuple[QThread, object, object]] = []
+        #: v0.6.14 sweep: a connect that succeeded while a TX was in
+        #: flight, adopted once the TX worker is idle — see
+        #: ``_defer_success_during_tx``.
+        self._deferred_connect_success: (
+            tuple[Rig, Callable[[Rig], None]] | None
+        ) = None
 
         # In-flight offline encode/decode workers.  Stored as instance
         # attributes (not locals) for the same reason as _connect_worker:
@@ -2700,6 +2706,9 @@ class MainWindow(QMainWindow):
         if self._rig_poll_was_active and not isinstance(self._rig, ManualRig):
             self._rig_poll_timer.start()
         self._rig_poll_was_active = False
+        # v0.6.14 sweep: adopt a rig whose connect finished mid-TX.
+        if self._tx_requests_in_flight <= 0:
+            self._run_deferred_connect_success()
 
     def _schedule_rx_resume(self) -> None:
         """Lift the RX gate 50 ms after TX ends.
@@ -3552,12 +3561,49 @@ class MainWindow(QMainWindow):
         ``_on_connect_thread_finished``, and its objects are kept alive in
         ``_retired_connects`` until its thread exits.
         """
-        if self._pending_rigctld_connect is not None:
+        if (
+            self._pending_rigctld_connect is not None
+            or self._deferred_connect_success is not None
+        ):
             return True
         if self._connect_thread is None:
             return False
         cancel = self._connect_cancel
         return cancel is None or not cancel.is_set()
+
+    def _defer_success_during_tx(
+        self, on_success: Callable[[Rig], None]
+    ) -> Callable[[Rig], None]:
+        """Wrap a connect success handler so it never runs mid-TX.
+
+        v0.6.14 sweep: a connect that completes while a transmission is
+        dispatched or on the air (e.g. Send pressed during the rigctld
+        auto-launch delay) used to adopt the rig immediately — swapping
+        ``tx_worker.set_rig`` / ``set_tci_connection`` and the RX audio
+        worker under a TX whose ``transmit`` slot may still be queued, and
+        restarting the rig poll that TX suspends (OP-47).  Adoption now
+        waits for ``_unlock_rig_controls`` (worker idle, unkey included).
+        """
+
+        def _guarded(rig: Rig) -> None:
+            if self._tx_requests_in_flight > 0:
+                _log.info("rig connected during TX — attaching it after the TX ends")
+                self._deferred_connect_success = (rig, on_success)
+                self.statusBar().showMessage(
+                    "Rig connected — it will be attached when the current "
+                    "transmission ends.", 5000,
+                )
+                return
+            on_success(rig)
+
+        return _guarded
+
+    def _run_deferred_connect_success(self) -> None:
+        pending = self._deferred_connect_success
+        self._deferred_connect_success = None
+        if pending is not None:
+            rig, on_success = pending
+            on_success(rig)
 
     def _retire_connect_attempt(self) -> None:
         """Park the current attempt's thread/worker/relay until it exits.
@@ -3603,6 +3649,7 @@ class MainWindow(QMainWindow):
         # in open(); park it rather than dropping its refs.
         if self._connect_thread is not None:
             self._retire_connect_attempt()
+        on_success = self._defer_success_during_tx(on_success)
         cancel = threading.Event()
         self._connect_cancel = cancel
 
@@ -3722,6 +3769,15 @@ class MainWindow(QMainWindow):
         self._retire_connect_attempt()  # also stops the timeout timer
         if cancel is not None:
             cancel.set()
+        # v0.6.14 sweep: a connect that succeeded mid-TX and is waiting to
+        # be adopted is abandoned too — close it so the port doesn't leak.
+        deferred = self._deferred_connect_success
+        self._deferred_connect_success = None
+        if deferred is not None:
+            try:
+                deferred[0].close()
+            except Exception:  # noqa: BLE001 — abandoned; never raise
+                pass
 
         for thread in self.findChildren(QThread):
             if thread.objectName() == "rig-connect-thread" and thread.isRunning():

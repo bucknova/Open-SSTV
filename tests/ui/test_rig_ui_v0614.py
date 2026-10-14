@@ -276,6 +276,53 @@ def test_timed_out_blocked_attempt_does_not_lock_out_connect(
     assert successes == [fast]
 
 
+def test_set_connecting_keeps_button_disabled_during_tx(window: MainWindow) -> None:
+    """v0.6.14 sweep: the rigctld auto-launch path calls set_connecting
+    again after the 500 ms delay — it must not re-enable Cancel mid-TX."""
+    panel = window._radio_panel
+    panel.set_tx_active(True)
+    panel.set_connecting()
+    assert not panel._connect_btn.isEnabled()
+    panel.set_tx_active(False)
+    assert panel._connect_btn.isEnabled()
+    assert panel._connect_btn.text() == "Cancel"
+
+
+def test_connect_completing_mid_tx_is_adopted_after_tx(
+    qtbot, window: MainWindow
+) -> None:
+    """v0.6.14 sweep: no tx_worker.set_rig swap under an in-flight TX."""
+    window._tx_worker.note_tx_requested = lambda: None  # type: ignore[method-assign]
+    window._request_test_tone = MagicMock()  # keep the worker out of it
+    window._on_test_tone_requested()  # one TX dispatched
+    assert window._tx_requests_in_flight == 1
+    set_rig = MagicMock()
+    window._tx_worker.set_rig = set_rig  # type: ignore[method-assign]
+    adopted: list[object] = []
+
+    def _on_success(rig: object) -> None:
+        adopted.append(rig)
+        window._tx_worker.set_rig(rig)
+
+    rig = FakeRig()
+    window._start_rig_connect_thread(rig, _on_success, lambda m: None)
+    qtbot.waitUntil(lambda: window._deferred_connect_success is not None, timeout=2000)
+    assert adopted == [] and not set_rig.called
+    assert window._connect_in_progress()
+    window._on_tx_finished()
+    assert adopted == [rig]
+    set_rig.assert_called_once_with(rig)
+    assert window._deferred_connect_success is None
+
+
+def test_abort_closes_rig_waiting_for_tx_end(window: MainWindow) -> None:
+    rig = FakeRig()
+    window._deferred_connect_success = (rig, lambda r: None)  # type: ignore[assignment]
+    window._abort_connect()
+    assert "close" in rig.calls
+    assert window._deferred_connect_success is None
+
+
 def test_double_click_during_rigctld_launch_delay(
     qtbot, window: MainWindow, monkeypatch: pytest.MonkeyPatch
 ) -> None:
