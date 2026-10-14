@@ -1716,17 +1716,24 @@ class TxWorker(QObject):
             "rig's TX time-out timer as a backstop)."
         )
 
-    def request_stop(self) -> None:
+    def request_stop(self, cancel_queued: bool = True) -> None:
         """Abort an in-flight transmission. Safe to call from any thread.
 
         Sets the stop flag and yanks PortAudio out of ``sd.wait()`` so
         the playback unwinds immediately. The worker thread then drops
         PTT and emits ``transmission_aborted``.
+
+        *cancel_queued* (the default, for the operator's Stop) also
+        cancels every transmission dispatched but not yet started (T-L2).
+        The playback watchdog passes ``False`` (v0.6.14 sweep): it is
+        about the *current* TX overrunning its budget, and must not
+        silently swallow a separately queued next transmission.
         """
         with self._stop_lock:
-            # T-L2: also cancel every transmission already dispatched
-            # but whose queued slot hasn't run yet.
-            self._stop_covers_upto = self._tx_requests_issued
+            if cancel_queued:
+                # T-L2: also cancel every transmission already dispatched
+                # but whose queued slot hasn't run yet.
+                self._stop_covers_upto = self._tx_requests_issued
             self._stop_event.set()
         output_stream.stop()
 
@@ -1800,7 +1807,8 @@ class TxWorker(QObject):
         # overdue — possibly wedged where request_stop() can't reach it —
         # so trusting the worker's own unwind to unkey is not enough.
         self.emergency_unkey()
-        self.request_stop()
+        # v0.6.14 sweep: stop only the overrunning TX, not a queued next one.
+        self.request_stop(cancel_queued=False)
 
 
 class RxWorker(QObject):

@@ -123,9 +123,38 @@ def test_watchdog_unkeys_directly_before_stopping(qapp) -> None:
     real_set = real.set_ptt
     real.set_ptt = lambda on: (order.append(f"ptt{int(on)}"), real_set(on))  # type: ignore[method-assign]
     orig_stop = w.request_stop
-    w.request_stop = lambda: (order.append("stop"), orig_stop())  # type: ignore[method-assign]
+    w.request_stop = lambda **kw: (order.append("stop"), orig_stop(**kw))  # type: ignore[method-assign]
     w._watchdog_fire(30.0, 0)
     assert order == ["ptt0", "stop"]
+
+
+def test_watchdog_does_not_cancel_queued_next_tx(qapp, image, _fast) -> None:
+    """v0.6.14 sweep: the watchdog stops the overrunning TX only — a
+    separately queued next transmission still runs."""
+    rig = PttRecorder()
+    w = TxWorker(rig=rig, ptt_delay_s=0)
+    log = _signals(w)
+    w.note_tx_requested()  # TX 1 dispatched and running
+    assert w._begin_tx_slot()
+    w.note_tx_requested()  # TX 2 queued behind it
+    w._watchdog_fire(30.0, 0)
+    assert w._stop_event.is_set()  # TX 1 is told to stop
+    w._end_tx_slot()
+    w.transmit(image, Mode.ROBOT_36)  # TX 2's queued slot
+    assert True in rig.calls, "queued TX must still key after a watchdog stop"
+    assert log["complete"] == [1]
+
+
+def test_operator_stop_still_cancels_queued_tx(qapp, image, _fast) -> None:
+    rig = PttRecorder()
+    w = TxWorker(rig=rig, ptt_delay_s=0)
+    w.note_tx_requested()
+    assert w._begin_tx_slot()
+    w.note_tx_requested()
+    w.request_stop()
+    w._end_tx_slot()
+    w.transmit(image, Mode.ROBOT_36)
+    assert True not in rig.calls
 
 
 # --- T-L2 ---
