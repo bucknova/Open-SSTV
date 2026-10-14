@@ -274,6 +274,47 @@ def test_no_name_keeps_given_device(qapp, image, _fast) -> None:
     assert _fast["play"].call_args.kwargs["device"] is dev
 
 
+def test_tci_reconnect_in_unkey_retry_resubscribes_rx_audio(qapp) -> None:
+    """T-L8: a reconnect during the unkey retry starts a fresh TCI session
+    without the RX ``audio_start`` — RX went silent until restart."""
+
+    class _Conn:
+        def __init__(self) -> None:
+            self.subscribed = True
+            self.sent: list[str] = []
+
+        def is_rx_audio_subscribed(self) -> bool:
+            return self.subscribed
+
+        def mark_rx_audio_subscribed(self, v: bool) -> None:
+            self.subscribed = v
+
+        def send(self, cmd: str) -> None:
+            self.sent.append(cmd)
+
+    class _TciLike(PttRecorder):
+        def __init__(self) -> None:
+            super().__init__()
+            self.connection = _Conn()
+            self.fail_unkeys = 1
+
+        def set_ptt(self, on: bool) -> None:
+            self.calls.append(on)
+            if not on and self.fail_unkeys:
+                self.fail_unkeys -= 1
+                raise RigConnectionError("socket dead")
+
+        def close(self) -> None:
+            self.connection.subscribed = False  # disconnect() resets it
+
+    rig = _TciLike()
+    w = TxWorker(rig=rig, ptt_delay_s=0)
+    w._unkey_with_retry(rig)
+    assert rig.calls == [False, False]
+    assert rig.connection.sent == ["audio_start:0;"]
+    assert rig.connection.subscribed
+
+
 def test_emergency_unkey_from_another_thread_while_keyed(qapp, image, _fast) -> None:
     """Sanity: emergency_unkey during playback reaches the keyed rig."""
     rig = PttRecorder()

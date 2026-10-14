@@ -1545,8 +1545,24 @@ class TxWorker(QObject):
         operator knows to check the radio.
         """
         first_exc: Exception | None = None
+        # v0.6.14 audit T-L8: a TCI reconnect here starts a fresh session
+        # with no RX audio subscription, so RX went silent after a
+        # recovered unkey.  Remember whether RX was subscribed (the flag
+        # survives until close()) and re-send ``audio_start`` afterwards.
+        tci_conn = getattr(rig, "connection", None)
+        rx_was_subscribed = False
+        if tci_conn is not None:
+            try:
+                rx_was_subscribed = bool(tci_conn.is_rx_audio_subscribed())
+            except Exception:  # noqa: BLE001
+                rx_was_subscribed = False
         for attempt in range(_UNKEY_ATTEMPTS):
             if attempt:
+                if tci_conn is not None and not rx_was_subscribed:
+                    try:
+                        rx_was_subscribed = bool(tci_conn.is_rx_audio_subscribed())
+                    except Exception:  # noqa: BLE001
+                        pass
                 try:
                     rig.close()
                 except Exception:  # noqa: BLE001
@@ -1569,6 +1585,13 @@ class TxWorker(QObject):
                     )
                     time.sleep(_UNKEY_RETRY_DELAY_S)
                     continue
+                if rx_was_subscribed:
+                    try:
+                        tci_conn.send("audio_start:0;")  # type: ignore[union-attr]
+                        tci_conn.mark_rx_audio_subscribed(True)  # type: ignore[union-attr]
+                        _log.info("TCI reconnected during unkey — RX audio re-subscribed")
+                    except Exception as exc:  # noqa: BLE001 — unkey matters more
+                        _log.warning("TCI audio_start after reconnect failed: %s", exc)
             try:
                 rig.set_ptt(False)
             except Exception as exc:  # noqa: BLE001
