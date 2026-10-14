@@ -86,8 +86,12 @@ from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 _log = logging.getLogger(__name__)
 
 from open_sstv.audio import output_stream
-from open_sstv.audio.devices import AudioDevice
-from open_sstv.audio.pipewire_route import PipeWireSink
+from open_sstv.audio.devices import (
+    AudioDevice,
+    find_output_device_by_name,
+    invalidate_device_cache,
+)
+from open_sstv.audio.pipewire_route import PipeWireSink, find_pipewire_sink_by_name
 from open_sstv.core.cw import make_cw
 from open_sstv.core.decoder import (
     DecodeError,
@@ -100,7 +104,7 @@ from open_sstv.core.decoder import (
 from open_sstv.core.encoder import DEFAULT_SAMPLE_RATE, encode
 from open_sstv.core.modes import MODE_TABLE, Mode
 from open_sstv.radio.base import ManualRig, Rig
-from open_sstv.radio.exceptions import RigError
+from open_sstv.radio.exceptions import RigCommandError
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -287,6 +291,13 @@ _UNKEY_RETRY_DELAY_S: float = 1.0
 #: Matches the ~1 s cadence the old inline periodic_check had.
 _RIG_HEALTH_INTERVAL_S: float = 1.0
 
+#: How many *consecutive* failed health pings mean the rig link is dead.
+#: v0.6.14 audit T-M4: one failure used to abort the TX and disconnect the
+#: rig, so a single missed CI-V reply or a slow rigctld answer during a
+#: long image threw the whole transmission away.  Three in a row at the
+#: 1 s cadence still catches a real unplug within a few seconds.
+_RIG_HEALTH_FAIL_THRESHOLD: int = 3
+
 #: How long to wait for the health-monitor thread to finish at TX end.
 #: One blocked CAT round-trip is at most ~2 s (rigctld socket timeout),
 #: so 3 s lets a wedged ping drain before we touch the rig to unkey.
@@ -304,9 +315,13 @@ class _RigHealthMonitor:
     own daemon thread; the write loop's ``periodic_check`` merely reads
     the failure flag, which is instant.
 
-    The monitor stops pinging after the first failure — once the link
-    is dead there is nothing more to learn, and the unkey path needs
-    the (serial) backend lock free.
+    The monitor stops pinging once the link is judged dead — there is
+    nothing more to learn, and the unkey path needs the (serial) backend
+    lock free.  v0.6.14 audit T-M4: "dead" means
+    ``_RIG_HEALTH_FAIL_THRESHOLD`` consecutive failures, and a
+    ``RigCommandError`` that carries an ``rprt`` code never counts — the
+    backend answered (``RPRT -5``, a Flex error code), so the link is up
+    even if that one read was refused.
     """
 
     def __init__(self, rig: Rig) -> None:
@@ -326,16 +341,36 @@ class _RigHealthMonitor:
         self._thread.join(timeout=_RIG_HEALTH_JOIN_TIMEOUT_S)
 
     def _run(self) -> None:
+        consecutive = 0
         while not self._stop.wait(_RIG_HEALTH_INTERVAL_S):
             try:
                 self._rig.get_ptt()
+            except RigCommandError as exc:
+                if exc.rprt is not None:
+                    # The backend replied with a clean rejection code:
+                    # the link is alive.  Not a strike.
+                    _log.debug("rig health: ping refused (%s) — link alive", exc)
+                    consecutive = 0
+                    continue
+                consecutive += 1
+                last: Exception = exc
             except Exception as exc:  # noqa: BLE001
-                # Anything raised here means the link is unusable for
-                # monitoring — RigError/OSError on unplug, but also any
+                # Anything else raised here means the link may be unusable
+                # for monitoring — RigError/OSError on unplug, but also any
                 # unexpected parse error.  Catching narrowly would let
                 # an oddball exception kill this thread silently and
                 # leave TX running unmonitored.
-                self.failure = exc
+                consecutive += 1
+                last = exc
+            else:
+                consecutive = 0
+                continue
+            _log.warning(
+                "rig health ping failed (%d/%d): %s",
+                consecutive, _RIG_HEALTH_FAIL_THRESHOLD, last,
+            )
+            if consecutive >= _RIG_HEALTH_FAIL_THRESHOLD:
+                self.failure = last
                 return
 
 
@@ -459,6 +494,13 @@ class TxWorker(QObject):
     #: fixed encode-stage budget if the encoder wedged).
     watchdog_fired = Signal(float)
     error = Signal(str)
+    #: v0.6.14 audit T-M1 / UI-M7: emitted exactly once per ``transmit`` /
+    #: ``transmit_test_tone`` call, *after* the worker is idle — unkey
+    #: retries included.  ``error`` alone is not terminal (it can arrive
+    #: while the unkey is still being retried, or be the only signal on an
+    #: encode/PTT failure), so the GUI unlocks rig controls and returns the
+    #: remote control plane to idle on this, never on ``error``.
+    transmission_finished = Signal()
     #: Emitted when the rig's serial/TCP link dies during TX (USB unplug
     #: mid-transmission).  Delivered to the GUI thread so ``_on_radio_disconnected``
     #: can update the radio panel immediately, without waiting for TX to finish.
@@ -523,6 +565,32 @@ class TxWorker(QObject):
         #: worker was still mid-unkey when the thread was quit.
         self._idle_event = threading.Event()
         self._idle_event.set()
+        #: v0.6.14 audit T-L2: stop requests vs. queued transmit slots.
+        #: ``transmit`` is a queued slot, so a Stop pressed after the GUI
+        #: dispatched a transmission but before the slot ran used to be
+        #: wiped by the ``_stop_event.clear()`` at TX entry — the image
+        #: then keyed anyway.  The GUI calls :meth:`note_tx_requested` when
+        #: it dispatches; :meth:`request_stop` records how many requests
+        #: had been issued; a slot whose sequence number is covered by
+        #: that mark aborts before keying.  All three counters are guarded
+        #: by ``_stop_lock`` (GUI, timer and worker threads touch them).
+        self._stop_lock = threading.Lock()
+        self._tx_requests_issued: int = 0
+        self._tx_slots_run: int = 0
+        self._stop_covers_upto: int = 0
+        #: v0.6.14 audit T-M3: the backend actually keyed by the TX in
+        #: flight.  ``emergency_unkey`` targets this, not ``self._rig``,
+        #: which an involuntary disconnect swaps to ``ManualRig`` mid-TX
+        #: (its ``set_ptt(False)`` is a no-op — the real radio stayed
+        #: keyed).  Guarded by ``_rig_lock``.
+        self._keyed_rig: Rig | None = None
+        #: v0.6.14 audit T-M5: the configured output device *name*.  When
+        #: set, the device is re-resolved by name at the start of every
+        #: TX, so a USB replug (which renumbers PortAudio indices once RX
+        #: recovery re-initialises PortAudio) can't send TX audio to
+        #: whatever device inherited the old index — e.g. the speakers,
+        #: with the rig keyed.  ``None`` keeps the device object as given.
+        self._output_device_name: str | None = None
         #: Latches after the first MME warning so the advice is logged once
         #: per worker rather than on every transmission.
         self._mme_warned: bool = False
@@ -576,6 +644,43 @@ class TxWorker(QObject):
     def set_output_device(self, device: AudioDevice | PipeWireSink | int | None) -> None:
         """Change the output device at runtime (e.g. after settings save)."""
         self._output_device = device
+
+    def set_output_device_name(self, name: str | None) -> None:
+        """Record the configured output device name for per-TX re-resolution.
+
+        v0.6.14 audit T-M5.  An empty name means "system default" and
+        disables re-resolution, as does ``None`` (the default).
+        """
+        self._output_device_name = name or None
+
+    def _resolve_output_device(self) -> AudioDevice | PipeWireSink | int | None:
+        """Re-look-up the configured output device by name (T-M5 / T-L4).
+
+        Returns the fresh device, or raises ``LookupError`` when a device
+        name is configured but no such device exists right now — the
+        caller refuses to key rather than let PortAudio fall back to the
+        system default (the speakers) while the rig is transmitting.
+        Prefers the host API of the previously resolved device so a
+        WASAPI pick doesn't silently become its MME twin (T-L4).
+        """
+        name = self._output_device_name
+        current = self._output_device
+        if not name:
+            return current
+        invalidate_device_cache()
+        fresh: AudioDevice | PipeWireSink | None
+        if isinstance(current, PipeWireSink):
+            fresh = find_pipewire_sink_by_name(name) or find_output_device_by_name(name)
+        else:
+            fresh = find_output_device_by_name(
+                name, host_api=getattr(current, "host_api", None)
+            ) or find_pipewire_sink_by_name(name)
+        if fresh is None:
+            raise LookupError(name)
+        if fresh != current:
+            _log.info("TX output device re-resolved: %r -> %r", current, fresh)
+        self._output_device = fresh
+        return fresh
 
     def set_output_gain(self, gain: float) -> None:
         """Set the software output gain (1.0 = unity). Thread-safe."""
@@ -698,9 +803,42 @@ class TxWorker(QObject):
         """
         try:
             with self._rig_lock:
-                self._rig.set_ptt(False)
+                # v0.6.14 audit T-M3: the rig keyed for the TX in flight,
+                # if any — after an involuntary disconnect ``self._rig``
+                # is already a no-op ManualRig.
+                rig = self._keyed_rig if self._keyed_rig is not None else self._rig
+                rig.set_ptt(False)
         except Exception as exc:  # noqa: BLE001
             self.error_occurred.emit("emergency_unkey", exc)
+
+    def note_tx_requested(self) -> None:
+        """Record that the GUI has dispatched one queued transmit request.
+
+        Call immediately before emitting the queued signal that runs
+        :meth:`transmit` / :meth:`transmit_test_tone`.  Thread-safe.
+        v0.6.14 audit T-L2 — see ``_stop_covers_upto``.
+        """
+        with self._stop_lock:
+            self._tx_requests_issued += 1
+
+    def _begin_tx_slot(self) -> bool:
+        """Claim this slot's sequence number; ``False`` if already stopped.
+
+        Clears ``_stop_event`` for the new transmission *only* when no
+        stop covers it, atomically with respect to ``request_stop``.
+        """
+        with self._stop_lock:
+            self._tx_slots_run += 1
+            if self._tx_slots_run <= self._stop_covers_upto:
+                return False
+            self._stop_event.clear()
+            return True
+
+    def _end_tx_slot(self) -> None:
+        with self._rig_lock:
+            self._keyed_rig = None
+        self._idle_event.set()
+        self.transmission_finished.emit()
 
     @Slot(object, object)
     def transmit(self, image: PILImage, mode: Mode) -> None:
@@ -713,9 +851,13 @@ class TxWorker(QObject):
         """
         self._idle_event.clear()
         try:
+            if not self._begin_tx_slot():
+                _log.info("TX stop requested before the transmission started — not keying")
+                self.transmission_aborted.emit()
+                return
             self._transmit_impl(image, mode)
         finally:
-            self._idle_event.set()
+            self._end_tx_slot()
 
     def _transmit_impl(self, image: PILImage, mode: Mode) -> None:
         """Encode and transmit one image (body of :meth:`transmit`).
@@ -746,7 +888,7 @@ class TxWorker(QObject):
         from a prior transmission cannot race the next ``transmit()``
         call's ``_stop_event.clear()``.
         """
-        self._stop_event.clear()
+        # ``_stop_event`` was cleared by ``_begin_tx_slot`` (T-L2).
         self._watchdog_triggered = False
         # Advance the TX id so any in-flight watchdog from a previous
         # transmission becomes "stale" and no-ops if it fires now.
@@ -921,9 +1063,13 @@ class TxWorker(QObject):
         """
         self._idle_event.clear()
         try:
+            if not self._begin_tx_slot():
+                _log.info("test tone stop requested before it started — not keying")
+                self.transmission_aborted.emit()
+                return
             self._test_tone_impl()
         finally:
-            self._idle_event.set()
+            self._end_tx_slot()
 
     def _test_tone_impl(self) -> None:
         """Two-tone test signal (body of :meth:`transmit_test_tone`).
@@ -939,7 +1085,7 @@ class TxWorker(QObject):
         budget rather than the literal 6 s the formula would otherwise
         produce).
         """
-        self._stop_event.clear()
+        # ``_stop_event`` was cleared by ``_begin_tx_slot`` (T-L2).
         self._watchdog_triggered = False
         with self._tx_id_lock:
             self._tx_id += 1
@@ -1211,14 +1357,37 @@ class TxWorker(QObject):
             PTT key failed; ``error`` signal already emitted.  The caller
             should return immediately without emitting complete/aborted.
         """
+        # --- Resolve the output device (PortAudio path only) ---
+        # v0.6.14 audit T-M5: before keying, so a vanished device is a
+        # refusal, never a keyed rig playing into the system default.
+        if self._tci_connection is None:
+            try:
+                self._resolve_output_device()
+            except LookupError as exc:
+                self.error.emit(
+                    f"TX output device {exc.args[0]!r} is not available — "
+                    "reconnect it or choose another in Settings → Audio. "
+                    "Not transmitting."
+                )
+                return None
+
         # --- Key the rig ---
+        with self._rig_lock:
+            self._keyed_rig = rig
         try:
             rig.set_ptt(True)
-        except RigError as exc:
+        except Exception as exc:  # noqa: BLE001
             # User explicitly wanted rig control and it failed — abort
             # before any audio leaves the soundcard.  ManualRig never
             # raises so this only fires for real backends.
+            #
+            # v0.6.14 audit T-H1: a failed key is NOT proof the rig is
+            # unkeyed.  rigctld answering ``T 1`` after its 2 s timeout, a
+            # lost CI-V OK frame, or a Flex reply timeout all raise here
+            # with the transmitter already on the air — and a non-RigError
+            # (raw OSError) used to escape entirely.  Always send PTT-off.
             self.error.emit(f"Could not key rig: {exc}")
+            self._unkey_with_retry(rig)
             return None
 
         self.transmission_started.emit()
@@ -1434,7 +1603,11 @@ class TxWorker(QObject):
         the playback unwinds immediately. The worker thread then drops
         PTT and emits ``transmission_aborted``.
         """
-        self._stop_event.set()
+        with self._stop_lock:
+            # T-L2: also cancel every transmission already dispatched
+            # but whose queued slot hasn't run yet.
+            self._stop_covers_upto = self._tx_requests_issued
+            self._stop_event.set()
         output_stream.stop()
 
     def wait_for_stop(self, timeout: float) -> bool:
@@ -1502,6 +1675,11 @@ class TxWorker(QObject):
             return
         self._watchdog_triggered = True
         self.watchdog_fired.emit(float(duration_s))
+        # v0.6.14 audit T-M2: drop PTT directly first, like the remote
+        # dead-man's-switch.  A watchdog fire means playback is already
+        # overdue — possibly wedged where request_stop() can't reach it —
+        # so trusting the worker's own unwind to unkey is not enough.
+        self.emergency_unkey()
         self.request_stop()
 
 
