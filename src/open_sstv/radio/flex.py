@@ -42,6 +42,7 @@ import logging
 import socket
 import threading
 
+from open_sstv.radio.base import validate_mode_token
 from open_sstv.radio.exceptions import RigCommandError, RigConnectionError
 
 _log = logging.getLogger(__name__)
@@ -60,6 +61,9 @@ _SLICE_TIMEOUT_S: float = 5.0
 #: Socket timeout for the reader thread. Idle reads time out and loop, so
 #: this only bounds how quickly close() is noticed.
 _SOCKET_TIMEOUT_S: float = 1.0
+#: v0.6.14 audit S-L9: longest line the reader will buffer.  Real status
+#: lines are a few hundred bytes.
+_MAX_LINE_BYTES: int = 64 * 1024
 
 #: Flex mode tokens we accept for a slice.
 FLEX_MODES = (
@@ -171,23 +175,31 @@ class FlexRig:
             )
             self._reader.start()
 
-        # Subscribe outside the write lock's connect section — _command
-        # takes the lock itself.  Both are needed: slice for freq/mode,
-        # transmit for the PTT state the health monitor reads back.
+        # v0.6.14 audit T-L5: everything after the socket is up must tear
+        # it down on failure.  A subscribe that raised (radio rejects the
+        # fallback too, link drops, timeout) used to leave the socket and
+        # reader thread alive with ``_sock`` set — and the next open()
+        # returned early, believing it was already connected.
         try:
-            self._command(f"sub slice {self._slice}")
-            self._command("sub tx all")
-        except RigCommandError:
-            # Older firmware may not accept a per-slice subscription;
-            # fall back to subscribing to everything.
-            self._command("sub slice all")
+            # Subscribe outside the write lock's connect section — _command
+            # takes the lock itself.  Both are needed: slice for freq/mode,
+            # transmit for the PTT state the health monitor reads back.
+            try:
+                self._command(f"sub slice {self._slice}")
+                self._command("sub tx all")
+            except RigCommandError:
+                # Older firmware may not accept a per-slice subscription;
+                # fall back to subscribing to everything.
+                self._command("sub slice all")
 
-        if not self._slice_seen.wait(_SLICE_TIMEOUT_S):
+            if not self._slice_seen.wait(_SLICE_TIMEOUT_S):
+                raise RigConnectionError(
+                    f"{self.name}: radio never reported slice {self._slice} — "
+                    "is that slice active in SmartSDR?"
+                )
+        except BaseException:
             self.close()
-            raise RigConnectionError(
-                f"{self.name}: radio never reported slice {self._slice} — "
-                "is that slice active in SmartSDR?"
-            )
+            raise
         _log.info(
             "FlexRadio connected: version=%s handle=%s slice=%d",
             self._version or "?", self._handle or "?", self._slice,
@@ -250,12 +262,13 @@ class FlexRig:
 
     def set_mode(self, mode: str, passband_hz: int) -> None:
         self._command(
-            f"slice set {self._slice} mode={normalize_flex_mode(mode)}"
+            f"slice set {self._slice} "
+            f"mode={validate_mode_token(normalize_flex_mode(mode))}"
         )
         if passband_hz > 0:
             # Flex expresses the filter as absolute edges around the carrier.
             self._command(
-                f"filt {self._slice} 0 {passband_hz}"
+                f"filt {self._slice} 0 {int(passband_hz)}"
             )
 
     def get_ptt(self) -> bool:
@@ -359,6 +372,15 @@ class FlexRig:
                     except Exception:  # noqa: BLE001 — a bad line must not kill the reader
                         _log.debug("%s: unparseable line %r", self.name, line,
                                    exc_info=True)
+            if len(buf) > _MAX_LINE_BYTES:
+                # v0.6.14 audit S-L9: a partial line this long is not a
+                # SmartSDR message — drop the link rather than buffer an
+                # unbounded stream.
+                _log.warning(
+                    "%s: %d bytes without a newline — dropping the link",
+                    self.name, len(buf),
+                )
+                break
         _log.debug("%s: reader loop exiting", self.name)
         if not self._stop.is_set():
             # Not asked to stop, so the radio closed the link or it errored.
