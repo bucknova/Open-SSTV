@@ -285,7 +285,7 @@ def _v3_named_table(
 # break — matched in one pass so substituted values are never re-scanned
 # (v0.6.14 audit: double expansion of ``{callsign}`` inside a note).
 _V3_TOKEN_RE = re.compile(
-    r"%%|\\n|%(name_o|note|rx_tx|ts|[a-z])|\{([a-z_]+)\}"
+    r"%%|\\\\|\\n|%(name_o|note|rx_tx|ts|[a-z])|\{([a-z_]+)\}"
 )
 
 
@@ -370,6 +370,10 @@ def resolve_text(
             return named_table.get(named_key, match.group(0))
         if match.group(0) == "%%":
             return "%"
+        if match.group(0) == "\\\\":
+            # ``\\`` is a literal backslash, so text that needs one before
+            # an ``n`` (a Windows path, say) can still be written.
+            return "\\"
         # A literal backslash-n typed into the (single-line) editor field
         # is a line break, as the token cheat sheet promises (v0.6.14
         # audit).  Only template text is scanned, never substituted values.

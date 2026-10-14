@@ -278,3 +278,24 @@ def test_preview_pixmap_is_rendered_at_device_pixel_ratio(
     # Device pixels ≈ 2× the logical fit (the 200x100 photo fits 400 wide).
     assert pix.width() == 800
     assert pix.height() == 400
+
+
+def test_failed_rename_leaves_live_template_name_alone(
+    panel: TxPanel, tdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v0.6.14 review: the rename used to mutate the gallery's live template
+    before saving, so a failed save left it renamed in memory only."""
+    from PySide6.QtWidgets import QInputDialog, QMessageBox
+
+    import open_sstv.ui.tx_panel as tx_mod
+
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Gamma", True)))
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: None))
+
+    def _boom(*a, **k):  # noqa: ANN002, ANN003, ANN202
+        raise OSError("read-only")
+
+    monkeypatch.setattr(tx_mod.template_manager, "save", _boom)
+    alpha = load_template(tdir / "alpha.toml")
+    panel._on_rename_template_requested(alpha, tdir / "alpha.toml")
+    assert alpha.name == "Alpha"

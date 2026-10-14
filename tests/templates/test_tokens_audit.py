@@ -112,3 +112,19 @@ def test_font_without_slashed_zero_falls_back_to_zero() -> None:
         pytest.skip("this Orbitron build has Ø")
     assert _substitute_missing_glyphs(orbitron, "WØAEZ") == "W0AEZ"
     assert _substitute_missing_glyphs(dejavu, "WØAEZ") == "WØAEZ"
+
+
+def test_escaped_backslash_keeps_a_literal_backslash_n() -> None:
+    """v0.6.14 review: ``\\n`` is a line break, so ``\\\\`` must exist to
+    write a real backslash before an ``n`` (e.g. a Windows path)."""
+    import datetime
+
+    from open_sstv.config.schema import AppConfig
+    from open_sstv.templates.model import QSOState, TXContext
+    from open_sstv.templates.tokens import resolve_text
+
+    out = resolve_text(
+        r"C:\\new and\nnext", QSOState(), AppConfig(), TXContext(frame_size=(320, 256)),
+        now_utc=datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC),
+    )
+    assert out == "C:\\new and\nnext"

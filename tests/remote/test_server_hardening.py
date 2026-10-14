@@ -496,18 +496,23 @@ class TestPageTokenHandling:
 
 class TestSsePerIpCap:
     def test_one_ip_cannot_take_every_slot(self, server: RemoteServer) -> None:
-        conns: list[http.client.HTTPConnection] = []
+        # Keep the *responses* alive: an SSE reply has no length, so
+        # http.client hands the socket to the response and a discarded
+        # response object closes the stream (freeing its slot server-side
+        # at the next write), which made this test flaky.
+        streams: list[http.client.HTTPResponse] = []
         try:
             for _ in range(server_mod._MAX_SSE_PER_IP):
                 conn = http.client.HTTPConnection("127.0.0.1", server.port, timeout=5)
                 conn.request("GET", f"/api/events?token={TOKEN}")
-                assert conn.getresponse().status == 200
-                conns.append(conn)
+                resp = conn.getresponse()
+                assert resp.status == 200
+                streams.append(resp)
             status, _, _ = _request(server, "GET", f"/api/events?token={TOKEN}")
             assert status == 429
         finally:
-            for c in conns:
-                c.close()
+            for r in streams:
+                r.close()
 
 
 # --- Info: remote-TX cooldown over HTTP ---------------------------------

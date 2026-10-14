@@ -879,7 +879,9 @@ class SettingsDialog(QDialog):
             combo.setCurrentIndex(chosen)
 
     @staticmethod
-    def _keep_absent_device(combo: QComboBox, saved_name: str | None) -> None:
+    def _keep_absent_device(
+        combo: QComboBox, saved_name: str | None, saved_host_api: str = ""
+    ) -> None:
         """Keep a saved device selectable while it is unplugged.
 
         v0.6.14 audit UI-M3: a USB codec that was off or unplugged when
@@ -892,6 +894,9 @@ class SettingsDialog(QDialog):
         if not saved_name or combo.findData(saved_name) >= 0:
             return
         combo.addItem(f"{saved_name} (not connected)", saved_name)
+        # Keep the saved host API too, or OK while unplugged would erase it
+        # and the replugged device re-resolve to its MME twin (T-L4).
+        combo.setItemData(combo.count() - 1, saved_host_api, _HOST_API_ROLE)
         combo.setCurrentIndex(combo.count() - 1)
 
     def _build_audio_tab(self) -> QWidget:
@@ -906,7 +911,10 @@ class SettingsDialog(QDialog):
             self._input_combo, self._input_devices,
             self._config.audio_input_device, self._config.audio_input_host_api,
         )
-        self._keep_absent_device(self._input_combo, self._config.audio_input_device)
+        self._keep_absent_device(
+            self._input_combo, self._config.audio_input_device,
+            self._config.audio_input_host_api,
+        )
         form.addRow("Input device:", self._input_combo)
 
         # Output device
@@ -931,7 +939,10 @@ class SettingsDialog(QDialog):
                 self._output_combo.setCurrentIndex(
                     self._output_combo.count() - 1
                 )
-        self._keep_absent_device(self._output_combo, self._config.audio_output_device)
+        self._keep_absent_device(
+            self._output_combo, self._config.audio_output_device,
+            self._config.audio_output_host_api,
+        )
         form.addRow("Output device:", self._output_combo)
 
         # Sample rate

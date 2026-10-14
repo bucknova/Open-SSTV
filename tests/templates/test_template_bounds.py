@@ -109,7 +109,10 @@ def test_renderer_skips_oversize_layer_but_keeps_the_rest() -> None:
     assert img.getpixel((5, 5)) == (255, 0, 0)
 
 
-def test_tall_photo_cover_into_wide_box_is_refused() -> None:
+def test_tall_photo_cover_into_wide_box_renders_without_huge_intermediate() -> None:
+    """Cover crops the source to the box aspect *before* resizing, so even
+    a degenerate 1x20000 photo never builds a 320x6.4M-pixel intermediate —
+    the layer renders (here: the photo's black) in bounded memory."""
     photo = PIL.Image.new("RGB", (1, 20000))
     tpl = Template(
         name="t",
@@ -121,7 +124,27 @@ def test_tall_photo_cover_into_wide_box_is_refused() -> None:
     img = render_template(
         tpl, QSOState(), AppConfig(), TXContext(frame_size=(320, 256), photo_image=photo)
     )
-    assert img.getpixel((5, 5)) == (0, 0, 255)
+    assert img.getpixel((5, 5)) == (0, 0, 0)
+
+
+def test_panorama_in_non_full_frame_cover_layer_is_not_dropped() -> None:
+    """v0.6.14 review: resize-then-crop made a 12:1 panorama in a sized
+    cover box exceed the allocation guard, so the photo vanished on air."""
+    photo = PIL.Image.new("RGB", (12000, 1000), (0, 255, 0))
+    tpl = Template(
+        name="t",
+        layers=[
+            RectLayer(id="bg", anchor="FILL", fill=(0, 0, 255, 255)),
+            PhotoLayer(
+                id="p", anchor="TL", fit="cover",
+                width_pct=90.0, height_pct=90.0, offset_x_pct=5.0, offset_y_pct=5.0,
+            ),
+        ],
+    )
+    img = render_template(
+        tpl, QSOState(), AppConfig(), TXContext(frame_size=(320, 256), photo_image=photo)
+    )
+    assert img.getpixel((160, 128)) == (0, 255, 0)
 
 
 def test_normal_pattern_still_renders() -> None:

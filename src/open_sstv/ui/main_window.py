@@ -170,11 +170,7 @@ from open_sstv.radio.band_plan import (
 from open_sstv.radio.base import ManualRig, Rig, RigConnectionMode
 from open_sstv.radio.exceptions import RigCommandError, RigError
 from open_sstv.radio.rigctld import RigctldClient, is_safe_rigctld_arg
-from open_sstv.radio.rigctld_launcher import (
-    drain_subprocess_stderr,
-    launch_rigctld,
-    stop_rigctld,
-)
+from open_sstv.radio.rigctld_launcher import launch_rigctld, stop_rigctld
 from open_sstv.radio.serial_rig import create_serial_rig
 from open_sstv.remote import (
     MIN_TOKEN_LEN,
@@ -205,16 +201,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from PIL.Image import Image as PILImage
-
-
-def _drain_subprocess_stderr(proc: subprocess.Popen, name: str) -> None:
-    """Pump *proc*'s stderr into this module's log on a daemon thread.
-
-    Thin wrapper over :func:`open_sstv.radio.rigctld_launcher.drain_subprocess_stderr`
-    (v0.4.0 audit high #2; v0.6.14 audit UI-H1 moved the one copy there so
-    both rigctld launch paths share it).
-    """
-    drain_subprocess_stderr(proc, name, logger=_log)
 
 
 class _RigPollWorker(QObject):

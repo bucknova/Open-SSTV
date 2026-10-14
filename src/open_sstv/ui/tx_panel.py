@@ -31,6 +31,7 @@ template_composited(bool):
 """
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -482,10 +483,13 @@ class TxPanel(QWidget):
                 return
             if choice == "keep":
                 filename = None  # save() picks a free slug
-        template.name = new_name
+        # Rename a copy: if the save fails, the gallery's live template (maybe
+        # the selected TX template) must keep its old name (v0.6.14 review).
+        renamed = copy.deepcopy(template)
+        renamed.name = new_name
         try:
             new_path = template_manager.save(
-                template, old_path.parent, filename=filename
+                renamed, old_path.parent, filename=filename
             )
         except OSError as exc:
             QMessageBox.critical(

@@ -1067,3 +1067,23 @@ class TestDeviceHostApi:
         out = dlg.result_config()
         assert out.audio_output_device == "USB Audio CODEC"
         assert out.audio_output_host_api == "Windows WASAPI"
+
+
+class TestAbsentDeviceKeepsHostApi:
+    """v0.6.14 review: OK while the saved device is unplugged must not erase
+    its saved host API (the replug would then pick the MME twin)."""
+
+    def test_not_connected_entry_round_trips_host_api(self, qtbot, monkeypatch) -> None:
+        from open_sstv.ui import settings_dialog as mod
+
+        monkeypatch.setattr(mod, "list_output_devices", lambda: [])
+        monkeypatch.setattr(mod, "list_input_devices", lambda: [])
+        monkeypatch.setattr(mod, "list_pipewire_sinks", lambda: [])
+        cfg = AppConfig(
+            audio_output_device="USB Audio CODEC",
+            audio_output_host_api="Windows WASAPI",
+        )
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        assert "not connected" in dlg._output_combo.currentText()
+        assert dlg.result_config().audio_output_host_api == "Windows WASAPI"

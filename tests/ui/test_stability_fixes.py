@@ -19,11 +19,10 @@ import pytest
 
 from open_sstv.config.schema import AppConfig
 from open_sstv.radio.base import ManualRig
-from open_sstv.ui.main_window import (
-    MainWindow,
-    _drain_subprocess_stderr,
-    _RigConnectWorker,
+from open_sstv.radio.rigctld_launcher import (
+    drain_subprocess_stderr as _drain_subprocess_stderr,
 )
+from open_sstv.ui.main_window import MainWindow, _RigConnectWorker
 
 pytestmark = pytest.mark.gui
 
@@ -193,7 +192,7 @@ class TestStderrDrain:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
         )
-        with caplog.at_level(logging.INFO, logger="open_sstv.ui.main_window"):
+        with caplog.at_level(logging.INFO, logger="open_sstv.radio.rigctld_launcher"):
             _drain_subprocess_stderr(proc, "fakectl")
             assert proc.wait(timeout=10) == 0, "child wedged — pipe not drained"
         # Give the pump a beat to flush the tail.

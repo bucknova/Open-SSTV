@@ -11,6 +11,8 @@ the leader, so a strict equality check would fail.
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 from PIL import Image
@@ -245,4 +247,6 @@ def test_scottie_line_matches_spec_layout(mode: Mode, pixel_ms: float, line_ms: 
     assert pixels == pytest.approx([pixel_ms] * 960)
     assert sum(d for _f, d in line) == pytest.approx(line_ms, abs=1e-9)
     assert MODE_TABLE[mode].line_time_ms == pytest.approx(line_ms, abs=1e-9)
-    assert sum(d for _f, d in tuples) == pytest.approx(line_ms * cls.HEIGHT, abs=1e-6)
+    # math.fsum: plain sum() over ~250k floats drifts ~1e-6 on Python 3.11
+    # (3.12+ sums with compensation), which failed CI on 3.11 only.
+    assert math.fsum(d for _f, d in tuples) == pytest.approx(line_ms * cls.HEIGHT, abs=1e-6)

@@ -176,21 +176,28 @@ def _fit_image(
         return img.resize((bbox_w, bbox_h), PIL.Image.LANCZOS)
 
     iw, ih = img.size
-    if fit == "contain":
-        ratio = min(bbox_w / iw, bbox_h / ih)
-    else:  # "cover"
-        ratio = max(bbox_w / iw, bbox_h / ih)
+    if fit == "cover":
+        # Crop the *source* to the box aspect, then resize straight to the
+        # box.  Resizing first and cropping after built an intermediate as
+        # wide as the photo's aspect demanded — a phone panorama in a
+        # non-full-frame cover layer tripped the allocation guard and the
+        # photo vanished from the transmitted image.
+        box_aspect = bbox_w / bbox_h
+        if iw / ih > box_aspect:
+            cw = max(1, min(iw, int(round(ih * box_aspect))))
+            cx = (iw - cw) // 2
+            src = img.crop((cx, 0, cx + cw, ih))
+        else:
+            ch = max(1, min(ih, int(round(iw / box_aspect))))
+            cy = (ih - ch) // 2
+            src = img.crop((0, cy, iw, cy + ch))
+        return src.resize((bbox_w, bbox_h), PIL.Image.LANCZOS)
 
+    ratio = min(bbox_w / iw, bbox_h / ih)  # contain
     new_w = max(1, int(round(iw * ratio)))
     new_h = max(1, int(round(ih * ratio)))
     _check_alloc(new_w, new_h, "fitted image")
     resized = img.resize((new_w, new_h), PIL.Image.LANCZOS)
-
-    if fit == "cover":
-        cx = (new_w - bbox_w) // 2
-        cy = (new_h - bbox_h) // 2
-        resized = resized.crop((cx, cy, cx + bbox_w, cy + bbox_h))
-        return resized
 
     # contain: letterbox / pillarbox with transparency
     out = PIL.Image.new("RGBA", (bbox_w, bbox_h), (0, 0, 0, 0))
