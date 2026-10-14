@@ -1067,8 +1067,7 @@ class SettingsDialog(QDialog):
         self._incremental_check.setToolTip(
             "Decodes each line as its sync pulse arrives instead of\n"
             "reprocessing the whole buffer on every flush.\n\n"
-            "Covers Scottie, Martin, PD, Wraase SC2, Pasokon, and Robot 36\n"
-            "(both per-line and line-pair wire formats, auto-detected).\n"
+            "Covers Scottie, Martin, PD, Wraase SC2, Pasokon, and Robot 36.\n"
             "Roughly a 50× CPU reduction on long receives, and keeps the\n"
             "decoder ahead of real-time on slower machines where the batch\n"
             "path falls behind mid-image.\n\n"
