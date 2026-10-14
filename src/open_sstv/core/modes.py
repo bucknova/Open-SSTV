@@ -93,7 +93,7 @@ class ModeSpec:
     color_layout: tuple[str, ...]
     """Channel labels in transmission order. ``("G","B","R")`` for Martin /
     Scottie, ``("Y","C")`` for Robot 36 (Y every line, chroma alternating
-    B-Y on even lines / R-Y on odd lines)."""
+    R-Y on even lines / B-Y on odd lines)."""
     sync_position: SyncPosition
 
     @property
@@ -156,13 +156,15 @@ _SCOTTIE_S1_PORCH_MS = 1.5           # same for S1, S2, DX
 _SCOTTIE_S1_SYNC_MS = 9.0            # same for S1, S2, DX
 
 # Robot 36 — most common HF / ISS SSTV mode, 36 s exact for 320×240. YUV not
-# RGB: Y on every line, chroma channel alternates B-Y on even / R-Y on odd.
-_ROBOT_36_Y_SCAN_MS = 88.0
-_ROBOT_36_C_SCAN_MS = 44.0
-_ROBOT_36_INTER_CH_GAP_MS = 4.5
-_ROBOT_36_INTER_CH_PORCH_MS = 1.5
-_ROBOT_36_SYNC_MS = 9.0
-_ROBOT_36_SYNC_PORCH_MS = 3.0
+# RGB: Y on every line, chroma channel alternates R-Y on even / B-Y on odd
+# lines. Every line carries its own sync (150 ms period). Public because
+# ``core/robot36_dsp.py`` derives the decoder's scan offsets from them.
+ROBOT_36_Y_SCAN_MS = 88.0
+ROBOT_36_C_SCAN_MS = 44.0
+ROBOT_36_INTER_CH_GAP_MS = 4.5
+ROBOT_36_INTER_CH_PORCH_MS = 1.5
+ROBOT_36_SYNC_MS = 9.0
+ROBOT_36_SYNC_PORCH_MS = 3.0
 
 # PD family — YCbCr line-pair format (one sync per two image rows).
 # Per super-line: SYNC(20 ms) + PORCH(2.08 ms) + Y0 + Cr + Cb + Y1,
@@ -245,16 +247,16 @@ MODE_TABLE: dict[Mode, ModeSpec] = {
         vis_code=0x08,  # 8
         width=320,
         height=240,
-        sync_pulse_ms=_ROBOT_36_SYNC_MS,
-        sync_porch_ms=_ROBOT_36_SYNC_PORCH_MS,
+        sync_pulse_ms=ROBOT_36_SYNC_MS,
+        sync_porch_ms=ROBOT_36_SYNC_PORCH_MS,
         # SYNC + SYNC_PORCH + Y_SCAN + INTER_CH_GAP + PORCH + C_SCAN = 150 ms
         line_time_ms=(
-            _ROBOT_36_SYNC_MS
-            + _ROBOT_36_SYNC_PORCH_MS
-            + _ROBOT_36_Y_SCAN_MS
-            + _ROBOT_36_INTER_CH_GAP_MS
-            + _ROBOT_36_INTER_CH_PORCH_MS
-            + _ROBOT_36_C_SCAN_MS
+            ROBOT_36_SYNC_MS
+            + ROBOT_36_SYNC_PORCH_MS
+            + ROBOT_36_Y_SCAN_MS
+            + ROBOT_36_INTER_CH_GAP_MS
+            + ROBOT_36_INTER_CH_PORCH_MS
+            + ROBOT_36_C_SCAN_MS
         ),
         color_layout=("Y", "C"),
         sync_position=SyncPosition.LINE_START,

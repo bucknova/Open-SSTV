@@ -8,23 +8,15 @@ This module is the buffered front-end of the receive pipeline. It owns:
 * the high-level state machine (idle → searching for VIS → decoding image),
 * the dispatch into per-mode pixel decoders.
 
-Phase 2 step 13 ships the **Robot 36** decoder. Step 14 adds Martin M1
-and Scottie S1 per-mode functions plus a dual-layout Robot 36 path (see
-below) — the ``Decoder.feed`` plumbing is mode-agnostic so each step
-only touches the dispatch table.
+Every mode in ``MODE_TABLE`` has a per-mode pixel decoder registered in
+``_PIXEL_DECODERS``; the ``Decoder.feed`` plumbing is mode-agnostic.
 
-Robot 36 has two wire formats in the wild:
-
-* PySSTV's per-line layout — 240 sync pulses at 150 ms intervals,
-  each followed by one Y and one chroma scan (Cr on even, Cb on odd).
-* The canonical broadcast "line-pair" layout — 120 sync pulses at
-  290 ms intervals, each followed by **two** Y scans and **two**
-  chroma scans (Cr then Cb) with no sync between them. This is what
-  SimpleSSTV iOS, MMSSTV, and most over-the-air encoders emit.
-
-``decode_wav`` auto-detects the layout by measuring the median spacing
-of raw sync candidates before walking the grid, then dispatches to
-``_decode_robot36`` (single-line) or ``_decode_robot36_line_pair``.
+Robot 36 is decoded in its one real wire format: a sync pulse on every
+line (150 ms period), Y then one chroma scan per line, Cr on even lines
+and Cb on odd lines — the Robot 36 spec as implemented by slowrx, MMSSTV,
+QSSTV, PySSTV and our own encoder. Its pixels are sampled with the
+slowrx port in ``core.robot36_dsp`` (shared with the live decoder), not
+the windowed-median ``demod.sample_pixels`` every other mode uses.
 
 Public API
 ----------
@@ -36,37 +28,25 @@ Public API
 
 ``Decoder``
     Streaming, pull-model API used by ``ui/workers.py``. Callers push
-    audio chunks via ``feed(samples)`` and pop ``DecoderEvent`` objects
-    describing what happened (``ImageStarted``, ``LineDecoded``,
-    ``ImageComplete``). Internally it just buffers audio until enough is
-    available to call ``decode_wav`` end-to-end — Phase 2 keeps the
-    streaming wrapper deliberately dumb so we can iterate on the per-mode
-    decoders without rewriting state-machine code.
+    audio chunks via ``feed(samples)`` and get back ``DecoderEvent``
+    objects (``ImageStarted``, ``ImageProgress``, ``ImageComplete``).
+    After VIS lock the per-line ``core.incremental_decoder`` backends do
+    the work; a legacy batch path (``incremental_decode=False``) re-runs
+    the partial decode over the whole buffer.
 
-Algorithm sketch (Robot 36)
----------------------------
+Line timing
+-----------
 
-PySSTV's encoder (verified by reading ``pysstv/color.py``) emits each
-scan line as::
-
-    1200 Hz sync ─ 9 ms
-    1500 Hz porch ─ 3 ms
-    Y scan ─ 88 ms (320 pixels @ 0.275 ms each)
-    inter-channel gap ─ 4.5 ms
-        2300 Hz on odd lines (sending Cb)
-        1500 Hz on even lines (sending Cr)
-    1900 Hz porch ─ 1.5 ms
-    chroma scan ─ 44 ms (320 samples @ 0.1375 ms each)
-
-Y is sent on every line; chroma alternates Cb (odd lines) / Cr (even
-lines), so each pair of adjacent lines carries one full set of YCbCr.
-The decoder pairs line N with line N+1, fills in the missing chroma
-from its neighbor, and converts YCbCr→RGB via Pillow.
+``decode_wav`` finds raw sync candidates after the VIS, then fits a
+least-squares line through them (``slant.slant_corrected_line_starts``)
+to absorb TX/RX clock drift; Robot 36 uses the plain grid walk
+(``sync.walk_sync_grid``) instead (OP2-15). Both are anchored on the
+expected line-0 position from the VIS end, so a missed sync on line 0
+or 1 doesn't shift the image (v0.6.14 audit D-H1).
 """
 from __future__ import annotations
 
 import logging
-import math
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -75,15 +55,11 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from PIL import Image
-from scipy.signal import sosfiltfilt
 
-from open_sstv.core.demod import (
-    SSTV_BLACK_HZ,
-    SSTV_SYNC_REJECT_HZ,
-    SSTV_WHITE_HZ,
-    instantaneous_frequency,
-)
-from open_sstv.core.dsp_utils import bandpass_sos
+from open_sstv.core import robot36_dsp
+from open_sstv.core.demod import instantaneous_frequency
+from open_sstv.core.demod import sample_pixels as _sample_pixels
+from open_sstv.core.dsp_utils import sstv_bandpass as _bandpass
 from open_sstv.core.modes import MODE_TABLE, Mode, ModeSpec, mode_from_vis
 from open_sstv.core.robot36_dsp import (
     sample_scan as _robot36_sample_scan,
@@ -92,26 +68,12 @@ from open_sstv.core.robot36_dsp import (
     ycbcr_to_rgb as _robot36_ycbcr_to_rgb,
 )
 from open_sstv.core.slant import slant_corrected_line_starts
-from open_sstv.core.sync import find_sync_candidates, walk_sync_grid
+from open_sstv.core.sync import (
+    find_sync_candidates,
+    line0_sync_hint,
+    walk_sync_grid,
+)
 from open_sstv.core.vis import detect_vis
-
-# Bandpass edges for the pre-demod filter. The SSTV signalling frequencies
-# span 1100 Hz (VIS '1') through 2300 Hz (white luma); we push the edges
-# out to 1000–2500 Hz to leave ~100 Hz of margin for filter rolloff and
-# plausible TX/RX clock drift. Butterworth order 4 gives ~24 dB/octave
-# stopband attenuation, which — combined with ``sosfiltfilt``'s zero-phase
-# response — drops out-of-band noise variance enough to recover ~12 dB of
-# sync-detector margin vs. running the Hilbert transform on raw audio.
-# Measured in tests/core/test_decoder.py::test_decode_wav_robot36_low_snr.
-_BANDPASS_LOW_HZ: float = 1000.0
-_BANDPASS_HIGH_HZ: float = 2500.0
-_BANDPASS_ORDER: int = 4
-
-# ``sosfiltfilt`` forward/back filters with a default padlen ≈ 3 * filter
-# length; very short inputs (well below any plausible SSTV image) trip
-# that guard. Skip filtering for buffers under this threshold — the
-# downstream decode will return ``None`` for them anyway.
-_BANDPASS_MIN_SAMPLES: int = 256
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -159,8 +121,7 @@ def decode_wav(
 
     Looks for the first VIS header, dispatches into the right per-mode
     decoder, and returns the resulting image. Returns ``None`` if no
-    VIS was found or the detected mode isn't one of the v1 modes
-    (Robot 36 / Martin M1 / Scottie S1).
+    VIS was found or the VIS code isn't a mode in ``MODE_TABLE``.
 
     Parameters
     ----------
@@ -180,8 +141,8 @@ def decode_wav(
     # which inflates FM-demod variance and makes the sync detector
     # collapse around 12 dB SNR. Zero-phase (``sosfiltfilt``) is
     # mandatory — any group delay would shift sync positions and corrupt
-    # the per-line pixel slicing downstream. See the module-level
-    # constants for the edge choices and the empirical measurements.
+    # the per-line pixel slicing downstream. See ``dsp_utils`` for the
+    # edge choices and the empirical measurements.
     filtered = _bandpass(arr, fs)
 
     vis_result = detect_vis(filtered, fs)
@@ -195,68 +156,46 @@ def decode_wav(
 
     spec = MODE_TABLE[mode]
     inst = instantaneous_frequency(filtered, fs)
-
-    # Robot 36 has two incompatible wire formats (see module docstring).
-    # Detect which one this WAV uses before fitting a sync grid.
-    # OP2-15: skip global polyfit slant correction for Robot 36 to match
-    # the GUI RxWorker path which never runs decode_wav on R36 images.
-    # The polyfit can be corrupted by sync outliers on noisy signals.
-    if mode == Mode.ROBOT_36:
-        image = _decode_robot36_dispatch(inst, fs, spec, vis_end, apply_slant_correct=False)
-    else:
-        line_samples = spec.line_time_ms / 1000.0 * fs
-        candidates = find_sync_candidates(
-            inst,
-            fs,
-            spec.sync_pulse_ms,
-            line_period_samples=line_samples,
-            start_idx=vis_end,
-        )
-        line_starts = slant_corrected_line_starts(
-            candidates, line_samples, spec.height
-        )
-        if len(line_starts) < spec.height:
-            return None
-        # Reject truncated buffers: slant projection happily extrapolates
-        # past the end of ``inst`` and ``_sample_pixels`` silently fills
-        # out-of-range pixels with zeros, which would hand callers a
-        # half-black image instead of a clean decode failure. The check
-        # is on the last projected line *start*, not end, because for
-        # Scottie (``sync_position=BEFORE_RED``) the anchor lands mid-line
-        # and the ``line_samples`` after it extends past the encoded end.
-        if line_starts[-1] >= inst.size:
-            return None
-        decoder = _PIXEL_DECODERS.get(mode)
-        if decoder is None:
-            return None
-        image = decoder(inst, fs, spec, line_starts)
-
+    line_starts = _line_grid(mode, spec, inst, fs, vis_end, slant=True)
+    if len(line_starts) < spec.height:
+        return None
+    # Reject truncated buffers: slant projection happily extrapolates
+    # past the end of ``inst`` and ``_sample_pixels`` silently fills
+    # out-of-range pixels with neutral values, which would hand callers a
+    # half-black image instead of a clean decode failure. The check
+    # is on the last projected line *start*, not end, because for
+    # Scottie (``sync_position=BEFORE_RED``) the anchor lands mid-line
+    # and the ``line_samples`` after it extends past the encoded end.
+    if line_starts[-1] >= inst.size:
+        return None
+    decoder = _PIXEL_DECODERS.get(mode)
+    if decoder is None:
+        return None
+    image = decoder(inst, fs, spec, line_starts)
     if image is None:
         return None
     return DecodedImage(image=image, mode=mode, vis_code=vis_code)
 
 
-def _decode_robot36_dispatch(
+def _line_grid(
+    mode: Mode,
+    spec: ModeSpec,
     inst: NDArray,
     fs: int,
-    spec: ModeSpec,
     vis_end: int,
     *,
-    apply_slant_correct: bool = True,
-) -> Image.Image | None:
-    """Auto-detect Robot 36 wire format and dispatch to the right decoder.
+    slant: bool,
+) -> list[int]:
+    """Sync candidates after ``vis_end`` → per-line start positions.
 
-    Uses the raw 1200 Hz sync candidates (length-filtered, no grid walk)
-    to estimate the actual inter-sync spacing. If it matches the
-    canonical per-line period within 25 %, the file is PySSTV-style and
-    we walk a ``spec.height`` grid. If it matches 2× that period, the
-    file is the canonical broadcast line-pair format and we walk a
-    ``spec.height // 2`` grid of super-lines. Anything else is rejected.
-
-    *apply_slant_correct* controls whether ``slant_corrected_line_starts``
-    (global least-squares polyfit) is used to build the line grid, or
-    just ``walk_sync_grid``.  Callers that need resilience to noisy signals
-    should pass ``False``; the polyfit can be corrupted by sync outliers.
+    ``slant=True`` fits a least-squares line through the candidates
+    (one-shot decodes); ``slant=False`` walks the grid, whose positions
+    for already-confirmed lines never move as more audio arrives
+    (progressive decodes — see ``_partial_decode``). Robot 36 always
+    walks (OP2-15: its batch result must match the live decoder, which
+    never slant-fits). Both are anchored on the line-0 position implied
+    by the VIS end, so a missed line-0/1 sync is extrapolated back rather
+    than shifting the whole image up (v0.6.14 audit D-H1).
     """
     line_samples = spec.line_time_ms / 1000.0 * fs
     candidates = find_sync_candidates(
@@ -266,39 +205,14 @@ def _decode_robot36_dispatch(
         line_period_samples=line_samples,
         start_idx=vis_end,
     )
-    if len(candidates) < 2:
-        return None
-
-    pair_samples = 2.0 * line_samples
-    tolerance = 0.25  # ±25 %, matching walk_sync_grid's slack
-
-    # Median of consecutive diffs — resilient to an occasional missed
-    # or spurious candidate, unlike mean.
-    diffs = np.diff(np.asarray(candidates, dtype=np.float64))
-    if diffs.size == 0:
-        return None
-    median_diff = float(np.median(diffs))
-
-    _grid_fn = slant_corrected_line_starts if apply_slant_correct else walk_sync_grid
-
-    if abs(median_diff - line_samples) <= line_samples * tolerance:
-        line_starts = _grid_fn(candidates, line_samples, spec.height)
-        if len(line_starts) < spec.height:
-            return None
-        # Truncation guard: see the matching comment in ``decode_wav``.
-        if line_starts[-1] >= inst.size:
-            return None
-        return _decode_robot36(inst, fs, spec, line_starts)
-
-    if abs(median_diff - pair_samples) <= pair_samples * tolerance:
-        super_starts = _grid_fn(candidates, pair_samples, spec.height // 2)
-        if len(super_starts) < spec.height // 2:
-            return None
-        if super_starts[-1] >= inst.size:
-            return None
-        return _decode_robot36_line_pair(inst, fs, spec, super_starts)
-
-    return None
+    hint = line0_sync_hint(spec, fs, vis_end)
+    if slant and mode != Mode.ROBOT_36:
+        return slant_corrected_line_starts(
+            candidates, line_samples, spec.height, first_slot_hint=hint
+        )
+    return walk_sync_grid(
+        candidates, line_samples, spec.height, first_slot_hint=hint
+    )
 
 
 # === per-mode pixel decoders ===
@@ -312,14 +226,14 @@ def _decode_robot36(
     *,
     cancel: threading.Event | None = None,
 ) -> Image.Image | None:
-    """Slice a frequency track into a Robot 36 YCbCr image (per-line format).
+    """Slice a frequency track into a Robot 36 YCbCr image.
 
     Delegates per-pixel sampling and YCbCr→RGB to the slowrx port in
-    ``core.robot36_dsp``: single-sample-with-5-sample-mean reads (no
-    chroma floor, no right-edge guard), then slowrx's integer matrix
-    for the colour conversion.  See that module's docstring for why
-    this is not the shared ``_sample_pixels`` path that every other
-    mode uses.
+    ``core.robot36_dsp`` (the same code the live decoder runs):
+    single-sample-with-5-sample-mean reads (no chroma floor, no
+    right-edge guard), then slowrx's integer matrix for the colour
+    conversion.  See that module's docstring for why this is not the
+    shared ``_sample_pixels`` path that every other mode uses.
 
     ``line_starts`` is the list of sample indices where each scan line
     begins (one per image row, ``spec.height`` long).
@@ -327,22 +241,10 @@ def _decode_robot36(
     width = spec.width
     height = spec.height
 
-    # PySSTV-derived per-segment durations (ms). Cross-checked above.
-    sync_ms = 9.0
-    sync_porch_ms = 3.0
-    y_scan_ms = 88.0
-    inter_ch_gap_ms = 4.5
-    porch_ms = 1.5
-    c_scan_ms = 44.0
-
-    y_offset_samples = (sync_ms + sync_porch_ms) / 1000.0 * fs
-    c_offset_samples = (
-        (sync_ms + sync_porch_ms + y_scan_ms + inter_ch_gap_ms + porch_ms)
-        / 1000.0
-        * fs
-    )
-    y_scan_samples = y_scan_ms / 1000.0 * fs
-    c_scan_samples = c_scan_ms / 1000.0 * fs
+    y_offset_samples = robot36_dsp.Y_OFFSET_MS / 1000.0 * fs
+    c_offset_samples = robot36_dsp.C_OFFSET_MS / 1000.0 * fs
+    y_scan_samples = robot36_dsp.Y_SCAN_MS / 1000.0 * fs
+    c_scan_samples = robot36_dsp.C_SCAN_MS / 1000.0 * fs
 
     y_plane = np.zeros((height, width), dtype=np.uint8)
     # Cb/Cr neutral midpoint is 128 — initializing to 0 would produce a
@@ -358,7 +260,7 @@ def _decode_robot36(
         c_start = line_start + c_offset_samples
         y_plane[row] = _robot36_sample_scan(inst, y_start, y_scan_samples, width, n)
         c_row = _robot36_sample_scan(inst, c_start, c_scan_samples, width, n)
-        # PySSTV: even lines (row%2 == 0) carry Cr, odd lines carry Cb.
+        # Even lines (row%2 == 0) carry Cr (R-Y), odd lines carry Cb (B-Y).
         if row % 2 == 0:
             cr_plane[row] = c_row
         else:
@@ -376,89 +278,6 @@ def _decode_robot36(
         else:
             src = row - 1 if row - 1 >= 0 else row + 1
             cr_plane[row] = cr_plane[src]
-
-    rgb = _robot36_ycbcr_to_rgb(y_plane, cb_plane, cr_plane)
-    # ``mode=`` omitted: Pillow 13 deprecates it; autodetection on a
-    # (H, W, 3) uint8 array produces RGB, which is what we want.
-    return Image.fromarray(rgb)
-
-
-def _decode_robot36_line_pair(
-    inst: NDArray,
-    fs: int,
-    spec: ModeSpec,
-    super_starts: list[int],
-    *,
-    cancel: threading.Event | None = None,
-) -> Image.Image | None:
-    """Slice a canonical-broadcast Robot 36 frequency track into a YCbCr image.
-
-    In this layout (used by SimpleSSTV iOS, MMSSTV, and most over-the-air
-    encoders) one sync pulse covers two image rows. The per-super-line
-    layout, measured against the leading edge of the sync, is::
-
-        SYNC (9 ms)
-        SYNC PORCH (3 ms)
-        Y_even (88 ms)
-        EVEN SEP (4.5 ms)
-        COLOR PORCH (1.5 ms)
-        Cr (44 ms)              [shared by the two rows in this pair]
-        SYNC PORCH (3 ms)       [no sync — just a settling porch]
-        Y_odd (88 ms)
-        ODD SEP (4.5 ms)
-        COLOR PORCH (1.5 ms)
-        Cb (44 ms)              [shared by the two rows in this pair]
-
-    Total: 290.5 ms. ``super_starts`` contains ``spec.height // 2``
-    indices, one per pair; we produce two Y rows per super-line and
-    copy each chroma pair across both rows (nearest-neighbor subsampling,
-    matching slowrx).  Sampling and YCbCr→RGB both run through
-    ``core.robot36_dsp`` — see the per-line decoder above for rationale.
-    """
-    width = spec.width
-    height = spec.height
-
-    sync_ms = 9.0
-    sync_porch_ms = 3.0
-    y_scan_ms = 88.0
-    inter_ch_gap_ms = 4.5
-    porch_ms = 1.5
-    c_scan_ms = 44.0
-
-    y0_offset_ms = sync_ms + sync_porch_ms
-    cr_offset_ms = y0_offset_ms + y_scan_ms + inter_ch_gap_ms + porch_ms
-    y1_offset_ms = cr_offset_ms + c_scan_ms + sync_porch_ms
-    cb_offset_ms = y1_offset_ms + y_scan_ms + inter_ch_gap_ms + porch_ms
-
-    y0_off = y0_offset_ms / 1000.0 * fs
-    cr_off = cr_offset_ms / 1000.0 * fs
-    y1_off = y1_offset_ms / 1000.0 * fs
-    cb_off = cb_offset_ms / 1000.0 * fs
-    y_span = y_scan_ms / 1000.0 * fs
-    c_span = c_scan_ms / 1000.0 * fs
-
-    y_plane = np.zeros((height, width), dtype=np.uint8)
-    cb_plane = np.full((height, width), 128, dtype=np.uint8)
-    cr_plane = np.full((height, width), 128, dtype=np.uint8)
-
-    n = inst.size
-    for pair_idx, sup in enumerate(super_starts):
-        if cancel is not None and cancel.is_set():
-            return None
-        row_even = pair_idx * 2
-        row_odd = row_even + 1
-        if row_odd >= height:
-            break
-        y_plane[row_even] = _robot36_sample_scan(inst, sup + y0_off, y_span, width, n)
-        y_plane[row_odd] = _robot36_sample_scan(inst, sup + y1_off, y_span, width, n)
-        cr_row = _robot36_sample_scan(inst, sup + cr_off, c_span, width, n)
-        cb_row = _robot36_sample_scan(inst, sup + cb_off, c_span, width, n)
-        # Both rows in the pair share the pair's chroma (nearest-neighbor
-        # upsample from the 320×(height/2) chroma grid).
-        cr_plane[row_even] = cr_row
-        cr_plane[row_odd] = cr_row
-        cb_plane[row_even] = cb_row
-        cb_plane[row_odd] = cb_row
 
     rgb = _robot36_ycbcr_to_rgb(y_plane, cb_plane, cr_plane)
     # ``mode=`` omitted: Pillow 13 deprecates it; autodetection on a
@@ -757,123 +576,7 @@ def _decode_pd(
     return Image.frombytes("YCbCr", (width, height), ycbcr.tobytes()).convert("RGB")
 
 
-def _bandpass(x: NDArray, fs: int) -> NDArray:
-    """Zero-phase bandpass to the SSTV signalling band.
-
-    Returns the input unchanged if ``fs`` is too low to support the
-    chosen band edges (guard against pathological test inputs), or if
-    the buffer is shorter than ``sosfiltfilt`` can stably pad. All
-    other cases run a Butterworth order-4 forward/back filter.
-    """
-    if x.size < _BANDPASS_MIN_SAMPLES:
-        return x
-    try:
-        sos = bandpass_sos(
-            _BANDPASS_LOW_HZ, _BANDPASS_HIGH_HZ, fs, order=_BANDPASS_ORDER
-        )
-    except ValueError:
-        # fs too low for the chosen band edges — skip filtering rather
-        # than blowing up the decode path with a construction error.
-        return x
-    return sosfiltfilt(sos, x)
-
-
-def _sample_pixels(
-    inst: NDArray,
-    start: float,
-    span_samples: float,
-    width: int,
-    track_len: int,
-    *,
-    chroma: bool = False,
-) -> NDArray[np.uint8]:
-    """Slice a span of the frequency track into ``width`` pixel medians.
-
-    Walks ``width`` evenly-spaced sub-windows over ``[start, start+span)``,
-    takes the median frequency in each window's central 60% (matching the
-    bit-window dodging trick from ``vis.detect_vis``), and maps to a uint8
-    luma. Returns zeros for pixel windows that fall outside the buffer.
-
-    When ``chroma=True`` the default and sync-band-reject value is 128
-    (the neutral YCbCr midpoint) instead of 0, preventing the bright-green
-    fringe produced when an edge pixel samples the sync/porch region at
-    ~1200 Hz.
-
-    Kept byte-for-byte in step with ``incremental_decoder._sample_pixels_inc``
-    — PD frames decoded from a WAV import and PD frames decoded live off
-    the air must land on the same pixels.
-
-    Median is more robust to filter ringing at sub-window boundaries than
-    a plain mean, and dramatically faster than the per-sample interpolation
-    slowrx uses (which we don't need until we add slant correction).
-    """
-    neutral: int = 128 if chroma else 0
-    out = np.full(width, neutral, dtype=np.uint8)
-    if width <= 0 or span_samples <= 0:
-        return out
-    pixel_span = span_samples / width
-    margin = pixel_span * 0.2  # central 60% of each pixel window
-    span_lo = SSTV_BLACK_HZ
-    span_hi = SSTV_WHITE_HZ
-    span_range = span_hi - span_lo
-    # Chroma guard: the last ~1.25 % of columns (≈4 px at width 320) are
-    # left at neutral-128 rather than sampled, because the bandpass
-    # filter smears the upcoming 1200 Hz sync back 10-15 samples into the
-    # end of the chroma scan. Reading those windows would decode as
-    # byte-0 chroma → a strong green stripe on the right edge.
-    #
-    # Sub-black samples are handled by the ``SSTV_SYNC_REJECT_HZ`` test in
-    # the loop, NOT by a proportional floor: chroma is coded 0-255 around a
-    # neutral 128, so a low value is a *saturated* pixel (Cb≈0 is fully
-    # yellow, Cr≈0 fully cyan), not a nearly-grey one. An earlier revision
-    # clamped everything under 15 % of the band (byte 38) to 128 and wiped
-    # out every saturated yellow / green / cyan pixel in the PD family.
-    guard_pixels = max(2, width // 80) if chroma else 0
-    max_col = width - guard_pixels
-    for col in range(max_col):
-        center_lo = start + col * pixel_span + margin
-        center_hi = start + (col + 1) * pixel_span - margin
-        lo = int(round(center_lo))
-        hi = int(round(center_hi))
-        if hi <= lo:
-            hi = lo + 1
-        if lo < 0 or hi > track_len:
-            continue
-        chunk = inst[lo:hi]
-        if chunk.size == 0:
-            continue
-        freq = float(np.median(chunk))
-        # Sync-band reject: frequencies deep in sync territory are not
-        # valid pixel data. Chroma clamps to neutral (preserves neighbour
-        # interpolation); luma falls through to the [0, 255] clip below
-        # (sub-black noise just reads as very dark).
-        if chroma and freq < SSTV_SYNC_REJECT_HZ:
-            out[col] = neutral
-            continue
-        # Linear map 1500..2300 → 0..255 with clipping. Inlined to keep
-        # this hot loop a single pass over the array.
-        norm = (freq - span_lo) / span_range
-        # v0.4.0 audit high #3: NaN passes BOTH range checks (NaN
-        # comparisons are False) and int(round(nan)) raises — treat a
-        # non-finite sample as neutral rather than crashing the line.
-        if not math.isfinite(norm):
-            out[col] = neutral
-            continue
-        # A reading a hair under SSTV_BLACK_HZ is byte 0, not neutral:
-        # demod jitter on a genuine byte-0 chroma scan (exactly 1500 Hz)
-        # lands on both sides of the boundary, and clamping the low half
-        # to 128 speckles saturated areas with grey. Anything far enough
-        # below to be real leakage was already caught by the sync-band
-        # reject above.
-        norm = min(1.0, max(0.0, norm))
-        out[col] = int(round(norm * 255.0))
-    return out
-
-
 _PIXEL_DECODERS: dict[Mode, Callable[..., Image.Image | None]] = {
-    # Robot 36 is dispatched separately in decode_wav/_partial_decode
-    # (auto-detects single-line vs line-pair wire format), but register
-    # the per-line decoder here so the dict stays complete.
     Mode.ROBOT_36: _decode_robot36,
     # Martin family
     Mode.MARTIN_M1: _decode_martin_rgb,
@@ -906,9 +609,6 @@ _PIXEL_DECODERS: dict[Mode, Callable[..., Image.Image | None]] = {
 # Fail loudly at import time if a Mode was added to the enum without a
 # corresponding pixel decoder entry, rather than silently returning None
 # when a user tries to receive that mode.
-# Note: ROBOT_36 IS in the table (uses _decode_robot36 as a fallback);
-# the main decode path auto-detects single-line vs line-pair and dispatches
-# directly, but having it here keeps the completeness check simple.
 _missing_decoder = set(Mode) - set(_PIXEL_DECODERS)
 assert not _missing_decoder, (
     f"Decoder missing for Mode(s): {_missing_decoder}. "
@@ -959,23 +659,12 @@ def _partial_decode(
     how many additional candidates arrive later.  Slant correction is
     applied by the final one-shot re-decode in ``RxWorker._dispatch``
     (via ``decode_wav``), so the saved image still benefits from it.
+    The walk is anchored on the VIS end (``first_slot_hint``), so a
+    missed line-0/1 sync no longer shifts the image (audit D-H1).
     """
-    if mode == Mode.ROBOT_36:
-        return _partial_decode_robot36(inst, fs, spec, vis_end, cancel=cancel)
-
-    line_samples = spec.line_time_ms / 1000.0 * fs
-    candidates = find_sync_candidates(
-        inst,
-        fs,
-        spec.sync_pulse_ms,
-        line_period_samples=line_samples,
-        start_idx=vis_end,
-    )
+    line_starts = _line_grid(mode, spec, inst, fs, vis_end, slant=False)
     if cancel is not None and cancel.is_set():
         return None
-    # Use walk_sync_grid (not slant_corrected_line_starts) so positions are
-    # stable across progressive flushes — see docstring for the full rationale.
-    line_starts = walk_sync_grid(candidates, line_samples, spec.height)
     usable = _trim_to_buffer(line_starts, inst.size)
     if not usable:
         return None
@@ -988,64 +677,6 @@ def _partial_decode(
     if image is None:
         return None
     return (image, len(usable), spec.height)
-
-
-def _partial_decode_robot36(
-    inst: NDArray,
-    fs: int,
-    spec: ModeSpec,
-    vis_end: int,
-    *,
-    cancel: threading.Event | None = None,
-) -> tuple[Image.Image, int, int] | None:
-    """Progressive Robot 36 decode with auto-format detection.
-
-    Mirrors ``_decode_robot36_dispatch`` but returns partial images
-    instead of ``None`` when fewer than ``spec.height`` lines are
-    available.
-    """
-    line_samples = spec.line_time_ms / 1000.0 * fs
-    candidates = find_sync_candidates(
-        inst,
-        fs,
-        spec.sync_pulse_ms,
-        line_period_samples=line_samples,
-        start_idx=vis_end,
-    )
-    if len(candidates) < 2:
-        return None
-
-    pair_samples = 2.0 * line_samples
-    tolerance = 0.25
-
-    diffs = np.diff(np.asarray(candidates, dtype=np.float64))
-    if diffs.size == 0:
-        return None
-    median_diff = float(np.median(diffs))
-    if abs(median_diff - line_samples) <= line_samples * tolerance:
-        # walk_sync_grid for position stability — see _partial_decode() docstring.
-        line_starts = walk_sync_grid(candidates, line_samples, spec.height)
-        usable = _trim_to_buffer(line_starts, inst.size)
-        if not usable:
-            return None
-        image = _decode_robot36(inst, fs, spec, usable, cancel=cancel)
-        if image is None:
-            return None
-        return (image, len(usable), spec.height)
-
-    if abs(median_diff - pair_samples) <= pair_samples * tolerance:
-        # walk_sync_grid for position stability — see _partial_decode() docstring.
-        super_starts = walk_sync_grid(candidates, pair_samples, spec.height // 2)
-        usable = _trim_to_buffer(super_starts, inst.size)
-        if not usable:
-            return None
-        image = _decode_robot36_line_pair(inst, fs, spec, usable, cancel=cancel)
-        if image is None:
-            return None
-        lines_decoded = min(len(usable) * 2, spec.height)
-        return (image, lines_decoded, spec.height)
-
-    return None
 
 
 # === streaming wrapper ===
@@ -1124,7 +755,9 @@ class Decoder:
     * **DECODING** — VIS is locked, accumulating scan lines.
 
       *Default path* (``incremental_decode=True``): each ``feed`` passes
-      only the new audio tail to the per-mode ``IncrementalDecoder``.
+      only the new chunk to the per-mode ``IncrementalDecoder`` (O(chunk);
+      the retained audio is just appended to a list for the re-decode
+      snapshot).
       The decoder emits one ``ImageProgress`` per newly completed row,
       so the image appears line-by-line in O(1 line period) per flush.
       All 22 supported modes use this path.
@@ -1134,7 +767,9 @@ class Decoder:
       growing buffer. CPU cost is O(N) per flush → O(N²) total.
 
       In both cases the decoder emits ``ImageComplete`` when all scan
-      lines are present, then auto-resets to IDLE.
+      lines are present, then auto-resets to IDLE and re-feeds whatever
+      audio followed the image (so back-to-back images in one buffer all
+      decode).
     """
 
     def __init__(
@@ -1162,12 +797,13 @@ class Decoder:
         # Optional cancellation event — set from the GUI thread to interrupt
         # an in-flight decode.  The RxWorker owns the Event and wires it here.
         self._cancel: threading.Event | None = None
+        # Running sample count of ``_buffer`` (v0.6.14 audit D-M1: so the
+        # hot path never has to concatenate or re-sum the chunk list).
+        self._buffered: int = 0
         # Incremental decoder instance — used when incremental_decode is True.
         # Annotated against the IncrementalDecoder Protocol so mypy accepts
         # any concrete backend (Scottie, Martin, PD, Wraase, Pasokon, Robot 36).
         self._incremental_dec: IncrementalDecoder | None = None
-        # How many samples of joined[] have been fed to the incremental decoder.
-        self._incremental_total_fed: int = 0
         # High-water mark for lines_decoded; prevents backward progress events
         # from Robot 36 per-line back-fill re-emissions.
         self._incremental_max_row: int = 0
@@ -1205,13 +841,9 @@ class Decoder:
         ):
             return
         cap = int((self._spec.total_duration_s * 1.5 + 10.0) * self._fs)
-        total = sum(a.size for a in self._buffer)
-        if total <= cap:
+        if self._buffered <= cap:
             return
-        joined = self._joined()
-        drop = total - cap
-        self._buffer = [joined[drop:]]
-        self._incremental_total_fed = max(0, self._incremental_total_fed - drop)
+        self._set_buffer(self._joined()[self._buffered - cap:])
         if not self._retained_buffer_trimmed:
             self._retained_buffer_trimmed = True
             _log.warning(
@@ -1268,16 +900,24 @@ class Decoder:
         if arr.ndim != 1:
             return [DecodeError(f"feed expected 1-D, got {arr.ndim}-D")]
         if arr.size > 0:
-            self._buffer.append(_sanitize_audio(arr))
+            arr = _sanitize_audio(arr)
+            self._buffer.append(arr)
+            self._buffered += arr.size
             self._enforce_decoding_buffer_cap()
 
-        joined = self._joined()
-        if joined.size == 0:
+        if self._buffered == 0:
             return []
 
         if self._state == _DecoderState.IDLE:
-            return self._feed_idle(joined)
-        return self._feed_decoding(joined)
+            return self._feed_idle(self._joined())
+        if self._incremental_decode and self._incremental_dec is not None:
+            # v0.6.14 audit D-M1: the incremental backend only ever needs
+            # the new chunk. This used to re-concatenate the whole retained
+            # buffer on every 0.1 s feed (O(N²); ~31 ms + 100 MB of
+            # allocation per feed late in a PD-290 / P7 image) only to
+            # slice the tail back off it.
+            return self._feed_decoding_incremental(arr)
+        return self._feed_decoding(self._joined())
 
     def _feed_idle(self, joined: NDArray) -> list[DecoderEvent]:
         """Hunt for a VIS header in the buffered audio."""
@@ -1289,7 +929,7 @@ class Decoder:
             # VIS sequence is < 700 ms; 3 s is ample headroom.
             max_samples = int(_IDLE_WINDOW_S * self._fs)
             if joined.size > max_samples:
-                self._buffer = [joined[-max_samples:]]
+                self._set_buffer(joined[-max_samples:])
             return []
 
         vis_code, vis_end = vis_result
@@ -1312,7 +952,7 @@ class Decoder:
             _PREAMBLE_WINDOW_S = 0.2
             preamble_samples = int(_PREAMBLE_WINDOW_S * self._fs)
             keep_start = max(0, vis_end - preamble_samples)
-            self._buffer = [joined[keep_start:]]
+            self._set_buffer(joined[keep_start:])
             return []
 
         spec = MODE_TABLE[mode]
@@ -1358,11 +998,10 @@ class Decoder:
             pre_vis = joined[:vis_end]
             if pre_vis.size > 0:
                 self._incremental_dec.feed(pre_vis)
-            self._incremental_total_fed = vis_end
             # Process any post-VIS audio already in the buffer so that
             # callers who feed all samples in a single call still get
             # progress/complete events (same behaviour as the batch path).
-            events.extend(self._feed_decoding_incremental(joined))
+            events.extend(self._feed_decoding_incremental(joined[vis_end:]))
             return events
 
         # Batch path: try an immediate partial decode — the buffer may already
@@ -1388,22 +1027,17 @@ class Decoder:
             inst, self._mode, self._spec, self._vis_code  # type: ignore[arg-type]
         )
 
-    def _feed_decoding_incremental(self, joined: NDArray) -> list[DecoderEvent]:
-        """Incremental decode: feed only the new audio chunk to the streaming decoder.
-
-        ``joined`` is the full accumulated buffer. We track how much of it has
-        already been fed via ``_incremental_total_fed`` and pass only the tail.
-        """
+    def _feed_decoding_incremental(self, new_audio: NDArray) -> list[DecoderEvent]:
+        """Incremental decode: feed only ``new_audio`` (audio not yet seen
+        by the streaming backend) and translate its rows into events."""
         if self._is_cancelled():
             return []
         assert self._incremental_dec is not None  # guarded by caller
         assert self._mode is not None
         assert self._spec is not None
 
-        new_audio = joined[self._incremental_total_fed:]
         if new_audio.size == 0:
             return []
-        self._incremental_total_fed = joined.size
 
         line_tuples = self._incremental_dec.feed(new_audio)
 
@@ -1449,7 +1083,7 @@ class Decoder:
             events.append(
                 ImageComplete(image=img, mode=self._mode, vis_code=self._vis_code)
             )
-            self.reset()
+            events.extend(self._reset_and_refeed_tail())
 
         return events
 
@@ -1481,7 +1115,7 @@ class Decoder:
             events: list[DecoderEvent] = [
                 ImageComplete(image=image, mode=mode, vis_code=vis_code)
             ]
-            self.reset()
+            events.extend(self._reset_and_refeed_tail())
             return events
         return [
             ImageProgress(
@@ -1493,6 +1127,28 @@ class Decoder:
             )
         ]
 
+    def _reset_and_refeed_tail(self) -> list[DecoderEvent]:
+        """Reset after ``ImageComplete`` without losing the audio after it.
+
+        v0.6.14 audit (Decoder.reset low): completion used to ``reset()``
+        and drop the rest of the buffer, so a single large ``feed`` (a WAV
+        with several images back to back, or a chunk that straddles the
+        end of one image and the next VIS) lost every image after the
+        first. Keep everything from just before the estimated image end —
+        the VIS end plus the mode's body duration, less 0.5 % + 100 ms of
+        slack for clock drift — and feed it back through IDLE.
+        """
+        tail: NDArray | None = None
+        if self._spec is not None and not self._retained_buffer_trimmed:
+            body = self._spec.total_duration_s * self._fs
+            end_est = int(self._vis_end + body * 0.995 - 0.1 * self._fs)
+            if 0 <= end_est < self._buffered:
+                tail = self._joined()[end_est:]
+        self.reset()
+        if tail is None or tail.size == 0:
+            return []
+        return self.feed(tail)
+
     def reset(self) -> None:
         """Drop the buffered audio and reset to IDLE.
 
@@ -1500,6 +1156,7 @@ class Decoder:
         the user clicks "Clear" or changes input device.
         """
         self._buffer.clear()
+        self._buffered = 0
         self._state = _DecoderState.IDLE
         self._vis_code = 0
         self._mode = None
@@ -1507,16 +1164,22 @@ class Decoder:
         self._vis_end = 0
         self._last_lines = 0
         self._incremental_dec = None
-        self._incremental_total_fed = 0
         self._incremental_max_row = 0
         self._retained_buffer_trimmed = False
 
+    def _set_buffer(self, arr: NDArray) -> None:
+        """Replace the buffered audio with ``arr`` (keeps the count right)."""
+        self._buffer = [arr]
+        self._buffered = int(arr.size)
+
     def _joined(self) -> NDArray:
+        """The buffered audio as one array. Collapses the chunk list as a
+        side effect so repeated calls don't re-concatenate."""
         if not self._buffer:
             return np.array([], dtype=np.float64)
-        if len(self._buffer) == 1:
-            return self._buffer[0]
-        return np.concatenate(self._buffer)
+        if len(self._buffer) > 1:
+            self._buffer = [np.concatenate(self._buffer)]
+        return self._buffer[0]
 
 
 __all__ = [

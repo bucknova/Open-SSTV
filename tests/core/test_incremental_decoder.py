@@ -268,10 +268,8 @@ def test_decoder_incremental_flag_routes_scottie_s1() -> None:
 
 def test_decoder_incremental_robot36_end_to_end() -> None:
     """incremental_decode=True routes Robot 36 through the
-    auto-detecting incremental wrapper and produces a complete image.
-
-    The default Robot 36 encoder emits the canonical line-pair format,
-    so this exercises the line-pair branch of ``Robot36IncrementalDecoder``.
+    incremental backend and produces a complete image (our encoder:
+    sync on every line, chroma averaged over each row pair).
     """
     fs = 48_000
     img = Image.new("RGB", (320, 240), color=(100, 150, 200))
@@ -515,8 +513,6 @@ def test_make_incremental_decoder_factory_dispatch() -> None:
         (Mode.WRAASE_SC2_180, WraaseIncrementalDecoder),
         (Mode.PASOKON_P3, PasokonIncrementalDecoder),
         (Mode.PASOKON_P7, PasokonIncrementalDecoder),
-        # Robot 36 now routes through the auto-detecting wrapper — which
-        # format (per-line vs line-pair) is decided at feed time, not here.
         (Mode.ROBOT_36, Robot36IncrementalDecoder),
     ]
     for mode, expected_cls in cases:
@@ -584,30 +580,19 @@ def test_incremental_wraase_pasokon_roundtrip(mode: Mode) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 5. Robot 36 — both wire formats + experimental chroma pipeline
+# 5. Robot 36 — our encoder and vanilla PySSTV
 # ---------------------------------------------------------------------------
 #
-# Robot 36 is handled by an auto-detecting wrapper that buffers initial
-# audio, measures inter-sync spacing, and dispatches to either a per-line
-# or line-pair backend.  The backends use linear (mean) chroma sampling
-# and linear inter-row chroma upsampling — soft-edged alternatives to the
-# batch decoder's median + nearest-neighbour copy.  These tests cover:
-#
-#   * Wrapper dispatch to the line-pair backend for canonical-encoder audio
-#     (``encode(img, Mode.ROBOT_36, ...)`` emits line-pair).
-#   * Wrapper dispatch to the per-line backend for vanilla-PySSTV audio.
-#   * Unit test for the linear chroma sampler (proves it's a mean, not
-#     a median, by construction).
+# Both put a sync on every line (the only Robot 36 layout; the 290.5 ms
+# "line-pair" backend was removed in the v0.6.14 audit D-H2 fix).  Our
+# encoder averages chroma over each row pair; PySSTV sends each row's own.
 
 
 def _encode_robot36_per_line(img: Image.Image, fs: int = 48_000) -> np.ndarray:
     """Encode a test image as per-line Robot 36 (upstream PySSTV format).
 
-    The app's ``encode(..., Mode.ROBOT_36)`` always emits the line-pair
-    wire format for transmit-path compatibility with MMSSTV / iOS apps.
-    To exercise the per-line branch of ``Robot36IncrementalDecoder`` in a
-    test we bypass our encoder and drive PySSTV's stock ``Robot36`` class
-    directly.  Matches what slowrx / PySSTV-based transmitters emit.
+    Same wire layout as our encoder, but each row carries its own (not
+    pair-averaged) chroma — what slowrx / PySSTV-based transmitters emit.
     """
     from pysstv.color import Robot36 as PySSTVRobot36  # noqa: PLC0415
 
@@ -618,13 +603,10 @@ def _encode_robot36_per_line(img: Image.Image, fs: int = 48_000) -> np.ndarray:
 
 @pytest.mark.slow
 def test_incremental_robot36_per_line_roundtrip() -> None:
-    """Robot 36 per-line format: wrapper auto-detects and decodes cleanly.
+    """Robot 36 from vanilla PySSTV decodes cleanly through the live path.
 
-    Transmits via PySSTV's vanilla per-line ``Robot36`` (sync every
-    150 ms) and verifies the wrapper picks ``_Robot36PerLineIncrementalDecoder``
-    rather than the line-pair backend.  A solid-colour fixture is
-    sufficient — we're checking that the format dispatch and linear
-    chroma upsampling produce a colour roughly matching the source.
+    A solid-colour fixture is sufficient — we're checking that chroma
+    upsampling produces a colour roughly matching the source.
     Marked slow because a full Robot 36 transmission is ~36 s of audio.
     """
     fs = 48_000
@@ -653,8 +635,7 @@ def test_incremental_robot36_per_line_roundtrip() -> None:
 
 
 def test_incremental_robot36_wrapper_rejects_empty_feed() -> None:
-    """Wrapper silently buffers before format detection and never crashes
-    on short / empty feeds."""
+    """Robot 36 backend never crashes or emits on short / empty feeds."""
     from open_sstv.core.incremental_decoder import Robot36IncrementalDecoder
 
     spec = MODE_TABLE[Mode.ROBOT_36]
@@ -662,7 +643,7 @@ def test_incremental_robot36_wrapper_rejects_empty_feed() -> None:
 
     # Empty feed — no-op.
     assert wrapper.feed(np.zeros(0, dtype=np.float64)) == []
-    # Tiny pre-VIS chunk — buffered, no detection possible, no emission.
+    # Tiny pre-VIS chunk — buffered, no sync yet, no emission.
     assert wrapper.feed(np.zeros(100, dtype=np.float64)) == []
     assert wrapper.lines_decoded == 0
     assert not wrapper.complete
@@ -854,22 +835,19 @@ def test_sample_scan_slowrx_constant_freq() -> None:
 # ---------------------------------------------------------------------------
 #
 # Verifies that the incremental (slowrx) path produces a usable image for a
-# clean synthetic Robot 36 signal in the line-pair wire format (the format
-# emitted by our own encoder and by most over-the-air encoders).
+# clean synthetic Robot 36 signal from our own encoder.
 #
-# Unlike Scottie/Martin/PD, the incremental and batch decoders for Robot 36
-# use different color pipelines (slowrx integer matrix vs median+PIL), so
-# byte-exact comparison is intentionally NOT required.  The bound is the
+# Byte-exact comparison with the batch decoder is intentionally NOT
+# required (the live path adds a 3-tap IF smoother and walks the grid).  The bound is the
 # same ∞-SNR luma/chroma MAE threshold from the decoder algorithm spec:
 # luma MAE < 5 %, chroma MAE < 15 %.  On a solid-colour source the round-
 # trip should clear those bounds comfortably.
 
 
 def test_robot36_incremental_roundtrip_quality() -> None:
-    """Robot 36 line-pair format through the incremental decoder stays within
-    the ∞-SNR quality bound: luma MAE < 5 %, chroma MAE < 15 %.
+    """Robot 36 from our encoder through the incremental decoder stays
+    within the ∞-SNR quality bound: luma MAE < 5 %, chroma MAE < 15 %.
 
-    Uses the line-pair wire format (our encoder / MMSSTV / iOS SimpleSSTV).
     Per-channel mean absolute error is computed over a solid-colour source
     so the true pixel value is known exactly.
     """
@@ -885,7 +863,7 @@ def test_robot36_incremental_roundtrip_quality() -> None:
 
     events = _run_decoder_events(audio, fs, incremental=True)
     completes = [e for e in events if isinstance(e, ImageComplete)]
-    assert len(completes) == 1, "Robot 36 line-pair: expected exactly 1 ImageComplete"
+    assert len(completes) == 1, "Robot 36: expected exactly 1 ImageComplete"
 
     decoded = np.array(completes[0].image, dtype=np.float64)
     src = np.array(img.resize((320, 240)), dtype=np.float64)
@@ -916,8 +894,8 @@ def test_robot36_incremental_progress_is_monotonic() -> None:
     holds end-to-end.
     """
     fs = 48_000
-    # Encode via PySSTV's vanilla per-line Robot36 to exercise the back-fill
-    # code path (line-pair format never back-fills).
+    # Encode via PySSTV's vanilla Robot36 to exercise the chroma back-fill
+    # re-emission path.
     img = Image.new("RGB", (320, 240), color=(100, 180, 60))
     from pysstv.color import Robot36 as PySSTVRobot36  # noqa: PLC0415
 
@@ -939,94 +917,3 @@ def test_robot36_incremental_progress_is_monotonic() -> None:
 
     # Sanity: we should have decoded some lines.
     assert len(progress_events) > 0, "no ImageProgress events — Robot 36 per-line not decoding"
-
-
-# ---------------------------------------------------------------------------
-# BZ-07: Robot36IncrementalDecoder detection is O(total samples), not O(N²)
-# ---------------------------------------------------------------------------
-
-
-def test_robot36_detection_is_incremental() -> None:
-    """_try_detect must process only new audio per feed(), not the full buffer.
-
-    With the old implementation, _bp_window was called once per feed() with
-    the entire accumulated tail — O(N × total_samples) work total. The fixed
-    implementation processes only the new slice (+ a fixed warm-up overlap of
-    _MIN_BP_SAMPLES), so total DSP work is O(total_samples + N × 256).
-
-    We verify this by mocking _bp_window, accumulating the sum of all input
-    sizes, and asserting it is less than 2 × total_pending_size.  A regression
-    to the O(N²) path would send the sum well above that bound for N ≥ 4.
-    """
-    from unittest.mock import patch
-
-    from open_sstv.core.incremental_decoder import (
-        _MIN_BP_SAMPLES,
-        Robot36IncrementalDecoder,
-        _bp_window,
-    )
-
-    spec = MODE_TABLE[Mode.ROBOT_36]
-    fs = 48_000
-    vis_end_abs = 1_000
-
-    # Create chunks that push just past _MIN_BP_SAMPLES on each call
-    # so _try_detect actually attempts detection on every feed.
-    chunk_size = _MIN_BP_SAMPLES + 50  # 306 samples — just over the threshold
-    n_chunks = 8
-    chunks = [np.random.default_rng(i).uniform(-0.1, 0.1, chunk_size) for i in range(n_chunks)]
-    total_pending = sum(c.size for c in chunks)
-
-    sizes_processed: list[int] = []
-
-    original_bp_window = _bp_window
-
-    def counting_bp_window(x, fs_):
-        sizes_processed.append(x.size)
-        return original_bp_window(x, fs_)
-
-    wrapper = Robot36IncrementalDecoder(spec, fs=fs, vis_end_abs=vis_end_abs, start_abs=0)
-
-    with patch(
-        "open_sstv.core.incremental_decoder._bp_window",
-        side_effect=counting_bp_window,
-    ):
-        for chunk in chunks:
-            wrapper.feed(chunk)
-
-    if not sizes_processed:
-        pytest.skip("_bp_window never called — all chunks below _MIN_BP_SAMPLES threshold")
-
-    total_processed = sum(sizes_processed)
-    # O(N²) would be roughly N * total_pending; O(N) is bounded by 2 * total_pending
-    # (factor of 2 accounts for the _MIN_BP_SAMPLES overlap on each call).
-    bound = 2 * total_pending
-    assert total_processed <= bound, (
-        f"_bp_window processed {total_processed} samples total across "
-        f"{len(sizes_processed)} calls, but total pending was {total_pending}. "
-        f"Bound is {bound}. Suggests O(N²) regression in _try_detect."
-    )
-
-
-# === OP2-10: fallback threshold uses seconds constant ===
-
-
-def test_robot36_fallback_threshold_scales_with_sample_rate() -> None:
-    """_DETECT_FALLBACK_S must scale the threshold with fs, not divide by
-    a hardcoded 48_000.  At 44.1 kHz the old formula yielded 2 s × 44100
-    instead of 3 s × 44100 (OP2-10)."""
-    from open_sstv.core.incremental_decoder import Robot36IncrementalDecoder
-
-    spec = MODE_TABLE[Mode.ROBOT_36]
-    fs_44k = 44_100
-    # Construct the decoder to exercise the __init__ path; we read the
-    # class constant directly below rather than via the instance.
-    Robot36IncrementalDecoder(spec, fs=fs_44k, vis_end_abs=0, start_abs=0)
-
-    expected = int(fs_44k * Robot36IncrementalDecoder._DETECT_FALLBACK_S)
-    # The fallback threshold is computed inside _try_detect; approximate it
-    # directly from the constant so a regression in the formula is visible.
-    assert expected == int(Robot36IncrementalDecoder._DETECT_FALLBACK_S * fs_44k)
-    # Sanity check: 3 s × 44100 Hz = 132 300 samples (not 2 × 44100 = 88 200
-    # as the old integer-division formula would have produced).
-    assert expected == 132_300
