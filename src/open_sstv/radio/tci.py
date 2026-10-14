@@ -48,6 +48,7 @@ from collections.abc import Callable
 
 import numpy as np
 
+from open_sstv.radio.base import validate_mode_token
 from open_sstv.radio.exceptions import RigCommandError, RigConnectionError
 
 _log = logging.getLogger(__name__)
@@ -70,6 +71,39 @@ _AUDIO_HEADER_SIZE = 64     # total header size including reserved
 _AUDIO_TYPE_RX = 1          # type=1 is RX_AUDIO
 _AUDIO_FMT_INT16 = 0
 _AUDIO_FMT_FLOAT32 = 3
+
+#: v0.6.14 audit S-L9: largest WebSocket frame we accept from the server.
+#: websocket-client allocates whatever length a frame header declares, so
+#: a buggy or hostile server could make us buffer gigabytes.  The biggest
+#: legitimate TCI frame is an audio block — 2048 stereo float32 samples
+#: plus the 64-byte header is ~16 KB — so 64 KB leaves 4x headroom.
+_MAX_FRAME_BYTES: int = 64 * 1024
+
+
+def _install_frame_size_cap(ws: object, limit: int = _MAX_FRAME_BYTES) -> None:
+    """Reject oversized frames *before* their payload is read (S-L9).
+
+    websocket-client exposes no max-size option, so wrap the instance's
+    frame-header length parser: once the declared length is known and too
+    big, raise instead of letting ``recv_strict`` allocate it.  The recv
+    loop treats that like any other protocol error (connection lost).
+    Best-effort — a websocket-client without this internal is left as is.
+    """
+    try:
+        fb = ws.frame_buffer  # type: ignore[attr-defined]
+        original = fb.recv_length
+    except AttributeError:
+        _log.debug("TCI: websocket-client has no frame_buffer; frame cap not installed")
+        return
+
+    def _capped_recv_length() -> None:
+        original()
+        if fb.length is not None and fb.length > limit:
+            raise RigConnectionError(
+                f"TCI: server sent a {fb.length}-byte frame (limit {limit}) — dropping link"
+            )
+
+    fb.recv_length = _capped_recv_length
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +200,7 @@ class TciConnection:
             self._ws.sock.settimeout(_SOCKET_TIMEOUT_S)
         except Exception as exc:  # noqa: BLE001
             _log.warning("TCI: could not set socket timeout: %s", exc)
+        _install_frame_size_cap(self._ws)
 
         self._closed = False
         self._ready_event.clear()
@@ -386,10 +421,15 @@ class TciConnection:
                 # session — but a quiet period on the wire isn't a
                 # connection loss, just keep looping.
                 continue
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 if not self._closed:
-                    _log.warning("TCI: recv error — connection lost")
+                    _log.warning("TCI: recv error — connection lost (%s)", exc)
                 break
+            if len(data) > _MAX_FRAME_BYTES:
+                # S-L9 belt-and-braces: a fragmented message is reassembled
+                # by websocket-client from individually-capped frames.
+                _log.warning("TCI: dropped %d-byte message (over the frame cap)", len(data))
+                continue
             if opcode == 1:  # TEXT
                 text = data.decode("utf-8", errors="replace").strip()
                 self._dispatch_text(text)
@@ -623,7 +663,7 @@ class TciRig:
 
     def set_mode(self, mode: str, passband_hz: int) -> None:
         del passband_hz
-        self.connection.send(f"modulation:0,{mode.upper()};")
+        self.connection.send(f"modulation:0,{validate_mode_token(mode).upper()};")
 
     def get_ptt(self) -> bool:
         self._require_alive()
@@ -670,9 +710,13 @@ class TciRig:
             # Only accept VFO A (index 0) on TRX 0 — the post-READY: burst
             # includes VFO B (index 1) and any secondary TRX, which would
             # otherwise clobber the operating frequency with a wrong value.
+            # v0.6.14 audit T-M7: the TRX half of that was never checked,
+            # so RX2's VFO A overwrote ours (false "tune failed", wrong
+            # logbook frequency).  Same TRX filter as modulation:/trx:.
             try:
                 parts = msg.split(",")
-                if len(parts) >= 3 and parts[1].strip() == "0":
+                trx_field = parts[0].split(":")[-1].strip()
+                if trx_field == "0" and len(parts) >= 3 and parts[1].strip() == "0":
                     self._last_freq = int(parts[2].strip())
                     self._freq_received = True
                     self._freq_event.set()
@@ -708,10 +752,15 @@ class TciRig:
             except (ValueError, IndexError):
                 pass
         elif lower.startswith("rx_smeter:"):
-            # rx_smeter:0,0,-73
+            # rx_smeter:<trx>,<channel>,<dBm>  e.g. rx_smeter:0,0,-73
+            # T-M7: TRX 0, channel 0 only — RX2 / the sub-receiver used to
+            # drive our S-meter too.
             try:
-                self._strength = int(float(msg.split(",")[-1]))
-            except (ValueError, IndexError):
+                parts = msg.split(",")
+                trx_field = parts[0].split(":")[-1].strip()
+                if trx_field == "0" and len(parts) >= 3 and parts[1].strip() == "0":
+                    self._strength = int(float(parts[2]))
+            except (ValueError, IndexError, OverflowError):
                 pass
 
 

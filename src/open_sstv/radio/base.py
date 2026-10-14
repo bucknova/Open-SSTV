@@ -20,8 +20,34 @@ without inheriting from us.
 """
 from __future__ import annotations
 
+import re
 from enum import StrEnum, unique
 from typing import Protocol, runtime_checkable
+
+from open_sstv.radio.exceptions import RigCommandError
+
+#: Allowlist for a rig mode token sent on a line-oriented wire protocol
+#: (rigctld ``M <mode>``, TCI ``modulation:0,<mode>;``, Flex ``mode=<mode>``).
+#: v0.6.14 audit (security info): modes only ever come from the static band
+#: plan today, but a newline, ``;`` or space in one would inject a second
+#: command into the stream, so reject anything that isn't a plain token.
+_MODE_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,15}")
+
+
+def validate_mode_token(mode: str) -> str:
+    """Return *mode* stripped, or raise ``RigCommandError`` if unsafe.
+
+    Accepts 1-16 characters of ``[A-Za-z0-9_-]`` starting with a letter or
+    digit, which covers every Hamlib (``PKTUSB``), TCI (``DIGU``), Flex
+    (``NFM``) and Yaesu/Icom-style (``DATA-U``, ``USB-D``) token we use.
+
+    >>> validate_mode_token(" USB ")
+    'USB'
+    """
+    token = (mode or "").strip()
+    if not _MODE_TOKEN_RE.fullmatch(token):
+        raise RigCommandError(f"refusing unsafe rig mode {mode!r}", command="set_mode")
+    return token
 
 
 @unique
@@ -138,4 +164,4 @@ class ManualRig:
         return None
 
 
-__all__ = ["ManualRig", "Rig", "RigConnectionMode"]
+__all__ = ["ManualRig", "Rig", "RigConnectionMode", "validate_mode_token"]

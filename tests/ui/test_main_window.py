@@ -67,6 +67,11 @@ def window(
     _suppress_first_launch_dialog: None,
 ) -> MainWindow:
     w = MainWindow(rig=ManualRig())
+    # v0.6.14 audit T-M5: the worker refuses to key when the configured
+    # output device is missing.  These tests use the developer's real
+    # config, whose radio codec usually isn't plugged in — skip the
+    # per-TX re-resolution (play_blocking is mocked anyway).
+    w._tx_worker.set_output_device_name(None)
     qtbot.addWidget(w)  # ensures pytest-qt cleans up the window on test exit
     return w
 

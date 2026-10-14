@@ -186,7 +186,7 @@ class FakeRigctld:
             if op == "t":
                 return header + f"PTT: {1 if self.ptt else 0}\nRPRT 0\n"
             if op == "T":
-                self.ptt = parts[1] == "1"
+                self.ptt = parts[1] != "0"  # RIG_PTT_ON / _MIC / _DATA
                 return header + "RPRT 0\n"
             if op == "l" and len(parts) >= 2 and parts[1] == "STRENGTH":
                 return header + f"STRENGTH: {self.strength_db}\nRPRT 0\n"

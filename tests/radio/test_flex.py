@@ -282,3 +282,59 @@ class TestConnectionLoss:
         threading.Timer(0.1, rig._fail_pending, args=("connection lost",)).start()
         with pytest.raises(RigConnectionError, match="connection lost"):
             rig.set_ptt(False)
+
+
+# --- v0.6.14 audit ---
+
+
+class TestOpenCleansUpOnPartialFailure:
+    """T-L5: a failure after the socket is up must leave nothing behind."""
+
+    def test_subscribe_rejected_twice_closes_socket(self) -> None:
+        fake = FakeFlex(fail_commands={"sub"})
+        try:
+            r = FlexRig(host="127.0.0.1", port=fake.port, slice_index=0)
+            with pytest.raises(RigCommandError):
+                r.open()
+            assert r._sock is None, "socket leaked after a failed open()"
+            assert r._reader is None
+        finally:
+            fake.close()
+
+    def test_failed_open_can_be_retried(self) -> None:
+        """Before the fix the leaked ``_sock`` made the next open() return
+        early, reporting a dead half-open link as connected."""
+        bad = FakeFlex(fail_commands={"sub"})
+        try:
+            r = FlexRig(host="127.0.0.1", port=bad.port, slice_index=0)
+            with pytest.raises(RigCommandError):
+                r.open()
+        finally:
+            bad.close()
+        good = FakeFlex()
+        try:
+            r._port = good.port
+            r.open()
+            assert r.get_freq() == 14_074_000
+        finally:
+            r.close()
+            good.close()
+
+
+class TestFlexHardening:
+    def test_unsafe_mode_is_refused(self, rig: FlexRig, radio: FakeFlex) -> None:
+        before = list(radio.commands)
+        with pytest.raises(RigCommandError):
+            rig.set_mode("USB\nxmit 1", 0)
+        assert radio.commands == before
+
+    def test_runaway_line_drops_the_link(
+        self, monkeypatch: pytest.MonkeyPatch, rig: FlexRig, radio: FakeFlex
+    ) -> None:
+        """S-L9: a reader buffer with no newline must not grow forever."""
+        assert radio._conn is not None
+        radio._conn.sendall(b"S" + b"x" * (70 * 1024))
+        deadline = time.monotonic() + 3
+        while not rig._lost.is_set() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert rig._lost.is_set()

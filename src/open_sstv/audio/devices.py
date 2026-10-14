@@ -215,31 +215,49 @@ def _default_for_direction(direction: int) -> AudioDevice | None:
     return None
 
 
-def find_output_device_by_name(name: str | None) -> AudioDevice | None:
-    """Look up an output device by its saved name string.
+def _pick_by_name(
+    devices: list[AudioDevice], name: str | None, host_api: str | None
+) -> AudioDevice | None:
+    """First device named *name*, preferring one on *host_api* if given.
 
-    Returns the first output device whose ``name`` matches, or ``None``
-    if no match is found (e.g. the device was unplugged since the config
-    was saved). Used by ``MainWindow`` to resolve the config's
-    ``audio_output_device`` (a string) into an ``AudioDevice`` with a
-    usable PortAudio ``index``.
+    v0.6.14 audit T-L4: Windows lists the same card under MME, DirectSound
+    and WASAPI with identical names, so a name-only lookup re-resolved a
+    WASAPI choice to whichever twin PortAudio enumerated first (usually
+    MME, the backend with the known TX-stall problem).
     """
     if not name:
         return None
-    for dev in list_output_devices():
-        if dev.name == name:
-            return dev
-    return None
-
-
-def find_input_device_by_name(name: str | None) -> AudioDevice | None:
-    """Look up an input device by its saved name string."""
-    if not name:
+    matches = [d for d in devices if d.name == name]
+    if not matches:
         return None
-    for dev in list_input_devices():
-        if dev.name == name:
-            return dev
-    return None
+    if host_api:
+        for dev in matches:
+            if dev.host_api == host_api:
+                return dev
+    return matches[0]
+
+
+def find_output_device_by_name(
+    name: str | None, host_api: str | None = None
+) -> AudioDevice | None:
+    """Look up an output device by its saved name string.
+
+    Returns the first output device whose ``name`` matches — or, when
+    *host_api* is given, the match on that host API if there is one — or
+    ``None`` if no match is found (e.g. the device was unplugged since the
+    config was saved). Used by ``MainWindow`` to resolve the config's
+    ``audio_output_device`` (a string) into an ``AudioDevice`` with a
+    usable PortAudio ``index``, and by ``TxWorker`` to re-resolve it at
+    the start of every transmission.
+    """
+    return _pick_by_name(list_output_devices(), name, host_api)
+
+
+def find_input_device_by_name(
+    name: str | None, host_api: str | None = None
+) -> AudioDevice | None:
+    """Look up an input device by its saved name string (see above)."""
+    return _pick_by_name(list_input_devices(), name, host_api)
 
 
 __all__ = [
