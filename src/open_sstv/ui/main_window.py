@@ -156,7 +156,6 @@ from open_sstv.audio.pipewire_route import PipeWireSink, find_pipewire_sink_by_n
 from open_sstv.audio.tci_input_stream import TciInputStreamWorker
 from open_sstv.config.schema import AppConfig
 from open_sstv.config.store import last_corrupt_backup, load_config, save_config
-from open_sstv.config.templates import load_templates
 from open_sstv.core.modes import Mode
 from open_sstv.fsutil import atomic_write_bytes
 from open_sstv.logbook import QSO, LogbookCoordinator, QsoLoggingError, UdpQsoLogger
@@ -901,7 +900,6 @@ class MainWindow(QMainWindow):
         # Push callsign and full config to TX panel so the gallery can render
         # token-resolved thumbnails on startup.
         self._tx_panel = TxPanel(
-            templates=load_templates(),
             default_mode=self._config.default_tx_mode,
             app_config=self._config,
             parent=self,

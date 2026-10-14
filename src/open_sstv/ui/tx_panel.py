@@ -34,7 +34,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PIL import Image, ImageDraw
+from PIL import Image
 from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
@@ -51,12 +51,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from open_sstv.config.templates import (
-    QSOTemplate,
-    load_templates,
-    needs_user_input,
-    resolve_placeholders,
-)
 from open_sstv.core.encoder import DEFAULT_SAMPLE_RATE
 from open_sstv.core.modes import MODE_TABLE, Mode
 from open_sstv.templates import manager as template_manager
@@ -66,10 +60,8 @@ from open_sstv.templates.context import (
 )
 from open_sstv.templates.model import QSOState, Template
 from open_sstv.templates.renderer import render_template
-from open_sstv.ui.draw_text import draw_text_overlay
 from open_sstv.ui.image_editor import ImageEditorDialog
 from open_sstv.ui.qso_state_widget import QSOStateWidget
-from open_sstv.ui.quick_fill_dialog import QuickFillDialog
 from open_sstv.ui.template_editor import TemplateEditor, ask_overwrite_template
 from open_sstv.ui.template_gallery import TemplateGallery
 from open_sstv.ui.utils import pil_to_pixmap as _pil_to_pixmap
@@ -110,7 +102,6 @@ class TxPanel(QWidget):
 
     def __init__(
         self,
-        templates: list[QSOTemplate] | None = None,
         default_mode: str | None = None,
         app_config: AppConfig | None = None,
         templates_dir: Path | None = None,
@@ -126,8 +117,6 @@ class TxPanel(QWidget):
         self._app_config: AppConfig | None = app_config
         self._templates_dir: Path | None = templates_dir
         self._selected_template: Template | None = None
-        # v0.2 compat: kept so set_templates() callers don't break.
-        self._v2_templates: list[QSOTemplate] = templates or load_templates()
         self._sample_rate: int = DEFAULT_SAMPLE_RATE
         self._preview_source: QPixmap | None = None
         #: v0.6.14 audit C-M4: returns MainWindow's last polled rig
@@ -412,10 +401,6 @@ class TxPanel(QWidget):
     def selected_mode(self) -> Mode:
         data = self._mode_combo.currentData()
         return data if isinstance(data, Mode) else Mode(data)
-
-    def set_templates(self, templates: list[QSOTemplate]) -> None:
-        """v0.2 compat shim — no-op in v0.3."""
-        self._v2_templates = templates
 
     @Slot(object)
     def set_rx_image(self, img: PILImage | None) -> None:
@@ -829,72 +814,6 @@ class TxPanel(QWidget):
             f"QLabel {{ padding: 4px 8px; border-radius: 3px; "
             f"background: {bg}; color: {fg}; }}"
         )
-
-
-    # -----------------------------------------------------------------------
-    # v0.2 compat private methods
-    # These are no longer wired to any UI element (QSOTemplateBar was
-    # replaced by the v0.3 gallery) but remain as private helpers so that
-    # existing tests and external callers that poke the internal API don't
-    # immediately break.  Will be removed in v0.4.
-    # -----------------------------------------------------------------------
-
-    @Slot(object)
-    def _on_template_activated(self, tpl: QSOTemplate) -> None:
-        """Apply a v0.2 QSOTemplate overlay onto the base image."""
-        if self._current_image is None:
-            self._status.setText("Load an image first before applying a template.")
-            return
-
-        if needs_user_input(tpl):
-            dlg = QuickFillDialog(tpl, mycall=self._callsign, parent=self)
-            if dlg.exec() != QuickFillDialog.DialogCode.Accepted:
-                return
-            overlays = dlg.resolved_overlays()
-        else:
-            overlays = []
-            for ov in tpl.overlays:
-                overlays.append({
-                    "text": resolve_placeholders(ov.text, mycall=self._callsign),
-                    "position": ov.position,
-                    "size": ov.size,
-                    "color": ov.color,
-                    "x": ov.x,
-                    "y": ov.y,
-                })
-        self._apply_overlays(overlays)
-
-    def _apply_overlays(self, overlays: list[dict]) -> None:
-        if self._base_image is None:
-            return
-        img = self._base_image.copy()
-        draw = ImageDraw.Draw(img)
-        for ov in overlays:
-            draw_text_overlay(
-                draw,
-                img.size,
-                text=ov["text"],
-                position=ov["position"],
-                size=ov["size"],
-                color=ov["color"],
-                x=ov.get("x"),
-                y=ov.get("y"),
-            )
-        self._current_image = img
-        self._preview_source = _pil_to_pixmap(img)
-        self._update_preview_pixmap()
-        self._preview.setText("")
-        self._status.setText("Template applied.")
-
-    @Slot()
-    def _on_clear_text(self) -> None:
-        if self._base_image is None:
-            return
-        self._current_image = self._base_image.copy()
-        self._preview_source = _pil_to_pixmap(self._current_image)
-        self._update_preview_pixmap()
-        self._preview.setText("")
-        self._status.setText("Template text cleared.")
 
 
 __all__ = ["TxPanel"]
