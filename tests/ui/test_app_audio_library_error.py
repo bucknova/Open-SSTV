@@ -103,7 +103,8 @@ def test_main_shows_dialog_and_exits_1(
 ) -> None:
     # Keep main() from touching the real log dir, logging config and argv.
     monkeypatch.setattr(app, "_setup_logging", lambda level: None)
-    monkeypatch.setattr(app, "_config_log_level", lambda: 20)
+    monkeypatch.setattr(app, "_config_log_level", lambda *_a: 20)
+    monkeypatch.setattr(app, "_load_startup_config", lambda: (None, None, []))
     monkeypatch.setattr(app, "_set_macos_process_name", lambda name: None)
     monkeypatch.setattr(sys, "argv", ["open-sstv"])
     monkeypatch.setitem(

@@ -520,12 +520,55 @@ class ImageEditorDialog(QDialog):
         )
 
     def _build_display_image(self) -> PILImage:
-        """Working image with text overlays burned in."""
+        """Working image with text overlays shown where they will land.
+
+        v0.6.14 audit C-M2: overlay X/Y and size are *target* pixels (the
+        spin boxes range over the target frame), but they used to be drawn
+        straight onto the larger working image — wrong place, wrong size,
+        and then shrunk again on OK.  They're now rendered at target size
+        and mapped into the crop rectangle, exactly as OK will produce.
+        """
         img = self._working_image.copy()
+        if not self._text_overlays:
+            return img
+        x, y, w, h = self._crop_box()
+        layer = Image.new("RGBA", (self._target_w, self._target_h), (0, 0, 0, 0))
+        self._draw_overlays(layer)
+        if (w, h) != layer.size:
+            layer = layer.resize((w, h), Image.Resampling.LANCZOS)
+        base = img.convert("RGBA")
+        base.alpha_composite(layer, (x, y))
+        return base.convert(img.mode) if img.mode in ("RGB", "L") else base
+
+    def _draw_overlays(self, img: PILImage) -> None:
+        """Draw every text overlay onto *img* (a target-size image)."""
         draw = ImageDraw.Draw(img)
         for overlay in self._text_overlays:
             self._draw_text(draw, img.size, overlay)
-        return img
+
+    def _crop_box(self) -> tuple[int, int, int, int]:
+        """The crop selection clamped to the working image: ``(x, y, w, h)``."""
+        iw, ih = self._working_image.size
+        x = max(0, min(self._crop_x.value(), iw - 1))
+        y = max(0, min(self._crop_y.value(), ih - 1))
+        w = max(1, min(self._crop_w.value(), iw - x))
+        h = max(1, min(self._crop_h.value(), ih - y))
+        return x, y, w, h
+
+    def _final_base_image(self) -> PILImage:
+        """The working image cropped to the selection and sized to target.
+
+        v0.6.14 audit C-M2: OK without Apply Crop used to resize the
+        *whole* working image to the target — squashing it whenever the
+        aspect differed — and ignored the yellow selection.  OK now
+        applies the pending crop first, same as Apply Crop would.
+        """
+        x, y, w, h = self._crop_box()
+        cropped = self._working_image.crop((x, y, x + w, y + h))
+        size = (self._target_w, self._target_h)
+        if cropped.size == size:
+            return cropped.copy()
+        return cropped.resize(size, Image.Resampling.LANCZOS)
 
     @staticmethod
     def _draw_text(
@@ -608,6 +651,10 @@ class ImageEditorDialog(QDialog):
         self._crop_rect_item = _CropRect(rect)
         self._crop_rect_item.on_moved = self._on_crop_rect_dragged
         self._scene.addItem(self._crop_rect_item)
+        # Overlays are placed relative to the crop (C-M2), so moving or
+        # resizing the selection moves them in the preview too.
+        if self._text_overlays and self._pixmap_item is not None:
+            self._pixmap_item.setPixmap(_pil_to_pixmap(self._build_display_image()))
 
     def _on_crop_rect_dragged(self, x: int, y: int) -> None:
         """Called when the user drags the crop rectangle in the viewport.
@@ -796,15 +843,15 @@ class ImageEditorDialog(QDialog):
 
     def _on_accept(self) -> None:
         """Build the final image: apply overlays, resize to mode, accept."""
-        size = (self._target_w, self._target_h)
         # Base image: cropped/rotated/filtered but NO text overlays.
         # Used by TxPanel as the "clean" baseline that Clear Text reverts to.
-        self._result_base_image = self._working_image.copy().resize(
-            size, Image.Resampling.LANCZOS,
-        )
-        # Full image: base + text overlays baked in.
-        img = self._build_display_image()
-        img = img.resize(size, Image.Resampling.LANCZOS)
+        # The pending crop selection is applied (C-M2).
+        base = self._final_base_image()
+        self._result_base_image = base
+        # Full image: overlays drawn at their target-pixel coordinates on
+        # the target-size base — never drawn big and shrunk.
+        img = base.copy()
+        self._draw_overlays(img)
         self._result_image = img
         self.accept()
 

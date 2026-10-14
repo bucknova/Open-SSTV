@@ -282,3 +282,81 @@ class TestRefreshPreviewSceneRect:
         assert abs(t.m11() - 1.0) < 0.01, (
             f"view should stay at 1:1 even for PD-290, got m11={t.m11()}"
         )
+
+
+# ---------------------------------------------------------------------------
+# v0.6.14 audit C-M2: OK applies the pending crop; overlays map correctly
+# ---------------------------------------------------------------------------
+
+
+def _banded(w: int, h: int) -> Image.Image:
+    """Red side bands, green centre third."""
+    img = Image.new("RGB", (w, h), (255, 0, 0))
+    img.paste((0, 255, 0), (w // 3, 0, 2 * w // 3, h))
+    return img
+
+
+def test_ok_without_apply_crop_crops_instead_of_squashing(qtbot) -> None:
+    # 2:1 source into 4:3 Robot 36: auto-fit selects the centre; OK must
+    # honour it rather than squashing the whole frame.
+    src = _banded(800, 400)
+    dlg = ImageEditorDialog(src, Mode.ROBOT_36)
+    qtbot.addWidget(dlg)
+    dlg._on_accept()
+    out = dlg.result_base_image()
+    assert out.size == (320, 240)
+    # Crop is source x 133..666, green 266..533 → target x 80..240.
+    # Squashed, green would only span target x 107..213.
+    assert out.getpixel((160, 120))[1] > 200
+    assert out.getpixel((90, 120)) == (0, 255, 0)
+    assert out.getpixel((40, 120)) == (255, 0, 0)
+    squashed = src.resize((320, 240))
+    assert squashed.getpixel((90, 120)) == (255, 0, 0)
+
+
+def test_overlay_lands_at_target_coords_and_size(qtbot) -> None:
+    src = Image.new("RGB", (640, 480), (0, 0, 0))
+    dlg = ImageEditorDialog(src, Mode.ROBOT_36)
+    qtbot.addWidget(dlg)
+    dlg._text_input.setText("WWWWWW")
+    dlg._font_size.setValue(24)
+    dlg._text_position.setCurrentText("Custom")
+    dlg._text_x.setValue(10)
+    dlg._text_y.setValue(10)
+    dlg._add_text_overlay()
+    dlg._on_accept()
+    out = dlg.result_image()
+    assert out.size == (320, 240)
+
+    def bright_cols() -> list[int]:
+        return [
+            x for x in range(320)
+            if any(out.getpixel((x, y))[0] > 200 for y in range(0, 60))
+        ]
+
+    cols = bright_cols()
+    assert cols, "overlay missing"
+    # Drawn at target scale: starts near x=10 and spans well past 60 px.
+    # (The old path drew on the 640-wide image and halved it on OK.)
+    assert 5 <= min(cols) <= 16
+    assert max(cols) > 70
+
+
+def test_preview_maps_overlay_into_crop(qtbot) -> None:
+    src = Image.new("RGB", (640, 480), (0, 0, 0))
+    dlg = ImageEditorDialog(src, Mode.ROBOT_36)
+    qtbot.addWidget(dlg)
+    dlg._text_input.setText("WWWWWW")
+    dlg._text_position.setCurrentText("Custom")
+    dlg._text_x.setValue(10)
+    dlg._text_y.setValue(10)
+    dlg._add_text_overlay()
+    disp = dlg._build_display_image()
+    assert disp.size == (640, 480)
+    cols = [
+        x for x in range(640)
+        if any(disp.getpixel((x, y))[0] > 200 for y in range(0, 120))
+    ]
+    # Target x=10 maps to working x≈20 (2× scale) inside the crop.
+    assert 10 <= min(cols) <= 32
+    assert max(cols) > 140

@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS qsos (
     time_utc        TEXT    NOT NULL,
     mode            TEXT    NOT NULL DEFAULT '',
     frequency_hz    INTEGER,
+    band            TEXT    NOT NULL DEFAULT '',
     rsv_sent        TEXT    NOT NULL DEFAULT '',
     rsv_received    TEXT    NOT NULL DEFAULT '',
     name            TEXT    NOT NULL DEFAULT '',
@@ -137,6 +138,7 @@ def _like_escape(text: str) -> str:
 
 def _row_to_qso(row: sqlite3.Row) -> QSO:
     return QSO(
+        band=row["band"] if "band" in row.keys() else "",  # noqa: SIM118
         id=row["id"],
         direction=row["direction"],  # already "RX" or "TX"
         callsign=row["callsign"],
@@ -170,6 +172,7 @@ def _qso_to_params(qso: QSO, *, now: datetime) -> dict[str, Any]:
         "time_utc": _iso(qso.time_utc),
         "mode": qso.mode,
         "frequency_hz": qso.frequency_hz,
+        "band": qso.band or "",
         "rsv_sent": qso.rsv_sent,
         "rsv_received": qso.rsv_received,
         "name": qso.name,
@@ -233,16 +236,32 @@ class LogbookStore:
             )
         # current == SCHEMA_VERSION → no migration needed in v1.
         # Future versions add `if current < N: <migrate>` blocks here.
+        self._ensure_additive_columns()
+
+    def _ensure_additive_columns(self) -> None:
+        """Add nullable/defaulted columns introduced after v1.
+
+        v0.6.14 audit C-M8 added ``band`` (BAND from FREQ-less ADIF
+        imports).  An additive column with a default is invisible to older
+        builds (they name their INSERT columns and read rows by name), so
+        it deliberately does NOT bump ``user_version`` — bumping would lock
+        a downgraded app out of the whole logbook for one optional field.
+        """
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(qsos)")}
+        if "band" not in cols:
+            self._conn.execute(
+                "ALTER TABLE qsos ADD COLUMN band TEXT NOT NULL DEFAULT ''"
+            )
 
     # -- CRUD ----------------------------------------------------------
 
     _INSERT_SQL = """
         INSERT INTO qsos (
-            direction, callsign, time_utc, mode, frequency_hz,
+            direction, callsign, time_utc, mode, frequency_hz, band,
             rsv_sent, rsv_received, name, qth, grid, comment,
             image_path, audio_path, created_at, updated_at
         ) VALUES (
-            :direction, :callsign, :time_utc, :mode, :frequency_hz,
+            :direction, :callsign, :time_utc, :mode, :frequency_hz, :band,
             :rsv_sent, :rsv_received, :name, :qth, :grid, :comment,
             :image_path, :audio_path, :created_at, :updated_at
         )
@@ -308,6 +327,7 @@ class LogbookStore:
                 time_utc = :time_utc,
                 mode = :mode,
                 frequency_hz = :frequency_hz,
+                band = :band,
                 rsv_sent = :rsv_sent,
                 rsv_received = :rsv_received,
                 name = :name,
@@ -326,6 +346,19 @@ class LogbookStore:
         got = self.get(qso.id)
         assert got is not None
         return got
+
+    def clear_image_path(self, qso_id: int) -> None:
+        """Unlink a QSO from its image file, touching nothing else.
+
+        v0.6.14 audit C-M7: the Gallery's Delete wrote back its whole
+        (possibly stale) QSO snapshot via ``update`` to clear this one
+        field, reverting any Logbook edit made since the gallery loaded.
+        A no-op if the row is gone.
+        """
+        self._conn.execute(
+            "UPDATE qsos SET image_path = NULL, updated_at = ? WHERE id = ?",
+            (_iso(datetime.now(UTC)), qso_id),
+        )
 
     def delete(self, qso_id: int) -> None:
         """Delete a QSO by id.  Raises ``ValueError`` if not found."""

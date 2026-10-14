@@ -156,10 +156,10 @@ from open_sstv.audio.pipewire_route import PipeWireSink, find_pipewire_sink_by_n
 from open_sstv.audio.tci_input_stream import TciInputStreamWorker
 from open_sstv.config.schema import AppConfig
 from open_sstv.config.store import last_corrupt_backup, load_config, save_config
-from open_sstv.config.templates import load_templates
 from open_sstv.core.modes import Mode
 from open_sstv.fsutil import atomic_write_bytes
 from open_sstv.logbook import QSO, LogbookCoordinator, QsoLoggingError, UdpQsoLogger
+from open_sstv.logbook.coordinator import mode_display_name
 from open_sstv.radio.band_plan import (
     FLEX_PROTOCOL,
     RIGCTLD_PROTOCOL,
@@ -623,6 +623,8 @@ class MainWindow(QMainWindow):
         input_device: AudioDevice | int | None = None,
         config: AppConfig | None = None,
         parent: QMainWindow | None = None,
+        *,
+        config_corrupt_backup: Path | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Open-SSTV")
@@ -778,7 +780,11 @@ class MainWindow(QMainWindow):
         #: v0.6 (Phase 4): server-side compositor + in-memory staging store.
         #: Created here (not in RemoteServer) so the stage endpoint and the
         #: transmit path below share the same staged images.
-        self._remote_compose = ComposeService(lambda: self._config)
+        self._remote_compose = ComposeService(
+            lambda: self._config,
+            # v0.6.14 audit C-M4: %f / %b in remote-composed templates.
+            frequency_getter=lambda: getattr(self, "_last_rig_freq_hz", None),
+        )
         #: Throttle for the live RX preview push (monotonic seconds).
         self._remote_last_preview_t = 0.0
         #: v0.6 (Phase 3c): remote-TX control plane — the reference monitor
@@ -933,12 +939,15 @@ class MainWindow(QMainWindow):
         # Push callsign and full config to TX panel so the gallery can render
         # token-resolved thumbnails on startup.
         self._tx_panel = TxPanel(
-            templates=load_templates(),
             default_mode=self._config.default_tx_mode,
             app_config=self._config,
             parent=self,
         )
         self._tx_panel.set_callsign(self._config.callsign)
+        # v0.6.14 audit C-M4: the rig-poll cache feeds %f / %b at render.
+        self._tx_panel.set_frequency_getter(
+            lambda: getattr(self, "_last_rig_freq_hz", None)
+        )
 
         # --- Panels inside a horizontal splitter ---
         self._rx_panel = RxPanel(self)
@@ -1269,7 +1278,13 @@ class MainWindow(QMainWindow):
         # ``load_config`` now banishes the corpse to a ``.corrupt``
         # sibling; tell the user where it went so a hand-edit typo is
         # recoverable.  Deferred so the window paints first.
-        corrupt_backup = last_corrupt_backup() if loaded_config_from_disk else None
+        # v0.6.14 audit C-H2: ``app.main`` loads the config once and passes
+        # both the config and the backup path in; a second load here found
+        # no file (already moved to ``.corrupt``) and the warning never showed.
+        corrupt_backup = (
+            last_corrupt_backup() if loaded_config_from_disk
+            else config_corrupt_backup
+        )
         if corrupt_backup is not None:
             QTimer.singleShot(
                 0,
@@ -1695,8 +1710,9 @@ class MainWindow(QMainWindow):
 
         UDP-only — never touches the local logbook database (that's
         ``save_draft``'s per-image auto-capture flow, a separate
-        concern).  Time is the moment of the click (UTC); mode is fixed
-        to "SSTV" since this bar only ever describes an SSTV contact.
+        concern).  Time is the moment of the click (UTC); mode is the TX
+        panel's selected SSTV mode (v0.6.14 audit C-M8: it was a bare
+        "SSTV", so loggers never got the SUBMODE).
         """
         qso_state = self._tx_panel.get_qso_state()
         callsign = qso_state.tocall.strip().upper()
@@ -1710,7 +1726,7 @@ class MainWindow(QMainWindow):
             direction="TX",
             callsign=callsign,
             time_utc=datetime.datetime.now(datetime.UTC),
-            mode="SSTV",
+            mode=mode_display_name(self._tx_panel.selected_mode()),
             frequency_hz=self._last_rig_freq_hz,
             rsv_sent=qso_state.rst,
             rsv_received=rst_received,

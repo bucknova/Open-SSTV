@@ -210,3 +210,36 @@ def test_build_various_patterns(
     expected_stem = expected_stem_template.format(ts=int(ctx.now_utc.timestamp()))
     path = build_autosave_filename(pattern, tmp_path, ctx)
     assert path == tmp_path / f"{expected_stem}.png"
+
+
+# ---------------------------------------------------------------------------
+# v0.6.14 audit: Windows reserved names, control chars, byte cap, dots
+# ---------------------------------------------------------------------------
+
+
+class TestSanitizerAudit:
+    @pytest.mark.parametrize("name", ["CON", "con", "NUL", "com1", "LPT9", "aux"])
+    def test_windows_reserved_names_are_escaped(self, name: str) -> None:
+        out = sanitize_filename_component(name)
+        assert out.upper() != name.upper()
+        assert out.lstrip("_").upper() == name.upper()
+
+    def test_reserved_name_with_suffix_part(self) -> None:
+        assert sanitize_filename_component("nul.tar") == "_nul.tar"
+        assert sanitize_filename_component("console") == "console"
+
+    def test_control_characters_stripped(self) -> None:
+        assert sanitize_filename_component("a\x01b\x02c\x7fd") == "abcd"
+
+    def test_tabs_still_become_underscores(self) -> None:
+        assert sanitize_filename_component("a\tb") == "a_b"
+
+    def test_trailing_dots_and_spaces_removed(self) -> None:
+        assert sanitize_filename_component("name...") == "name"
+        assert sanitize_filename_component("name. . ") == "name"
+
+    def test_byte_cap_never_splits_a_character(self) -> None:
+        out = sanitize_filename_component("Ø" * 300)
+        assert len(out.encode("utf-8")) <= 200
+        out.encode("utf-8").decode("utf-8")  # valid UTF-8
+        assert set(out) == {"Ø"}

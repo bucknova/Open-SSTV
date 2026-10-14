@@ -38,6 +38,7 @@ Design choices
 from __future__ import annotations
 
 import logging
+import math
 import tomllib
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
@@ -99,16 +100,71 @@ def _rgba(lst: list[int]) -> RGBA:
     return (lst[0], lst[1], lst[2], lst[3] if len(lst) >= 4 else 255)
 
 
-def _stroke(d: dict) -> StrokeSpec:
-    return StrokeSpec(color=_rgba(d["color"]), width_px=int(d["width_px"]))
+#: v0.6.14 audit S-M5: the type-specific numeric fields had no bounds.  A
+#: shared template with ``shadow = { offset_x = 4000, … }`` made the text
+#: rasteriser allocate a ~1.9 GB image for a 320×256 frame (quadratic in
+#: the offset), and the gallery renders every template at launch, so it
+#: recurred on every start.  Ranges match the editor's spin boxes where
+#: it has them and are generous elsewhere; the renderer also refuses
+#: oversized intermediates as a second line of defence.
+_TYPED_NUMERIC_BOUNDS: dict[str, tuple[float, float]] = {
+    "stroke.width_px": (0.0, 32.0),
+    "shadow.offset_x": (-64.0, 64.0),
+    "shadow.offset_y": (-64.0, 64.0),
+    "shadow.blur_px": (0.0, 32.0),
+    "font_size_pct": (0.1, 100.0),
+    "line_height_mult": (0.1, 10.0),
+    "angle_deg": (-360.0, 360.0),
+    "cell_size_pct": (0.1, 100.0),
+}
 
 
-def _shadow(d: dict) -> ShadowSpec:
+def _bounded(
+    d: dict, key: str, default: float, file_name: str, bounds_key: str | None = None,
+) -> float:
+    """Read numeric *key* from *d*, rejecting wrong types and NaN/inf
+    (→ *default*) and clamping to ``_TYPED_NUMERIC_BOUNDS``, with a warning.
+    """
+    if key not in d:
+        return default
+    val = d[key]
+    name = bounds_key or key
+    if (
+        isinstance(val, bool)
+        or not isinstance(val, (int, float))
+        or not math.isfinite(val)
+    ):
+        _log.warning(
+            "Template %r: %s must be a finite number, got %r — using %g",
+            file_name, name, val, default,
+        )
+        return default
+    lo, hi = _TYPED_NUMERIC_BOUNDS[name]
+    clamped = max(lo, min(hi, float(val)))
+    if clamped != float(val):
+        _log.warning(
+            "Template %r: %s=%r out of range [%g, %g] — clamped to %g",
+            file_name, name, val, lo, hi, clamped,
+        )
+    return clamped
+
+
+def _stroke(d: dict, file_name: str = "<template>") -> StrokeSpec:
+    if "width_px" not in d:
+        raise KeyError("width_px")
+    width = _bounded(d, "width_px", 0.0, file_name, "stroke.width_px")
+    return StrokeSpec(color=_rgba(d["color"]), width_px=int(round(width)))
+
+
+def _shadow(d: dict, file_name: str = "<template>") -> ShadowSpec:
+    for required in ("offset_x", "offset_y"):
+        if required not in d:
+            raise KeyError(required)
     return ShadowSpec(
-        offset_x=float(d["offset_x"]),
-        offset_y=float(d["offset_y"]),
+        offset_x=_bounded(d, "offset_x", 0.0, file_name, "shadow.offset_x"),
+        offset_y=_bounded(d, "offset_y", 0.0, file_name, "shadow.offset_y"),
         color=_rgba(d["color"]),
-        blur_px=float(d.get("blur_px", 0.0)),
+        blur_px=_bounded(d, "blur_px", 0.0, file_name, "shadow.blur_px"),
     )
 
 
@@ -152,10 +208,16 @@ def _base_kwargs(d: dict, file_name: str = "<template>") -> dict:
         if bounds is None:
             kw[key] = val
             continue
-        if isinstance(val, bool) or not isinstance(val, (int, float)):
+        if (
+            isinstance(val, bool)
+            or not isinstance(val, (int, float))
+            # NaN slipped through the clamp below as the upper bound
+            # (every comparison with NaN is False) — v0.6.14 audit S-M5.
+            or not math.isfinite(val)
+        ):
             _log.warning(
-                "Template %r: layer field %s must be a number, got %s %r "
-                "— using the default",
+                "Template %r: layer field %s must be a finite number, got "
+                "%s %r — using the default",
                 file_name, key, type(val).__name__, val,
             )
             continue  # omitted → LayerBase default
@@ -239,15 +301,16 @@ def _validate_station_image_path(path: str) -> None:
         )
 
 
-def _layer_from_dict(d: dict) -> Layer | None:
+def _layer_from_dict(d: dict, file_name: str = "<template>") -> Layer | None:
     """Deserialise one ``[[layer]]`` table into the appropriate Layer subclass.
 
     Returns ``None`` for unknown layer types (forward-compat — older installs
-    silently skip layers added in future schema versions).
+    silently skip layers added in future schema versions).  *file_name*
+    only labels warnings.
     """
     layer_type = d.get("type", "")
     try:
-        base = _base_kwargs(d)
+        base = _base_kwargs(d, file_name)
     except KeyError as exc:
         _log.warning("Layer missing required field %s — skipping", exc)
         return None
@@ -277,14 +340,14 @@ def _layer_from_dict(d: dict) -> Layer | None:
                 **base,
                 text_raw=d.get("text", ""),
                 font_family=d.get("font_family", "DejaVu Sans Bold"),
-                font_size_pct=float(d.get("font_size_pct", 6.0)),
+                font_size_pct=_bounded(d, "font_size_pct", 6.0, file_name),
                 weight=d.get("weight", "regular"),
                 italic=bool(d.get("italic", False)),
                 fill=_rgba(d.get("fill", [255, 255, 255, 255])),
-                stroke=_stroke(d["stroke"]) if "stroke" in d else None,
-                shadow=_shadow(d["shadow"]) if "shadow" in d else None,
+                stroke=_stroke(d["stroke"], file_name) if "stroke" in d else None,
+                shadow=_shadow(d["shadow"], file_name) if "shadow" in d else None,
                 align=d.get("align", "left"),
-                line_height_mult=float(d.get("line_height_mult", 1.0)),
+                line_height_mult=_bounded(d, "line_height_mult", 1.0, file_name),
                 slashed_zero=bool(d.get("slashed_zero", True)),
                 date_format=d.get("date_format", "%Y-%m-%d"),
                 time_format=d.get("time_format", "%H:%M"),
@@ -300,7 +363,7 @@ def _layer_from_dict(d: dict) -> Layer | None:
                 **base,
                 from_color=_rgba(d.get("from_color", [0, 0, 0, 255])),
                 to_color=_rgba(d.get("to_color", [0, 0, 0, 0])),
-                angle_deg=float(d.get("angle_deg", 90.0)),
+                angle_deg=_bounded(d, "angle_deg", 90.0, file_name),
             )
 
         if layer_type == "pattern":
@@ -308,7 +371,7 @@ def _layer_from_dict(d: dict) -> Layer | None:
                 **base,
                 pattern_id=d.get("pattern_id", "checkered"),
                 tint=_rgba(d.get("tint", [255, 255, 255, 128])),
-                cell_size_pct=float(d.get("cell_size_pct", 2.0)),
+                cell_size_pct=_bounded(d, "cell_size_pct", 2.0, file_name),
             )
 
     except (KeyError, TypeError, ValueError) as exc:
@@ -463,7 +526,7 @@ def load_template(path: Path) -> Template:
 
     layers: list[Layer] = []
     for layer_raw in raw.get("layer", []):
-        layer = _layer_from_dict(layer_raw)
+        layer = _layer_from_dict(layer_raw, path.name)
         if layer is not None:
             layers.append(layer)
 

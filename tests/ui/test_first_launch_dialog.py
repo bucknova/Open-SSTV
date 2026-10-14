@@ -189,12 +189,23 @@ class TestOperatorInfoInputs:
         dlg._grid_input.setText("em29lk")
         assert dlg._grid_input.text() == "EM29LK"
 
-    def test_grid_input_max_length_is_six(self, qapp, qtbot) -> None:
-        """6-character subsquare precision is the practical maximum;
-        anything longer is non-standard."""
+    def test_grid_input_max_length_is_eight(self, qapp, qtbot) -> None:
+        """Extended-square locators (EM29LK12) are 8 characters
+        (v0.6.14 audit nit: the old cap of 6 cut them off)."""
         dlg = FirstLaunchDialog()
         qtbot.addWidget(dlg)
-        assert dlg._grid_input.maxLength() == 6
+        assert dlg._grid_input.maxLength() == 8
+
+    def test_intro_is_real_rich_text_paragraphs(self, qapp, qtbot) -> None:
+        """RichText collapses "\\n\\n" and shows *…* literally."""
+        from PySide6.QtWidgets import QLabel
+
+        dlg = FirstLaunchDialog()
+        qtbot.addWidget(dlg)
+        texts = [lbl.text() for lbl in dlg.findChildren(QLabel)]
+        intro = next(t for t in texts if "Skip for now" in t)
+        assert "<p>" in intro and "<i>Skip for now</i>" in intro
+        assert "\n" not in intro and "*Skip" not in intro
 
     def test_name_input_does_not_force_uppercase(self, qapp, qtbot) -> None:
         """Operator name should preserve mixed case — it's a display

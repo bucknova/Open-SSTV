@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import MISSING, dataclass, field, fields
 from pathlib import Path
+from typing import Any
 
 import platformdirs
 
@@ -55,6 +56,67 @@ def _default_images_dir() -> str:
     """XDG-correct pictures directory, e.g. ``~/Pictures/open_sstv``."""
     base = Path(platformdirs.user_pictures_dir())
     return str(base / "open_sstv")
+
+
+def _field_default(f: Any) -> Any:
+    """The declared default for dataclass field *f* (fresh for factories)."""
+    if f.default is not MISSING:
+        return f.default
+    if f.default_factory is not MISSING:
+        return f.default_factory()
+    return None  # pragma: no cover — every AppConfig field has a default
+
+
+def _coerce_scalar(value: Any, kind: str) -> tuple[bool, Any]:
+    """Coerce *value* to the scalar *kind* (``"str"``/``"int"``/``"float"``/
+    ``"bool"``).  Returns ``(ok, coerced)``; ``ok=False`` means the value
+    can't be represented sensibly and the caller should use the default.
+
+    Deliberately conservative: numbers become strings (``callsign = 123``
+    → ``"123"``) and numeric strings become numbers, but a string never
+    becomes a bool (``"false"`` would be truthy) and a bool never becomes
+    a number (``port = true`` is a typo, not ``1``).  Non-finite floats
+    are rejected for both numeric kinds.
+    """
+    if kind == "str":
+        if isinstance(value, str):
+            return True, value
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return True, str(value)
+        return False, None
+    if kind == "bool":
+        return (True, value) if isinstance(value, bool) else (False, None)
+    if isinstance(value, bool):
+        return False, None
+    if isinstance(value, str):
+        try:
+            value = float(value.strip())
+        except ValueError:
+            return False, None
+    if not isinstance(value, (int, float)):
+        return False, None
+    if isinstance(value, float) and not math.isfinite(value):
+        return False, None
+    if kind == "float":
+        return True, float(value)
+    # kind == "int": accept only integral values (4533.0 → 4533).
+    if isinstance(value, float):
+        if not value.is_integer():
+            return False, None
+        return True, int(value)
+    return True, value
+
+
+#: Annotation string → scalar kind for ``_coerce_scalar``.  Annotations
+#: are strings here because of ``from __future__ import annotations``.
+#: ``list[str]`` (gallery_extra_dirs) keeps its dedicated handling below.
+_SCALAR_KINDS: dict[str, tuple[str, bool]] = {
+    "str": ("str", False),
+    "str | None": ("str", True),
+    "int": ("int", False),
+    "float": ("float", False),
+    "bool": ("bool", False),
+}
 
 
 @dataclass
@@ -132,7 +194,7 @@ class AppConfig:
     # v0.3.7: how many seconds without a new decoded line before the RX
     # watchdog abandons an in-progress decode and keeps the partial image.
     # The total-elapsed guard (mode duration × 1.5, min 15 s) is separate
-    # and fires regardless.  10 s is the default; raise in Settings for
+    # and fires regardless.  5 s is the default; raise in Settings for
     # propagation conditions with longer, deeper QSB fading cycles.
     rx_watchdog_timeout_s: int = 5
     # v0.1.18: when True, the completed image is re-decoded in a single pass
@@ -310,7 +372,36 @@ class AppConfig:
     # binary Network Message protocol (QLog, JTAlert, GridTracker, N1MM).
     udp_log_format: str = "wsjtx"
 
+    def _coerce_field_types(self) -> None:
+        """Coerce every scalar field to its annotated type, field by field.
+
+        v0.6.14 audit C-H1: a hand-edited TOML with one wrong-typed value
+        (``log_level = 5``, ``callsign = 123``) used to raise from the
+        ``.strip()`` / ``.upper()`` calls below — or from ``int()`` on a
+        junk port — and either crash every launch or reset the *whole*
+        config.  Now only the offending field falls back to its default,
+        with a warning naming it, before any validation runs.
+        """
+        for f in fields(self):
+            spec = _SCALAR_KINDS.get(str(f.type))
+            if spec is None:
+                continue
+            kind, nullable = spec
+            value = getattr(self, f.name)
+            if value is None and nullable:
+                continue
+            ok, coerced = _coerce_scalar(value, kind)
+            if not ok:
+                default = _field_default(f)
+                _log.warning(
+                    "AppConfig: %s = %r is not a valid %s — using the "
+                    "default %r", f.name, value, f.type, default,
+                )
+                coerced = default
+            setattr(self, f.name, coerced)
+
     def __post_init__(self) -> None:
+        self._coerce_field_types()
         # v0.1.12: slider ceiling reverted from 500% to 200%.
         # Clamp any stored value so users who raised it to ≤500% on v0.1.11
         # don't get unexpected clipping on next open.
@@ -531,12 +622,14 @@ class AppConfig:
 
         # PTT lead-in: a negative delay is meaningless and a large one looks
         # like a hang while the rig sits keyed with no audio.
+        # Fallback is the field default (0.2 s), not a different
+        # hard-coded number (v0.6.14 audit nit).
         try:
             ptt_delay = float(self.ptt_delay_s)
         except (TypeError, ValueError):
-            ptt_delay = 0.5
+            ptt_delay = 0.2
         if not math.isfinite(ptt_delay):
-            ptt_delay = 0.5
+            ptt_delay = 0.2
         clamped_ptt = max(0.0, min(5.0, ptt_delay))
         if clamped_ptt != ptt_delay:
             _log.warning(

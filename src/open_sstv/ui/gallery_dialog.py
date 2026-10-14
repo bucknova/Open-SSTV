@@ -20,7 +20,6 @@ from __future__ import annotations
 import logging
 import shutil
 from collections import OrderedDict
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -62,7 +61,7 @@ from open_sstv.gallery import (
     scan_dirs,
 )
 from open_sstv.gallery.thumbnail_cache import DEFAULT_THUMB_SIZE
-from open_sstv.ui.log_qso_dialog import format_frequency
+from open_sstv.ui.log_qso_dialog import format_frequency, qdate_day_start_utc
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -234,7 +233,7 @@ class GalleryDialog(QDialog):
         self._f_mode.textChanged.connect(lambda _t: self._refresh_debounce.start())
         bar.addWidget(self._f_mode)
 
-        self._f_from_on = QCheckBox("From:")
+        self._f_from_on = QCheckBox("From (UTC):")
         self._f_from_on.toggled.connect(self._apply_filters_and_sort)
         bar.addWidget(self._f_from_on)
         self._f_from = QDateEdit(QDate.currentDate().addDays(-30))
@@ -242,7 +241,7 @@ class GalleryDialog(QDialog):
         self._f_from.dateChanged.connect(self._apply_filters_and_sort)
         bar.addWidget(self._f_from)
 
-        self._f_until_on = QCheckBox("Until:")
+        self._f_until_on = QCheckBox("Until (UTC):")
         self._f_until_on.toggled.connect(self._apply_filters_and_sort)
         bar.addWidget(self._f_until_on)
         self._f_until = QDateEdit(QDate.currentDate())
@@ -372,11 +371,6 @@ class GalleryDialog(QDialog):
 
     # === Filter + sort ===
 
-    @staticmethod
-    def _local_day_start_utc(d: QDate) -> datetime:
-        """Midnight local time on the picked day, as UTC (logbook audit #5)."""
-        return datetime(d.year(), d.month(), d.day()).astimezone(UTC)
-
     def _passes(self, item: GalleryItem) -> bool:
         cs = self._f_callsign.text().strip().upper()
         if cs and cs not in item.callsign.upper():
@@ -384,14 +378,20 @@ class GalleryDialog(QDialog):
         md = self._f_mode.text().strip().upper()
         if md and md not in item.display_mode.upper():
             return False
+        # v0.6.14 audit: the date filter used *local* day boundaries while
+        # every caption and the detail panel show UTC dates, so an item
+        # captioned 2026-04-17 could vanish from a "From 2026-04-17"
+        # filter.  The gallery is UTC throughout; the filter labels say so.
         ts = item.timestamp_utc
-        if self._f_from_on.isChecked() and ts < self._local_day_start_utc(
-            self._f_from.date()
+        if self._f_from_on.isChecked() and ts < qdate_day_start_utc(
+            self._f_from.date(), local=False
         ):
             return False
         return not (
             self._f_until_on.isChecked()
-            and ts >= self._local_day_start_utc(self._f_until.date().addDays(1))
+            and ts >= qdate_day_start_utc(
+                self._f_until.date().addDays(1), local=False
+            )
         )
 
     @Slot()
@@ -563,11 +563,13 @@ class GalleryDialog(QDialog):
         except OSError as exc:
             QMessageBox.warning(self, "Delete failed", str(exc))
             return
-        # Clear the QSO's image link so it doesn't dangle.
+        # Clear the QSO's image link so it doesn't dangle.  v0.6.14 audit
+        # C-M7: this used to write back the gallery's *snapshot* of the
+        # whole QSO (taken at the last refresh), reverting any Logbook
+        # edit made since.  A targeted UPDATE touches only image_path.
         if item.qso is not None and item.qso.id is not None:
-            item.qso.image_path = None
             try:
-                self._coordinator.store.update(item.qso)
+                self._coordinator.store.clear_image_path(item.qso.id)
             except Exception as exc:  # noqa: BLE001 — file's already gone; log only
                 _log.warning("could not clear image link on QSO %s: %s", item.qso.id, exc)
         self.refresh()
