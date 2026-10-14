@@ -14,6 +14,7 @@ from __future__ import annotations
 import signal
 import sys
 from pathlib import Path
+from typing import Any
 
 from open_sstv import __version__
 
@@ -189,20 +190,67 @@ def _setup_logging(log_level: int) -> Path | None:
         return None
 
 
-def _config_log_level() -> int:
+def _load_startup_config() -> tuple[Any, Path | None, list[Any]]:
+    """Load the config exactly once for this process.
+
+    v0.6.14 audit C-H2: the config used to be loaded twice — here for the
+    log level, then again by ``MainWindow``.  The first load banished a
+    corrupt file to ``.corrupt``, so the second found no file: no
+    "settings could not be read" warning, ``first_launch_seen=False``, the
+    Welcome dialog, and a save of defaults.  Now ``main`` loads once and
+    hands both the config and the backup path to ``MainWindow``.
+
+    Logging isn't configured yet when this runs (the log level comes from
+    the config), so the config package's warnings are captured and
+    returned for ``main`` to replay once the handlers exist.  Never
+    raises: an unreadable config degrades to defaults.
+
+    Returns ``(config, corrupt_backup_path_or_None, captured_log_records)``.
+    """
+    import logging  # noqa: PLC0415
+
+    from open_sstv.config.schema import AppConfig  # noqa: PLC0415
+
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    capture = _Capture()
+    cfg_logger = logging.getLogger("open_sstv.config")
+    cfg_logger.addHandler(capture)
+    try:
+        try:
+            from open_sstv.config.store import (  # noqa: PLC0415
+                last_corrupt_backup,
+                load_config,
+            )
+            cfg = load_config()
+            backup = last_corrupt_backup()
+        except Exception as exc:  # noqa: BLE001 — never block startup
+            cfg_logger.warning("Could not load config (%s) — using defaults", exc)
+            cfg, backup = AppConfig(first_launch_seen=True), None
+    finally:
+        cfg_logger.removeHandler(capture)
+    return cfg, backup, records
+
+
+def _config_log_level(cfg: Any = None) -> int:
     """Resolve the configured log level (v0.4 Settings → Logging tab).
 
-    Reads ``AppConfig.log_level`` from the saved TOML.  Defensive on
-    every failure path — a corrupt or unreadable config must never
-    block startup, and the level falls back to INFO exactly as it was
-    before the field existed.  ``AppConfig.__post_init__`` has already
-    normalised the value to one of DEBUG/INFO/WARNING/ERROR.
+    Reads ``AppConfig.log_level`` from *cfg* (the once-per-process config
+    from ``_load_startup_config``).  Defensive on every failure path —
+    the level falls back to INFO exactly as it was before the field
+    existed.  ``AppConfig.__post_init__`` has already normalised the
+    value to one of DEBUG/INFO/WARNING/ERROR.
     """
     import logging  # noqa: PLC0415
 
     try:
-        from open_sstv.config.store import load_config  # noqa: PLC0415
-        name = load_config().log_level
+        if cfg is None:
+            cfg = _load_startup_config()[0]
+        name = cfg.log_level
     except Exception:  # noqa: BLE001
         return logging.INFO
     return {
@@ -393,10 +441,17 @@ def main(argv: list[str] | None = None) -> int:
     # OPEN_SSTV_DEBUG wins over the configured level so "set this env
     # var and re-run" stays a one-step support instruction even when
     # the user has Settings → Logging set to WARNING/ERROR.
+    # v0.6.14 audit C-H2: load the config ONCE; MainWindow gets this copy.
+    startup_config, corrupt_backup, config_log_records = _load_startup_config()
     log_level = (
-        logging.DEBUG if os.environ.get("OPEN_SSTV_DEBUG") else _config_log_level()
+        logging.DEBUG if os.environ.get("OPEN_SSTV_DEBUG")
+        else _config_log_level(startup_config)
     )
     _log_file_path = _setup_logging(log_level)
+    # Replay what the config loader said before logging existed (bad
+    # fields reset, corrupt file backed up) into the real handlers.
+    for record in config_log_records:
+        logging.getLogger(record.name).handle(record)
     if _log_file_path is not None:
         logging.getLogger("open_sstv").info(
             "Logging to %s (stderr handler unchanged)", _log_file_path
@@ -582,7 +637,9 @@ def main(argv: list[str] | None = None) -> int:
 
     # Start with ManualRig (no-op). The user clicks "Connect Rig" in
     # the radio panel to establish a live rigctld link at runtime.
-    window = MainWindow()
+    window = MainWindow(
+        config=startup_config, config_corrupt_backup=corrupt_backup
+    )
     if _missing_assets:
         # Surface the warning to the user via the status bar too —
         # log-only is invisible to GUI users.

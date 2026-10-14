@@ -605,6 +605,8 @@ class MainWindow(QMainWindow):
         input_device: AudioDevice | int | None = None,
         config: AppConfig | None = None,
         parent: QMainWindow | None = None,
+        *,
+        config_corrupt_backup: Path | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Open-SSTV")
@@ -751,7 +753,11 @@ class MainWindow(QMainWindow):
         #: v0.6 (Phase 4): server-side compositor + in-memory staging store.
         #: Created here (not in RemoteServer) so the stage endpoint and the
         #: transmit path below share the same staged images.
-        self._remote_compose = ComposeService(lambda: self._config)
+        self._remote_compose = ComposeService(
+            lambda: self._config,
+            # v0.6.14 audit C-M4: %f / %b in remote-composed templates.
+            frequency_getter=lambda: getattr(self, "_last_rig_freq_hz", None),
+        )
         #: Throttle for the live RX preview push (monotonic seconds).
         self._remote_last_preview_t = 0.0
         #: v0.6 (Phase 3c): remote-TX control plane — the reference monitor
@@ -900,6 +906,10 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         self._tx_panel.set_callsign(self._config.callsign)
+        # v0.6.14 audit C-M4: the rig-poll cache feeds %f / %b at render.
+        self._tx_panel.set_frequency_getter(
+            lambda: getattr(self, "_last_rig_freq_hz", None)
+        )
 
         # --- Panels inside a horizontal splitter ---
         self._rx_panel = RxPanel(self)
@@ -1215,7 +1225,13 @@ class MainWindow(QMainWindow):
         # ``load_config`` now banishes the corpse to a ``.corrupt``
         # sibling; tell the user where it went so a hand-edit typo is
         # recoverable.  Deferred so the window paints first.
-        corrupt_backup = last_corrupt_backup() if loaded_config_from_disk else None
+        # v0.6.14 audit C-H2: ``app.main`` loads the config once and passes
+        # both the config and the backup path in; a second load here found
+        # no file (already moved to ``.corrupt``) and the warning never showed.
+        corrupt_backup = (
+            last_corrupt_backup() if loaded_config_from_disk
+            else config_corrupt_backup
+        )
         if corrupt_backup is not None:
             QTimer.singleShot(
                 0,
