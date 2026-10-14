@@ -218,6 +218,20 @@ class RadioPanel(QWidget):
         self._status_label.setText("Connection lost")
         self._status_label.setStyleSheet("color: red;")
 
+    def set_link_degraded(self) -> None:
+        """One poll failed but the rig is still connected (v0.6.14 UI-M1).
+
+        Status only: the button keeps reading "Disconnect" (and still
+        disconnects), unlike ``set_connection_error`` which relabelled it
+        "Connect Rig" while a click would actually have disconnected.
+        The next good poll restores "Connected".
+        """
+        if not self._connected:
+            self.set_connection_error()
+            return
+        self._status_label.setText("No response…")
+        self._status_label.setStyleSheet("color: orange;")
+
     def set_tx_active(self, active: bool) -> None:
         """Disable the connect/disconnect and test-tone buttons during TX.
 
@@ -257,6 +271,10 @@ class RadioPanel(QWidget):
         self, freq_hz: int, mode: str, strength_db: int
     ) -> None:
         """Feed fresh poll data into the display widgets."""
+        if self._connected and not self._connecting:
+            # A good poll clears a transient "No response…" (UI-M1).
+            self._status_label.setText("Connected")
+            self._status_label.setStyleSheet("color: green; font-weight: bold;")
         # Frequency
         if freq_hz > 0:
             if freq_hz >= 1_000_000:

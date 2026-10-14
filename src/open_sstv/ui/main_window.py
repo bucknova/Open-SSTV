@@ -170,6 +170,11 @@ from open_sstv.radio.band_plan import (
 from open_sstv.radio.base import ManualRig, Rig, RigConnectionMode
 from open_sstv.radio.exceptions import RigCommandError, RigError
 from open_sstv.radio.rigctld import RigctldClient, is_safe_rigctld_arg
+from open_sstv.radio.rigctld_launcher import (
+    drain_subprocess_stderr,
+    launch_rigctld,
+    stop_rigctld,
+)
 from open_sstv.radio.serial_rig import create_serial_rig
 from open_sstv.remote import (
     ComposeService,
@@ -200,38 +205,13 @@ if TYPE_CHECKING:
 
 
 def _drain_subprocess_stderr(proc: subprocess.Popen, name: str) -> None:
-    """Pump *proc*'s stderr into the app log on a daemon thread.
+    """Pump *proc*'s stderr into this module's log on a daemon thread.
 
-    v0.4.0 audit high #2: a child launched with ``stderr=PIPE`` that
-    nobody reads wedges once the OS pipe buffer (~64 KB) fills — the
-    child blocks on ``write(2)`` and stops doing its real job.  For
-    rigctld that means the daemon stops servicing CAT commands, worst
-    case with PTT keyed.  The pump thread is a daemon so it can never
-    hold the interpreter open; it exits when the child closes stderr.
-
-    Qt-free and module-level so it's unit-testable without a window.
+    Thin wrapper over :func:`open_sstv.radio.rigctld_launcher.drain_subprocess_stderr`
+    (v0.4.0 audit high #2; v0.6.14 audit UI-H1 moved the one copy there so
+    both rigctld launch paths share it).
     """
-    if proc.stderr is None:  # not launched with stderr=PIPE — nothing to do
-        return
-
-    def _pump() -> None:
-        try:
-            assert proc.stderr is not None
-            for raw in proc.stderr:
-                line = raw.decode("utf-8", errors="replace").rstrip()
-                if line:
-                    _log.info("%s: %s", name, line)
-        except Exception:  # noqa: BLE001 — the drain must never die loudly
-            pass
-        finally:
-            try:
-                proc.stderr.close()
-            except Exception:  # noqa: BLE001
-                pass
-
-    threading.Thread(
-        target=_pump, name=f"{name}-stderr-drain", daemon=True
-    ).start()
+    drain_subprocess_stderr(proc, name, logger=_log)
 
 
 class _RigPollWorker(QObject):
@@ -275,6 +255,17 @@ class _RigPollWorker(QObject):
         super().__init__()
         self._rig: Rig = ManualRig()
         self._consecutive_errors: int = 0
+        #: v0.6.14 audit (UI low): at most one poll queued or running.  The
+        #: 1 Hz timer used to queue a poll every second regardless, so a
+        #: slow rig (2 s CAT timeouts) piled them up — and the backlog kept
+        #: running after TX started, interleaving CAT reads with PTT on the
+        #: same port (the OP-47 failure).  ``claim_poll`` (GUI thread) and
+        #: the end of ``poll`` (this thread) hand the flag back and forth.
+        self._poll_lock = threading.Lock()
+        self._poll_pending: bool = False
+        #: Set from the GUI thread for the whole TX; a poll that was already
+        #: queued when TX began returns without touching the rig.
+        self._suspended = threading.Event()
         #: Latches once per rig so an unsupported S-meter is logged a single
         #: time instead of once per second.
         self._strength_unsupported: bool = False
@@ -285,9 +276,32 @@ class _RigPollWorker(QObject):
         self._consecutive_errors = 0
         self._strength_unsupported = False
 
+    def claim_poll(self) -> bool:
+        """Reserve the single poll slot; ``False`` if one is still pending."""
+        with self._poll_lock:
+            if self._poll_pending:
+                return False
+            self._poll_pending = True
+            return True
+
+    def set_suspended(self, suspended: bool) -> None:
+        """Suspend/resume polling for the duration of a TX. Thread-safe."""
+        if suspended:
+            self._suspended.set()
+        else:
+            self._suspended.clear()
+
     @Slot()
     def poll(self) -> None:
         """Read freq/mode/strength from the rig. Blocks; runs on worker thread."""
+        try:
+            if not self._suspended.is_set():
+                self._poll_once()
+        finally:
+            with self._poll_lock:
+                self._poll_pending = False
+
+    def _poll_once(self) -> None:
         try:
             freq = self._rig.get_freq()
             mode_name, _ = self._rig.get_mode()
@@ -595,6 +609,8 @@ class MainWindow(QMainWindow):
     #: serialised with the 1 Hz ``poll`` slot on the same thread.
     # (freq_hz, rig_mode, passband_hz, mode_is_exact)
     _request_tune = Signal(int, str, int, bool)
+    #: GUI → rig-poll thread, emitted only when ``claim_poll`` succeeded.
+    _request_rig_poll = Signal()
     #: Triggers the one-shot update check on the update worker thread.
     _request_update_check = Signal()
 
@@ -636,6 +652,7 @@ class MainWindow(QMainWindow):
         # system default so we can surface a status-bar notice once the
         # status bar exists later in __init__.
         self._missing_devices: list[str] = []
+        explicit_output_device = output_device is not None
         if output_device is None:
             output_device = find_output_device_by_name(
                 self._config.audio_output_device
@@ -845,6 +862,18 @@ class MainWindow(QMainWindow):
         #: radio keyed.  Finished by ``_finish_deferred_rig_teardown``
         #: from the TX completion/abort handlers.
         self._deferred_rig_teardown: Rig | None = None
+        #: v0.6.14 audit T-L3 / T-M1: transmissions dispatched to the TX
+        #: worker whose ``transmission_finished`` hasn't arrived yet.  Rig
+        #: controls lock when this goes above zero (at request time, not
+        #: at ``transmission_started``) and unlock only when it returns to
+        #: zero — i.e. when the worker is idle, unkey retries included.
+        self._tx_requests_in_flight: int = 0
+        #: Token for the 500 ms "let rigctld bind" delay after an auto-
+        #: launch; a Cancel or a second Connect invalidates it (UI low).
+        self._pending_rigctld_connect: object | None = None
+        #: closeEvent's early emergency-unkey thread (T-L1), joined before
+        #: the rig is finally closed.
+        self._close_unkey_thread: threading.Thread | None = None
 
         # --- Menu bar ---
         self._build_menu_bar()
@@ -987,6 +1016,10 @@ class MainWindow(QMainWindow):
             self._config.test_tone_freq_lo,
             self._config.test_tone_freq_hi,
         )
+        # v0.6.14 audit T-M5: re-resolve the configured device by name at
+        # every TX start (not for an explicitly injected device).
+        if not explicit_output_device:
+            self._tx_worker.set_output_device_name(self._config.audio_output_device)
         self._tx_worker.moveToThread(self._tx_thread)
         # Standard Qt cleanup pattern: when the thread finishes, schedule
         # the worker for deletion. Without this the worker is left as an
@@ -1058,8 +1091,10 @@ class MainWindow(QMainWindow):
         self._tx_worker.transmission_aborted.connect(self._on_tx_aborted)
         # v0.6 (Phase 3c): whenever a transmission ends, return the remote
         # control plane to idle (a no-op unless a remote TX was in flight).
-        self._tx_worker.transmission_complete.connect(self._remote_tx_ended)
-        self._tx_worker.transmission_aborted.connect(self._remote_tx_ended)
+        # v0.6.14 audit UI-M7: on the one terminal signal, so a remote TX
+        # that fails before keying (only ``error``) can't leave the plane
+        # stuck TRANSMITTING.
+        self._tx_worker.transmission_finished.connect(self._on_tx_finished)
         # v0.2.8: stash the composited TX image (banner already applied) so
         # ``_on_tx_complete`` can auto-save it when ``autosave_tx`` is on.
         self._tx_worker.tx_image_prepared.connect(self._on_tx_image_prepared)
@@ -1176,9 +1211,10 @@ class MainWindow(QMainWindow):
         self._rig_poll_thread.start()
 
         # Queued connection: timeout fires on GUI thread → slot runs on poll thread.
-        self._rig_poll_timer.timeout.connect(self._rig_poll_worker.poll)
+        self._rig_poll_timer.timeout.connect(self._on_rig_poll_tick)
+        self._request_rig_poll.connect(self._rig_poll_worker.poll)
         self._rig_poll_worker.poll_result.connect(self._on_poll_result)
-        self._rig_poll_worker.poll_error.connect(self._radio_panel.set_connection_error)
+        self._rig_poll_worker.poll_error.connect(self._on_poll_error)
         self._rig_poll_worker.radio_disconnected.connect(self._on_radio_disconnected)
         self._rig_poll_worker.tune_failed.connect(self._on_tune_failed)
         # Band-plan tune relay: GUI thread emits _request_tune → rig-poll thread
@@ -1475,6 +1511,7 @@ class MainWindow(QMainWindow):
         _log.info("remote TX: transmitting %s in %s", what, mode)
         self._last_tx_was_test_tone = False
         self._last_tx_was_remote = True
+        self._begin_tx_request()
         self._request_transmit.emit(img, mode_enum)
 
     def _remote_tx_abandon(self) -> None:
@@ -2314,6 +2351,7 @@ class MainWindow(QMainWindow):
             self._config.audio_output_device
         ) or find_pipewire_sink_by_name(self._config.audio_output_device)
         self._tx_worker.set_output_device(new_output)
+        self._tx_worker.set_output_device_name(self._config.audio_output_device)
         self._tx_worker.set_output_gain(self._config.audio_output_gain)
         self._tx_worker.set_ptt_delay(self._config.ptt_delay_s)
         new_input = find_input_device_by_name(self._config.audio_input_device)
@@ -2379,6 +2417,7 @@ class MainWindow(QMainWindow):
         self._remote_control.reclaim_local()
         self._last_tx_was_test_tone = False
         self._last_tx_was_remote = False
+        self._begin_tx_request()
         self._request_transmit.emit(image, mode)
 
     @Slot()
@@ -2387,6 +2426,7 @@ class MainWindow(QMainWindow):
         self._remote_control.reclaim_local()  # local keying wins over remote
         self._last_tx_was_test_tone = True
         self._last_tx_was_remote = False
+        self._begin_tx_request()
         self._request_test_tone.emit()
 
     @Slot()
@@ -2434,7 +2474,27 @@ class MainWindow(QMainWindow):
             self._tx_panel.set_status("Transmitting…")
             self.statusBar().showMessage("Transmitting")
         # Lock rig controls for the duration of the transmission so the user
-        # can't swap or disconnect the rig while PTT is keyed.
+        # can't swap or disconnect the rig while PTT is keyed.  Normally
+        # already locked at request time (T-L3); idempotent.
+        self._lock_rig_controls_for_tx()
+        # Gate the RX decoder to prevent self-decode through loopback (R-2).
+        self._request_rx_gate.emit(True)
+        self._rx_panel.set_status("RX paused during TX.")
+
+    def _begin_tx_request(self) -> None:
+        """Bookkeeping for one TX dispatched to the worker (GUI thread).
+
+        v0.6.14 audit T-L3: lock Disconnect/Settings *now*, not at
+        ``transmission_started`` — the ``set_ptt(True)`` round-trip (up to
+        a 2 s CAT timeout) used to leave Disconnect clickable while the rig
+        was being keyed.  T-L2: tell the worker a request is queued so a
+        Stop pressed before the slot runs still cancels it.
+        """
+        self._tx_worker.note_tx_requested()
+        self._tx_requests_in_flight += 1
+        self._lock_rig_controls_for_tx()
+
+    def _lock_rig_controls_for_tx(self) -> None:
         self._radio_panel.set_tx_active(True)
         self._settings_action.setEnabled(False)
         # OP-47: suspend the 1 Hz rig-status poll while TX is active.
@@ -2448,12 +2508,34 @@ class MainWindow(QMainWindow):
         # error". RX works fine before this point because no concurrent
         # writer exists. Remember the pre-TX state so we only resume if
         # the rig was connected to begin with.
-        self._rig_poll_was_active = self._rig_poll_timer.isActive()
-        if self._rig_poll_was_active:
+        # Only *record* "was active" when it is: the lock now runs at both
+        # request and start, and the second call must not overwrite True.
+        if self._rig_poll_timer.isActive():
+            self._rig_poll_was_active = True
             self._rig_poll_timer.stop()
-        # Gate the RX decoder to prevent self-decode through loopback (R-2).
-        self._request_rx_gate.emit(True)
-        self._rx_panel.set_status("RX paused during TX.")
+        # v0.6.14 audit (UI low): a poll already queued on the poll thread
+        # must not run during TX either.
+        self._rig_poll_worker.set_suspended(True)
+
+    def _maybe_unlock_rig_controls(self) -> None:
+        """Unlock only once no dispatched TX is still in flight (T-M1).
+
+        complete / aborted / error can arrive while the worker is still
+        unkeying (error) or with another request queued behind them; the
+        final unlock comes from ``_on_tx_finished``.
+        """
+        if self._tx_requests_in_flight <= 0:
+            self._unlock_rig_controls()
+
+    @Slot()
+    def _on_tx_finished(self) -> None:
+        """The worker is idle: exactly one per dispatched TX (T-M1, UI-M7)."""
+        self._tx_requests_in_flight = max(0, self._tx_requests_in_flight - 1)
+        # An error with no following abort (encode / PTT / device refusal)
+        # must not swallow the *next* abort's status message.
+        self._tx_error_pending = False
+        self._maybe_unlock_rig_controls()
+        self._remote_tx_ended()
 
     def _unlock_rig_controls(self) -> None:
         """Re-enable rig UI after TX completes, aborts, or errors.
@@ -2472,6 +2554,7 @@ class MainWindow(QMainWindow):
         self._finish_deferred_rig_teardown()
         self._radio_panel.set_tx_active(False)
         self._settings_action.setEnabled(True)
+        self._rig_poll_worker.set_suspended(False)
         # Only resume polling if the rig is still a real backend. If the
         # user (or a disconnect handler) swapped back to ManualRig during
         # TX, restarting the timer would poll a no-op backend and also
@@ -2565,7 +2648,7 @@ class MainWindow(QMainWindow):
             self._last_tx_mode = None
             self._tx_panel.set_status("Transmission complete.")
             self.statusBar().showMessage("Ready")
-        self._unlock_rig_controls()
+        self._maybe_unlock_rig_controls()
         self._schedule_rx_resume()
 
     @Slot(float)
@@ -2609,7 +2692,7 @@ class MainWindow(QMainWindow):
             else:
                 self._tx_panel.set_status("Transmission aborted.")
             self.statusBar().showMessage("Ready")
-        self._unlock_rig_controls()
+        self._maybe_unlock_rig_controls()
         self._schedule_rx_resume()
 
     @Slot(str)
@@ -2623,7 +2706,10 @@ class MainWindow(QMainWindow):
         self._tx_panel.set_status(f"Error: {message}")
         self.statusBar().showMessage(message, 8000)
         self._tx_error_pending = True
-        self._unlock_rig_controls()
+        # v0.6.14 audit T-M1: NOT a terminal signal — the worker may still
+        # be retrying the unkey.  Disconnect stays locked until
+        # ``transmission_finished`` (see _maybe_unlock_rig_controls).
+        self._maybe_unlock_rig_controls()
         self._schedule_rx_resume()
 
     # === RX slots ===
@@ -3215,6 +3301,18 @@ class MainWindow(QMainWindow):
         """
         mode = self._config.rig_connection_mode
 
+        # v0.6.14 audit UI-H2 / UI low: one connect attempt at a time.  A
+        # timed-out attempt's thread can still be blocked in open(); a
+        # second attempt started then had its state wiped by the first
+        # thread's ``finished`` (stuck "Connecting…", leaked open port).
+        # Likewise a double-click during the rigctld auto-launch delay.
+        if self._connect_in_progress():
+            self.statusBar().showMessage(
+                "A previous connection attempt is still finishing — "
+                "try again in a moment.", 5000,
+            )
+            return
+
         # OP-28: dispatch via RigConnectionMode rather than string literals
         # so a future enum rename can't silently break one of the three
         # call sites that used to carry bare strings.
@@ -3233,6 +3331,14 @@ class MainWindow(QMainWindow):
             self._connect_flex()
         else:
             self._connect_rigctld()
+
+    def _connect_in_progress(self) -> bool:
+        if self._pending_rigctld_connect is not None or self._connect_thread is not None:
+            return True
+        return any(
+            t.objectName() == "rig-connect-thread" and t.isRunning()
+            for t in self.findChildren(QThread)
+        )
 
     def _start_rig_connect_thread(
         self,
@@ -3315,6 +3421,12 @@ class MainWindow(QMainWindow):
     def _on_connect_thread_finished(self) -> None:
         """Clear connect-thread state when the thread exits normally."""
         thread = self._connect_thread
+        # v0.6.14 audit UI-H2: only the *current* attempt's thread may
+        # clear the shared state — a stale thread finishing late must not
+        # wipe a newer attempt's worker/relay/timer.
+        sender = self.sender()
+        if isinstance(sender, QThread) and sender is not thread:
+            return
         worker = self._connect_worker
         # Explicitly break thread.started → worker.run before releasing Python
         # refs.  This removes Qt's internal connection record (which holds a
@@ -3352,6 +3464,7 @@ class MainWindow(QMainWindow):
         """
         timer = self._connect_timeout_timer
         cancel = self._connect_cancel
+        self._pending_rigctld_connect = None  # cancels a pending auto-launch connect
         self._connect_thread = None
         self._connect_cancel = None
         self._connect_timeout_timer = None
@@ -3464,33 +3577,16 @@ class MainWindow(QMainWindow):
                     8000,
                 )
                 return
-            cmd = [
-                "rigctld",
-                "-m", str(self._config.rig_model_id),
-                "-t", str(port),
-            ]
-            if self._config.rig_serial_port:
-                cmd += ["-r", self._config.rig_serial_port]
-            if self._config.rig_baud_rate:
-                cmd += ["-s", str(self._config.rig_baud_rate)]
             try:
-                # OP2-14: start_new_session=True on POSIX isolates the child
-                # into its own process group so a GUI crash/SIGKILL doesn't
-                # orphan rigctld holding the serial port.
-                self._rigctld_proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    start_new_session=True,
+                # v0.6.14 audit UI-H1: the shared launcher — PATH-only
+                # absolute executable, start_new_session (OP2-14), and the
+                # stderr drain (v0.4.0 audit high #2) every launch needs.
+                self._rigctld_proc = launch_rigctld(
+                    self._config.rig_model_id,
+                    port,
+                    self._config.rig_serial_port,
+                    self._config.rig_baud_rate,
                 )
-                # v0.4.0 audit high #2: the stderr pipe MUST be drained.
-                # hamlib chatters per-transaction errors on a flaky CAT
-                # cable; once the OS pipe buffer (~64 KB) fills, rigctld
-                # blocks on write(2) and stops servicing its TCP socket
-                # entirely — worst case while PTT is keyed.  Draining
-                # into our log also lands hamlib's diagnostics in the
-                # diagnostics zip, where they belong.
-                _drain_subprocess_stderr(self._rigctld_proc, "rigctld")
             except FileNotFoundError:
                 self.statusBar().showMessage(
                     "rigctld not found — install Hamlib, or switch to Direct Serial in Settings", 5000,
@@ -3500,9 +3596,22 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(f"Failed to launch rigctld: {exc}", 5000)
                 return
             # Give rigctld 500 ms to bind the port without freezing the GUI.
-            QTimer.singleShot(500, lambda: self._finish_rigctld_connect(host, port))
+            # Show "Connecting…" (with Cancel) from now, and tie the delayed
+            # connect to a token so Cancel / a second click can't race it.
+            self._radio_panel.set_connecting()
+            token = object()
+            self._pending_rigctld_connect = token
+            QTimer.singleShot(
+                500, lambda: self._finish_pending_rigctld_connect(token, host, port)
+            )
             return
 
+        self._finish_rigctld_connect(host, port)
+
+    def _finish_pending_rigctld_connect(self, token: object, host: str, port: int) -> None:
+        if self._pending_rigctld_connect is not token:
+            return  # cancelled (or superseded) during the launch delay
+        self._pending_rigctld_connect = None
         self._finish_rigctld_connect(host, port)
 
     def _finish_rigctld_connect(self, host: str, port: int) -> None:
@@ -3517,7 +3626,9 @@ class MainWindow(QMainWindow):
         """
         if not self.isVisible():
             return
-        client = RigctldClient(host=host, port=port)
+        client = RigctldClient(
+            host=host, port=port, ptt_type=self._config.rigctld_ptt_type
+        )
         self._radio_panel.set_connecting()
         self.statusBar().showMessage(f"Connecting to rigctld at {host}:{port}…")
 
@@ -3867,10 +3978,7 @@ class MainWindow(QMainWindow):
         self._rig_poll_timer.stop()
         # v0.4: no rig → no trustworthy frequency for logbook drafts.
         self._last_rig_freq_hz = None
-        try:
-            self._rig.close()
-        except RigError:
-            pass
+        old_rig = self._rig
         self._rig = ManualRig()
         self._tx_worker.set_rig(self._rig)
         self._tx_worker.set_tci_connection(None)
@@ -3879,8 +3987,19 @@ class MainWindow(QMainWindow):
         # If we were using TCI, swap the audio worker back to PortAudio.
         if isinstance(self._audio_worker, TciInputStreamWorker):
             self._swap_audio_worker(InputStreamWorker())
-        # Stop rigctld if we launched it
-        self._kill_rigctld()
+        if not self._tx_worker.wait_for_idle(0.0) and not isinstance(old_rig, ManualRig):
+            # v0.6.14 audit T-M1: a TX is still unwinding (e.g. retrying
+            # its unkey) on this backend.  Closing it / killing rigctld now
+            # destroys the unkey path — defer exactly like
+            # _on_radio_disconnected; _unlock_rig_controls finishes it.
+            self._deferred_rig_teardown = old_rig
+        else:
+            try:
+                old_rig.close()
+            except Exception:  # noqa: BLE001 — dead port raises OSError / termios.error
+                _log.warning("rig close on disconnect failed", exc_info=True)
+            # Stop rigctld if we launched it
+            self._kill_rigctld()
         self.statusBar().showMessage("Rig disconnected.", 3000)
 
     @Slot()
@@ -3959,24 +4078,32 @@ class MainWindow(QMainWindow):
         if self._rigctld_proc is None:
             return
         try:
-            self._rigctld_proc.terminate()
-            try:
-                self._rigctld_proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                try:
-                    self._rigctld_proc.kill()
-                    # v0.4.0 audit low #14: reap after kill().  Without
-                    # this wait the child lingers as a zombie and a
-                    # respawned rigctld can race the dying one for the
-                    # serial port and TCP listen port.
-                    self._rigctld_proc.wait(timeout=2)
-                except (ProcessLookupError, OSError, subprocess.TimeoutExpired):
-                    pass
-        except (ProcessLookupError, OSError):
-            # Already gone — nothing to do.
-            pass
+            # Shared helper: terminate, escalate to kill(), and reap after
+            # kill() (v0.4.0 audit low #14) so no zombie races a respawn.
+            stop_rigctld(self._rigctld_proc)
         finally:
             self._rigctld_proc = None
+
+    @Slot()
+    def _on_rig_poll_tick(self) -> None:
+        """1 Hz timer tick: queue a poll only if none is outstanding."""
+        if self._rig_poll_worker.claim_poll():
+            self._request_rig_poll.emit()
+
+    @Slot()
+    def _on_poll_error(self) -> None:
+        """One failed poll (v0.6.14 audit UI-M1).
+
+        Used to call ``set_connection_error`` directly, flipping the button
+        to "Connect Rig" / "Connection lost" while the rig was still
+        connected — and clicking it then *disconnected*.  A connected rig
+        now only shows a degraded status; the 3-strike
+        ``radio_disconnected`` path is what really disconnects.
+        """
+        if self._radio_panel.connected:
+            self._radio_panel.set_link_degraded()
+        else:
+            self._radio_panel.set_connection_error()
 
     @Slot(int, str, int)
     def _on_poll_result(self, freq: int, mode_name: str, strength: int) -> None:
@@ -4148,6 +4275,22 @@ class MainWindow(QMainWindow):
         # unwinds and unkeys on its own thread while the rest of the
         # teardown runs, and wait_for_idle() further down confirms it.
         self._tx_worker.request_stop()
+        # v0.6.14 audit T-L1: if the worker hasn't unwound within 0.5 s it
+        # may be wedged — send PTT-off directly now rather than after the
+        # remote-server / connect / offline-worker teardown below (which
+        # could make the closing fallback run ~19 s late).  Daemon thread:
+        # a dead-rig timeout can't hold the GUI; joined before rig.close().
+        if not self._tx_worker.wait_for_idle(0.5):
+            _log.warning(
+                "closeEvent: TX still unwinding 0.5 s after stop — sending "
+                "emergency PTT-off now"
+            )
+            self._close_unkey_thread = threading.Thread(
+                target=self._tx_worker.emergency_unkey,
+                name="sstv-app-emergency-unkey-early",
+                daemon=True,
+            )
+            self._close_unkey_thread.start()
         self._stop_remote_server()
 
         # Abort any in-flight rig connect first — the QThread is a child of
@@ -4340,6 +4483,8 @@ class MainWindow(QMainWindow):
         # completion signal was processed, finish it here — the TX
         # thread has joined (or been detached), so the unkey path is
         # no longer using the old rig.
+        if self._close_unkey_thread is not None:
+            self._close_unkey_thread.join(timeout=3.0)
         self._finish_deferred_rig_teardown()
 
         try:
