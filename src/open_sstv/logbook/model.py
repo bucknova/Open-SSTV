@@ -68,6 +68,10 @@ class QSO:
     time_utc: datetime = field(default_factory=_utc_now)
     mode: str = ""
     frequency_hz: int | None = None
+    #: ADIF band ("20m").  Only meaningful when ``frequency_hz`` is None —
+    #: an imported record with BAND but no FREQ (v0.6.14 audit C-M8);
+    #: otherwise the band is derived from the frequency.
+    band: str = ""
     rsv_sent: str = ""
     rsv_received: str = ""
     name: str = ""

@@ -160,6 +160,7 @@ from open_sstv.config.templates import load_templates
 from open_sstv.core.modes import Mode
 from open_sstv.fsutil import atomic_write_bytes
 from open_sstv.logbook import QSO, LogbookCoordinator, QsoLoggingError, UdpQsoLogger
+from open_sstv.logbook.coordinator import mode_display_name
 from open_sstv.radio.band_plan import (
     FLEX_PROTOCOL,
     RIGCTLD_PROTOCOL,
@@ -1637,8 +1638,9 @@ class MainWindow(QMainWindow):
 
         UDP-only — never touches the local logbook database (that's
         ``save_draft``'s per-image auto-capture flow, a separate
-        concern).  Time is the moment of the click (UTC); mode is fixed
-        to "SSTV" since this bar only ever describes an SSTV contact.
+        concern).  Time is the moment of the click (UTC); mode is the TX
+        panel's selected SSTV mode (v0.6.14 audit C-M8: it was a bare
+        "SSTV", so loggers never got the SUBMODE).
         """
         qso_state = self._tx_panel.get_qso_state()
         callsign = qso_state.tocall.strip().upper()
@@ -1652,7 +1654,7 @@ class MainWindow(QMainWindow):
             direction="TX",
             callsign=callsign,
             time_utc=datetime.datetime.now(datetime.UTC),
-            mode="SSTV",
+            mode=mode_display_name(self._tx_panel.selected_mode()),
             frequency_hz=self._last_rig_freq_hz,
             rsv_sent=qso_state.rst,
             rsv_received=rst_received,
