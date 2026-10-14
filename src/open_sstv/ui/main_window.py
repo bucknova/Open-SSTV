@@ -1027,7 +1027,10 @@ class MainWindow(QMainWindow):
         # v0.6.14 audit T-M5: re-resolve the configured device by name at
         # every TX start (not for an explicitly injected device).
         if not explicit_output_device:
-            self._tx_worker.set_output_device_name(self._config.audio_output_device)
+            self._tx_worker.set_output_device_name(
+                self._config.audio_output_device,
+                host_api=self._config.audio_output_host_api or None,
+            )
         self._tx_worker.moveToThread(self._tx_thread)
         # Standard Qt cleanup pattern: when the thread finishes, schedule
         # the worker for deletion. Without this the worker is left as an
@@ -2408,7 +2411,10 @@ class MainWindow(QMainWindow):
             host_api=self._config.audio_output_host_api or None,
         ) or find_pipewire_sink_by_name(self._config.audio_output_device)
         self._tx_worker.set_output_device(new_output)
-        self._tx_worker.set_output_device_name(self._config.audio_output_device)
+        self._tx_worker.set_output_device_name(
+            self._config.audio_output_device,
+            host_api=self._config.audio_output_host_api or None,
+        )
         self._tx_worker.set_output_gain(self._config.audio_output_gain)
         self._tx_worker.set_ptt_delay(self._config.ptt_delay_s)
         new_input = find_input_device_by_name(

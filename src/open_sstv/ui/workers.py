@@ -91,6 +91,7 @@ from open_sstv.audio.devices import (
     find_output_device_by_name,
     invalidate_device_cache,
     list_output_devices,
+    portaudio_generation,
 )
 from open_sstv.audio.pipewire_route import PipeWireSink, find_pipewire_sink_by_name
 from open_sstv.core.cw import make_cw
@@ -610,6 +611,16 @@ class TxWorker(QObject):
         #: PortAudio query (and pactl on Linux), so it runs only then, or
         #: while the configured device is missing (v0.6.14 review).
         self._output_device_stale: bool = False
+        #: v0.6.14 sweep: the configured host API (``audio_output_host_api``)
+        #: — preferred over the current device's when re-resolving, so a
+        #: device that was missing at launch resolves to the operator's
+        #: WASAPI pick rather than its MME twin.
+        self._output_host_api: str | None = None
+        #: v0.6.14 sweep: ``devices.portaudio_generation()`` as of the last
+        #: resolve.  A PortAudio reset by any path (not just the ones the
+        #: GUI flags via ``mark_output_device_stale``) bumps the
+        #: generation and forces a re-resolve before the next key-up.
+        self._resolved_generation: int = portaudio_generation()
         #: Latches after the first MME warning so the advice is logged once
         #: per worker rather than on every transmission.
         self._mme_warned: bool = False
@@ -664,13 +675,18 @@ class TxWorker(QObject):
         """Change the output device at runtime (e.g. after settings save)."""
         self._output_device = device
 
-    def set_output_device_name(self, name: str | None) -> None:
+    def set_output_device_name(
+        self, name: str | None, host_api: str | None = None
+    ) -> None:
         """Record the configured output device name for per-TX re-resolution.
 
         v0.6.14 audit T-M5.  An empty name means "system default" and
-        disables re-resolution, as does ``None`` (the default).
+        disables re-resolution, as does ``None`` (the default).  *host_api*
+        is the configured ``audio_output_host_api`` (v0.6.14 sweep); empty
+        or ``None`` means "no preference".
         """
         self._output_device_name = name or None
+        self._output_host_api = host_api or None
 
     def mark_output_device_stale(self) -> None:
         """The device list changed (USB loss / PortAudio reset): re-resolve
@@ -678,18 +694,41 @@ class TxWorker(QObject):
         store)."""
         self._output_device_stale = True
 
+    @staticmethod
+    def _query_output_device(
+        name: str, host_api: str | None
+    ) -> tuple[AudioDevice | None, bool, int]:
+        """PortAudio lookup of *name*: ``(device, enumerated_any, generation)``.
+
+        v0.6.14 sweep: runs under ``output_stream._tx_state_lock`` — the
+        lock ``run_if_tx_idle`` holds across ``_pa_reset``'s
+        ``sd._terminate()`` / ``sd._initialize()`` — so the query can never
+        overlap a PortAudio teardown, and the generation read here is the
+        one the returned indices belong to.  The lock is not re-entrant;
+        nothing below takes it, and the caller is not yet inside
+        ``play_blocking``.  pactl lookups stay outside the lock so a slow
+        subprocess can't block ``output_stream.stop()``.
+        """
+        with output_stream._tx_state_lock:
+            generation = portaudio_generation()
+            invalidate_device_cache()
+            if not list_output_devices():
+                return None, False, generation
+            return find_output_device_by_name(name, host_api=host_api), True, generation
+
     def _resolve_output_device(self) -> AudioDevice | PipeWireSink | int | None:
         """Re-look-up the configured output device by name (T-M5 / T-L4).
 
-        Runs only when the device list is known to have changed
-        (:meth:`mark_output_device_stale`) or the configured device is
-        currently missing.  Returns the fresh device, or raises
-        ``LookupError`` when a device name is configured but no such
-        device exists right now — the caller refuses to key rather than
-        let PortAudio fall back to the system default (the speakers) while
-        the rig is transmitting.  Prefers the host API of the previously
-        resolved device so a WASAPI pick doesn't silently become its MME
-        twin (T-L4).
+        Runs only when the device list may have changed — the PortAudio
+        generation moved since the last resolve, or
+        :meth:`mark_output_device_stale` was called (v0.6.14 sweep) — or
+        the configured device is currently missing.  Returns the fresh
+        device, or raises ``LookupError`` when a device name is configured
+        but no such device exists right now — the caller refuses to key
+        rather than let PortAudio fall back to the system default (the
+        speakers) while the rig is transmitting.  Prefers the configured
+        host API, then that of the previously resolved device, so a
+        WASAPI pick doesn't silently become its MME twin (T-L4).
 
         An *empty* enumeration means PortAudio itself failed (it is logged
         and swallowed in ``devices``), not that the device is gone — keep
@@ -697,28 +736,41 @@ class TxWorker(QObject):
         """
         name = self._output_device_name
         current = self._output_device
-        if not name or (current is not None and not self._output_device_stale):
+        if not name:
             return current
-        invalidate_device_cache()
+        if (
+            current is not None
+            and not self._output_device_stale
+            and portaudio_generation() == self._resolved_generation
+        ):
+            return current
+        # Clear before querying so a mark that lands mid-query is kept.
+        self._output_device_stale = False
+        host_api = self._output_host_api or getattr(current, "host_api", None)
+        generation = portaudio_generation()
         fresh: AudioDevice | PipeWireSink | None
         if isinstance(current, PipeWireSink):
-            fresh = find_pipewire_sink_by_name(name) or find_output_device_by_name(name)
+            fresh = find_pipewire_sink_by_name(name)
+            if fresh is None:
+                fresh, _, generation = self._query_output_device(name, host_api)
         else:
-            if current is not None and not list_output_devices():
+            fresh, enumerated, generation = self._query_output_device(name, host_api)
+            if not enumerated and current is not None:
+                self._output_device_stale = True  # retry on the next TX
                 _log.warning(
                     "TX output device re-resolution skipped: audio device "
                     "enumeration returned nothing — keeping %r", current,
                 )
                 return current
-            fresh = find_output_device_by_name(
-                name, host_api=getattr(current, "host_api", None)
-            ) or find_pipewire_sink_by_name(name)
+            if fresh is None:
+                fresh = find_pipewire_sink_by_name(name)
         if fresh is None:
+            self._output_device_stale = True
             raise LookupError(name)
         if fresh != current:
             _log.info("TX output device re-resolved: %r -> %r", current, fresh)
         self._output_device = fresh
-        self._output_device_stale = False
+        self._resolved_generation = generation
         return fresh
 
     def set_output_gain(self, gain: float) -> None:

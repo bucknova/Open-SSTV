@@ -334,6 +334,76 @@ def test_reresolution_prefers_previous_host_api(qapp, monkeypatch: pytest.Monkey
     assert devices.find_output_device_by_name("nope", host_api="MME") is None
 
 
+def test_portaudio_generation_bump_forces_reresolve(
+    qapp, image, _fast, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v0.6.14 sweep: a PortAudio reset by any path (e.g. RX start after a
+    replug while RX was stopped) re-resolves without the GUI stale flag."""
+    from open_sstv.audio import devices
+
+    stale, fresh = _dev(3), _dev(7)
+    lookup = MagicMock(return_value=fresh)
+    monkeypatch.setattr(workers, "find_output_device_by_name", lookup)
+    monkeypatch.setattr(workers, "list_output_devices", lambda: [fresh])
+    w = TxWorker(rig=PttRecorder(), output_device=stale, ptt_delay_s=0)
+    w.set_output_device_name("USB Audio CODEC")
+    w.transmit(image, Mode.ROBOT_36)
+    lookup.assert_not_called()
+    devices.bump_portaudio_generation()
+    w.transmit(image, Mode.ROBOT_36)
+    assert _fast["play"].call_args.kwargs["device"] is fresh
+    # ...and only once per generation.
+    w.transmit(image, Mode.ROBOT_36)
+    assert lookup.call_count == 1
+
+
+def test_pa_reset_bumps_generation(monkeypatch: pytest.MonkeyPatch) -> None:
+    from open_sstv.audio import devices, input_stream
+
+    monkeypatch.setattr(input_stream.sd, "_terminate", lambda: None, raising=False)
+    monkeypatch.setattr(input_stream.sd, "_initialize", lambda: None, raising=False)
+    before = devices.portaudio_generation()
+    input_stream.InputStreamWorker._pa_reset(MagicMock())
+    assert devices.portaudio_generation() == before + 1
+
+
+def test_device_query_holds_tx_state_lock(
+    qapp, image, _fast, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The enumeration can't overlap _pa_reset's sd._terminate()."""
+    held: list[bool] = []
+
+    def _list() -> list[AudioDevice]:
+        held.append(workers.output_stream._tx_state_lock.locked())
+        return [_dev(7)]
+
+    monkeypatch.setattr(workers, "list_output_devices", _list)
+    monkeypatch.setattr(workers, "find_output_device_by_name", lambda n, host_api=None: _dev(7))
+    w = TxWorker(rig=PttRecorder(), output_device=_dev(3), ptt_delay_s=0)
+    w.set_output_device_name("USB Audio CODEC")
+    w.mark_output_device_stale()
+    w.transmit(image, Mode.ROBOT_36)
+    assert held == [True]
+    assert not workers.output_stream._tx_state_lock.locked()
+
+
+def test_configured_host_api_preferred_when_missing_at_launch(
+    qapp, image, _fast, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v0.6.14 sweep: device missing at launch, configured WASAPI ->
+    resolves to the WASAPI twin, not MME (enumerated first)."""
+    from open_sstv.audio import devices
+
+    mme, wasapi = _dev(1, "MME"), _dev(9, "Windows WASAPI")
+    monkeypatch.setattr(devices, "list_output_devices", lambda: [mme, wasapi])
+    monkeypatch.setattr(workers, "list_output_devices", lambda: [mme, wasapi])
+    monkeypatch.setattr(workers, "find_output_device_by_name", devices.find_output_device_by_name)
+    w = TxWorker(rig=PttRecorder(), output_device=None, ptt_delay_s=0)
+    w.set_output_device_name("USB Audio CODEC", host_api="Windows WASAPI")
+    w.transmit(image, Mode.ROBOT_36)
+    assert _fast["play"].call_args.kwargs["device"] is wasapi
+
+
 def test_no_name_keeps_given_device(qapp, image, _fast) -> None:
     dev = _dev(3)
     w = TxWorker(rig=ManualRig(), output_device=dev, ptt_delay_s=0)
