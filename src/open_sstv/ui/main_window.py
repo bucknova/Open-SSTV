@@ -2326,6 +2326,11 @@ class MainWindow(QMainWindow):
         self._tx_worker.set_ptt_delay(self._config.ptt_delay_s)
         new_input = find_input_device_by_name(self._config.audio_input_device)
         self._input_device = new_input
+        if new_input is None and self._config.audio_input_device:
+            # v0.6.14 audit UI-M3: the saved device is unplugged (Settings
+            # now keeps it as "(not connected)").  Look it up again at the
+            # next capture start so plugging it back in is enough.
+            self._input_device_needs_relookup = True
         self._rx_worker.set_input_gain(self._config.audio_input_gain)
         # Keep the always-on audio strip in sync with a Settings save
         # (overdrive first so the TX ceiling is right before the clamp).
