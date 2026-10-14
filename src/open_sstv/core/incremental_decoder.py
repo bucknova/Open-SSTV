@@ -579,15 +579,17 @@ class ScottieIncrementalDecoder(IncrementalDecoderBase):
     def _compute_timing(self, spec: ModeSpec, fs: int) -> None:
         sync_ms = spec.sync_pulse_ms
         porch_ms = spec.sync_porch_ms
-        scan_ms = (spec.line_time_ms - sync_ms - 6.0 * porch_ms) / 3.0
+        # Spec layout (v0.6.14 audit D-L3), mirrors _decode_scottie_rgb:
+        # SEP | G | SEP | B | SYNC | PORCH | R
+        scan_ms = (spec.line_time_ms - sync_ms - 3.0 * porch_ms) / 3.0
 
         # G starts this many ms BEFORE the sync (negative offset).
         # R ends this many ms AFTER the sync (positive offset).
-        g_start_ms = -(porch_ms + scan_ms + porch_ms + porch_ms + scan_ms)
-        r_end_ms = sync_ms + porch_ms + scan_ms + porch_ms
+        g_start_ms = -(scan_ms + porch_ms + scan_ms)
+        r_end_ms = sync_ms + porch_ms + scan_ms
 
         self._g_offset: float = g_start_ms / 1000.0 * fs          # negative
-        self._b_offset: float = -(porch_ms + scan_ms) / 1000.0 * fs  # negative
+        self._b_offset: float = -scan_ms / 1000.0 * fs             # negative
         self._r_offset: float = (sync_ms + porch_ms) / 1000.0 * fs   # positive
         self._scan_samp: float = scan_ms / 1000.0 * fs
 

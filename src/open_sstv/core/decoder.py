@@ -354,14 +354,15 @@ def _decode_scottie_rgb(
     """Slice a frequency track into a Scottie-family RGB image.
 
     Scottie's defining oddity: the SYNC pulse sits **between blue and
-    red** within each line (``BEFORE_RED``). Layout::
+    red** within each line (``BEFORE_RED``). Spec layout (v0.6.14 audit
+    D-L3; see ``modes.py``)::
 
-        PORCH → G_scan → PORCH → PORCH → B_scan → PORCH → SYNC → PORCH → R_scan → PORCH
+        SEP → G_scan → SEP → B_scan → SYNC → PORCH → R_scan
 
     Each per-line index lands on the leading edge of the between-B-and-R
     sync. The decoder steps backward to reach G and B, forward for R.
 
-    Scan time: ``scan_ms = (line_time − sync − 6×porch) / 3``
+    Scan time: ``scan_ms = (line_time − sync − 3×sep) / 3``
 
     Handles S1 (320×256, ~110 s), S2 (320×256, ~71 s), DX (320×256,
     ~269 s), and the 320×128 S3 / S4.  As with Martin, the half-time
@@ -371,11 +372,13 @@ def _decode_scottie_rgb(
     height = spec.height
     sync_ms = spec.sync_pulse_ms
     porch_ms = spec.sync_porch_ms
-    scan_ms = (spec.line_time_ms - sync_ms - 6 * porch_ms) / 3
+    scan_ms = (spec.line_time_ms - sync_ms - 3 * porch_ms) / 3
 
-    # Offsets relative to the detected SYNC position.
-    g_offset_ms = -(porch_ms + scan_ms + porch_ms + porch_ms + scan_ms)
-    b_offset_ms = -(porch_ms + scan_ms)
+    # Offsets relative to the detected SYNC position. (Channel *starts*
+    # are where PySSTV's old split put them too, so pre-v0.6.15 Open-SSTV
+    # audio still decodes — minus ~3.5 px of porch at each channel end.)
+    g_offset_ms = -(scan_ms + porch_ms + scan_ms)
+    b_offset_ms = -scan_ms
     r_offset_ms = sync_ms + porch_ms
 
     g_offset = g_offset_ms / 1000.0 * fs
