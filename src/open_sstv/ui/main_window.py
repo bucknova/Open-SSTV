@@ -1418,9 +1418,9 @@ class MainWindow(QMainWindow):
             # S-M2: don't silently break an existing install's short token —
             # say why the link changed and where to fix it.
             self.statusBar().showMessage(
-                f"Remote access token is shorter than {MIN_TOKEN_LEN} characters, so a "
-                "random one is in use this session — open Settings → Remote to set "
-                f"or regenerate it.  Link: {self._remote_server.url}",
+                f"Remote access token must be at least {MIN_TOKEN_LEN} plain-ASCII "
+                "characters, so a random one is in use this session — open "
+                f"Settings → Remote to set or regenerate it.  Link: {self._remote_server.url}",
                 30000,
             )
         else:

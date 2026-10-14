@@ -499,3 +499,18 @@ def test_emergency_unkey_from_another_thread_while_keyed(qapp, image, _fast) -> 
     _fast["play"].side_effect = _play
     w.transmit(image, Mode.ROBOT_36)
     assert rig.calls == [True, False, False]
+
+
+def test_stale_watchdog_cannot_stop_a_tx_whose_slot_just_began(qapp) -> None:
+    """v0.6.14 sweep: a watchdog for the previous TX that fires after the
+    next slot cleared ``_stop_event`` (but before that TX bumped its id
+    deeper in ``_transmit_impl``) used to stop the new TX.  The slot now
+    bumps the id under the lock the watchdog holds, so the fire is stale."""
+    rig = PttRecorder()
+    w = TxWorker(rig=rig, ptt_delay_s=0)
+    w._tx_id = old_id = 5  # the previous transmission's id (0 = "no check")
+    w.note_tx_requested()
+    assert w._begin_tx_slot()
+    w._watchdog_fire(1.0, tx_id=old_id)
+    assert not w._stop_event.is_set()
+    assert rig.calls == []  # stale fire sent no emergency PTT-off either

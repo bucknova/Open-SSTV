@@ -918,13 +918,23 @@ class TxWorker(QObject):
 
         Clears ``_stop_event`` for the new transmission *only* when no
         stop covers it, atomically with respect to ``request_stop``.
+
+        v0.6.14 sweep: also advances ``_tx_id`` under ``_tx_id_lock``, which
+        ``_watchdog_fire`` holds from its stale check through its stop.  A
+        watchdog for the previous TX therefore either finishes before this
+        slot clears ``_stop_event`` (so the clear wins) or sees the new id
+        and stands down — it can no longer stop a TX that started in
+        between.  Lock order: ``_tx_id_lock`` → ``_stop_lock`` /
+        ``_rig_lock``, never the reverse.
         """
-        with self._stop_lock:
-            self._tx_slots_run += 1
-            if self._tx_slots_run <= self._stop_covers_upto:
-                return False
-            self._stop_event.clear()
-            return True
+        with self._tx_id_lock:
+            self._tx_id += 1
+            with self._stop_lock:
+                self._tx_slots_run += 1
+                if self._tx_slots_run <= self._stop_covers_upto:
+                    return False
+                self._stop_event.clear()
+                return True
 
     def _end_tx_slot(self) -> None:
         with self._rig_lock:
@@ -1792,23 +1802,26 @@ class TxWorker(QObject):
         display a persistent watchdog message that isn't immediately
         clobbered by the subsequent ``transmission_aborted`` signal.
         """
+        # Held from the stale check through the stop (v0.6.14 sweep): a new
+        # slot bumps ``_tx_id`` under this lock before clearing
+        # ``_stop_event``, so it can't start in between and be stopped.
         with self._tx_id_lock:
             current = self._tx_id
-        if tx_id != 0 and tx_id != current:
-            _log.debug(
-                "stale TX watchdog fire ignored (timer tx_id=%d, current=%d)",
-                tx_id, current,
-            )
-            return
-        self._watchdog_triggered = True
-        self.watchdog_fired.emit(float(duration_s))
-        # v0.6.14 audit T-M2: drop PTT directly first, like the remote
-        # dead-man's-switch.  A watchdog fire means playback is already
-        # overdue — possibly wedged where request_stop() can't reach it —
-        # so trusting the worker's own unwind to unkey is not enough.
-        self.emergency_unkey()
-        # v0.6.14 sweep: stop only the overrunning TX, not a queued next one.
-        self.request_stop(cancel_queued=False)
+            if tx_id != 0 and tx_id != current:
+                _log.debug(
+                    "stale TX watchdog fire ignored (timer tx_id=%d, current=%d)",
+                    tx_id, current,
+                )
+                return
+            self._watchdog_triggered = True
+            self.watchdog_fired.emit(float(duration_s))
+            # v0.6.14 audit T-M2: drop PTT directly first, like the remote
+            # dead-man's-switch.  A watchdog fire means playback is already
+            # overdue — possibly wedged where request_stop() can't reach it —
+            # so trusting the worker's own unwind to unkey is not enough.
+            self.emergency_unkey()
+            # v0.6.14 sweep: stop only the overrunning TX, not a queued next one.
+            self.request_stop(cancel_queued=False)
 
 
 class RxWorker(QObject):
