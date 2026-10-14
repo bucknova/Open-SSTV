@@ -8,12 +8,14 @@ samples to an instantaneous-frequency track and from frequencies to luma.
 The decoder pipeline is::
 
     samples (float32, mono)
-        ──> analytic_signal      # complex baseband via Hilbert
+        ──> analytic_signal          # complex baseband via Hilbert
         ──> instantaneous_frequency  # one Hz value per sample
-        ──> freq_to_luma         # one 0..255 byte per sample
+        ──> sample_pixels            # one 0..255 byte per pixel
 
-Slicing the resulting luma stream into pixels is the per-mode decoder's job
-(``core/decoder.py``); this module just hands back a frequency / luma track.
+Deciding *where* each scan starts is the per-mode decoder's job
+(``core/decoder.py`` / ``core/incremental_decoder.py``); this module hands
+back a frequency track and turns a span of it into a row of pixel bytes.
+(Robot 36 uses its own slowrx-style sampler in ``core/robot36_dsp.py``.)
 
 Constants
 ---------
@@ -34,9 +36,9 @@ instantaneous_frequency(x, fs) -> np.ndarray[float64]
     length (the phase-difference is right-padded by one sample so callers
     don't have to special-case off-by-one indexing).
 
-freq_to_luma(freq_hz) -> np.ndarray[uint8] | int
-    Linear map of 1500..2300 Hz to 0..255 byte luma, clipped at the
-    endpoints. Accepts a scalar (returns int) or an array (returns uint8).
+sample_pixels(inst, start, span_samples, width, track_len, *, chroma=False)
+    Windowed-median pixel sampler shared by the batch and incremental
+    decoders for every RGB / PD mode.
 """
 from __future__ import annotations
 
@@ -105,25 +107,89 @@ def instantaneous_frequency(x: NDArray, fs: float) -> NDArray[np.float64]:
     return np.concatenate([diffs, diffs[-1:]])
 
 
-def freq_to_luma(
-    freq_hz: NDArray | float,
-) -> NDArray[np.uint8] | int:
-    """Map an SSTV color tone to a 0..255 byte luma.
+def sample_pixels(
+    inst: NDArray,
+    start: float,
+    span_samples: float,
+    width: int,
+    track_len: int,
+    *,
+    chroma: bool = False,
+) -> NDArray[np.uint8]:
+    """Slice a span of the frequency track into ``width`` pixel medians.
 
-    Linear FM: 1500 Hz → 0, 2300 Hz → 255. Frequencies outside the
-    [black, white] range are clipped to the endpoints (the decoder sees
-    plenty of out-of-band frequencies during sync pulses, porches, and
-    noisy passages — clipping is the right behavior, not an error).
+    Walks ``width`` evenly-spaced sub-windows over ``[start, start+span)``,
+    takes the median frequency in each window's central 60% (matching the
+    bit-window dodging trick from ``vis.detect_vis``), and maps 1500..2300 Hz
+    linearly to a 0..255 byte. Pixel windows that fall outside
+    ``[0, track_len)`` are left at the neutral value.
 
-    Returns ``int`` for scalar input and ``np.ndarray[uint8]`` for array
-    input, so callers can use either pattern naturally.
+    When ``chroma=True`` the neutral value is 128 (the YCbCr midpoint)
+    instead of 0, and two chroma-specific behaviours apply:
+
+    1. **Sync-band reject** at ``SSTV_SYNC_REJECT_HZ``.  Legitimate low
+       chroma decodes as itself — byte 0 is fully saturated (Cb≈0 is
+       yellow, Cr≈0 cyan), not grey — but sync-pulse leakage (~1200 Hz)
+       clamps to neutral instead of painting the edge green.  Luma falls
+       through to the [0, 255] clip (sub-black noise just reads as dark).
+    2. **Right-edge guard** of ``max(2, width // 80)`` columns (≈ 4 px at
+       width 320) left neutral, because the bandpass filter smears the
+       upcoming 1200 Hz sync back 10-15 samples into the end of the
+       chroma scan.
+
+    This is the single implementation used by both the batch decoder and
+    the incremental decoder (v0.6.14 audit D-M3: they used to carry
+    near-identical copies that drifted apart once already).  It is
+    vectorised — windows are grouped by length and each group is one
+    strided ``np.median`` call — but numerically identical to the old
+    per-column ``np.median`` loop (``tests/core/test_demod.py`` pins
+    that): same window bounds, same half-to-even rounding.
     """
-    arr = np.asarray(freq_hz, dtype=np.float64)
-    span = SSTV_WHITE_HZ - SSTV_BLACK_HZ
-    luma = np.clip((arr - SSTV_BLACK_HZ) * (255.0 / span), 0.0, 255.0)
-    if luma.ndim == 0:
-        return int(round(float(luma)))
-    return luma.astype(np.uint8)
+    neutral: int = 128 if chroma else 0
+    out = np.full(width, neutral, dtype=np.uint8)
+    if width <= 0 or span_samples <= 0:
+        return out
+    pixel_span = span_samples / width
+    margin = pixel_span * 0.2  # central 60% of each pixel window
+    guard_pixels = max(2, width // 80) if chroma else 0
+    max_col = width - guard_pixels
+    if max_col <= 0:
+        return out
+
+    cols = np.arange(max_col, dtype=np.float64)
+    # Same expression order as the scalar loop this replaced, so the
+    # float window bounds (and hence the rounded indices) are bit-equal.
+    lo = np.round(start + cols * pixel_span + margin).astype(np.int64)
+    hi = np.round(start + (cols + 1.0) * pixel_span - margin).astype(np.int64)
+    hi = np.maximum(hi, lo + 1)
+    valid = (lo >= 0) & (hi <= track_len)
+    # ``inst[lo:hi]`` truncates silently past the array end; mirror that.
+    hi = np.minimum(hi, inst.shape[0])
+    valid &= hi > lo
+    if not valid.any():
+        return out
+
+    freq = np.full(max_col, np.nan, dtype=np.float64)
+    lengths = hi - lo
+    for length in np.unique(lengths[valid]):
+        sel = np.flatnonzero(valid & (lengths == length))
+        idx = lo[sel, None] + np.arange(int(length))
+        freq[sel] = np.median(inst[idx], axis=1)
+
+    vals = np.full(max_col, float(neutral), dtype=np.float64)
+    norm = (freq - SSTV_BLACK_HZ) / (SSTV_WHITE_HZ - SSTV_BLACK_HZ)
+    # v0.4.0 audit high #3: NaN passes BOTH range checks (NaN comparisons
+    # are False) — treat a non-finite sample as neutral rather than
+    # emitting garbage.
+    ok = valid & np.isfinite(norm)
+    if chroma:
+        # Sync-band reject (see docstring). A reading a hair under
+        # SSTV_BLACK_HZ is byte 0, not neutral: demod jitter on a genuine
+        # byte-0 chroma scan lands on both sides of the boundary.
+        ok &= ~(freq < SSTV_SYNC_REJECT_HZ)
+    vals[ok] = np.round(np.clip(norm[ok], 0.0, 1.0) * 255.0)
+    out[:max_col] = vals.astype(np.uint8)
+    return out
 
 
 __all__ = [
@@ -132,6 +198,6 @@ __all__ = [
     "SSTV_SYNC_REJECT_HZ",
     "SSTV_WHITE_HZ",
     "analytic_signal",
-    "freq_to_luma",
     "instantaneous_frequency",
+    "sample_pixels",
 ]
