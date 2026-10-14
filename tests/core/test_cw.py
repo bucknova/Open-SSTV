@@ -154,3 +154,14 @@ class TestMakeCW:
         out = make_cw("W0AEZ/P", wpm=WPM, tone_hz=800, sample_rate=SR)
         assert out.dtype == np.dtype("int16")
         assert len(out) > 0
+
+
+def test_make_cw_positive_peak_dbfs_clips_instead_of_wrapping() -> None:
+    """v0.6.14 audit (cw low): +6 dBFS used to wrap int16 overshoot to
+    the opposite rail."""
+    out = make_cw("E", wpm=20, sample_rate=48_000, peak_dbfs=6.0)
+    assert out.max() == 32767
+    assert out.min() == -32767
+    # A wrapped sample shows up as a sign flip between neighbours at
+    # near-full-scale; a clipped sine never jumps more than one step.
+    assert int(np.abs(np.diff(out.astype(np.int32))).max()) < 20_000
