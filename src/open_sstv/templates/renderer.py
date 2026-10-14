@@ -34,6 +34,7 @@ See ``model.py`` docstring for the full anchor semantics.  Summary:
 from __future__ import annotations
 
 import colorsys
+import contextvars
 import datetime
 import logging
 import math
@@ -65,6 +66,39 @@ from open_sstv.templates.tokens import resolve_text
 
 if TYPE_CHECKING:
     from open_sstv.config.schema import AppConfig
+
+# ---------------------------------------------------------------------------
+# Allocation guard (v0.6.14 audit S-M5)
+# ---------------------------------------------------------------------------
+
+#: Largest intermediate image, as a multiple of the canvas area, that one
+#: layer may allocate.  Legitimate layers stay well inside the canvas (a
+#: bleed layout might reach 2–4×); a hostile or fat-fingered template
+#: (shadow offset 4000, a 1×10000 photo cover-fitted into a wide box) asked
+#: for gigabytes and got the whole app OOM-killed mid-TX.
+MAX_INTERMEDIATE_CANVAS_MULT: float = 4.0
+
+#: Pixel budget for the render in progress (set by ``render_template``).
+#: A ContextVar, not a global, because remote compose renders on server
+#: threads concurrently with the GUI.
+_pixel_budget: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "_pixel_budget", default=None
+)
+
+
+class OversizeLayerError(ValueError):
+    """A layer asked for an intermediate image beyond the pixel budget."""
+
+
+def _check_alloc(w: int, h: int, what: str) -> None:
+    """Raise ``OversizeLayerError`` if a *w*×*h* image exceeds the budget."""
+    budget = _pixel_budget.get()
+    if budget is not None and w * h > budget:
+        raise OversizeLayerError(
+            f"{what} would be {w}×{h} px — over the "
+            f"{MAX_INTERMEDIATE_CANVAS_MULT:g}× canvas limit"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Anchor geometry helpers
@@ -137,6 +171,7 @@ def _fit_image(
     if img.mode != "RGBA":
         img = img.convert("RGBA")
 
+    _check_alloc(bbox_w, bbox_h, "image layer box")
     if fit == "stretch":
         return img.resize((bbox_w, bbox_h), PIL.Image.LANCZOS)
 
@@ -148,6 +183,7 @@ def _fit_image(
 
     new_w = max(1, int(round(iw * ratio)))
     new_h = max(1, int(round(ih * ratio)))
+    _check_alloc(new_w, new_h, "fitted image")
     resized = img.resize((new_w, new_h), PIL.Image.LANCZOS)
 
     if fit == "cover":
@@ -194,6 +230,7 @@ def _make_pattern_tile(pattern_id: str, cell_px: int) -> PIL.Image.Image:
 
 def _tile_pattern(tile: PIL.Image.Image, bbox_w: int, bbox_h: int) -> PIL.Image.Image:
     """Tile *tile* to cover a (bbox_w × bbox_h) region."""
+    _check_alloc(bbox_w, bbox_h, "pattern layer box")
     out = PIL.Image.new("RGBA", (bbox_w, bbox_h), (0, 0, 0, 0))
     tw, th = tile.size
     for y in range(0, bbox_h, th):
@@ -430,6 +467,7 @@ def _render_horizontal_text(
 
     img_w = total_w + stroke_w * 2 + pad_left + pad_right
     img_h = total_h + pad_top + pad_bottom
+    _check_alloc(img_w, img_h, "text layer")
     img = PIL.Image.new("RGBA", (max(1, img_w), max(1, img_h)), (0, 0, 0, 0))
     draw = PIL.ImageDraw.Draw(img)
 
@@ -532,6 +570,7 @@ def _render_stacked_text(
     spacing = int(font_h_px * layer.line_height_mult)
     total_h = spacing * (len(chars) - 1) + char_h + stroke_w * 2
     total_w = char_w + stroke_w * 2
+    _check_alloc(total_w, total_h, "stacked text layer")
 
     img = PIL.Image.new("RGBA", (max(1, total_w), max(1, total_h)), (0, 0, 0, 0))
     draw = PIL.ImageDraw.Draw(img)
@@ -681,6 +720,7 @@ def _rasterize_rx_image(
     # shows where the RX image will land.  Semi-transparent fill so any
     # photo layer composited below still reads through; "RX" label makes
     # the intent unambiguous.
+    _check_alloc(bbox_w, bbox_h, "RX image placeholder")
     placeholder = PIL.Image.new("RGBA", (bbox_w, bbox_h), (255, 255, 255, 80))
     cell.paste(placeholder, (x, y), placeholder)
 
@@ -740,6 +780,7 @@ def _rasterize_gradient(
             layer.anchor, layer.offset_x_pct, layer.offset_y_pct,
             bbox_w, bbox_h, canvas_w, canvas_h,
         )
+    _check_alloc(bbox_w, bbox_h, "gradient layer box")
     grad_img = _make_gradient(bbox_w, bbox_h, layer.from_color, layer.to_color, layer.angle_deg)
     cell = PIL.Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
     cell.paste(grad_img, (x, y), grad_img)
@@ -946,6 +987,33 @@ def render_template(
 
     W, H = tx_context.frame_size
     canvas = PIL.Image.new("RGBA", (W, H), (0, 0, 0, 255))
+    budget_token = _pixel_budget.set(int(MAX_INTERMEDIATE_CANVAS_MULT * W * H))
+    try:
+        return _render_layers(
+            template, qso_state, app_config, tx_context, canvas,
+            now_utc=now_utc, assets_dir=assets_dir,
+        )
+    finally:
+        _pixel_budget.reset(budget_token)
+
+
+def _render_layers(
+    template: Template,
+    qso_state: QSOState,
+    app_config: AppConfig,
+    tx_context: TXContext,
+    canvas: PIL.Image.Image,
+    *,
+    now_utc: datetime.datetime,
+    assets_dir: Path,
+) -> PIL.Image.Image:
+    """Composite every visible layer onto *canvas* (see ``render_template``).
+
+    A layer that trips the allocation guard is skipped with a warning
+    instead of aborting the render — the rest of the template still goes
+    out (v0.6.14 audit S-M5).
+    """
+    W, H = canvas.size
 
     # Load station image once if any StationImageLayer references it
     _station_img_cache: dict[str, PIL.Image.Image | None] = {}
@@ -954,75 +1022,101 @@ def render_template(
         if not layer.visible:
             continue
 
-        cell: PIL.Image.Image | None = None
-
-        if isinstance(layer, PhotoLayer):
-            cell = _rasterize_photo(layer, W, H, tx_context.photo_image)
-
-        elif isinstance(layer, RxImageLayer):
-            cell = _rasterize_rx_image(layer, W, H, tx_context.rx_image)
-
-        elif isinstance(layer, StationImageLayer):
-            if layer.path and layer.path not in _station_img_cache:
-                resolved = _resolve_station_image_path(layer.path, assets_dir)
-                if resolved is None:
-                    # M4 (v0.3 audit): WARNING, not debug — a moved or
-                    # deleted station image means the transmitted picture
-                    # is silently missing its QSL graphic, and a debug
-                    # line was the only trace.  The cache keeps this to
-                    # one log entry per path per session.
-                    _log.warning(
-                        "Station image %r not found (template layer %r) — "
-                        "the layer will render blank",
-                        layer.path, layer.id,
-                    )
-                    _station_img_cache[layer.path] = None
-                else:
-                    try:
-                        _station_img_cache[layer.path] = PIL.Image.open(resolved)
-                    except (OSError, PIL.Image.DecompressionBombError) as exc:
-                        _log.warning("Could not open station image %s: %s", resolved, exc)
-                        _station_img_cache[layer.path] = None
-            station_img = _station_img_cache.get(layer.path) if layer.path else None
-            cell = _rasterize_image_layer(layer, W, H, station_img)
-
-        elif isinstance(layer, TextLayer):
-            resolved = resolve_text(
-                layer.text_raw,
-                qso_state,
-                app_config,
-                tx_context,
-                slashed_zero=layer.slashed_zero,
-                date_format=layer.date_format,
-                time_format=layer.time_format,
-                now_utc=now_utc,
+        try:
+            cell = _rasterize_layer(
+                layer, W, H, qso_state, app_config, tx_context,
+                _station_img_cache, now_utc=now_utc, assets_dir=assets_dir,
             )
-            if resolved:
-                cell = _rasterize_text(layer, resolved, W, H)
-            else:
-                # An empty resolved string (e.g. ``%r`` before any RST is
-                # entered) used to skip rasterization entirely.  That's
-                # invisible until the *next* layer below paints into the
-                # would-have-been text bbox, which then "moves" because the
-                # layer above isn't reserving its cell.  A transparent
-                # full-canvas cell keeps the layer present in the composite
-                # pipeline so layout decisions and debug overlays remain
-                # stable across token-resolution edge cases.
-                cell = PIL.Image.new("RGBA", (W, H), (0, 0, 0, 0))
-
-        elif isinstance(layer, RectLayer):
-            cell = _rasterize_rect(layer, W, H)
-
-        elif isinstance(layer, GradientLayer):
-            cell = _rasterize_gradient(layer, W, H)
-
-        elif isinstance(layer, PatternLayer):
-            cell = _rasterize_pattern(layer, W, H)
+        except OversizeLayerError as exc:
+            _log.warning(
+                "Template %r: skipping layer %r — %s", template.name, layer.id, exc
+            )
+            continue
 
         if cell is not None:
             canvas = PIL.Image.alpha_composite(canvas, cell)
 
     return canvas.convert("RGB")
+
+
+def _rasterize_layer(
+    layer: LayerBase,
+    W: int,
+    H: int,
+    qso_state: QSOState,
+    app_config: AppConfig,
+    tx_context: TXContext,
+    _station_img_cache: dict[str, PIL.Image.Image | None],
+    *,
+    now_utc: datetime.datetime,
+    assets_dir: Path,
+) -> PIL.Image.Image | None:
+    """Rasterise one layer to a full-canvas RGBA cell (or ``None``)."""
+    cell: PIL.Image.Image | None = None
+    if isinstance(layer, PhotoLayer):
+        cell = _rasterize_photo(layer, W, H, tx_context.photo_image)
+
+    elif isinstance(layer, RxImageLayer):
+        cell = _rasterize_rx_image(layer, W, H, tx_context.rx_image)
+
+    elif isinstance(layer, StationImageLayer):
+        if layer.path and layer.path not in _station_img_cache:
+            resolved = _resolve_station_image_path(layer.path, assets_dir)
+            if resolved is None:
+                # M4 (v0.3 audit): WARNING, not debug — a moved or
+                # deleted station image means the transmitted picture
+                # is silently missing its QSL graphic, and a debug
+                # line was the only trace.  The cache keeps this to
+                # one log entry per path per session.
+                _log.warning(
+                    "Station image %r not found (template layer %r) — "
+                    "the layer will render blank",
+                    layer.path, layer.id,
+                )
+                _station_img_cache[layer.path] = None
+            else:
+                try:
+                    _station_img_cache[layer.path] = PIL.Image.open(resolved)
+                except (OSError, PIL.Image.DecompressionBombError) as exc:
+                    _log.warning("Could not open station image %s: %s", resolved, exc)
+                    _station_img_cache[layer.path] = None
+        station_img = _station_img_cache.get(layer.path) if layer.path else None
+        cell = _rasterize_image_layer(layer, W, H, station_img)
+
+    elif isinstance(layer, TextLayer):
+        resolved = resolve_text(
+            layer.text_raw,
+            qso_state,
+            app_config,
+            tx_context,
+            slashed_zero=layer.slashed_zero,
+            date_format=layer.date_format,
+            time_format=layer.time_format,
+            now_utc=now_utc,
+        )
+        if resolved:
+            cell = _rasterize_text(layer, resolved, W, H)
+        else:
+            # An empty resolved string (e.g. ``%r`` before any RST is
+            # entered) used to skip rasterization entirely.  That's
+            # invisible until the *next* layer below paints into the
+            # would-have-been text bbox, which then "moves" because the
+            # layer above isn't reserving its cell.  A transparent
+            # full-canvas cell keeps the layer present in the composite
+            # pipeline so layout decisions and debug overlays remain
+            # stable across token-resolution edge cases.
+            cell = PIL.Image.new("RGBA", (W, H), (0, 0, 0, 0))
+
+    elif isinstance(layer, RectLayer):
+        cell = _rasterize_rect(layer, W, H)
+
+    elif isinstance(layer, GradientLayer):
+        cell = _rasterize_gradient(layer, W, H)
+
+    elif isinstance(layer, PatternLayer):
+        cell = _rasterize_pattern(layer, W, H)
+
+    return cell
 
 
 __all__ = ["render_template", "_fit_text", "_wrap_text"]
