@@ -418,6 +418,9 @@ _PAGE = """<!doctype html>
   // Everything fetch()ed sends the token as a Bearer header instead (S-M1),
   // which also satisfies the server's Origin-or-Bearer POST rule (S-L1).
   const api = (p, opts) => {
+    // v0.6.14 sweep: with no token there is nothing to send — answer
+    // locally rather than hitting the server with a request it must refuse.
+    if (token === "") return Promise.resolve(new Response(null, { status: 401 }));
     const o = Object.assign({}, opts || {});
     o.headers = Object.assign({ Authorization: "Bearer " + token }, o.headers || {});
     return fetch(p, o);
@@ -603,6 +606,7 @@ _PAGE = """<!doctype html>
   function hideLive() { live.classList.remove("show"); setStatus("live", "Live"); }
 
   function connect() {
+    if (token === "") return;   // v0.6.14 sweep: see the start-up guard
     const es = new EventSource(q("/api/events"));
     es.onopen = () => setStatus("live", "Live");
     // EventSource auto-reconnects; reflect the gap instead of hiding it.
@@ -1053,8 +1057,15 @@ _PAGE = """<!doctype html>
   window.addEventListener("resize", () => { if (cStage === "crop") refitCrop(); });
   $("cTransmit").addEventListener("click", composeTransmit);
 
-  load();
-  connect();
+  // v0.6.14 sweep: opened without the ?token= link (a bookmark, a new tab)?
+  // Don't fire the API / EventSource calls at all — just say how to get in.
+  if (token === "") {
+    grid.innerHTML = '<div class="err">' + errMsg(new Error("unauthorized")) + "</div>";
+    setStatus("offline", "No access token");
+  } else {
+    load();
+    connect();
+  }
 </script>
 </body>
 </html>

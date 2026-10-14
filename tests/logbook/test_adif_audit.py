@@ -175,3 +175,28 @@ def test_udp_logger_enables_broadcast(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(socket.socket, "sendto", lambda self, data, addr: len(data))
     UdpQsoLogger("127.0.0.1", 2237, format="adif").log_qso(_q())
     assert (socket.SOL_SOCKET, socket.SO_BROADCAST, 1) in opts
+
+
+def test_additive_column_migration_race_is_benign(tmp_path: Path) -> None:
+    """v0.6.14 sweep: two connections upgrading an old DB at once.
+
+    The loser of the race sees ``band`` missing in PRAGMA, then its ALTER
+    hits "duplicate column name" because the winner added it in between.
+    """
+    db = tmp_path / "race.db"
+    with LogbookStore(db) as store:
+        real = store._conn
+
+        class _StalePragma:
+            def execute(self, sql: str, *args: object) -> object:
+                if sql.startswith("PRAGMA table_info"):
+                    return [r for r in real.execute(sql, *args) if r["name"] != "band"]
+                return real.execute(sql, *args)
+
+        store._conn = _StalePragma()  # type: ignore[assignment]
+        try:
+            store._ensure_additive_columns()  # must not raise
+        finally:
+            store._conn = real
+        store.insert(_q(band="6m"))
+        assert store.list_qsos()[0].band == "6m"

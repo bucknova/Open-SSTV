@@ -141,9 +141,21 @@ _SERVER_BANNER = "Open-SSTV"
 _TOKEN_IN_URL = re.compile(r"(token=)[^&\s\"]*", re.IGNORECASE)
 
 
+def token_chars_ok(token: str) -> bool:
+    """True if *token* is printable ASCII (space through ``~``) only.
+
+    v0.6.14 sweep: the page sends the token in an ``Authorization: Bearer``
+    header, and ``fetch()`` throws on any header character above U+00FF —
+    so a non-ASCII token could never authenticate from the browser.
+    Control characters are refused for the same reason.
+    """
+    return all(" " <= c <= "~" for c in token)
+
+
 def token_is_strong(token: str) -> bool:
-    """True if an operator-chosen *token* is long enough to use."""
-    return len(token) >= MIN_TOKEN_LEN
+    """True if an operator-chosen *token* is usable: long enough, and
+    printable ASCII (v0.6.14 sweep) so a browser can send it."""
+    return len(token) >= MIN_TOKEN_LEN and token_chars_ok(token)
 
 
 def _redact(text: str) -> str:
@@ -452,8 +464,9 @@ class RemoteServer:
         self._token_rejected = bool(token) and not token_is_strong(token)
         if self._token_rejected:
             _log.warning(
-                "remote: configured access token is shorter than %d characters; "
-                "using a random token for this session", MIN_TOKEN_LEN,
+                "remote: configured access token is shorter than %d characters "
+                "or not printable ASCII; using a random token for this session",
+                MIN_TOKEN_LEN,
             )
         self._token = (
             token if token and not self._token_rejected else secrets.token_urlsafe(16)
@@ -595,20 +608,29 @@ class RemoteServer:
                         headers={"Retry-After": str(math.ceil(wait))},
                     )
                     return False
-                if self._authed(query):
+                supplied = self._supplied_token(query)
+                if not supplied:
+                    # v0.6.14 sweep: no token at all isn't a guess — it's a
+                    # bookmark / reload without the ?token= link.  Counting
+                    # it let an operator lock themselves out by reloading.
+                    self._json(HTTPStatus.UNAUTHORIZED, {"error": "missing token"})
+                    return False
+                if self._authed(supplied):
                     throttle.success(ip)
                     return True
                 throttle.failure(ip)
                 self._json(HTTPStatus.UNAUTHORIZED, {"error": "invalid or missing token"})
                 return False
 
-            def _authed(self, query: dict[str, list[str]]) -> bool:
-                supplied = ""
+            def _supplied_token(self, query: dict[str, list[str]]) -> str:
                 auth = self.headers.get("Authorization", "")
                 if auth.startswith("Bearer "):
-                    supplied = auth[7:]
-                elif "token" in query:
-                    supplied = query["token"][0]
+                    return auth[7:]
+                if "token" in query:
+                    return query["token"][0]
+                return ""
+
+            def _authed(self, supplied: str) -> bool:
                 # Compare as bytes.  hmac.compare_digest refuses to compare
                 # str containing any non-ASCII character and raises
                 # TypeError — and self.path/headers are latin-1 decoded, so
@@ -1116,4 +1138,4 @@ class RemoteServer:
         return f"http://{self._host}:{self._port}/?token={self._token}"
 
 
-__all__ = ["MIN_TOKEN_LEN", "RemoteServer", "token_is_strong"]
+__all__ = ["MIN_TOKEN_LEN", "RemoteServer", "token_chars_ok", "token_is_strong"]

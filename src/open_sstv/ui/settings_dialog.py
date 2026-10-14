@@ -66,7 +66,7 @@ from open_sstv.radio.serial_rig import (
     SERIAL_RIG_PROTOCOLS,
     create_serial_rig,
 )
-from open_sstv.remote.server import MIN_TOKEN_LEN, token_is_strong
+from open_sstv.remote.server import MIN_TOKEN_LEN, token_chars_ok, token_is_strong
 from open_sstv.templates import TokenContext
 
 #: Combo item role carrying a device's host API (v0.6.14 audit T-L4).
@@ -635,10 +635,7 @@ class SettingsDialog(QDialog):
         token_row.addWidget(self._remote_regen)
         form.addRow("Access token:", token_row)
 
-        self._remote_token_error = QLabel(
-            f"Too short — use at least {MIN_TOKEN_LEN} characters, leave it "
-            "blank, or click Regenerate."
-        )
+        self._remote_token_error = QLabel(self._TOKEN_TOO_SHORT)
         self._remote_token_error.setWordWrap(True)
         self._remote_token_error.setStyleSheet("color: #c0392b; font-size: 11px;")
         self._remote_token_error.setVisible(False)
@@ -736,6 +733,17 @@ class SettingsDialog(QDialog):
         self._remote_live_token = token
         self._update_remote_url()
 
+    _TOKEN_TOO_SHORT = (
+        f"Too short — use at least {MIN_TOKEN_LEN} characters, leave it "
+        "blank, or click Regenerate."
+    )
+    #: v0.6.14 sweep: the browser sends the token in a Bearer header, which
+    #: can't carry characters above U+00FF — such a token never works.
+    _TOKEN_NOT_ASCII = (
+        "Use plain ASCII letters, digits and punctuation only (no accents, "
+        "symbols or emoji), leave it blank, or click Regenerate."
+    )
+
     def _remote_token_ok(self) -> bool:
         token = self._remote_token.text().strip()
         # Only enforced while remote access is on: an upgrader's old short
@@ -745,10 +753,18 @@ class SettingsDialog(QDialog):
             return True
         return not token or token_is_strong(token)
 
+    def _set_remote_token_error_text(self) -> None:
+        """Pick the too-short or not-ASCII message (v0.6.14 sweep)."""
+        token = self._remote_token.text().strip()
+        self._remote_token_error.setText(
+            self._TOKEN_TOO_SHORT if token_chars_ok(token) else self._TOKEN_NOT_ASCII
+        )
+
     def accept(self) -> None:  # noqa: D102
         # v0.6.14 audit S-M2: refuse to save a too-short fixed token — it is
         # the only thing between the network and the rig's PTT.
         if not self._remote_token_ok():
+            self._set_remote_token_error_text()
             self._remote_token_error.setVisible(True)
             tabs = self.findChild(QTabWidget)
             if tabs is not None:
@@ -809,6 +825,8 @@ class SettingsDialog(QDialog):
         # Hide a stale "too short" error as soon as the field is fixed.
         if self._remote_token_ok():
             self._remote_token_error.setVisible(False)
+        else:
+            self._set_remote_token_error_text()  # keep a shown error accurate
         if not self._remote_enabled.isChecked():
             self._remote_url.setText("(enable above to get a link)")
             self._remote_qr.clear()
@@ -842,6 +860,8 @@ class SettingsDialog(QDialog):
             self._remote_qr.clear()
             self._remote_qr.setText(
                 f"Token too short (minimum {MIN_TOKEN_LEN} characters) — no QR"
+                if token_chars_ok(token)
+                else "Token must be plain ASCII — no QR"  # v0.6.14 sweep
             )
             return
         pix = self._render_qr(f"http://{host}:{port}/?token={token}")
