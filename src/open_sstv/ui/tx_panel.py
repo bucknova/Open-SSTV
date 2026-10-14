@@ -65,6 +65,7 @@ from open_sstv.ui.qso_state_widget import QSOStateWidget
 from open_sstv.ui.template_editor import TemplateEditor, ask_overwrite_template
 from open_sstv.ui.template_gallery import TemplateGallery
 from open_sstv.ui.utils import pil_to_pixmap as _pil_to_pixmap
+from open_sstv.ui.utils import scaled_pixmap_for
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -705,17 +706,9 @@ class TxPanel(QWidget):
     def _update_preview_pixmap(self) -> None:
         if self._preview_source is None or self._preview_source.isNull():
             return
-        # HiDPI (v0.6.14 audit UI nit): scaling to the *logical* label size
-        # left a Retina preview at half resolution, upscaled and blurry.
-        # Scale to device pixels and tag the pixmap with the ratio so Qt
-        # draws it 1:1.
-        dpr = self._preview.devicePixelRatioF() or 1.0
-        scaled = self._preview_source.scaled(
-            self._preview.size() * dpr,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        scaled.setDevicePixelRatio(dpr)
+        # HiDPI (v0.6.14 audit UI nit): scale to device pixels, not the
+        # logical label size, so a Retina preview isn't upscaled and blurry.
+        scaled = scaled_pixmap_for(self._preview_source, self._preview)
         annotated = self._paint_target_outline(scaled)
         self._preview.setPixmap(annotated)
         self._update_tx_target_status()

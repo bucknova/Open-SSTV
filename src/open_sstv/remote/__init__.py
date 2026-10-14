@@ -24,7 +24,12 @@ from __future__ import annotations
 from open_sstv.remote.compose import ComposeService
 from open_sstv.remote.control import ControlPlane
 from open_sstv.remote.events import EventHub
-from open_sstv.remote.server import MIN_TOKEN_LEN, RemoteServer, token_is_strong
+from open_sstv.remote.server import (
+    MIN_TOKEN_LEN,
+    RemoteServer,
+    normalise_hosts,
+    token_is_strong,
+)
 from open_sstv.remote.service import GalleryService
 
 __all__ = [
@@ -34,5 +39,6 @@ __all__ = [
     "GalleryService",
     "MIN_TOKEN_LEN",
     "RemoteServer",
+    "normalise_hosts",
     "token_is_strong",
 ]

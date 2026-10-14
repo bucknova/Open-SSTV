@@ -240,7 +240,6 @@ class TestEditFlow:
         coordinator: LogbookCoordinator,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from PySide6.QtWidgets import QDialog
 
         from open_sstv.ui import logbook_dialog as mod
 
@@ -281,7 +280,7 @@ class TestEditAliasing:
         coordinator: LogbookCoordinator,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from PySide6.QtWidgets import QDialog, QMessageBox
+        from PySide6.QtWidgets import QMessageBox
 
         from open_sstv.logbook.store import LogbookStore
         from open_sstv.ui import logbook_dialog as mod

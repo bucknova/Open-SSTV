@@ -188,13 +188,16 @@ class TestJpegDraftDecode:
         from open_sstv.remote import compose as compose_mod
 
         seen: list[tuple[int, int]] = []
-        real = compose_mod.render_template
+        real = compose_mod.build_tx_context
 
-        def spy(template, qso, cfg, ctx):  # noqa: ANN001, ANN202
-            seen.append(ctx.photo_image.size)
-            return real(template, qso, cfg, ctx)
+        # Spy on the decoded photo going *into* the context builder: the
+        # builder may then pre-crop it to the frame (C-M3), which is not
+        # what this test is about.
+        def spy(template, mode, photo, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+            seen.append(photo.size)
+            return real(template, mode, photo, *args, **kwargs)
 
-        monkeypatch.setattr(compose_mod, "render_template", spy)
+        monkeypatch.setattr(compose_mod, "build_tx_context", spy)
         tid = service.list_templates()[0]["id"]
         img = service.render(_photo_bytes((4000, 3000)), tid, {}, Mode.SCOTTIE_S1.value)
         spec = MODE_TABLE[Mode.SCOTTIE_S1]

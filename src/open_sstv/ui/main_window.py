@@ -177,12 +177,13 @@ from open_sstv.radio.rigctld_launcher import (
 )
 from open_sstv.radio.serial_rig import create_serial_rig
 from open_sstv.remote import (
+    MIN_TOKEN_LEN,
     ComposeService,
     ControlPlane,
     EventHub,
-    MIN_TOKEN_LEN,
     GalleryService,
     RemoteServer,
+    normalise_hosts,
     token_is_strong,
 )
 from open_sstv.templates import TokenContext, build_autosave_filename, run_migration
@@ -1359,6 +1360,7 @@ class MainWindow(QMainWindow):
             not want
             or srv.host != cfg.remote_host
             or srv.port != cfg.remote_port
+            or srv.extra_hosts != normalise_hosts(cfg.remote_extra_hosts)
             or token_changed
         ):
             self._stop_remote_server()
@@ -1373,6 +1375,7 @@ class MainWindow(QMainWindow):
                 host=cfg.remote_host,
                 port=cfg.remote_port,
                 token=cfg.remote_token,
+                extra_hosts=cfg.remote_extra_hosts,
                 hub=self._remote_hub,
                 control=self._remote_control,
                 compose=self._remote_compose,
@@ -1944,9 +1947,9 @@ class MainWindow(QMainWindow):
     @Slot(str, str)
     def _on_update_available(self, version: str, url: str) -> None:
         """Show a persistent status-bar link when a newer release is found."""
-        from PySide6.QtWidgets import QLabel
-
         import html  # noqa: PLC0415
+
+        from PySide6.QtWidgets import QLabel
 
         # v0.6.14 audit S-L7: both values came off the network into a
         # link-opening rich-text label — escape them (the worker also

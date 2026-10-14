@@ -23,7 +23,7 @@ import threading
 from collections import OrderedDict
 from typing import TYPE_CHECKING
 
-from open_sstv.core.modes import Mode
+from open_sstv.core.modes import MODE_TABLE, Mode
 from open_sstv.security import MAX_IMAGE_PIXELS
 from open_sstv.templates import manager as template_manager
 from open_sstv.templates.context import build_tx_context

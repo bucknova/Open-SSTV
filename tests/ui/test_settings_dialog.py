@@ -1010,3 +1010,22 @@ class TestV0614RigItems:
         dialog._stop_rigctld()
         proc.kill.assert_called_once()
         assert proc.wait.call_count == 2, "kill() must be followed by a reap"
+
+
+class TestRemoteExtraHosts:
+    """v0.6.14 audit S-L1: tailnet / local-DNS names reach the Host allowlist."""
+
+    def test_round_trips_comma_separated_names(self, qtbot) -> None:
+        cfg = AppConfig(remote_extra_hosts=["shack.tail1234.ts.net"])
+        dlg = SettingsDialog(cfg)
+        qtbot.addWidget(dlg)
+        assert dlg._remote_extra_hosts.text() == "shack.tail1234.ts.net"
+        dlg._remote_extra_hosts.setText(" shack.tail1234.ts.net , , radio.lan ")
+        assert dlg.result_config().remote_extra_hosts == [
+            "shack.tail1234.ts.net",
+            "radio.lan",
+        ]
+
+    def test_grid_square_accepts_eight_characters(self, dialog) -> None:
+        dialog._grid_square.setText("EM29qe78")
+        assert dialog._grid_square.text() == "EM29qe78"

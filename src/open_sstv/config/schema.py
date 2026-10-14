@@ -338,10 +338,16 @@ class AppConfig:
     # 0.0.0.0 blindly" stance, taken to the safe extreme for the spike.
     remote_host: str = "127.0.0.1"
     remote_port: int = 8730
-    # Dev access token.  Empty → the server mints a random one at startup
-    # and logs the full URL (http://host:port/?token=…).  Set a value to
-    # keep a stable URL across restarts.
+    # Access token.  Empty → the server mints a random one at startup.  Set
+    # a value to keep a stable URL across restarts; it must be at least 16
+    # characters (v0.6.14 audit S-M2) or the server ignores it and mints a
+    # random one instead.
     remote_token: str = ""
+    # v0.6.14 audit S-L1: the server refuses requests whose Host header is
+    # not an IP literal, localhost, or this machine's hostname (DNS-rebinding
+    # defence).  List any other names you reach the station by here, e.g. a
+    # Tailscale MagicDNS name ("shack.tail1234.ts.net") or a local DNS name.
+    remote_extra_hosts: list[str] = field(default_factory=list)
     # Phase 3 (control plane): allow a paired browser to *transmit* an
     # image remotely.  SEPARATE from remote_enabled and default OFF — you
     # can allow remote viewing while forbidding remote transmit.  Even when
@@ -546,6 +552,17 @@ class AppConfig:
         else:
             self.gallery_extra_dirs = [
                 str(d) for d in self.gallery_extra_dirs if str(d).strip()
+            ]
+        # Same treatment for remote_extra_hosts (v0.6.14 audit S-L1).
+        if not isinstance(self.remote_extra_hosts, list):
+            _log.warning(
+                "AppConfig: remote_extra_hosts is not a list (%r) — ignoring",
+                self.remote_extra_hosts,
+            )
+            self.remote_extra_hosts = []
+        else:
+            self.remote_extra_hosts = [
+                str(h).strip() for h in self.remote_extra_hosts if str(h).strip()
             ]
 
         # v0.4: normalise rx_capture_prompt; unknown values fall back to

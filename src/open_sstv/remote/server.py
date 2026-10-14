@@ -396,6 +396,11 @@ def _is_known_mode(mode: str) -> bool:
     return mode in {m.value for m in Mode}
 
 
+def normalise_hosts(hosts: Iterable[str]) -> frozenset[str]:
+    """Canonical form for extra Host-header names (lower-case, no trailing dot)."""
+    return frozenset(h.strip().lower().rstrip(".") for h in hosts if h.strip())
+
+
 class RemoteServer:
     """Owns the embedded HTTP server's lifecycle.
 
@@ -455,9 +460,7 @@ class RemoteServer:
         )
         #: Host-header names accepted on top of IP literals and this
         #: machine's own names (S-L1) — e.g. a tailnet DNS name.
-        self._extra_hosts = frozenset(
-            h.strip().lower().rstrip(".") for h in extra_hosts if h.strip()
-        )
+        self._extra_hosts = normalise_hosts(extra_hosts)
         #: Per-IP failed-auth backoff (S-M2).  Lives on the server object so
         #: it survives across connections; reset on restart.
         self._auth_throttle = _AuthThrottle()
@@ -1096,6 +1099,10 @@ class RemoteServer:
     @property
     def token(self) -> str:
         return self._token
+
+    @property
+    def extra_hosts(self) -> frozenset[str]:
+        return self._extra_hosts
 
     @property
     def token_rejected(self) -> bool:

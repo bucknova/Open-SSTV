@@ -201,8 +201,9 @@ class SettingsDialog(QDialog):
 
         self._grid_square = QLineEdit(self._config.grid_square)
         self._grid_square.setPlaceholderText("e.g. EM29")
-        # Maidenhead grid is at most 6 characters (subsquare precision).
-        self._grid_square.setMaxLength(6)
+        # Maidenhead grid: up to 8 characters (extended square), matching
+        # the QSO bar and log dialog (v0.6.14 audit).
+        self._grid_square.setMaxLength(8)
         identity_form.addRow("Grid Square:", self._grid_square)
 
         self._qth = QLineEdit(self._config.qth)
@@ -594,6 +595,21 @@ class SettingsDialog(QDialog):
         # host "0.0.0.0" = bound to the LAN; anything else = loopback only.
         self._remote_lan.setChecked(self._config.remote_host == "0.0.0.0")
         form.addRow(self._remote_lan)
+
+        # v0.6.14 audit S-L1: names other than an IP, localhost or this
+        # machine's hostname are refused (DNS-rebinding defence), so a
+        # Tailscale / local-DNS name has to be listed explicitly.
+        self._remote_extra_hosts = QLineEdit(
+            ", ".join(self._config.remote_extra_hosts)
+        )
+        self._remote_extra_hosts.setPlaceholderText(
+            "e.g. shack.tail1234.ts.net (comma-separated)"
+        )
+        self._remote_extra_hosts.setToolTip(
+            "Extra hostnames you open the remote page by. IP addresses, "
+            "localhost and this computer's own name always work."
+        )
+        form.addRow("Extra hostnames:", self._remote_extra_hosts)
 
         self._remote_port = QSpinBox()
         self._remote_port.setRange(1, 65535)
@@ -2495,6 +2511,11 @@ class SettingsDialog(QDialog):
             remote_host="0.0.0.0" if self._remote_lan.isChecked() else "127.0.0.1",
             remote_port=self._remote_port.value(),
             remote_token=self._remote_token.text().strip(),
+            remote_extra_hosts=[
+                h.strip()
+                for h in self._remote_extra_hosts.text().split(",")
+                if h.strip()
+            ],
             remote_tx_enabled=self._remote_tx.isChecked(),
         )
 
