@@ -367,8 +367,13 @@ def select_anchor(
     lattice (VIS stop-bit residue, MMSSTV's Scottie "starting sync") are
     skipped exactly as an outgoing-gap mismatch would skip them.
 
-    Falls back to the first on-lattice candidate, then to candidate 0,
-    when no pair matches, so a lone candidate still yields a grid.
+    Falls back to the first on-lattice candidate; then, if nothing is on
+    the lattice at all, to the no-hint choice (first well-spaced pair at
+    slot 0) — the hint is built on the *nominal* period, so after a long
+    run of missed syncs under heavy TX/RX clock drift every candidate can
+    sit off it, and the old pair-anchored grid beats calling an arbitrary
+    candidate line 0.  Finally candidate 0, so a lone candidate still
+    yields a grid.
     """
     p = line_period_samples
 
@@ -395,6 +400,9 @@ def select_anchor(
             slot = slot_of(c)
             if slot is not None:
                 return i, slot
+        for i in range(len(candidates) - 1):
+            if gap_ok(i):
+                return i, 0
     return 0, 0
 
 

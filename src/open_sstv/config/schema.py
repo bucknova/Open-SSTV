@@ -130,6 +130,12 @@ class AppConfig:
     # --- Audio ---
     audio_input_device: str | None = None
     audio_output_device: str | None = None
+    #: Host API of the chosen device ("Windows WASAPI", "MME", "Core Audio").
+    #: Windows lists the same card under MME, DirectSound and WASAPI with
+    #: identical names, so the name alone re-resolved a WASAPI pick to its
+    #: MME twin on every launch (v0.6.14 audit T-L4).  Empty = first match.
+    audio_input_host_api: str = ""
+    audio_output_host_api: str = ""
     sample_rate: int = 48_000
 
     # --- TX ---

@@ -510,3 +510,17 @@ def test_sync_candidates_are_unbiased_on_encoder_audio(mode: Mode) -> None:
     err = np.array([cands[np.argmin(np.abs(cands - x))] - x for x in true])
     assert abs(err.mean()) < 2.0
     assert np.abs(err).max() < 8.0
+
+
+def test_select_anchor_off_lattice_hint_falls_back_to_pair_anchor() -> None:
+    """v0.6.14 review: when drift puts every candidate off the nominal hint
+    lattice, anchor on the first well-spaced pair (old behaviour), not on
+    candidate 0."""
+    from open_sstv.core.sync import select_anchor
+
+    p = 1000.0
+    # A spurious early candidate, then a regular run — all ~0.4·P off the
+    # hint lattice, far outside the tolerance.
+    cands = [400, 5400, 6400, 7400, 8400]
+    idx, slot = select_anchor(cands, p, tolerance=0.1 * p, first_slot_hint=0.0)
+    assert (idx, slot) == (1, 0)

@@ -297,7 +297,7 @@ class TestIdentityGroupOnGeneralTab:
         self, dialog: SettingsDialog
     ) -> None:
         assert dialog._grid_square is not None
-        assert dialog._grid_square.maxLength() == 6
+        assert dialog._grid_square.maxLength() == 8  # extended square
 
     def test_qth_widget_exists(self, dialog: SettingsDialog) -> None:
         assert dialog._qth is not None
@@ -618,9 +618,22 @@ class TestRemoteTab:
 
     # --- v0.6.14 audit S-M2 / S-M3 ---
 
+    def test_short_token_ignored_while_remote_disabled(self, qtbot) -> None:
+        """v0.6.14 review: an upgrader's old short token mustn't block
+        saving unrelated settings while remote access is off."""
+        dlg = SettingsDialog(
+            config=AppConfig(callsign="W0AEZ", remote_token="demo"),
+            rig_connected=False,
+        )
+        qtbot.addWidget(dlg)
+        assert not dlg._remote_enabled.isChecked()
+        dlg.accept()
+        assert dlg.result() == dlg.DialogCode.Accepted
+
     def test_short_token_refused_on_save(self, qtbot) -> None:
         dlg = SettingsDialog(config=AppConfig(callsign="W0AEZ"), rig_connected=False)
         qtbot.addWidget(dlg)
+        dlg._remote_enabled.setChecked(True)
         dlg._remote_token.setText("demo")
         dlg.accept()
         assert dlg.result() != dlg.DialogCode.Accepted
@@ -1029,3 +1042,28 @@ class TestRemoteExtraHosts:
     def test_grid_square_accepts_eight_characters(self, dialog) -> None:
         dialog._grid_square.setText("EM29qe78")
         assert dialog._grid_square.text() == "EM29qe78"
+
+
+class TestDeviceHostApi:
+    """v0.6.14 audit T-L4 (review follow-up): the host API is saved and
+    preferred, so a WASAPI pick isn't reselected as its same-named MME twin."""
+
+    def test_saved_host_api_selected_and_round_tripped(self, qtbot, monkeypatch) -> None:
+        from open_sstv.audio.devices import AudioDevice
+        from open_sstv.ui import settings_dialog as mod
+
+        mme = AudioDevice(1, "USB Audio CODEC", "MME", 0, 2, 48000.0)
+        wasapi = AudioDevice(9, "USB Audio CODEC", "Windows WASAPI", 0, 2, 48000.0)
+        monkeypatch.setattr(mod, "list_output_devices", lambda: [mme, wasapi])
+        monkeypatch.setattr(mod, "list_input_devices", lambda: [])
+        monkeypatch.setattr(mod, "list_pipewire_sinks", lambda: [])
+        cfg = AppConfig(
+            audio_output_device="USB Audio CODEC",
+            audio_output_host_api="Windows WASAPI",
+        )
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        assert "WASAPI" in dlg._output_combo.currentText()
+        out = dlg.result_config()
+        assert out.audio_output_device == "USB Audio CODEC"
+        assert out.audio_output_host_api == "Windows WASAPI"

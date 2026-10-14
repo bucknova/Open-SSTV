@@ -230,15 +230,49 @@ def _dev(index: int, api: str = "Core Audio", name: str = "USB Audio CODEC") -> 
     return AudioDevice(index, name, api, 0, 2, 48000.0)
 
 
-def test_output_device_re_resolved_by_name_each_tx(
+def test_output_device_re_resolved_by_name_after_device_loss(
     qapp, image, _fast, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     stale, fresh = _dev(3), _dev(7)
     monkeypatch.setattr(workers, "find_output_device_by_name", lambda n, host_api=None: fresh)
+    monkeypatch.setattr(workers, "list_output_devices", lambda: [fresh])
     w = TxWorker(rig=PttRecorder(), output_device=stale, ptt_delay_s=0)
     w.set_output_device_name("USB Audio CODEC")
+    w.mark_output_device_stale()
     w.transmit(image, Mode.ROBOT_36)
     assert _fast["play"].call_args.kwargs["device"] is fresh
+
+
+def test_output_device_not_requeried_without_device_change(
+    qapp, image, _fast, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v0.6.14 review: no PortAudio/pactl query on every key-up."""
+    dev = _dev(3)
+    lookup = MagicMock(return_value=_dev(7))
+    monkeypatch.setattr(workers, "find_output_device_by_name", lookup)
+    w = TxWorker(rig=PttRecorder(), output_device=dev, ptt_delay_s=0)
+    w.set_output_device_name("USB Audio CODEC")
+    w.transmit(image, Mode.ROBOT_36)
+    lookup.assert_not_called()
+    assert _fast["play"].call_args.kwargs["device"] is dev
+
+
+def test_failed_enumeration_keeps_current_device(
+    qapp, image, _fast, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v0.6.14 review: PortAudio enumeration failing (devices returns [])
+    is not 'the device is gone' — transmit on the current device."""
+    dev = _dev(3)
+    monkeypatch.setattr(workers, "list_output_devices", lambda: [])
+    monkeypatch.setattr(workers, "find_output_device_by_name", lambda n, host_api=None: None)
+    monkeypatch.setattr(workers, "find_pipewire_sink_by_name", lambda n: None)
+    rig = PttRecorder()
+    w = TxWorker(rig=rig, output_device=dev, ptt_delay_s=0)
+    w.set_output_device_name("USB Audio CODEC")
+    w.mark_output_device_stale()
+    w.transmit(image, Mode.ROBOT_36)
+    assert _fast["play"].call_args.kwargs["device"] is dev
+    assert rig.calls and rig.calls[0] is True
 
 
 def test_missing_output_device_refuses_before_keying(
@@ -246,9 +280,11 @@ def test_missing_output_device_refuses_before_keying(
 ) -> None:
     monkeypatch.setattr(workers, "find_output_device_by_name", lambda n, host_api=None: None)
     monkeypatch.setattr(workers, "find_pipewire_sink_by_name", lambda n: None)
+    monkeypatch.setattr(workers, "list_output_devices", lambda: [_dev(5, name="Other")])
     rig = PttRecorder()
     w = TxWorker(rig=rig, output_device=_dev(3), ptt_delay_s=0)
     w.set_output_device_name("USB Audio CODEC")
+    w.mark_output_device_stale()
     log = _signals(w)
     w.transmit(image, Mode.ROBOT_36)
     assert rig.calls == [], "must not key when the TX audio device is gone"

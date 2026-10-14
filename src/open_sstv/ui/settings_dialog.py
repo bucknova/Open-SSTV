@@ -69,6 +69,10 @@ from open_sstv.radio.serial_rig import (
 from open_sstv.remote.server import MIN_TOKEN_LEN, token_is_strong
 from open_sstv.templates import TokenContext
 
+#: Combo item role carrying a device's host API (v0.6.14 audit T-L4).
+_HOST_API_ROLE = Qt.ItemDataRole.UserRole + 1
+
+
 #: Common Hamlib radio models (model_id, display_name).
 _COMMON_RIG_MODELS: list[tuple[int, str]] = [
     (0, "None / Manual"),
@@ -734,6 +738,11 @@ class SettingsDialog(QDialog):
 
     def _remote_token_ok(self) -> bool:
         token = self._remote_token.text().strip()
+        # Only enforced while remote access is on: an upgrader's old short
+        # token must not block saving unrelated settings (the server
+        # ignores a short token anyway and mints a random one).
+        if not self._remote_enabled.isChecked():
+            return True
         return not token or token_is_strong(token)
 
     def accept(self) -> None:  # noqa: D102
@@ -843,6 +852,33 @@ class SettingsDialog(QDialog):
             self._remote_qr.setText("(QR unavailable)")
 
     @staticmethod
+    def _add_device_items(
+        combo: QComboBox,
+        devices: list[AudioDevice],
+        saved_name: str | None,
+        saved_host_api: str,
+    ) -> None:
+        """Add *devices* to *combo* and select the saved one.
+
+        The host API rides along in ``_HOST_API_ROLE`` and is preferred
+        when matching, so a WASAPI pick isn't reselected as its MME twin
+        (same name) — v0.6.14 audit T-L4.
+        """
+        name_match = exact_match = -1
+        for dev in sorted(devices, key=lambda d: d.name.lower()):
+            combo.addItem(f"{dev.name} ({dev.host_api})", dev.name)
+            idx = combo.count() - 1
+            combo.setItemData(idx, dev.host_api, _HOST_API_ROLE)
+            if saved_name and dev.name == saved_name:
+                if name_match < 0:
+                    name_match = idx
+                if exact_match < 0 and saved_host_api and dev.host_api == saved_host_api:
+                    exact_match = idx
+        chosen = exact_match if exact_match >= 0 else name_match
+        if chosen >= 0:
+            combo.setCurrentIndex(chosen)
+
+    @staticmethod
     def _keep_absent_device(combo: QComboBox, saved_name: str | None) -> None:
         """Keep a saved device selectable while it is unplugged.
 
@@ -865,28 +901,22 @@ class SettingsDialog(QDialog):
         # Input device
         self._input_combo = QComboBox()
         self._input_combo.addItem("System default", None)
-        self._input_devices: list[AudioDevice] = []
-        for dev in sorted(list_input_devices(), key=lambda d: d.name.lower()):
-            label = f"{dev.name} ({dev.host_api})"
-            self._input_combo.addItem(label, dev.name)
-            self._input_devices.append(dev)
-            if dev.name == self._config.audio_input_device:
-                self._input_combo.setCurrentIndex(self._input_combo.count() - 1)
+        self._input_devices: list[AudioDevice] = list_input_devices()
+        self._add_device_items(
+            self._input_combo, self._input_devices,
+            self._config.audio_input_device, self._config.audio_input_host_api,
+        )
         self._keep_absent_device(self._input_combo, self._config.audio_input_device)
         form.addRow("Input device:", self._input_combo)
 
         # Output device
         self._output_combo = QComboBox()
         self._output_combo.addItem("System default", None)
-        self._output_devices: list[AudioDevice] = []
-        for dev in sorted(list_output_devices(), key=lambda d: d.name.lower()):
-            label = f"{dev.name} ({dev.host_api})"
-            self._output_combo.addItem(label, dev.name)
-            self._output_devices.append(dev)
-            if dev.name == self._config.audio_output_device:
-                self._output_combo.setCurrentIndex(
-                    self._output_combo.count() - 1
-                )
+        self._output_devices: list[AudioDevice] = list_output_devices()
+        self._add_device_items(
+            self._output_combo, self._output_devices,
+            self._config.audio_output_device, self._config.audio_output_host_api,
+        )
         # PipeWire's own named sinks (e.g. a user's virtual "Radio" routing
         # sink) — empty list on macOS/Windows/no-PipeWire, so this is a
         # no-op there. Not part of the PortAudio list above: PortAudio only
@@ -2436,6 +2466,8 @@ class SettingsDialog(QDialog):
         return AppConfig(
             audio_input_device=self._input_combo.currentData(),
             audio_output_device=self._output_combo.currentData(),
+            audio_input_host_api=self._input_combo.currentData(_HOST_API_ROLE) or "",
+            audio_output_host_api=self._output_combo.currentData(_HOST_API_ROLE) or "",
             sample_rate=self._sample_rate.currentData(),
             default_tx_mode=self._tx_mode.currentData(),
             rig_connection_mode=conn_mode,

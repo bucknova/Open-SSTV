@@ -660,7 +660,8 @@ class MainWindow(QMainWindow):
         explicit_output_device = output_device is not None
         if output_device is None:
             output_device = find_output_device_by_name(
-                self._config.audio_output_device
+                self._config.audio_output_device,
+                host_api=self._config.audio_output_host_api or None,
             )
             # Not a PortAudio/ALSA device by that name — try a PipeWire
             # sink (e.g. a user's virtual "Radio" routing sink). PortAudio
@@ -678,7 +679,8 @@ class MainWindow(QMainWindow):
                 )
         if input_device is None:
             input_device = find_input_device_by_name(
-                self._config.audio_input_device
+                self._config.audio_input_device,
+                host_api=self._config.audio_input_host_api or None,
             )
             if input_device is None and self._config.audio_input_device:
                 self._missing_devices.append(
@@ -2416,13 +2418,17 @@ class MainWindow(QMainWindow):
         # with updated callsign / grid / op-name token values.
         self._tx_panel.set_app_config(self._config)
         new_output = find_output_device_by_name(
-            self._config.audio_output_device
+            self._config.audio_output_device,
+            host_api=self._config.audio_output_host_api or None,
         ) or find_pipewire_sink_by_name(self._config.audio_output_device)
         self._tx_worker.set_output_device(new_output)
         self._tx_worker.set_output_device_name(self._config.audio_output_device)
         self._tx_worker.set_output_gain(self._config.audio_output_gain)
         self._tx_worker.set_ptt_delay(self._config.ptt_delay_s)
-        new_input = find_input_device_by_name(self._config.audio_input_device)
+        new_input = find_input_device_by_name(
+            self._config.audio_input_device,
+            host_api=self._config.audio_input_host_api or None,
+        )
         self._input_device = new_input
         if new_input is None and self._config.audio_input_device:
             # v0.6.14 audit UI-M3: the saved device is unplugged (Settings
@@ -2655,6 +2661,9 @@ class MainWindow(QMainWindow):
         # must not swallow the *next* abort's status message.
         self._tx_error_pending = False
         self._maybe_unlock_rig_controls()
+        # Lift the RX gate here too — a no-op if complete/aborted already
+        # did, or if the TX never keyed (the gate was never raised).
+        self._schedule_rx_resume()
         self._remote_tx_ended()
 
     def _unlock_rig_controls(self) -> None:
@@ -2708,7 +2717,10 @@ class MainWindow(QMainWindow):
             if self.isVisible() and not self._rx_gate_raised:
                 self._request_rx_gate.emit(False)
 
-        QTimer.singleShot(50, _lift)
+        # ``self`` as the context object: Qt drops the callback if the
+        # window is destroyed within the 50 ms (a bare callable then ran on
+        # a deleted MainWindow and raised from the event loop).
+        QTimer.singleShot(50, self, _lift)
 
     @Slot(object, object)
     def _on_tx_image_prepared(self, image: object, mode: object) -> None:
@@ -2843,9 +2855,10 @@ class MainWindow(QMainWindow):
         self._tx_error_pending = True
         # v0.6.14 audit T-M1: NOT a terminal signal — the worker may still
         # be retrying the unkey.  Disconnect stays locked until
-        # ``transmission_finished`` (see _maybe_unlock_rig_controls).
+        # ``transmission_finished`` (see _maybe_unlock_rig_controls), and
+        # RX stays gated until then too: resuming RX here decoded whatever
+        # the receiver heard while the rig was still keyed.
         self._maybe_unlock_rig_controls()
-        self._schedule_rx_resume()
 
     # === RX slots ===
 
@@ -2936,6 +2949,7 @@ class MainWindow(QMainWindow):
         if n <= len(_AUDIO_RECOVERY_DELAYS_S) or n % 10 == 0:
             _log.info("RX audio recovery: attempt %d to restart capture", n)
         self._input_device_needs_relookup = True  # USB re-plug renumbers devices
+        self._tx_worker.mark_output_device_stale()  # ...TX's index too
         self._begin_capture()
         # Success shows up as _on_rx_started.  A failure arrives as
         # error + stopped, and _on_rx_stopped schedules the next attempt.
@@ -2968,7 +2982,10 @@ class MainWindow(QMainWindow):
         # (_on_audio_device_lost sets the flag): sd.query_devices() can
         # block for 50-500 ms on macOS Core Audio after a USB event.
         if self._input_device_needs_relookup and self._config.audio_input_device:
-            fresh = find_input_device_by_name(self._config.audio_input_device)
+            fresh = find_input_device_by_name(
+                self._config.audio_input_device,
+                host_api=self._config.audio_input_host_api or None,
+            )
             if fresh is not None:
                 self._input_device = fresh
             self._input_device_needs_relookup = False
@@ -3031,6 +3048,9 @@ class MainWindow(QMainWindow):
         # Signal _start_once that it must re-resolve the saved device
         # name on the next capture start.
         self._input_device_needs_relookup = True
+        # Same for TX: re-resolve the output device before the next key-up
+        # (v0.6.14 audit T-M5 — only after a loss, not on every TX).
+        self._tx_worker.mark_output_device_stale()
         # An involuntary loss: keep trying to restart capture once the
         # stream has stopped (_on_rx_stopped), rather than waiting for
         # someone to click Start.
