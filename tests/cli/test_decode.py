@@ -115,6 +115,38 @@ def test_cli_rejects_silence_wav(tmp_path: Path) -> None:
     assert not out.exists()
 
 
+def test_cli_empty_wav_is_clean_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """v0.6.14 audit (CLI low): a zero-byte .wav crashed with an EOFError
+    traceback instead of exit 1 + message."""
+    empty = tmp_path / "empty.wav"
+    empty.write_bytes(b"")
+    rc = decode_main([str(empty), "-o", str(tmp_path / "out.png")])
+    assert rc == 1
+    assert "failed to read WAV" in capsys.readouterr().err
+
+
+def test_cli_missing_soundfile_is_clean_error(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.6.14 audit (CLI low): FLAC without ``soundfile`` raised an
+    uncaught ImportError."""
+    import open_sstv.cli.decode as cli_decode
+
+    def _no_soundfile(_path):
+        raise ImportError("FLAC decoding requires the 'soundfile' package.")
+
+    monkeypatch.setattr(cli_decode, "_read_wav", _no_soundfile)
+    flac = tmp_path / "in.flac"
+    flac.write_bytes(b"fLaC")
+    rc = decode_main([str(flac), "-o", str(tmp_path / "out.png")])
+    assert rc == 1
+    assert "soundfile" in capsys.readouterr().err
+
+
 def test_cli_default_output_path(
     robot36_wav: Path,
     monkeypatch: pytest.MonkeyPatch,
