@@ -110,7 +110,7 @@ def _sample_pixels_reference(
     *,
     chroma: bool = False,
 ) -> np.ndarray:
-    """The pre-v0.6.15 per-column loop, verbatim (v0.6.14 audit D-M3).
+    """The pre-v0.6.16 per-column loop, verbatim (v0.6.14 audit D-M3).
 
     ``sample_pixels`` is now vectorised; this frozen copy pins that the
     vectorised version is numerically identical, byte for byte.
