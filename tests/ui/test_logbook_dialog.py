@@ -240,7 +240,6 @@ class TestEditFlow:
         coordinator: LogbookCoordinator,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from PySide6.QtWidgets import QDialog
 
         from open_sstv.ui import logbook_dialog as mod
 
@@ -249,7 +248,8 @@ class TestEditFlow:
         def fake_exec(self: object) -> int:
             # Simulate the operator changing the notes field then Save.
             self._comment.setText("after")  # type: ignore[attr-defined]
-            return int(QDialog.DialogCode.Accepted)
+            self.accept()  # type: ignore[attr-defined]  # runs on_save (C-M9)
+            return int(self.result())  # type: ignore[attr-defined]
 
         monkeypatch.setattr(mod.LogQsoDialog, "exec", fake_exec)
         dlg = LogbookDialog(coordinator)
@@ -280,7 +280,7 @@ class TestEditAliasing:
         coordinator: LogbookCoordinator,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from PySide6.QtWidgets import QDialog, QMessageBox
+        from PySide6.QtWidgets import QMessageBox
 
         from open_sstv.logbook.store import LogbookStore
         from open_sstv.ui import logbook_dialog as mod
@@ -289,7 +289,8 @@ class TestEditAliasing:
 
         def fake_exec(self: object) -> int:
             self._comment.setText("edited-but-never-saved")  # type: ignore[attr-defined]
-            return int(QDialog.DialogCode.Accepted)
+            self.accept()  # type: ignore[attr-defined]  # save fails → stays open
+            return int(self.result())  # type: ignore[attr-defined]
 
         def boom(self: object, qso: object) -> object:
             raise RuntimeError("disk on fire")

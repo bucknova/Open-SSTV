@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Robot 36-specific DSP helpers — Python port of slowrx's video path.
 
-Used by both the batch decoder (``core.decoder._decode_robot36`` /
-``_decode_robot36_line_pair``) and the incremental decoder
-(``core.incremental_decoder._Robot36*IncrementalDecoder``).  Kept in a
-standalone module so the two decoders share the same implementation
-verbatim — the earlier split (batch used a windowed median + PIL,
+Used by both the batch decoder (``core.decoder._decode_robot36``) and the
+incremental decoder (``core.incremental_decoder.Robot36IncrementalDecoder``),
+together with the per-line scan offsets below.  Kept in a standalone
+module so the two decoders share the same implementation verbatim — the earlier split (batch used a windowed median + PIL,
 incremental used its own slowrx port) produced visibly different
 colors for saturated yellow / cyan / green pixels and a whole chain
 of patch-on-patch fixes we eventually gave up on.
@@ -54,9 +53,38 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from open_sstv.core.demod import SSTV_BLACK_HZ, SSTV_WHITE_HZ
+from open_sstv.core.modes import (
+    ROBOT_36_C_SCAN_MS,
+    ROBOT_36_INTER_CH_GAP_MS,
+    ROBOT_36_INTER_CH_PORCH_MS,
+    ROBOT_36_SYNC_MS,
+    ROBOT_36_SYNC_PORCH_MS,
+    ROBOT_36_Y_SCAN_MS,
+)
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
+
+
+# === Per-line layout, relative to the leading edge of the line's sync ===
+#
+#   SYNC 9 | PORCH 3 | Y 88 | SEP 4.5 (1500 even / 2300 odd) | PORCH 1.5 | C 44
+#
+# Every line has its own sync (150 ms period); even lines carry Cr (R-Y),
+# odd lines Cb (B-Y).  This is the layout of the Robot 36 spec, slowrx,
+# MMSSTV, QSSTV, PySSTV and our own encoder.  (Before v0.6.15 the decoders
+# also accepted a 290.5 ms "line pair" layout with no sync on odd lines;
+# no spec or reference implementation emits that, and its auto-detection
+# misfired on a single missed sync — v0.6.14 audit D-H2 — so it is gone.)
+#: One source for the constants that used to be repeated in four places.
+Y_OFFSET_MS: float = ROBOT_36_SYNC_MS + ROBOT_36_SYNC_PORCH_MS
+C_OFFSET_MS: float = (
+    Y_OFFSET_MS + ROBOT_36_Y_SCAN_MS
+    + ROBOT_36_INTER_CH_GAP_MS + ROBOT_36_INTER_CH_PORCH_MS
+)
+Y_SCAN_MS: float = ROBOT_36_Y_SCAN_MS
+C_SCAN_MS: float = ROBOT_36_C_SCAN_MS
+C_END_MS: float = C_OFFSET_MS + C_SCAN_MS
 
 
 #: Half-width of the mean window used for per-pixel frequency reads.
@@ -168,7 +196,12 @@ def ycbcr_to_rgb(
 
 
 __all__ = [
+    "C_END_MS",
+    "C_OFFSET_MS",
+    "C_SCAN_MS",
     "HZ_PER_BYTE",
+    "Y_OFFSET_MS",
+    "Y_SCAN_MS",
     "SAMPLE_HALF",
     "sample_pixel",
     "sample_scan",

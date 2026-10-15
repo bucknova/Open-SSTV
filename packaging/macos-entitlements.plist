@@ -16,10 +16,13 @@
       code signature in <...> '/path/to/_internal/Python' not valid for
       use in process: library load disallowed by system policy
 
-  The JIT / unsigned-memory / dyld-env entitlements are standard for a
-  PyInstaller-packaged Python application and match the set recommended
-  by PyInstaller's own macOS documentation.  They are harmless on
-  builds that don't actually rely on JIT.
+  v0.6.14 audit S-L6: ``allow-dyld-environment-variables`` and
+  ``allow-jit`` were dropped.  Combined with library-validation off and the
+  microphone entitlement, DYLD_INSERT_LIBRARIES let any local process run
+  code inside Open-SSTV and inherit its microphone (TCC) grant.  Nothing
+  here needs either: CPython doesn't JIT, and nothing sets DYLD_* at launch.
+  ``allow-unsigned-executable-memory`` stays — cffi (sounddevice) writes
+  executable callback trampolines.
 
   This file is NOT a substitute for proper Developer ID signing +
   notarization — it just makes ad-hoc signing viable on modern macOS.
@@ -28,13 +31,16 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <!--
+      Needed ONLY while the bundle is ad-hoc signed: each ad-hoc signature
+      has its own identity, so library validation would reject every
+      bundled .so/.dylib.  Remove once Developer ID signing exists (all
+      code then shares one Team ID).
+    -->
     <key>com.apple.security.cs.disable-library-validation</key>
     <true/>
+    <!-- cffi (sounddevice callbacks) allocates executable trampolines. -->
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
-    <true/>
-    <key>com.apple.security.cs.allow-jit</key>
-    <true/>
-    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
     <true/>
     <!--
       Audio input (RX).  Under the hardened runtime, macOS refuses to even

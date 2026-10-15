@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import MISSING, dataclass, field, fields
 from pathlib import Path
+from typing import Any
 
 import platformdirs
 
@@ -57,6 +58,67 @@ def _default_images_dir() -> str:
     return str(base / "open_sstv")
 
 
+def _field_default(f: Any) -> Any:
+    """The declared default for dataclass field *f* (fresh for factories)."""
+    if f.default is not MISSING:
+        return f.default
+    if f.default_factory is not MISSING:
+        return f.default_factory()
+    return None  # pragma: no cover — every AppConfig field has a default
+
+
+def _coerce_scalar(value: Any, kind: str) -> tuple[bool, Any]:
+    """Coerce *value* to the scalar *kind* (``"str"``/``"int"``/``"float"``/
+    ``"bool"``).  Returns ``(ok, coerced)``; ``ok=False`` means the value
+    can't be represented sensibly and the caller should use the default.
+
+    Deliberately conservative: numbers become strings (``callsign = 123``
+    → ``"123"``) and numeric strings become numbers, but a string never
+    becomes a bool (``"false"`` would be truthy) and a bool never becomes
+    a number (``port = true`` is a typo, not ``1``).  Non-finite floats
+    are rejected for both numeric kinds.
+    """
+    if kind == "str":
+        if isinstance(value, str):
+            return True, value
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return True, str(value)
+        return False, None
+    if kind == "bool":
+        return (True, value) if isinstance(value, bool) else (False, None)
+    if isinstance(value, bool):
+        return False, None
+    if isinstance(value, str):
+        try:
+            value = float(value.strip())
+        except ValueError:
+            return False, None
+    if not isinstance(value, (int, float)):
+        return False, None
+    if isinstance(value, float) and not math.isfinite(value):
+        return False, None
+    if kind == "float":
+        return True, float(value)
+    # kind == "int": accept only integral values (4533.0 → 4533).
+    if isinstance(value, float):
+        if not value.is_integer():
+            return False, None
+        return True, int(value)
+    return True, value
+
+
+#: Annotation string → scalar kind for ``_coerce_scalar``.  Annotations
+#: are strings here because of ``from __future__ import annotations``.
+#: ``list[str]`` (gallery_extra_dirs) keeps its dedicated handling below.
+_SCALAR_KINDS: dict[str, tuple[str, bool]] = {
+    "str": ("str", False),
+    "str | None": ("str", True),
+    "int": ("int", False),
+    "float": ("float", False),
+    "bool": ("bool", False),
+}
+
+
 @dataclass
 class AppConfig:
     """Top-level application config, one field per user-facing setting.
@@ -68,6 +130,12 @@ class AppConfig:
     # --- Audio ---
     audio_input_device: str | None = None
     audio_output_device: str | None = None
+    #: Host API of the chosen device ("Windows WASAPI", "MME", "Core Audio").
+    #: Windows lists the same card under MME, DirectSound and WASAPI with
+    #: identical names, so the name alone re-resolved a WASAPI pick to its
+    #: MME twin on every launch (v0.6.14 audit T-L4).  Empty = first match.
+    audio_input_host_api: str = ""
+    audio_output_host_api: str = ""
     sample_rate: int = 48_000
 
     # --- TX ---
@@ -91,6 +159,11 @@ class AppConfig:
     rig_connection_mode: str = RigConnectionMode.MANUAL.value
     rigctld_host: str = "127.0.0.1"
     rigctld_port: int = 4532
+    #: v0.6.14 audit T-L9: which Hamlib PTT the rigctld backend keys —
+    #: "default" (``T 1``, the backend's choice, unchanged behaviour),
+    #: "mic" (``T 2``) or "data" (``T 3``, the rear/USB data input that
+    #: Kenwood ``TX1``-style rigs need for SSTV audio).
+    rigctld_ptt_type: str = "default"
     tci_host: str = "127.0.0.1"
     tci_port: int = 40001
     #: FlexRadio direct control (SmartSDR TCP API).  Host is the radio's
@@ -127,7 +200,7 @@ class AppConfig:
     # v0.3.7: how many seconds without a new decoded line before the RX
     # watchdog abandons an in-progress decode and keeps the partial image.
     # The total-elapsed guard (mode duration × 1.5, min 15 s) is separate
-    # and fires regardless.  10 s is the default; raise in Settings for
+    # and fires regardless.  5 s is the default; raise in Settings for
     # propagation conditions with longer, deeper QSB fading cycles.
     rx_watchdog_timeout_s: int = 5
     # v0.1.18: when True, the completed image is re-decoded in a single pass
@@ -271,10 +344,16 @@ class AppConfig:
     # 0.0.0.0 blindly" stance, taken to the safe extreme for the spike.
     remote_host: str = "127.0.0.1"
     remote_port: int = 8730
-    # Dev access token.  Empty → the server mints a random one at startup
-    # and logs the full URL (http://host:port/?token=…).  Set a value to
-    # keep a stable URL across restarts.
+    # Access token.  Empty → the server mints a random one at startup.  Set
+    # a value to keep a stable URL across restarts; it must be at least 16
+    # characters (v0.6.14 audit S-M2) or the server ignores it and mints a
+    # random one instead.
     remote_token: str = ""
+    # v0.6.14 audit S-L1: the server refuses requests whose Host header is
+    # not an IP literal, localhost, or this machine's hostname (DNS-rebinding
+    # defence).  List any other names you reach the station by here, e.g. a
+    # Tailscale MagicDNS name ("shack.tail1234.ts.net") or a local DNS name.
+    remote_extra_hosts: list[str] = field(default_factory=list)
     # Phase 3 (control plane): allow a paired browser to *transmit* an
     # image remotely.  SEPARATE from remote_enabled and default OFF — you
     # can allow remote viewing while forbidding remote transmit.  Even when
@@ -305,7 +384,36 @@ class AppConfig:
     # binary Network Message protocol (QLog, JTAlert, GridTracker, N1MM).
     udp_log_format: str = "wsjtx"
 
+    def _coerce_field_types(self) -> None:
+        """Coerce every scalar field to its annotated type, field by field.
+
+        v0.6.14 audit C-H1: a hand-edited TOML with one wrong-typed value
+        (``log_level = 5``, ``callsign = 123``) used to raise from the
+        ``.strip()`` / ``.upper()`` calls below — or from ``int()`` on a
+        junk port — and either crash every launch or reset the *whole*
+        config.  Now only the offending field falls back to its default,
+        with a warning naming it, before any validation runs.
+        """
+        for f in fields(self):
+            spec = _SCALAR_KINDS.get(str(f.type))
+            if spec is None:
+                continue
+            kind, nullable = spec
+            value = getattr(self, f.name)
+            if value is None and nullable:
+                continue
+            ok, coerced = _coerce_scalar(value, kind)
+            if not ok:
+                default = _field_default(f)
+                _log.warning(
+                    "AppConfig: %s = %r is not a valid %s — using the "
+                    "default %r", f.name, value, f.type, default,
+                )
+                coerced = default
+            setattr(self, f.name, coerced)
+
     def __post_init__(self) -> None:
+        self._coerce_field_types()
         # v0.1.12: slider ceiling reverted from 500% to 200%.
         # Clamp any stored value so users who raised it to ≤500% on v0.1.11
         # don't get unexpected clipping on next open.
@@ -451,6 +559,17 @@ class AppConfig:
             self.gallery_extra_dirs = [
                 str(d) for d in self.gallery_extra_dirs if str(d).strip()
             ]
+        # Same treatment for remote_extra_hosts (v0.6.14 audit S-L1).
+        if not isinstance(self.remote_extra_hosts, list):
+            _log.warning(
+                "AppConfig: remote_extra_hosts is not a list (%r) — ignoring",
+                self.remote_extra_hosts,
+            )
+            self.remote_extra_hosts = []
+        else:
+            self.remote_extra_hosts = [
+                str(h).strip() for h in self.remote_extra_hosts if str(h).strip()
+            ]
 
         # v0.4: normalise rx_capture_prompt; unknown values fall back to
         # "always" (the most conservative mode — never silently drops a
@@ -526,12 +645,14 @@ class AppConfig:
 
         # PTT lead-in: a negative delay is meaningless and a large one looks
         # like a hang while the rig sits keyed with no audio.
+        # Fallback is the field default (0.2 s), not a different
+        # hard-coded number (v0.6.14 audit nit).
         try:
             ptt_delay = float(self.ptt_delay_s)
         except (TypeError, ValueError):
-            ptt_delay = 0.5
+            ptt_delay = 0.2
         if not math.isfinite(ptt_delay):
-            ptt_delay = 0.5
+            ptt_delay = 0.2
         clamped_ptt = max(0.0, min(5.0, ptt_delay))
         if clamped_ptt != ptt_delay:
             _log.warning(
@@ -613,6 +734,14 @@ class AppConfig:
                 self.rig_tune_mode_policy, list(_VALID_TUNE_MODE_POLICIES),
             )
             self.rig_tune_mode_policy = "voice"
+
+        if self.rigctld_ptt_type not in ("default", "mic", "data"):
+            _log.warning(
+                "AppConfig: unknown rigctld_ptt_type %r (valid: default, "
+                "mic, data) — falling back to 'default'",
+                self.rigctld_ptt_type,
+            )
+            self.rigctld_ptt_type = "default"
 
         ptt_line = (self.rig_ptt_line or "").upper()
         if ptt_line not in _VALID_PTT_LINES:

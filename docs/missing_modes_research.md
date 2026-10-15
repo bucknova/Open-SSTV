@@ -184,7 +184,7 @@ Multiple independent sources (smolgroot decoder constants.ts, brainwagon robot72
 **Architectural similarity:** Robot 72 and Robot 24 Color use an identical line structure with different pixel counts and VIS codes. The Robot 36 decoder cannot be reused for Robot 72 — Robot 36 uses a 4:2:0 interlaced chroma scheme (requiring line-pair chroma averaging), while Robot 72 is fully self-contained per line. Robot 72 requires its own decode path (or can share a decoder with Robot 24 Color if that is parameterized).
 
 **Gotchas:**
-- **Do not reuse the Robot 36 decoder.** The 4:2:0 line-pairing logic in `_decode_robot36` and `_decode_robot36_line_pair` does not apply here.
+- **Do not reuse the Robot 36 decoder.** The 4:2:0 line-pairing logic in `_decode_robot36` does not apply here.
 - Separator 1 is at 1500 Hz; Separator 2 is at 2300 Hz. Both act as frequency markers between channels, not as sync pulses.
 - No chroma averaging between adjacent lines — each line provides independent full-color data.
 - Some sources confusingly refer to Robot 72 as a "4:2:2" mode even though the chroma is not sub-sampled spatially — Cr and Cb each have 320 samples at the same spatial rate as Y. The "4:2:2" label comes from the temporal efficiency compared to RGB modes.
@@ -414,7 +414,7 @@ Robot 8 and 12 BW are the simplest: single-channel (luma only), no porch, direct
 
 Robot 24 Color and Robot 72 are the same line structure (Y+sep+porch+Cr+sep+porch+Cb) and can share a single `_decode_robot72_style(samples, fs, spec)` function with 9 ms sync, 3 ms porch, then three channels separated by 4.5 ms + 1.5 ms gaps.
 
-The existing Robot 36 decoder uses the line-pair format auto-detection (`median sync spacing` trick). The Robot 72 decoder should use the 300 ms sync spacing threshold to distinguish it from Robot 36 (150 ms). Robot 24 Color uses 200 ms spacing, so the three modes can be distinguished by their expected sync period alone, enabling straightforward dispatch before per-mode decode begins.
+The Robot 72 decoder should use the 300 ms sync spacing threshold to distinguish it from Robot 36 (150 ms). Robot 24 Color uses 200 ms spacing, so the three modes can be distinguished by their expected sync period alone, enabling straightforward dispatch before per-mode decode begins.
 
 ### PySSTV encoder coverage and gaps
 

@@ -54,7 +54,11 @@ from PySide6.QtWidgets import (
 from open_sstv import __version__
 from open_sstv.logbook.adif import read_adif_file, write_adif_file
 from open_sstv.logbook.model import QSO
-from open_sstv.ui.log_qso_dialog import LogQsoDialog, format_frequency
+from open_sstv.ui.log_qso_dialog import (
+    LogQsoDialog,
+    format_frequency,
+    qdate_day_start_utc,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -331,10 +335,9 @@ class LogbookDialog(QDialog):
         The pickers show local calendar days, but the store's
         ``time_utc`` column is UTC.  Treating the picked day as UTC
         midnight hid this evening's QSOs for operators west of UTC
-        (audit #5) — a naive datetime ``astimezone()`` interprets it
-        in the system zone, which is what the operator meant.
+        (audit #5).  Shared helper in ``log_qso_dialog``.
         """
-        return datetime(d.year(), d.month(), d.day()).astimezone(UTC)
+        return qdate_day_start_utc(d, local=True)
 
     def _query_kwargs(self) -> dict[str, Any]:
         kw: dict[str, Any] = {}
@@ -472,15 +475,16 @@ class LogbookDialog(QDialog):
     @Slot()
     def _on_new(self) -> None:
         """Manual entry — *Save & New* loops for batch keying."""
+        # v0.6.14 audit C-M9: time/mode/frequency are editable here (paper
+        # log back-entry), and the save runs inside the dialog so a
+        # failure keeps the form open instead of discarding it.
         while True:
             draft = QSO(direction="TX", time_utc=datetime.now(UTC))
-            dlg = LogQsoDialog(draft, allow_save_and_new=True, parent=self)
+            dlg = LogQsoDialog(
+                draft, allow_save_and_new=True, editable_facts=True,
+                on_save=self._coordinator.save_draft, parent=self,
+            )
             if dlg.exec() != QDialog.DialogCode.Accepted:
-                break
-            try:
-                self._coordinator.save_draft(dlg.result_qso())
-            except Exception as exc:  # noqa: BLE001
-                QMessageBox.warning(self, "Save failed", str(exc))
                 break
             self.refresh()
             if not dlg.save_and_new:
@@ -495,13 +499,12 @@ class LogbookDialog(QDialog):
         # result_qso() before store.update() can fail — handing it the
         # model's own row object would leave a failed edit displayed
         # (and exported) as if it were saved.
-        dlg = LogQsoDialog(dataclasses.replace(qso), parent=self)
+        dlg = LogQsoDialog(
+            dataclasses.replace(qso), editable_facts=True,
+            on_save=self._coordinator.store.update, parent=self,
+        )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        try:
-            self._coordinator.store.update(dlg.result_qso())
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "Save failed", str(exc))
         self.refresh()
 
     @Slot()

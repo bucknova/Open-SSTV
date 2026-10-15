@@ -87,10 +87,13 @@ class TokenContext:
 # ---------------------------------------------------------------------------
 
 
-# Regex for each syntax.  Run in a specific order inside ``resolve_tokens``
-# so that ``%%`` processes before ``{...}`` can interfere.
-_PERCENT_TOKEN_RE = re.compile(r"%(rx_tx|ts|[a-z])")
-_NAMED_TOKEN_RE = re.compile(r"\{([a-z_]+)\}")
+# Both syntaxes plus the ``%%`` escape in ONE alternation, applied in a
+# single ``re.sub`` pass.  v0.6.14 audit: the old two-pass resolver
+# re-scanned the output of the ``%x`` pass for ``{name}`` tokens, so a
+# substituted value that happened to contain ``{callsign}`` (a QSO note,
+# or remote-supplied text) was expanded a second time.  One pass means a
+# substituted value is never re-interpreted.
+_TOKEN_RE = re.compile(r"%%|%(rx_tx|ts|[a-z])|\{([a-z_]+)\}")
 
 
 def _percent_table(ctx: TokenContext) -> dict[str, str]:
@@ -138,31 +141,18 @@ def resolve_tokens(pattern: str, ctx: TokenContext) -> str:
     str
         The fully-resolved string with all recognised tokens expanded.
     """
-    # --- Pass 0: escape literal %% before any other processing ---
-    # Use a sentinel that can't collide with user input.
-    SENTINEL = "\x00LITERAL_PERCENT\x00"
-    pattern = pattern.replace("%%", SENTINEL)
-
-    # --- Pass 1: %x tokens ---
     pct_table = _percent_table(ctx)
-
-    def _pct_sub(match: re.Match[str]) -> str:
-        key = match.group(1)
-        return pct_table.get(key, match.group(0))
-
-    pattern = _PERCENT_TOKEN_RE.sub(_pct_sub, pattern)
-
-    # --- Pass 2: {name} tokens ---
     named_table = _named_table(ctx)
 
-    def _named_sub(match: re.Match[str]) -> str:
-        key = match.group(1)
-        return named_table.get(key, match.group(0))
+    def _sub(match: re.Match[str]) -> str:
+        pct_key, named_key = match.group(1), match.group(2)
+        if pct_key is not None:
+            return pct_table.get(pct_key, match.group(0))
+        if named_key is not None:
+            return named_table.get(named_key, match.group(0))
+        return "%"  # the %% escape
 
-    pattern = _NAMED_TOKEN_RE.sub(_named_sub, pattern)
-
-    # --- Restore escaped literal percents ---
-    return pattern.replace(SENTINEL, "%")
+    return _TOKEN_RE.sub(_sub, pattern)
 
 
 # ---------------------------------------------------------------------------
@@ -180,34 +170,16 @@ def resolve_tokens(pattern: str, ctx: TokenContext) -> str:
 _CALLSIGN_PERCENT_KEYS: frozenset[str] = frozenset(["c", "o"])
 _CALLSIGN_NAMED_KEYS: frozenset[str] = frozenset(["callsign", "tocall"])
 
-# Ham-band lookup: Hz lower bound → band label.
-# Covers HF + 6 m + 2 m + 70 cm — all bands where SSTV is common.
-_BAND_EDGES: tuple[tuple[float, str], ...] = (
-    (1_800_000, "160m"),
-    (3_500_000, "80m"),
-    (5_330_500, "60m"),
-    (7_000_000, "40m"),
-    (10_100_000, "30m"),
-    (14_000_000, "20m"),
-    (18_068_000, "17m"),
-    (21_000_000, "15m"),
-    (24_890_000, "12m"),
-    (28_000_000, "10m"),
-    (50_000_000, "6m"),
-    (144_000_000, "2m"),
-    (420_000_000, "70cm"),
-    (902_000_000, "33cm"),
-    (1_240_000_000, "23cm"),
-)
-
-
 def _hz_to_band(freq_hz: float) -> str:
-    """Return the amateur-radio band label for a frequency, or '' if unknown."""
-    band = ""
-    for lower, label in _BAND_EDGES:
-        if freq_hz >= lower:
-            band = label
-    return band
+    """Return the amateur-radio band label for a frequency, or '' if unknown.
+
+    v0.6.14 audit: this used a lower-edges-only table, so any frequency
+    above a band's top (7.5 MHz, 450 MHz) reported the band below.  It now
+    shares ``open_sstv.bands`` with the ADIF exporter: out-of-band → "".
+    """
+    from open_sstv.bands import hz_to_band  # noqa: PLC0415
+
+    return hz_to_band(freq_hz) or ""
 
 
 def _apply_slashed_zero(value: str) -> str:
@@ -253,6 +225,10 @@ def _v3_percent_table(
         # to avoid breaking templates that already use ``%q`` for serial.
         "q": str(qso_state.serial),
         "v": _open_sstv_version(),
+        # Same vocabulary as filename templates (v0.6.14 audit): image
+        # templates only ever render for TX, so the direction is fixed.
+        "ts": str(int(now_utc.timestamp())),
+        "rx_tx": "TX",
     }
     # Multi-char percent tokens
     table["name_o"] = qso_state.tocall_name
@@ -299,12 +275,18 @@ def _v3_named_table(
         "band": band_str,
         "qso_serial": str(qso_state.serial),
         "version": _open_sstv_version(),
+        "timestamp": str(int(now_utc.timestamp())),
+        "direction": "TX",
     }
 
 
-# v0.3 uses a superset regex: matches %c, %name_o, %note, %rx_tx, %ts, etc.
-_V3_PERCENT_TOKEN_RE = re.compile(r"%(name_o|note|rx_tx|ts|[a-z])")
-_V3_NAMED_TOKEN_RE = re.compile(r"\{([a-z_]+)\}")
+# v0.3 uses a superset alternation: %c, %name_o, %note, %rx_tx, %ts, …,
+# ``{name}``, the ``%%`` escape, and a literal backslash-n (``\n``) line
+# break — matched in one pass so substituted values are never re-scanned
+# (v0.6.14 audit: double expansion of ``{callsign}`` inside a note).
+_V3_TOKEN_RE = re.compile(
+    r"%%|\\\\|\\n|%(name_o|note|rx_tx|ts|[a-z])|\{([a-z_]+)\}"
+)
 
 
 def _open_sstv_version() -> str:
@@ -360,9 +342,6 @@ def resolve_text(
     if now_utc is None:
         now_utc = datetime.datetime.now(datetime.UTC)
 
-    SENTINEL = "\x00LITERAL_PERCENT\x00"
-    text = text.replace("%%", SENTINEL)
-
     pct_table = _v3_percent_table(
         qso_state,
         app_config,
@@ -372,11 +351,6 @@ def resolve_text(
         time_format=time_format,
         slashed_zero=slashed_zero,
     )
-
-    def _pct_sub(match: re.Match[str]) -> str:
-        return pct_table.get(match.group(1), match.group(0))
-
-    text = _V3_PERCENT_TOKEN_RE.sub(_pct_sub, text)
 
     named_table = _v3_named_table(
         qso_state,
@@ -388,12 +362,24 @@ def resolve_text(
         slashed_zero=slashed_zero,
     )
 
-    def _named_sub(match: re.Match[str]) -> str:
-        return named_table.get(match.group(1), match.group(0))
+    def _sub(match: re.Match[str]) -> str:
+        pct_key, named_key = match.group(1), match.group(2)
+        if pct_key is not None:
+            return pct_table.get(pct_key, match.group(0))
+        if named_key is not None:
+            return named_table.get(named_key, match.group(0))
+        if match.group(0) == "%%":
+            return "%"
+        if match.group(0) == "\\\\":
+            # ``\\`` is a literal backslash, so text that needs one before
+            # an ``n`` (a Windows path, say) can still be written.
+            return "\\"
+        # A literal backslash-n typed into the (single-line) editor field
+        # is a line break, as the token cheat sheet promises (v0.6.14
+        # audit).  Only template text is scanned, never substituted values.
+        return "\n"
 
-    text = _V3_NAMED_TOKEN_RE.sub(_named_sub, text)
-
-    return text.replace(SENTINEL, "%")
+    return _V3_TOKEN_RE.sub(_sub, text)
 
 
 __all__ = [

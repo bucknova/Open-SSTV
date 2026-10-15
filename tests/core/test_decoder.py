@@ -22,14 +22,22 @@ from open_sstv.core.decoder import (
     Decoder,
     ImageComplete,
     ImageStarted,
-    _decode_robot36_dispatch,
     decode_wav,
 )
-from open_sstv.core.dsp_utils import resample_to
 from open_sstv.core.encoder import encode
 from open_sstv.core.modes import MODE_TABLE, Mode
 
 # === helpers ===
+
+
+def _resample(samples: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
+    """Polyphase resample — test tooling for simulating TX/RX clock drift."""
+    from math import gcd  # noqa: PLC0415
+
+    from scipy.signal import resample_poly  # noqa: PLC0415
+
+    g = gcd(src_rate, dst_rate)
+    return resample_poly(samples, dst_rate // g, src_rate // g)
 
 
 def _to_float(samples_int16: np.ndarray) -> np.ndarray:
@@ -118,100 +126,6 @@ def test_decode_wav_robot36_round_trip_at_44100() -> None:
     assert err < 12.75
 
 
-def _byte_to_freq(b: int) -> float:
-    """Inverse of decoder's freq→luma map (1500..2300 → 0..255)."""
-    return 1500.0 + (2300.0 - 1500.0) * b / 255.0
-
-
-def _synthesize_robot36_line_pair_track(
-    image: Image.Image, fs: int
-) -> np.ndarray:
-    """Fabricate the per-sample frequency track of a canonical broadcast
-    Robot 36 WAV (120 super-lines, no VIS preamble).
-
-    Each super-line encodes two image rows as::
-
-        SYNC (9 ms, 1200 Hz)
-        SYNC PORCH (3 ms, 1500 Hz)
-        Y_even (88 ms @ 0.275 ms/pixel)
-        EVEN SEP (4.5 ms, 1500 Hz)
-        COLOR PORCH (1.5 ms, 1900 Hz)
-        Cr (44 ms @ 0.1375 ms/pixel, averaged across the row pair)
-        SYNC PORCH (3 ms, 1500 Hz)
-        Y_odd (88 ms)
-        ODD SEP (4.5 ms, 2300 Hz)
-        COLOR PORCH (1.5 ms, 1900 Hz)
-        Cb (44 ms, averaged across the row pair)
-
-    Total 290.5 ms per super-line, 120 super-lines → ~34.86 s. Used by
-    the line-pair dispatch test; the production dispatcher should detect
-    this layout from the 290 ms inter-sync spacing and route it through
-    ``_decode_robot36_line_pair``.
-    """
-    ycbcr = np.asarray(image.convert("YCbCr"), dtype=np.int32)
-    height, width, _ = ycbcr.shape
-    assert height % 2 == 0, "Robot 36 needs an even number of rows"
-    y_pix_ms = 88.0 / width
-    c_pix_ms = 44.0 / width
-
-    segments: list[tuple[float, float]] = []
-
-    def push(freq_hz: float, dur_ms: float) -> None:
-        segments.append((freq_hz, dur_ms / 1000.0))
-
-    for row_even in range(0, height, 2):
-        row_odd = row_even + 1
-        push(1200.0, 9.0)  # sync
-        push(1500.0, 3.0)  # sync porch
-        for x in range(width):
-            push(_byte_to_freq(int(ycbcr[row_even, x, 0])), y_pix_ms)
-        push(1500.0, 4.5)  # even separator
-        push(1900.0, 1.5)  # color porch
-        for x in range(width):
-            cr_avg = (int(ycbcr[row_even, x, 2]) + int(ycbcr[row_odd, x, 2])) // 2
-            push(_byte_to_freq(cr_avg), c_pix_ms)
-        push(1500.0, 3.0)  # mid-pair sync porch (no sync)
-        for x in range(width):
-            push(_byte_to_freq(int(ycbcr[row_odd, x, 0])), y_pix_ms)
-        push(2300.0, 4.5)  # odd separator
-        push(1900.0, 1.5)  # color porch
-        for x in range(width):
-            cb_avg = (int(ycbcr[row_even, x, 1]) + int(ycbcr[row_odd, x, 1])) // 2
-            push(_byte_to_freq(cb_avg), c_pix_ms)
-
-    out: list[np.ndarray] = []
-    for freq, dur in segments:
-        n = int(round(dur * fs))
-        if n > 0:
-            out.append(np.full(n, freq, dtype=np.float64))
-    return np.concatenate(out)
-
-
-def test_decode_robot36_line_pair_round_trip_recovers_image() -> None:
-    """Canonical broadcast Robot 36 (120 super-lines, 290 ms spacing) —
-    the layout SimpleSSTV iOS and MMSSTV emit on air. The dispatcher
-    should auto-detect this from the raw sync spacing and route it to
-    ``_decode_robot36_line_pair``.
-    """
-    fs = 48_000
-    original = _make_gradient(320, 240)
-    spec = MODE_TABLE[Mode.ROBOT_36]
-
-    inst = _synthesize_robot36_line_pair_track(original, fs)
-    # No VIS preamble in the synthesized track — call the dispatcher
-    # directly with vis_end=0 to exercise the layout auto-detection.
-    image = _decode_robot36_dispatch(inst, fs, spec, vis_end=0)
-
-    assert image is not None, "line-pair dispatch returned None"
-    assert image.size == (320, 240)
-    assert image.mode == "RGB"
-
-    err = _mean_abs_luma_error(image, original)
-    assert err < 12.75, (
-        f"Robot 36 line-pair round-trip luma error {err:.2f} exceeds 5 % bound"
-    )
-
-
 def test_decode_wav_robot36_solid_color_recovers_color() -> None:
     """A solid 50% grey image should round-trip to a solid 50% grey
     image (within a luma unit or two of quantization noise)."""
@@ -275,7 +189,7 @@ def test_decode_wav_robot36_clock_drift_round_trip() -> None:
     clean = _to_float(encode(original, Mode.ROBOT_36, sample_rate=fs_claimed))
 
     # Resample to the "actual" (slower) rate, then lie to the decoder.
-    drifted = resample_to(clean, fs_claimed, fs_actual)
+    drifted = _resample(clean, fs_claimed, fs_actual)
     result = decode_wav(drifted, fs_claimed)
 
     assert result is not None, "clock-drifted Robot 36 returned None"
@@ -612,9 +526,9 @@ def test_slant_correction_shifts_positions_with_more_data() -> None:
 # === OP2-15: CLI decode_wav skips slant correction for Robot 36 ===
 
 
-def test_decode_robot36_dispatch_apply_slant_correct_false_calls_walk() -> None:
-    """_decode_robot36_dispatch(apply_slant_correct=False) must use
-    walk_sync_grid rather than slant_corrected_line_starts (OP2-15).
+def test_decode_wav_robot36_grid_calls_walk_not_slant() -> None:
+    """decode_wav must build the Robot 36 grid with walk_sync_grid rather
+    than slant_corrected_line_starts (OP2-15).
 
     We verify by patching both grid functions with call counters and
     running a full Robot 36 decode to get a real candidate set.
@@ -639,8 +553,6 @@ def test_decode_robot36_dispatch_apply_slant_correct_false_calls_walk() -> None:
         patch("open_sstv.core.decoder.slant_corrected_line_starts", side_effect=_counting_slant),
         patch("open_sstv.core.decoder.walk_sync_grid", side_effect=_counting_walk),
     ):
-        # decode_wav passes apply_slant_correct=False for Robot 36, so
-        # running a full Robot 36 decode exercises the no-slant path.
         import numpy as np
 
         from open_sstv.core.encoder import encode
@@ -813,3 +725,134 @@ def test_pd_roundtrip_preserves_saturated_chroma() -> None:
         f"blue channel is {interior[..., 2].mean():.1f}, expected ~0 — "
         "saturated chroma was clamped to neutral"
     )
+
+
+# === v0.6.14 audit D-H1 / D-H2 / D-M1 / Decoder.reset ===
+
+
+def _audio_for(mode: Mode, img: Image.Image, fs: int = 48_000) -> np.ndarray:
+    audio = _to_float(encode(img, mode, sample_rate=fs))
+    pad = np.zeros(fs // 4)
+    return np.concatenate([pad, audio, pad])
+
+
+def _blank_syncs(audio: np.ndarray, mode: Mode, lines: list[int], fs: int = 48_000) -> np.ndarray:
+    """Overwrite line ``lines``' sync pulses with a 1500 Hz porch tone."""
+    from open_sstv.core.sync import line0_sync_hint  # noqa: PLC0415
+    from open_sstv.core.vis import detect_vis  # noqa: PLC0415
+
+    spec = MODE_TABLE[mode]
+    _code, vis_end = detect_vis(audio, fs)
+    line0 = line0_sync_hint(spec, fs, vis_end)
+    period = spec.line_time_ms / 1000 * fs
+    n = int(spec.sync_pulse_ms / 1000 * fs) + 96
+    out = audio.copy()
+    t = np.arange(n) / fs
+    for line in lines:
+        s = int(line0 + line * period) - 48
+        out[s:s + n] = 0.5 * np.sin(2 * np.pi * 1500.0 * t)
+    return out
+
+
+def _live_complete(audio: np.ndarray, fs: int = 48_000, chunk: int = 4800):
+    dec = Decoder(fs)
+    events = []
+    for i in range(0, audio.size, chunk):
+        events.extend(dec.feed(audio[i:i + chunk]))
+    return [e for e in events if isinstance(e, ImageComplete)]
+
+
+def _mae(a: Image.Image, b: Image.Image) -> float:
+    return float(np.abs(
+        np.asarray(a.convert("RGB"), dtype=float) - np.asarray(b.convert("RGB"), dtype=float)
+    ).mean())
+
+
+@pytest.mark.parametrize("lines", [[0], [1], [0, 1]])
+def test_missed_leading_sync_martin_m4_batch_and_live(lines: list[int]) -> None:
+    """D-H1: one missed sync on line 0/1 used to lose the image (batch
+    returned None; live never completed)."""
+    img = _make_gradient(320, 128)
+    clean = _audio_for(Mode.MARTIN_M4, img)
+    ref = decode_wav(clean, 48_000)
+    assert ref is not None
+    damaged = _blank_syncs(clean, Mode.MARTIN_M4, lines)
+
+    batch = decode_wav(damaged, 48_000)
+    assert batch is not None
+    assert _mae(batch.image, ref.image) < 2.0
+
+    live = _live_complete(damaged)
+    assert len(live) == 1
+    assert _mae(live[0].image, ref.image) < 2.0
+
+
+@pytest.mark.parametrize("lines", [[0], [1], [2], [0, 1]])
+def test_missed_early_sync_robot36_keeps_chroma_parity(lines: list[int]) -> None:
+    """D-H1 + D-H2: a missed sync among the first three used to send live
+    Robot 36 to the (now removed) line-pair backend (MAE ~32) or stall,
+    and swap Cr/Cb in the batch path. Saturated colour makes a parity
+    swap obvious."""
+    img = Image.new("RGB", (320, 240), (220, 40, 40))
+    clean = _audio_for(Mode.ROBOT_36, img)
+    ref = decode_wav(clean, 48_000)
+    assert ref is not None
+    damaged = _blank_syncs(clean, Mode.ROBOT_36, lines)
+
+    batch = decode_wav(damaged, 48_000)
+    assert batch is not None
+    assert _mae(batch.image, ref.image) < 3.0
+
+    live = _live_complete(damaged)
+    assert len(live) == 1
+    assert _mae(live[0].image, ref.image) < 3.0
+
+
+def test_feed_does_not_reconcatenate_buffer_while_decoding() -> None:
+    """D-M1: in DECODING the incremental backend gets only the new chunk
+    and the retained buffer is never re-joined per feed."""
+    from unittest.mock import patch  # noqa: PLC0415
+
+    img = _make_gradient(320, 128)
+    audio = _audio_for(Mode.MARTIN_M4, img)
+    dec = Decoder(48_000)
+    chunk = 4800
+    pos = 0
+    while dec._state.value == "idle":
+        dec.feed(audio[pos:pos + chunk])
+        pos += chunk
+    fed_sizes: list[int] = []
+    real_feed = dec._incremental_dec.feed
+
+    def spy(x):
+        fed_sizes.append(x.size)
+        return real_feed(x)
+
+    with (
+        patch.object(dec._incremental_dec, "feed", side_effect=spy),
+        patch.object(Decoder, "_joined", side_effect=AssertionError("joined")),
+    ):
+        for _ in range(20):
+            dec.feed(audio[pos:pos + chunk])
+            pos += chunk
+    assert fed_sizes == [chunk] * 20
+    assert dec._buffered == sum(a.size for a in dec._buffer)
+
+
+@pytest.mark.parametrize("chunk", [None, 48_000])
+def test_back_to_back_images_in_one_feed_both_decode(chunk: int | None) -> None:
+    """Decoder.reset low: completion used to drop the rest of the chunk,
+    so a buffer holding two transmissions only yielded the first."""
+    img_a = _make_gradient(320, 128)
+    img_b = Image.new("RGB", (320, 128), (30, 200, 90))
+    audio = np.concatenate([
+        _audio_for(Mode.MARTIN_M4, img_a), _audio_for(Mode.MARTIN_M4, img_b),
+    ])
+    if chunk is None:
+        events = Decoder(48_000).feed(audio)
+        completes = [e for e in events if isinstance(e, ImageComplete)]
+    else:
+        completes = _live_complete(audio, chunk=chunk)
+    assert len(completes) == 2
+    second = np.asarray(completes[1].image, dtype=float)
+    assert np.abs(second - np.array([30, 200, 90])).mean() < 10

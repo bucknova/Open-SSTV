@@ -197,10 +197,14 @@ def capture_desktop(out: Path) -> int:
     grab(LogQsoDialog(q, preview_image=testcard(None, "W1ABC", "Martin M1", 0)),
          "log-qso-dialog", size=(520, 300), settle=6)
 
-    from open_sstv.config.templates import load_templates
-    from open_sstv.ui.template_editor_dialog import TemplateEditorDialog
-    grab(TemplateEditorDialog(load_templates(), mycall="W0AEZ"),
-         "template-editor", size=(980, 620), settle=8)
+    # The v0.2 TemplateEditorDialog was removed; the live editor is the
+    # v0.3 TemplateEditor (shown here on the CQSSTV starter template).
+    from open_sstv.templates.manager import _bundled_templates_dir
+    from open_sstv.templates.toml_io import load_template
+    from open_sstv.ui.template_editor import TemplateEditor
+    grab(TemplateEditor(load_template(_bundled_templates_dir() / "cqsstv.toml"),
+                        app_config=cfg),
+         "template-editor", size=(1280, 780), settle=8)
 
     from open_sstv.ui.image_editor import ImageEditorDialog
     grab(ImageEditorDialog(testcard(None, "W0AEZ", "Martin M1", 2, size=(640, 496)),

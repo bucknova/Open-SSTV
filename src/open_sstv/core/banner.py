@@ -6,8 +6,11 @@ drawn on a copy of the image so the original is never modified.
 
 Layout
 ------
-- **Centre:** "Open-SSTV v{version}"
-- **Right:**  "{callsign}"  (omitted when *callsign* is empty)
+- **Left (flush-left):** "{callsign}" — the §97.119 station ID, always
+  drawn when non-empty.
+- **Right (flush-right):** "Open-SSTV v{version}", falling back to
+  "Open-SSTV" and then to nothing when the space left beside the
+  callsign is too narrow (:func:`resolve_right_side_text`).
 
 The strip sits within the image bounds — dimensions are never changed — so
 every SSTV mode's pixel geometry is preserved exactly.
@@ -41,9 +44,6 @@ _log = logging.getLogger(__name__)
 
 #: Default (small) banner height in pixels — kept for backward compatibility.
 BANNER_HEIGHT: int = 24
-
-#: Right-edge margin (pixels) for the callsign text.
-_CALLSIGN_MARGIN: int = 4
 
 #: Default (small) font size in points.  Raised from 14 pt → 18 pt in v0.1.22
 #: so the default "small" preset fills more of its 24 px strip.

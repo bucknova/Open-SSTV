@@ -67,6 +67,11 @@ def window(
     _suppress_first_launch_dialog: None,
 ) -> MainWindow:
     w = MainWindow(rig=ManualRig())
+    # v0.6.14 audit T-M5: the worker refuses to key when the configured
+    # output device is missing.  These tests use the developer's real
+    # config, whose radio codec usually isn't plugged in — skip the
+    # per-TX re-resolution (play_blocking is mocked anyway).
+    w._tx_worker.set_output_device_name(None)
     qtbot.addWidget(w)  # ensures pytest-qt cleans up the window on test exit
     return w
 
@@ -1144,7 +1149,7 @@ class TestAudioDeviceReplug:
         # Patch find_input_device_by_name to return the fresh device.
         monkeypatch.setattr(
             "open_sstv.ui.main_window.find_input_device_by_name",
-            lambda _name: fresh_device,
+            lambda _name, host_api=None: fresh_device,
         )
 
         # Capture what device index reaches audio_worker.start().
@@ -1774,6 +1779,48 @@ class TestRemoteStatusIndicator:
         window._show_remote_indicator("http://127.0.0.1:8730/?token=demo")
         window._stop_remote_server()
         assert window._remote_status_label.isVisible() is False
+
+    def test_token_markup_is_escaped(self, window: MainWindow) -> None:
+        # v0.6.14 audit (Info): the operator-typed token lands in a rich-text
+        # href; a quote or tag in it must not break out of the attribute.
+        window._show_remote_indicator('http://127.0.0.1:8730/?token=a"b<i>c')
+        text = window._remote_status_label.text()
+        assert 'a"b<i>' not in text
+        assert "a&quot;b&lt;i&gt;c" in text
+
+    def test_short_token_warns_and_does_not_churn(self, window: MainWindow) -> None:
+        # v0.6.14 audit S-M2: a short configured token is replaced by a
+        # random one; the operator is told, and a settings re-apply doesn't
+        # restart the server (the configured token never matches).
+        window._config.remote_enabled = True
+        window._config.remote_host = "127.0.0.1"
+        window._config.remote_port = 0
+        window._config.remote_token = "demo"
+        try:
+            window._apply_remote_server()
+            srv = window._remote_server
+            assert srv is not None and srv.token_rejected
+            assert "plain-ASCII characters" in window.statusBar().currentMessage()
+            assert "demo" != srv.token
+            window._config.remote_port = srv.port  # as a saved config would hold
+            window._apply_remote_server()
+            assert window._remote_server is srv
+        finally:
+            window._stop_remote_server()
+
+
+class TestUpdateNotice:
+    def test_version_and_url_escaped(self, window: MainWindow) -> None:
+        # v0.6.14 audit S-L7: both values come off the network.
+        from PySide6.QtWidgets import QLabel
+
+        window._on_update_available(
+            "9<b>x</b>", 'https://github.com/bucknova/Open-SSTV/releases/"x'
+        )
+        texts = [w.text() for w in window.statusBar().findChildren(QLabel)]
+        notice = next(t for t in texts if "available" in t)
+        assert "<b>x</b>" not in notice and "9&lt;b&gt;x&lt;/b&gt;" in notice
+        assert '/"x' not in notice
 
 
 class TestRemoteTxWiring:

@@ -37,9 +37,11 @@ from __future__ import annotations
 import logging
 
 import numpy as np
-from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QSize, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
+
+from open_sstv.ui.utils import scaled_pixmap_for
 
 _log = logging.getLogger(__name__)
 
@@ -209,10 +211,15 @@ class WaterfallWidget(QWidget):
     def add_tx_column(self, chunk: object) -> None:
         """Append one TX audio chunk to the waterfall (warm palette)."""
         self._check_gui_thread("add_tx_column")
-        arr = np.asarray(chunk, dtype=np.float64).ravel()
-        # TX samples arrive as int16 PCM in [-32768, 32767] — normalise.
-        if arr.size > 0 and np.max(np.abs(arr)) > 1.5:
-            arr = arr / 32768.0
+        raw = np.asarray(chunk)
+        arr = raw.astype(np.float64).ravel()
+        # The PortAudio TX path sends int16 PCM; the TCI path sends float32
+        # already in [-1, 1].  Decide by dtype.  The old "max(abs) > 1.5"
+        # test left quiet int16 chunks (silence, the CW-ID gap) unscaled,
+        # so 1-LSB noise drew at full scale, and it would have divided an
+        # overdriven float chunk by 32768.  (v0.6.14 audit.)
+        if np.issubdtype(raw.dtype, np.integer):
+            arr = arr / float(-np.iinfo(raw.dtype).min)
         self._add_column(arr, warm=True)
 
     def clear(self) -> None:
@@ -262,11 +269,13 @@ class WaterfallWidget(QWidget):
             self._dirty = False
             self.update()
 
-    def paintEvent(self, event) -> None:  # type: ignore[override]  # noqa: ARG002
-        w = self.width()
-        h = self.height()
-        painter = QPainter(self)
+    def _backing_pixmap(self, w: int, h: int) -> QPixmap:
+        """The spectrogram scaled to *w* × *h* logical pixels.
 
+        Scaled at device pixels with the ratio set (``scaled_pixmap_for``),
+        so a 2x display doesn't upscale it a second time and blur it
+        (v0.6.14 audit).
+        """
         # Roll backing buffer so oldest column is at x=0 and newest at x=W-1.
         rolled = np.roll(self._buf, -self._cursor, axis=1)
 
@@ -277,12 +286,16 @@ class WaterfallWidget(QWidget):
             _DISPLAY_WIDTH * 3,
             QImage.Format.Format_RGB888,
         )
-        pixmap = QPixmap.fromImage(img).scaled(
-            w, h,
+        return scaled_pixmap_for(
+            QPixmap.fromImage(img), self, QSize(w, h),
             Qt.AspectRatioMode.IgnoreAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
         )
-        painter.drawPixmap(0, 0, pixmap)
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]  # noqa: ARG002
+        w = self.width()
+        h = self.height()
+        painter = QPainter(self)
+        painter.drawPixmap(0, 0, self._backing_pixmap(w, h))
 
         # Frequency markers.
         bin_hz = self._sample_rate / _FFT_SIZE

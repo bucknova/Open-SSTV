@@ -39,9 +39,20 @@ import logging
 import socket
 import threading
 
+from open_sstv.radio.base import validate_mode_token
 from open_sstv.radio.exceptions import RigCommandError, RigConnectionError
 
 _log = logging.getLogger(__name__)
+
+#: Hamlib ``set_ptt`` values (``RIG_PTT_*``) the PTT-type setting can pick.
+#: v0.6.14 audit T-L9: plain ``T 1`` lets the backend choose, which on
+#: several Kenwood/Yaesu backends means the *mic* input rather than the
+#: rear/USB data port the SSTV audio arrives on.  ``T 3`` asks for data.
+RIGCTLD_PTT_VALUES: dict[str, int] = {
+    "default": 1,  # RIG_PTT_ON — backend's choice (unchanged behaviour)
+    "mic": 2,      # RIG_PTT_ON_MIC
+    "data": 3,     # RIG_PTT_ON_DATA
+}
 
 #: S9 in dBm — Hamlib STRENGTH is relative to this.
 _S9_DBM = -73
@@ -64,10 +75,14 @@ class RigctldClient:
         host: str = DEFAULT_HOST,
         port: int = DEFAULT_PORT,
         timeout_s: float = DEFAULT_TIMEOUT_S,
+        ptt_type: str = "default",
     ) -> None:
         self._host = host
         self._port = port
         self._timeout_s = timeout_s
+        # Unknown values fall back to the historical ``T 1`` so a hand-
+        # edited config can never make keying fail outright.
+        self._ptt_on_value = RIGCTLD_PTT_VALUES.get(ptt_type, 1)
         self._lock = threading.Lock()
         self._sock: socket.socket | None = None
 
@@ -128,7 +143,7 @@ class RigctldClient:
         return (_parse_value(body[0]), passband)
 
     def set_mode(self, mode: str, passband_hz: int) -> None:
-        self._send_recv(f"M {mode} {passband_hz}")
+        self._send_recv(f"M {validate_mode_token(mode)} {int(passband_hz)}")
 
     def get_ptt(self) -> bool:
         # +t → "PTT: 0\nRPRT 0"
@@ -141,7 +156,7 @@ class RigctldClient:
         return _parse_value(body[0]) != "0"
 
     def set_ptt(self, on: bool) -> None:
-        self._send_recv(f"T {1 if on else 0}")
+        self._send_recv(f"T {self._ptt_on_value if on else 0}")
 
     def get_strength(self) -> int:
         # +l STRENGTH → "STRENGTH: -36\nRPRT 0"
@@ -444,4 +459,4 @@ def is_safe_rigctld_arg(value: str | None) -> bool:
     return not value.lstrip().startswith("-")
 
 
-__all__ = ["RigctldClient", "is_safe_rigctld_arg"]
+__all__ = ["RIGCTLD_PTT_VALUES", "RigctldClient", "is_safe_rigctld_arg"]

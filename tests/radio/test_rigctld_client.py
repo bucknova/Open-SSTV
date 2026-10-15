@@ -448,3 +448,35 @@ def test_get_ptt_with_empty_body_raises_rig_error(
     monkeypatch.setattr(client, "_send_recv", lambda command: [])
     with pytest.raises(RigCommandError):
         client.get_ptt()
+
+
+# --- v0.6.14 audit ---
+
+
+def test_unsafe_mode_never_reaches_the_wire(
+    client: RigctldClient, fake: FakeRigctld
+) -> None:
+    """Security info: a newline in a mode would inject a second command
+    (``T 1`` keys the rig)."""
+    with pytest.raises(RigCommandError):
+        client.set_mode("USB\nT 1", 2400)
+    assert not any(c.startswith("T") for c in fake.commands_received)
+
+
+@pytest.mark.parametrize(
+    ("ptt_type", "expected"),
+    [("default", "T 1"), ("mic", "T 2"), ("data", "T 3"), ("bogus", "T 1")],
+)
+def test_ptt_type_selects_the_t_value(
+    fake: FakeRigctld, ptt_type: str, expected: str
+) -> None:
+    """T-L9: the PTT type setting picks Hamlib's RIG_PTT_ON / _MIC / _DATA;
+    the default (and anything unknown) keeps the historical ``T 1``."""
+    c = RigctldClient(host="127.0.0.1", port=fake.port, ptt_type=ptt_type)
+    try:
+        c.set_ptt(True)
+        c.set_ptt(False)
+    finally:
+        c.close()
+    sent = [cmd.lstrip("+") for cmd in fake.commands_received if cmd.lstrip("+").startswith("T")]
+    assert sent == [expected, "T 0"]

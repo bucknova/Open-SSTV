@@ -15,6 +15,8 @@ from __future__ import annotations
 import datetime
 import logging
 import subprocess
+import threading
+from collections.abc import Callable
 
 import serial.tools.list_ports
 
@@ -58,12 +60,18 @@ from open_sstv.radio.band_plan import DATA_MODE_BY_PROTOCOL
 from open_sstv.radio.base import RigConnectionMode
 from open_sstv.radio.exceptions import RigError
 from open_sstv.radio.rigctld import RigctldClient, is_safe_rigctld_arg
+from open_sstv.radio.rigctld_launcher import launch_rigctld, stop_rigctld
 from open_sstv.radio.serial_rig import (
     ICOM_ADDRESSES,
     SERIAL_RIG_PROTOCOLS,
     create_serial_rig,
 )
+from open_sstv.remote.server import MIN_TOKEN_LEN, token_chars_ok, token_is_strong
 from open_sstv.templates import TokenContext
+
+#: Combo item role carrying a device's host API (v0.6.14 audit T-L4).
+_HOST_API_ROLE = Qt.ItemDataRole.UserRole + 1
+
 
 #: Common Hamlib radio models (model_id, display_name).
 _COMMON_RIG_MODELS: list[tuple[int, str]] = [
@@ -105,6 +113,10 @@ class SettingsDialog(QDialog):
     #: ``TxWorker.transmit_test_tone`` via the same queued-signal path as the
     #: Radio panel's Test Tone button.
     test_tone_requested = Signal()
+    #: Carries a zero-arg callable from a background "Test connection"
+    #: thread back to the GUI thread (v0.6.14 audit: the Test buttons used
+    #: to block the GUI for 2–8 s on an unreachable rig).
+    _bg_test_done = Signal(object)
 
     #: Emitted on every TX output gain slider tick so MainWindow can live-push
     #: the value to TxWorker without waiting for OK. Payload is the gain as a
@@ -119,6 +131,7 @@ class SettingsDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self._bg_test_done.connect(self._on_bg_test_done)
         self.setWindowTitle("Settings")
         # 480 px was too narrow for the Radio tab's rigctld group: the
         # group title ("rigctld — Hamlib Daemon"), the wrapped help label,
@@ -192,8 +205,9 @@ class SettingsDialog(QDialog):
 
         self._grid_square = QLineEdit(self._config.grid_square)
         self._grid_square.setPlaceholderText("e.g. EM29")
-        # Maidenhead grid is at most 6 characters (subsquare precision).
-        self._grid_square.setMaxLength(6)
+        # Maidenhead grid: up to 8 characters (extended square), matching
+        # the QSO bar and log dialog (v0.6.14 audit).
+        self._grid_square.setMaxLength(8)
         identity_form.addRow("Grid Square:", self._grid_square)
 
         self._qth = QLineEdit(self._config.qth)
@@ -586,6 +600,21 @@ class SettingsDialog(QDialog):
         self._remote_lan.setChecked(self._config.remote_host == "0.0.0.0")
         form.addRow(self._remote_lan)
 
+        # v0.6.14 audit S-L1: names other than an IP, localhost or this
+        # machine's hostname are refused (DNS-rebinding defence), so a
+        # Tailscale / local-DNS name has to be listed explicitly.
+        self._remote_extra_hosts = QLineEdit(
+            ", ".join(self._config.remote_extra_hosts)
+        )
+        self._remote_extra_hosts.setPlaceholderText(
+            "e.g. shack.tail1234.ts.net (comma-separated)"
+        )
+        self._remote_extra_hosts.setToolTip(
+            "Extra hostnames you open the remote page by. IP addresses, "
+            "localhost and this computer's own name always work."
+        )
+        form.addRow("Extra hostnames:", self._remote_extra_hosts)
+
         self._remote_port = QSpinBox()
         self._remote_port.setRange(1, 65535)
         self._remote_port.setValue(self._config.remote_port)
@@ -593,9 +622,30 @@ class SettingsDialog(QDialog):
 
         self._remote_token = QLineEdit(self._config.remote_token)
         self._remote_token.setPlaceholderText("blank = generate a random one at launch")
-        form.addRow("Access token:", self._remote_token)
+        # v0.6.14 audit S-M2: one click to a strong fixed token, so nobody
+        # has to invent one (operator-chosen tokens were often "demo").
+        self._remote_regen = QPushButton("Regenerate")
+        self._remote_regen.setToolTip(
+            "Fill in a new random token.  Phones using the old link will need "
+            "the new one (scan the QR again)."
+        )
+        self._remote_regen.clicked.connect(self._regenerate_remote_token)
+        token_row = QHBoxLayout()
+        token_row.addWidget(self._remote_token, 1)
+        token_row.addWidget(self._remote_regen)
+        form.addRow("Access token:", token_row)
+
+        self._remote_token_error = QLabel(self._TOKEN_TOO_SHORT)
+        self._remote_token_error.setWordWrap(True)
+        self._remote_token_error.setStyleSheet("color: #c0392b; font-size: 11px;")
+        self._remote_token_error.setVisible(False)
+        form.addRow(self._remote_token_error)
+        #: The running server's token (set by MainWindow), so a blank (auto)
+        #: token still gets a scannable QR.
+        self._remote_live_token = ""
 
         self._remote_url = QLabel()
+        self._remote_url.setTextFormat(Qt.PlainText)  # token text is never markup
         self._remote_url.setWordWrap(True)
         self._remote_url.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._remote_url.setStyleSheet("font-family: monospace; font-size: 11px;")
@@ -635,6 +685,19 @@ class SettingsDialog(QDialog):
         tx_note.setWordWrap(True)
         tx_note.setStyleSheet("color: gray; font-size: 10px;")
         tx_form.addWidget(tx_note)
+        # v0.6.14 audit S-M3: there's no TLS yet, so with LAN access on the
+        # token crosses the network in cleartext on every request.
+        self._remote_lan_tx_warning = QLabel(
+            "⚠ Network access + remote transmit: the link is <b>not encrypted</b>. "
+            "Anyone who can watch traffic on this network can read the token "
+            "and key your rig.  Use it only on a network you trust (your home "
+            "LAN or a private VPN such as WireGuard/Tailscale) — never on "
+            "public or shared Wi-Fi."
+        )
+        self._remote_lan_tx_warning.setTextFormat(Qt.RichText)
+        self._remote_lan_tx_warning.setWordWrap(True)
+        self._remote_lan_tx_warning.setStyleSheet("color: #c0392b; font-size: 11px;")
+        tx_form.addWidget(self._remote_lan_tx_warning)
         layout.addWidget(tx_group)
         layout.addStretch(1)
 
@@ -642,8 +705,76 @@ class SettingsDialog(QDialog):
         self._remote_lan.toggled.connect(self._update_remote_url)
         self._remote_port.valueChanged.connect(self._update_remote_url)
         self._remote_token.textChanged.connect(self._update_remote_url)
+        self._remote_lan.toggled.connect(self._update_remote_warnings)
+        self._remote_tx.toggled.connect(self._update_remote_warnings)
+        self._remote_enabled.toggled.connect(self._update_remote_warnings)
         self._update_remote_url()
+        self._update_remote_warnings()
         return tab
+
+    @Slot()
+    def _update_remote_warnings(self) -> None:
+        """S-M3: show the cleartext warning only when it applies."""
+        self._remote_lan_tx_warning.setVisible(
+            self._remote_enabled.isChecked()
+            and self._remote_lan.isChecked()
+            and self._remote_tx.isChecked()
+        )
+
+    @Slot()
+    def _regenerate_remote_token(self) -> None:
+        """Fill the token field with a fresh 128-bit random token (S-M2)."""
+        import secrets  # noqa: PLC0415
+
+        self._remote_token.setText(secrets.token_urlsafe(16))
+
+    def set_remote_live_token(self, token: str) -> None:
+        """Tell the Remote tab which token the running server is using."""
+        self._remote_live_token = token
+        self._update_remote_url()
+
+    _TOKEN_TOO_SHORT = (
+        f"Too short — use at least {MIN_TOKEN_LEN} characters, leave it "
+        "blank, or click Regenerate."
+    )
+    #: v0.6.14 sweep: the browser sends the token in a Bearer header, which
+    #: can't carry characters above U+00FF — such a token never works.
+    _TOKEN_NOT_ASCII = (
+        "Use plain ASCII letters, digits and punctuation only (no accents, "
+        "symbols or emoji), leave it blank, or click Regenerate."
+    )
+
+    def _remote_token_ok(self) -> bool:
+        token = self._remote_token.text().strip()
+        # Only enforced while remote access is on: an upgrader's old short
+        # token must not block saving unrelated settings (the server
+        # ignores a short token anyway and mints a random one).
+        if not self._remote_enabled.isChecked():
+            return True
+        return not token or token_is_strong(token)
+
+    def _set_remote_token_error_text(self) -> None:
+        """Pick the too-short or not-ASCII message (v0.6.14 sweep)."""
+        token = self._remote_token.text().strip()
+        self._remote_token_error.setText(
+            self._TOKEN_TOO_SHORT if token_chars_ok(token) else self._TOKEN_NOT_ASCII
+        )
+
+    def accept(self) -> None:  # noqa: D102
+        # v0.6.14 audit S-M2: refuse to save a too-short fixed token — it is
+        # the only thing between the network and the rig's PTT.
+        if not self._remote_token_ok():
+            self._set_remote_token_error_text()
+            self._remote_token_error.setVisible(True)
+            tabs = self.findChild(QTabWidget)
+            if tabs is not None:
+                for i in range(tabs.count()):
+                    if tabs.tabText(i) == "Remote":
+                        tabs.setCurrentIndex(i)
+                        break
+            self._remote_token.setFocus()
+            return
+        super().accept()
 
     @staticmethod
     def _detect_lan_ip() -> str:
@@ -691,6 +822,11 @@ class SettingsDialog(QDialog):
     @Slot()
     def _update_remote_url(self) -> None:
         """Refresh the browse-URL hint and QR from the Remote-tab widgets."""
+        # Hide a stale "too short" error as soon as the field is fixed.
+        if self._remote_token_ok():
+            self._remote_token_error.setVisible(False)
+        else:
+            self._set_remote_token_error_text()  # keep a shown error accurate
         if not self._remote_enabled.isChecked():
             self._remote_url.setText("(enable above to get a link)")
             self._remote_qr.clear()
@@ -699,13 +835,34 @@ class SettingsDialog(QDialog):
         host = self._detect_lan_ip() if self._remote_lan.isChecked() else "127.0.0.1"
         port = self._remote_port.value()
         token = self._remote_token.text().strip()
+        # v0.6.14 audit S-M2: a blank token is the recommended (random)
+        # setting, so it gets a QR too — from the running server's token, as
+        # long as Save won't restart the server under a new one (it does if
+        # the binding changes).
+        binding_unchanged = (
+            self._config.remote_enabled
+            and port == self._config.remote_port
+            and (self._config.remote_host == "0.0.0.0") == self._remote_lan.isChecked()
+            and not token_is_strong(self._config.remote_token)
+        )
+        if not token and self._remote_live_token and binding_unchanged:
+            token = self._remote_live_token
         tok = token if token else "‹auto›"
         self._remote_url.setText(f"http://{host}:{port}/?token={tok}")
-        # A scannable QR needs the real token; a blank (auto) token isn't
-        # known until the server starts, so nudge toward setting one.
         if not token:
             self._remote_qr.clear()
-            self._remote_qr.setText("Set a token above for a scannable code")
+            self._remote_qr.setText(
+                "A random token is made when the server starts — the QR shows "
+                "here after Save (or click Regenerate)"
+            )
+            return
+        if not token_is_strong(token):
+            self._remote_qr.clear()
+            self._remote_qr.setText(
+                f"Token too short (minimum {MIN_TOKEN_LEN} characters) — no QR"
+                if token_chars_ok(token)
+                else "Token must be plain ASCII — no QR"  # v0.6.14 sweep
+            )
             return
         pix = self._render_qr(f"http://{host}:{port}/?token={token}")
         if pix is not None:
@@ -714,6 +871,54 @@ class SettingsDialog(QDialog):
         else:
             self._remote_qr.setText("(QR unavailable)")
 
+    @staticmethod
+    def _add_device_items(
+        combo: QComboBox,
+        devices: list[AudioDevice],
+        saved_name: str | None,
+        saved_host_api: str,
+    ) -> None:
+        """Add *devices* to *combo* and select the saved one.
+
+        The host API rides along in ``_HOST_API_ROLE`` and is preferred
+        when matching, so a WASAPI pick isn't reselected as its MME twin
+        (same name) — v0.6.14 audit T-L4.
+        """
+        name_match = exact_match = -1
+        for dev in sorted(devices, key=lambda d: d.name.lower()):
+            combo.addItem(f"{dev.name} ({dev.host_api})", dev.name)
+            idx = combo.count() - 1
+            combo.setItemData(idx, dev.host_api, _HOST_API_ROLE)
+            if saved_name and dev.name == saved_name:
+                if name_match < 0:
+                    name_match = idx
+                if exact_match < 0 and saved_host_api and dev.host_api == saved_host_api:
+                    exact_match = idx
+        chosen = exact_match if exact_match >= 0 else name_match
+        if chosen >= 0:
+            combo.setCurrentIndex(chosen)
+
+    @staticmethod
+    def _keep_absent_device(
+        combo: QComboBox, saved_name: str | None, saved_host_api: str = ""
+    ) -> None:
+        """Keep a saved device selectable while it is unplugged.
+
+        v0.6.14 audit UI-M3: a USB codec that was off or unplugged when
+        Settings opened matched no combo entry, so the combo sat on
+        "System default" and OK, pressed for any unrelated change,
+        overwrote the saved name.  The device is now listed as
+        "<name> (not connected)" with the saved name as its data, so OK
+        keeps it and capture picks it up again once it's plugged back in.
+        """
+        if not saved_name or combo.findData(saved_name) >= 0:
+            return
+        combo.addItem(f"{saved_name} (not connected)", saved_name)
+        # Keep the saved host API too, or OK while unplugged would erase it
+        # and the replugged device re-resolve to its MME twin (T-L4).
+        combo.setItemData(combo.count() - 1, saved_host_api, _HOST_API_ROLE)
+        combo.setCurrentIndex(combo.count() - 1)
+
     def _build_audio_tab(self) -> QWidget:
         tab = QWidget()
         form = QFormLayout(tab)
@@ -721,27 +926,25 @@ class SettingsDialog(QDialog):
         # Input device
         self._input_combo = QComboBox()
         self._input_combo.addItem("System default", None)
-        self._input_devices: list[AudioDevice] = []
-        for dev in sorted(list_input_devices(), key=lambda d: d.name.lower()):
-            label = f"{dev.name} ({dev.host_api})"
-            self._input_combo.addItem(label, dev.name)
-            self._input_devices.append(dev)
-            if dev.name == self._config.audio_input_device:
-                self._input_combo.setCurrentIndex(self._input_combo.count() - 1)
+        self._input_devices: list[AudioDevice] = list_input_devices()
+        self._add_device_items(
+            self._input_combo, self._input_devices,
+            self._config.audio_input_device, self._config.audio_input_host_api,
+        )
+        self._keep_absent_device(
+            self._input_combo, self._config.audio_input_device,
+            self._config.audio_input_host_api,
+        )
         form.addRow("Input device:", self._input_combo)
 
         # Output device
         self._output_combo = QComboBox()
         self._output_combo.addItem("System default", None)
-        self._output_devices: list[AudioDevice] = []
-        for dev in sorted(list_output_devices(), key=lambda d: d.name.lower()):
-            label = f"{dev.name} ({dev.host_api})"
-            self._output_combo.addItem(label, dev.name)
-            self._output_devices.append(dev)
-            if dev.name == self._config.audio_output_device:
-                self._output_combo.setCurrentIndex(
-                    self._output_combo.count() - 1
-                )
+        self._output_devices: list[AudioDevice] = list_output_devices()
+        self._add_device_items(
+            self._output_combo, self._output_devices,
+            self._config.audio_output_device, self._config.audio_output_host_api,
+        )
         # PipeWire's own named sinks (e.g. a user's virtual "Radio" routing
         # sink) — empty list on macOS/Windows/no-PipeWire, so this is a
         # no-op there. Not part of the PortAudio list above: PortAudio only
@@ -756,6 +959,10 @@ class SettingsDialog(QDialog):
                 self._output_combo.setCurrentIndex(
                     self._output_combo.count() - 1
                 )
+        self._keep_absent_device(
+            self._output_combo, self._config.audio_output_device,
+            self._config.audio_output_host_api,
+        )
         form.addRow("Output device:", self._output_combo)
 
         # Sample rate
@@ -771,11 +978,13 @@ class SettingsDialog(QDialog):
         gain_group = QGroupBox("Software Gain")
         gain_layout = QFormLayout(gain_group)
 
-        # Input gain slider (0–200% in 1% steps)
+        # Input gain slider (0–200% in 1% steps).  round(), not int():
+        # 0.29 * 100 is 28.999…, and truncating it ratcheted the saved gain
+        # down 1 % on every OK (v0.6.14 audit).
         in_row = QHBoxLayout()
         self._input_gain_slider = QSlider(Qt.Orientation.Horizontal)
         self._input_gain_slider.setRange(0, 200)
-        self._input_gain_slider.setValue(int(self._config.audio_input_gain * 100))
+        self._input_gain_slider.setValue(round(self._config.audio_input_gain * 100))
         self._input_gain_label = QLabel(f"{self._config.audio_input_gain * 100:.0f}%")
         self._input_gain_label.setFixedWidth(45)
         self._input_gain_slider.valueChanged.connect(
@@ -791,7 +1000,7 @@ class SettingsDialog(QDialog):
         out_row = QHBoxLayout()
         self._output_gain_slider = QSlider(Qt.Orientation.Horizontal)
         self._output_gain_slider.setRange(0, 200 if _overdrive_on else 100)
-        self._output_gain_slider.setValue(int(self._config.audio_output_gain * 100))
+        self._output_gain_slider.setValue(round(self._config.audio_output_gain * 100))
         self._output_gain_label = QLabel(f"{self._config.audio_output_gain * 100:.0f}%")
         self._output_gain_label.setFixedWidth(45)
         self._output_gain_slider.valueChanged.connect(
@@ -919,8 +1128,7 @@ class SettingsDialog(QDialog):
         self._incremental_check.setToolTip(
             "Decodes each line as its sync pulse arrives instead of\n"
             "reprocessing the whole buffer on every flush.\n\n"
-            "Covers Scottie, Martin, PD, Wraase SC2, Pasokon, and Robot 36\n"
-            "(both per-line and line-pair wire formats, auto-detected).\n"
+            "Covers Scottie, Martin, PD, Wraase SC2, Pasokon, and Robot 36.\n"
             "Roughly a 50× CPU reduction on long receives, and keeps the\n"
             "decoder ahead of real-time on slower machines where the batch\n"
             "path falls behind mid-image.\n\n"
@@ -1149,6 +1357,21 @@ class SettingsDialog(QDialog):
             "mode will reject it (shown as a tune-failed message)."
         )
         rigctld_form.addRow("SSTV mode:", self._rigctld_tune_mode_combo)
+
+        # v0.6.14 audit T-L9: which PTT input rigctld keys.
+        self._rigctld_ptt_type_combo = QComboBox()
+        self._rigctld_ptt_type_combo.addItem("Default (T 1 — rig's choice)", "default")
+        self._rigctld_ptt_type_combo.addItem("Mic input (T 2)", "mic")
+        self._rigctld_ptt_type_combo.addItem("Data / rear input (T 3)", "data")
+        idx = self._rigctld_ptt_type_combo.findData(self._config.rigctld_ptt_type)
+        if idx >= 0:
+            self._rigctld_ptt_type_combo.setCurrentIndex(idx)
+        self._rigctld_ptt_type_combo.setToolTip(
+            "Which transmit input rigctld keys.  Default leaves it to the\n"
+            "Hamlib backend.  If your rig transmits but SSTV audio from the\n"
+            "USB/rear port is silent (common on Kenwood), pick Data."
+        )
+        rigctld_form.addRow("PTT type:", self._rigctld_ptt_type_combo)
 
         self._test_btn = QPushButton("Test rigctld Connection")
         self._test_btn.clicked.connect(self._test_connection)
@@ -1471,6 +1694,45 @@ class SettingsDialog(QDialog):
             if addr is not None:
                 self._civ_address_spin.setValue(addr)
 
+    def _run_test_in_background(
+        self,
+        button: QPushButton,
+        work: Callable[[], object],
+        on_done: Callable[[bool, object], None],
+    ) -> None:
+        """Run a blocking rig test off the GUI thread (v0.6.14 audit).
+
+        *work* runs on a daemon thread; ``on_done(ok, result_or_exc)``
+        runs back on the GUI thread via the queued ``_bg_test_done``
+        signal.  The button is disabled meanwhile so a second click can't
+        open a second connection to the same port.
+        """
+        label = button.text()
+        button.setEnabled(False)
+        button.setText("Testing…")
+
+        def _finish(ok: bool, value: object) -> None:
+            button.setEnabled(True)
+            button.setText(label)
+            on_done(ok, value)
+
+        def _thread() -> None:
+            try:
+                value: object = work()
+                ok = True
+            except Exception as exc:  # noqa: BLE001 — reported on the GUI thread
+                value, ok = exc, False
+            try:
+                self._bg_test_done.emit(lambda: _finish(ok, value))
+            except RuntimeError:
+                pass  # dialog already destroyed — nobody to tell
+
+        threading.Thread(target=_thread, name="settings-rig-test", daemon=True).start()
+
+    @Slot(object)
+    def _on_bg_test_done(self, fn: object) -> None:
+        fn()  # type: ignore[operator]
+
     def _test_serial_connection(self) -> None:
         """Try to open and ping via the direct serial backend."""
         proto = self._serial_protocol_combo.currentText()
@@ -1484,45 +1746,56 @@ class SettingsDialog(QDialog):
             )
             return
 
-        try:
+        civ = self._civ_address_spin.value()
+        ptt_line = self._ptt_line_combo.currentData() or "DTR"
+
+        def _work() -> tuple[int, str]:
             rig = create_serial_rig(
                 protocol=proto,
                 port=port,
                 baud_rate=baud if baud else 9600,
-                ci_v_address=self._civ_address_spin.value(),
-                ptt_line=self._ptt_line_combo.currentData() or "DTR",
+                ci_v_address=civ,
+                ptt_line=ptt_line,
             )
             rig.open()
-            rig.ping()
-            freq = rig.get_freq()
-            mode, _ = rig.get_mode()
-            rig.close()
+            try:
+                rig.ping()
+                freq = rig.get_freq()
+                mode, _ = rig.get_mode()
+            finally:
+                rig.close()
+            return freq, mode
 
-            info_parts = [f"Connected via {proto} on {port}."]
-            if freq > 0:
-                info_parts.append(f"Frequency: {freq / 1_000_000:.6f} MHz")
-            if mode:
-                info_parts.append(f"Mode: {mode}")
-            QMessageBox.information(
-                self, "Connection successful", "\n".join(info_parts),
-            )
-            self._serial_status.setText("Connection OK")
-            self._serial_status.setStyleSheet("color: green;")
-        except RigError as exc:
-            QMessageBox.warning(
-                self, "Connection failed",
-                f"Could not connect via {proto} on {port}.\n\n"
-                f"Error: {exc}",
-            )
+        def _done(ok: bool, value: object) -> None:
+            if ok:
+                freq, mode = value  # type: ignore[misc]
+                info_parts = [f"Connected via {proto} on {port}."]
+                if freq > 0:
+                    info_parts.append(f"Frequency: {freq / 1_000_000:.6f} MHz")
+                if mode:
+                    info_parts.append(f"Mode: {mode}")
+                QMessageBox.information(
+                    self, "Connection successful", "\n".join(info_parts),
+                )
+                self._serial_status.setText("Connection OK")
+                self._serial_status.setStyleSheet("color: green;")
+                return
+            exc = value
+            if isinstance(exc, RigError):
+                QMessageBox.warning(
+                    self, "Connection failed",
+                    f"Could not connect via {proto} on {port}.\n\n"
+                    f"Error: {exc}",
+                )
+            else:
+                QMessageBox.warning(
+                    self, "Connection failed",
+                    f"Unexpected error:\n\n{exc}",
+                )
             self._serial_status.setText(f"Failed: {exc}")
             self._serial_status.setStyleSheet("color: red;")
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(
-                self, "Connection failed",
-                f"Unexpected error:\n\n{exc}",
-            )
-            self._serial_status.setText(f"Failed: {exc}")
-            self._serial_status.setStyleSheet("color: red;")
+
+        self._run_test_in_background(self._serial_test_btn, _work, _done)
 
     def _build_images_tab(self) -> QWidget:
         tab = QWidget()
@@ -1723,27 +1996,37 @@ class SettingsDialog(QDialog):
         """Try to connect and ping the rigctld daemon at the current settings."""
         host = self._rigctld_host.text().strip()
         port = self._rigctld_port.value()
-        try:
-            client = RigctldClient(host=host, port=port)
-            client.open()
-            client.ping()
-            freq = client.get_freq()
-            mode, _ = client.get_mode()
-            client.close()
-            QMessageBox.information(
-                self,
-                "Connection successful",
-                f"Connected to rigctld at {host}:{port}.\n\n"
-                f"Frequency: {freq / 1_000_000:.6f} MHz\n"
-                f"Mode: {mode}",
-            )
-        except Exception as exc:  # noqa: BLE001
+        ptt_type = self._rigctld_ptt_type_combo.currentData() or "default"
+
+        def _work() -> tuple[int, str]:
+            client = RigctldClient(host=host, port=port, ptt_type=ptt_type)
+            try:
+                client.open()
+                client.ping()
+                freq = client.get_freq()
+                mode, _ = client.get_mode()
+            finally:
+                client.close()
+            return freq, mode
+
+        def _done(ok: bool, value: object) -> None:
+            if ok:
+                freq, mode = value  # type: ignore[misc]
+                QMessageBox.information(
+                    self,
+                    "Connection successful",
+                    f"Connected to rigctld at {host}:{port}.\n\n"
+                    f"Frequency: {freq / 1_000_000:.6f} MHz\n"
+                    f"Mode: {mode}",
+                )
+                return
             # Catch *everything*, not just RigError: a non-RigError escaping
             # this slot leaves the button looking completely dead (no dialog,
             # and on a Windows GUI build the traceback goes to a stderr that
             # doesn't exist).  A diagnostic button must always say something.
+            exc = value
             _log.warning(
-                "rigctld connection test to %s:%d failed", host, port, exc_info=True
+                "rigctld connection test to %s:%d failed: %r", host, port, exc
             )
             QMessageBox.warning(
                 self,
@@ -1753,6 +2036,8 @@ class SettingsDialog(QDialog):
                 "Make sure rigctld is running, or use the launcher above.\n"
                 "Enable diagnostics logging for the full details.",
             )
+
+        self._run_test_in_background(self._test_btn, _work, _done)
 
     def _test_flex_connection(self) -> None:
         """Open a real SmartSDR session and report what the radio says."""
@@ -1767,21 +2052,33 @@ class SettingsDialog(QDialog):
                 "Enter the FlexRadio's IP address first.",
             )
             return
-        rig = FlexRig(host, port, slice_index=slice_index)
-        try:
-            rig.open()
-            freq = rig.get_freq()
-            mode, _ = rig.get_mode()
-            QMessageBox.information(
-                self,
-                "Connection successful",
-                f"Connected to FlexRadio at {host}:{port}.\n\n"
-                f"Slice {slice_index}: {freq / 1_000_000:.6f} MHz {mode}",
-            )
-        except Exception as exc:  # noqa: BLE001 — never fail silently
+
+        def _work() -> tuple[int, str]:
+            rig = FlexRig(host, port, slice_index=slice_index)
+            try:
+                rig.open()
+                freq = rig.get_freq()
+                mode, _ = rig.get_mode()
+            finally:
+                try:
+                    rig.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            return freq, mode
+
+        def _done(ok: bool, value: object) -> None:
+            if ok:
+                freq, mode = value  # type: ignore[misc]
+                QMessageBox.information(
+                    self,
+                    "Connection successful",
+                    f"Connected to FlexRadio at {host}:{port}.\n\n"
+                    f"Slice {slice_index}: {freq / 1_000_000:.6f} MHz {mode}",
+                )
+                return
+            exc = value
             _log.warning(
-                "FlexRadio connection test to %s:%d failed", host, port,
-                exc_info=True,
+                "FlexRadio connection test to %s:%d failed: %r", host, port, exc
             )
             QMessageBox.warning(
                 self,
@@ -1791,11 +2088,8 @@ class SettingsDialog(QDialog):
                 "Check the radio's IP address, that SmartSDR is running, and "
                 f"that slice {slice_index} is active.",
             )
-        finally:
-            try:
-                rig.close()
-            except Exception:  # noqa: BLE001
-                pass
+
+        self._run_test_in_background(self._flex_test_btn, _work, _done)
 
     def _launch_rigctld(self) -> None:
         """Spawn a rigctld process with the current radio settings."""
@@ -1826,20 +2120,12 @@ class SettingsDialog(QDialog):
             )
             return
 
-        cmd = ["rigctld", "-m", str(model_id), "-t", str(tcp_port)]
-        if serial_port:
-            cmd += ["-r", serial_port]
-        if baud_rate:
-            cmd += ["-s", str(baud_rate)]
-
         try:
-            # OP2-14: start_new_session=True isolates the child process so a
-            # GUI crash doesn't orphan rigctld holding the serial port.
-            self._rigctld_proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                start_new_session=True,
+            # v0.6.14 audit UI-H1: the shared launcher — absolute rigctld
+            # path from PATH (never the CWD), stderr drained so the daemon
+            # can't wedge on a full pipe after MainWindow adopts it.
+            self._rigctld_proc = launch_rigctld(
+                model_id, tcp_port, serial_port, baud_rate or 0
             )
             self._rigctld_status.setText(f"rigctld launched (PID {self._rigctld_proc.pid})")
             self._rigctld_status.setStyleSheet("color: green;")
@@ -1868,17 +2154,8 @@ class SettingsDialog(QDialog):
         "already stopped" so the dialog state stays consistent (OP-19).
         """
         if self._rigctld_proc is not None:
-            try:
-                self._rigctld_proc.terminate()
-                try:
-                    self._rigctld_proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    try:
-                        self._rigctld_proc.kill()
-                    except (ProcessLookupError, OSError):
-                        pass
-            except (ProcessLookupError, OSError):
-                pass
+            # v0.6.14 audit: shared helper reaps after kill() (no zombie).
+            stop_rigctld(self._rigctld_proc)
             self._rigctld_proc = None
             self._rigctld_status.setText("rigctld stopped.")
             self._rigctld_status.setStyleSheet("color: gray;")
@@ -2220,11 +2497,14 @@ class SettingsDialog(QDialog):
         return AppConfig(
             audio_input_device=self._input_combo.currentData(),
             audio_output_device=self._output_combo.currentData(),
+            audio_input_host_api=self._input_combo.currentData(_HOST_API_ROLE) or "",
+            audio_output_host_api=self._output_combo.currentData(_HOST_API_ROLE) or "",
             sample_rate=self._sample_rate.currentData(),
             default_tx_mode=self._tx_mode.currentData(),
             rig_connection_mode=conn_mode,
             rigctld_host=self._rigctld_host.text().strip(),
             rigctld_port=self._rigctld_port.value(),
+            rigctld_ptt_type=self._rigctld_ptt_type_combo.currentData() or "default",
             tci_host=self._tci_host.text().strip(),
             tci_port=self._tci_port.value(),
             flex_host=self._flex_host.text().strip(),
@@ -2293,6 +2573,11 @@ class SettingsDialog(QDialog):
             remote_host="0.0.0.0" if self._remote_lan.isChecked() else "127.0.0.1",
             remote_port=self._remote_port.value(),
             remote_token=self._remote_token.text().strip(),
+            remote_extra_hosts=[
+                h.strip()
+                for h in self._remote_extra_hosts.text().split(",")
+                if h.strip()
+            ],
             remote_tx_enabled=self._remote_tx.isChecked(),
         )
 

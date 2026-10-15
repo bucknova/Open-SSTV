@@ -524,3 +524,16 @@ def test_tag_only_header_is_still_discarded() -> None:
 def test_free_text_header_still_works() -> None:
     doc = "Exported by something\n<ADIF_VER:5>3.1.4 <EOH>\n" + _rec("W1AAA")
     assert [q.callsign for q in import_adif(doc)] == ["W1AAA"]
+
+
+def test_non_sstv_submodes_export_under_their_adif_parent() -> None:
+    """v0.6.14 review: import keeps only SUBMODE, so export must restore the
+    parent MODE for every ADIF 3.1 submode — not just a handful."""
+    from open_sstv.logbook.adif import adif_mode_fields
+
+    assert adif_mode_fields("PSK250") == ("PSK", "PSK250")
+    assert adif_mode_fields("Olivia 8/250") == ("OLIVIA", "OLIVIA 8/250")
+    assert adif_mode_fields("VARA HF") == ("DYNAMIC", "VARA HF")
+    assert adif_mode_fields("JT65B") == ("JT65", "JT65B")
+    assert adif_mode_fields("FT8") == ("FT8", "")
+    assert adif_mode_fields("Martin M1") == ("SSTV", "MartinM1")

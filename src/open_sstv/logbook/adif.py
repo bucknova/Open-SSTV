@@ -13,15 +13,29 @@ Tags are case-insensitive.
 
 What we support
 ───────────────
-- **Export**: CALL, QSO_DATE, TIME_ON, MODE=SSTV, SUBMODE (compact
-  SSTV mode form like ``MartinM1``), BAND (derived from FREQ),
-  FREQ (MHz), RST_SENT, RST_RCVD, NAME, QTH, GRIDSQUARE, COMMENT,
+- **Export**: CALL, QSO_DATE, TIME_ON, MODE (``SSTV`` plus a compact
+  SUBMODE like ``MartinM1`` for SSTV modes; the real mode otherwise),
+  BAND (derived from FREQ, else the stored band), FREQ (MHz), RST_SENT,
+  RST_RCVD, NAME, QTH, GRIDSQUARE, COMMENT,
   STATION_CALLSIGN, MY_GRIDSQUARE, MY_CITY, OPERATOR, MY_NAME.  Plus our own
   ``APP_OPENSSTV_DIRECTION`` for RX-only entries (default TX/two-way
   is implicit).
 - **Import**: same fields, lenient about whitespace, line endings,
   case, and submode formatting (accepts ``Martin M1``, ``MartinM1``,
   ``MARTINM1``).  Unknown tags ignored silently.
+
+Non-ASCII text (v0.6.14 sweep decision)
+───────────────────────────────────────
+Strictly, ADI String fields (NAME, QTH, COMMENT …) are ASCII-only and
+international text belongs in the ``*_INTL`` fields — which the spec
+forbids in ADI files (ADX only).  We write UTF-8 values as-is, with the
+length prefix counting **bytes** (``<NAME:12>Jörg Ñoño``), and read them
+back the same way.  Reason: transliterating to ASCII would silently
+destroy operators' names and QTHs, and the mainstream loggers and
+services (Log4OM, N1MM+, WSJT-X, Club Log, QRZ) accept UTF-8 ADI with
+byte counts; a byte-counted length is also what keeps a strict-ASCII
+parser in sync, since it skips exactly the right number of bytes even if
+it renders them as mojibake.  ``*_INTL`` fields are never emitted.
 
 What we don't support
 ─────────────────────
@@ -34,12 +48,15 @@ those upload integrations land in v0.4.x patches.
 """
 from __future__ import annotations
 
+import functools
 import logging
-import re
+import math
 from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime, time
 from pathlib import Path
 
+from open_sstv.bands import BAND_NAMES
+from open_sstv.bands import hz_to_band as _shared_hz_to_band
 from open_sstv.logbook.model import DIRECTIONS, QSO, StationInfo
 
 _log = logging.getLogger(__name__)
@@ -58,10 +75,160 @@ class AdifParseError(ValueError):
 # ---------------------------------------------------------------------------
 #
 # ADIF MODE for SSTV is always "SSTV"; the specific SSTV mode goes in
-# SUBMODE.  There's no official SSTV submode list in the spec, but
-# MMSSTV established the de-facto convention of compact spaces-removed
-# names (MartinM1, Scottie1, PD120).  We export that form and accept
-# any reasonable variant on import (case-insensitive, optional spaces).
+# SUBMODE.  ADIF 3.1's Mode enumeration lists SSTV with *no* submodes, so
+# there's no official list, but MMSSTV established the de-facto
+# convention of compact spaces-removed names (MartinM1, Scottie1, PD120)
+# and Open-SSTV has always exported that form — kept for compatibility
+# with existing logs.  We accept any reasonable variant on import
+# (case-insensitive, optional spaces).
+#
+# v0.6.14 audit C-M8: the writer hard-coded MODE=SSTV and put *any* mode in
+# SUBMODE, so an imported FT8 contact went out as MODE=SSTV SUBMODE=FT8
+# and LoTW / Club Log rejected or mis-filed it.  SUBMODE is now written
+# only for recognised SSTV modes; ADIF modes/submodes go out under their
+# own MODE (with the ADIF parent MODE where the enumeration nests it).
+# v0.6.14 sweep: names that are neither fall back to MODE=SSTV with the
+# name as SUBMODE (see ``adif_mode_fields``).
+
+#: SSTV mode names other loggers (MMSSTV, QSSTV, Log4OM) write that
+#: Open-SSTV doesn't transmit, so imported rows still export as SSTV.
+_EXTRA_SSTV_MODE_NAMES: tuple[str, ...] = (
+    "Robot 8", "Robot 12", "Robot 24", "Robot 72",
+    "Scottie DX2", "Martin HQ1", "Martin HQ2",
+    "SC2-60", "Wraase SC2-30", "Wraase SC2-60",
+    "PD 50", "AVT 90", "AVT 94", "FAX480",
+    "MP73", "MP115", "MP140", "MP175", "MR73", "MR90", "MR115", "MR140",
+    "MR175", "ML180", "ML240", "ML280", "ML320",
+    "BW 8", "BW 12", "B/W 8", "B/W 12",
+)
+
+#: ADIF 3.1 Submode enumeration, grouped by parent MODE.  An imported
+#: record keeps only its SUBMODE as ``mode``, so export needs the full map
+#: to restore the parent — a partial list sent e.g. PSK250 out as
+#: MODE=PSK250, which isn't in the Mode enumeration.
+_ADIF_SUBMODES: dict[str, tuple[str, ...]] = {
+    "CHIP": ("CHIP64", "CHIP128"),
+    "CW": ("PCW",),
+    "DIGITALVOICE": ("C4FM", "DMR", "DSTAR", "FREEDV", "M17"),
+    "DOMINO": (
+        "DOM-M", "DOM4", "DOM5", "DOM8", "DOM11", "DOM16", "DOM22", "DOM44",
+        "DOM88", "DOMINOEX", "DOMINOF",
+    ),
+    "DYNAMIC": ("FREEDATA", "VARA HF", "VARA SATELLITE", "VARA FM 1200", "VARA FM 9600"),
+    "FSK": ("SCAMP_FAST", "SCAMP_SLOW", "SCAMP_VSLOW"),
+    "HELL": (
+        "FMHELL", "FSKH105", "FSKH245", "FSKHELL", "HELL80", "HELLX5", "HELLX9",
+        "HFSK", "PSKHELL", "SLOWHELL",
+    ),
+    "ISCAT": ("ISCAT-A", "ISCAT-B"),
+    "JT4": ("JT4A", "JT4B", "JT4C", "JT4D", "JT4E", "JT4F", "JT4G"),
+    "JT9": (
+        "JT9-1", "JT9-2", "JT9-5", "JT9-10", "JT9-30", "JT9A", "JT9B", "JT9C",
+        "JT9D", "JT9E", "JT9E FAST", "JT9F", "JT9F FAST", "JT9G", "JT9G FAST",
+        "JT9H", "JT9H FAST",
+    ),
+    "JT65": ("JT65A", "JT65B", "JT65B2", "JT65C", "JT65C2"),
+    "MFSK": (
+        "FSQCALL", "FST4", "FST4W", "FT4", "JS8", "JTMS", "MFSK4", "MFSK8",
+        "MFSK11", "MFSK16", "MFSK22", "MFSK31", "MFSK32", "MFSK64", "MFSK64L",
+        "MFSK128", "MFSK128L", "Q65",
+    ),
+    "OLIVIA": (
+        "OLIVIA 4/125", "OLIVIA 4/250", "OLIVIA 8/250", "OLIVIA 8/500",
+        "OLIVIA 16/500", "OLIVIA 16/1000", "OLIVIA 32/1000",
+    ),
+    "OPERA": ("OPERA-BEACON", "OPERA-QSO"),
+    "PAC": ("PAC2", "PAC3", "PAC4"),
+    "PAX": ("PAX2",),
+    "PSK": (
+        "8PSK125", "8PSK125F", "8PSK125FL", "8PSK250", "8PSK250F", "8PSK250FL",
+        "8PSK500", "8PSK500F", "8PSK1000", "8PSK1000F", "8PSK1200F", "FSK31",
+        "PSK10", "PSK31", "PSK63", "PSK63F", "PSK63RC4", "PSK63RC5",
+        "PSK63RC10", "PSK63RC20", "PSK63RC32", "PSK125", "PSK125C12",
+        "PSK125R", "PSK125RC10", "PSK125RC12", "PSK125RC16", "PSK125RC4",
+        "PSK125RC5", "PSK250", "PSK250C6", "PSK250R", "PSK250RC2",
+        "PSK250RC3", "PSK250RC5", "PSK250RC6", "PSK250RC7", "PSK500",
+        "PSK500C2", "PSK500C4", "PSK500R", "PSK500RC2", "PSK500RC3",
+        "PSK500RC4", "PSK800C2", "PSK800RC2", "PSK1000", "PSK1000C2",
+        "PSK1000R", "PSK1000RC2", "PSKAM10", "PSKAM31", "PSKAM50", "PSKFEC31",
+        "QPSK31", "QPSK63", "QPSK125", "QPSK250", "QPSK500", "SIM31",
+    ),
+    "QRA64": ("QRA64A", "QRA64B", "QRA64C", "QRA64D", "QRA64E"),
+    "ROS": ("ROS-EME", "ROS-HF", "ROS-MF"),
+    "RTTY": ("ASCI",),
+    "SSB": ("LSB", "USB"),
+    "THOR": (
+        "THOR-M", "THOR4", "THOR5", "THOR8", "THOR11", "THOR16", "THOR22",
+        "THOR25X4", "THOR50X1", "THOR50X2", "THOR100",
+    ),
+    "THRB": ("THRBX", "THRBX1", "THRBX2", "THRBX4", "THROB1", "THROB2", "THROB4"),
+    "TOR": ("AMTORFEC", "GTOR", "NAVTEX", "SITORB"),
+}
+
+#: ADIF 3.1.4 Mode enumeration (current, non-import-only values).  The
+#: exported MODE must be one of these — v0.6.14 sweep.  ``FSK`` (parent of
+#: the SCAMP submodes above) is included so every parent in
+#: ``_ADIF_SUBMODES`` is itself a valid MODE.
+ADIF_MODES: frozenset[str] = frozenset((
+    "AM", "ARDOP", "ATV", "CHIP", "CLO", "CONTESTI", "CW", "DIGITALVOICE",
+    "DOMINO", "DYNAMIC", "FAX", "FM", "FSK", "FSK441", "FT8", "HELL", "ISCAT",
+    "JT4", "JT6M", "JT9", "JT44", "JT65", "MFSK", "MSK144", "MT63", "OLIVIA",
+    "OPERA", "PAC", "PAX", "PKT", "PSK", "PSK2K", "Q15", "QRA64", "ROS",
+    "RTTY", "RTTYM", "SSB", "SSTV", "T10", "THOR", "THRB", "TOR", "V4",
+    "VOI", "WINMOR", "WSPR",
+))
+
+_SUBMODE_PARENT: dict[str, str] = {
+    sub: parent for parent, subs in _ADIF_SUBMODES.items() for sub in subs
+}
+
+
+@functools.lru_cache(maxsize=1)
+def _sstv_submode_keys() -> frozenset[str]:
+    """Compact-uppercase forms of every recognised SSTV mode name."""
+    from open_sstv.logbook.coordinator import MODE_DISPLAY_NAMES  # noqa: PLC0415
+
+    names = (*MODE_DISPLAY_NAMES.values(), *MODE_DISPLAY_NAMES.keys(),
+             *_EXTRA_SSTV_MODE_NAMES)
+    return frozenset(mode_to_submode(n).upper().replace("_", "") for n in names)
+
+
+def is_sstv_mode(mode: str) -> bool:
+    """True when *mode* names a specific SSTV mode ("Martin M1", "PD120")."""
+    key = mode_to_submode(mode).upper().replace("_", "")
+    return bool(key) and key in _sstv_submode_keys()
+
+
+def adif_mode_fields(mode: str) -> tuple[str, str]:
+    """``(MODE, SUBMODE)`` to export for a stored mode string.
+
+    - empty / "SSTV" → ``("SSTV", "")`` (our own contacts are SSTV)
+    - a recognised SSTV mode → ``("SSTV", "MartinM1")``
+    - a known ADIF submode → its parent (``FT4`` → ``("MFSK", "FT4")``)
+    - an exact ADIF MODE → ``("FT8", "")``
+    - anything else → ``("SSTV", compact)``.
+
+    v0.6.14 sweep: the last rule used to be "anything else is its own
+    MODE", which sent SSTV submodes from other loggers (``SC2-180``,
+    ``P3``, ``Martin1``, ``Robot 36C`` …) out as invalid ADIF MODEs —
+    import keeps only SUBMODE, so the fact that MODE was SSTV is gone by
+    export time.  This is an SSTV logger: an unrecognised name is far more
+    likely an SSTV submode than a mode, and MODE must always come from
+    the ADIF Mode enumeration.
+    """
+    mode = (mode or "").strip()
+    if not mode or mode.upper() == "SSTV":
+        return ("SSTV", "")
+    if is_sstv_mode(mode):
+        return ("SSTV", mode_to_submode(mode))
+    upper = mode.upper()
+    parent = _SUBMODE_PARENT.get(upper)
+    if parent is not None and parent != upper:
+        return (parent, upper)
+    if upper in ADIF_MODES:
+        return (upper, "")
+    return ("SSTV", mode_to_submode(mode))
+
 
 def mode_to_submode(mode: str) -> str:
     """Convert a QSO ``mode`` field to ADIF SUBMODE form (no spaces)."""
@@ -87,48 +254,13 @@ def submode_to_mode(submode: str, *, table: Iterable[str] = ()) -> str:
 # Band derivation from frequency
 # ---------------------------------------------------------------------------
 #
-# Standard ham bands.  SSTV is realistically HF (160m–10m) plus the
-# occasional 6m, 2m, 70cm contact.  Adding higher bands is cheap and
-# future-proofs us for the rare VHF/UHF SSTV op.
-
-_BAND_TABLE: list[tuple[float, float, str]] = [
-    # (lo_mhz, hi_mhz, band_name) — ranges per ADIF Band Enumeration
-    (0.1357, 0.1378, "2190m"),
-    (0.472, 0.479, "630m"),
-    (1.8, 2.0, "160m"),
-    (3.5, 4.0, "80m"),
-    (5.06, 5.45, "60m"),
-    (7.0, 7.3, "40m"),
-    (10.1, 10.15, "30m"),
-    (14.0, 14.35, "20m"),
-    (18.068, 18.168, "17m"),
-    (21.0, 21.45, "15m"),
-    (24.89, 24.99, "12m"),
-    (28.0, 29.7, "10m"),
-    (50.0, 54.0, "6m"),
-    (70.0, 70.5, "4m"),
-    (144.0, 148.0, "2m"),
-    (219.0, 225.0, "1.25m"),
-    (420.0, 450.0, "70cm"),
-    (902.0, 928.0, "33cm"),
-    (1240.0, 1300.0, "23cm"),
-    (2300.0, 2450.0, "13cm"),
-    (3300.0, 3500.0, "9cm"),
-    (5650.0, 5925.0, "6cm"),
-    (10000.0, 10500.0, "3cm"),
-    (24000.0, 24250.0, "1.25cm"),
-]
+# The table lives in ``open_sstv.bands`` (shared with the template
+# ``%b`` token since the v0.6.14 audit); this is the ADIF-facing wrapper.
 
 
 def hz_to_band(freq_hz: int | None) -> str | None:
     """Map frequency (Hz) to ADIF Band Enumeration string ("20m", "40m")."""
-    if freq_hz is None or freq_hz <= 0:
-        return None
-    mhz = freq_hz / 1_000_000.0
-    for lo, hi, name in _BAND_TABLE:
-        if lo <= mhz <= hi:
-            return name
-    return None
+    return _shared_hz_to_band(freq_hz)
 
 
 def hz_to_mhz_str(freq_hz: int | None) -> str | None:
@@ -138,12 +270,29 @@ def hz_to_mhz_str(freq_hz: int | None) -> str | None:
     return f"{freq_hz / 1_000_000.0:.6f}"
 
 
+#: Upper bound for a plausible FREQ (300 GHz — the top of the radio
+#: spectrum).  Anything past it is junk, not a contact.
+_MAX_FREQ_HZ = 300_000_000_000
+
+
 def mhz_str_to_hz(mhz_str: str) -> int | None:
-    """Parse an ADIF FREQ field (MHz) into integer Hz."""
+    """Parse an ADIF FREQ field (MHz) into integer Hz, or ``None``.
+
+    v0.6.14 audit S-L8: ``FREQ=inf`` raised ``OverflowError`` from
+    ``int()`` (not caught) and aborted the whole import; ``1e300`` and
+    negatives were accepted.  Non-finite and out-of-range (not
+    0 < Hz < 300 GHz) values now parse as "no frequency".
+    """
     try:
-        return int(round(float(mhz_str) * 1_000_000))
-    except (ValueError, TypeError):
+        mhz = float(mhz_str)
+        if not math.isfinite(mhz):
+            return None
+        hz = int(round(mhz * 1_000_000))
+    except (ValueError, TypeError, OverflowError):
         return None
+    if not 0 < hz < _MAX_FREQ_HZ:
+        return None
+    return hz
 
 
 # ---------------------------------------------------------------------------
@@ -233,12 +382,14 @@ def format_qso_record(qso: QSO, station: StationInfo | None = None) -> str:
     record_parts.append(_adif_field("CALL", qso.callsign.strip().upper()))
     record_parts.append(_adif_field("QSO_DATE", datetime_to_qso_date(qso.time_utc)))
     record_parts.append(_adif_field("TIME_ON", datetime_to_time_on(qso.time_utc)))
-    # Mode is always SSTV for us; submode carries the specific mode.
-    record_parts.append(_adif_field("MODE", "SSTV"))
-    if qso.mode:
-        record_parts.append(_adif_field("SUBMODE", mode_to_submode(qso.mode)))
-    # Band + frequency.
-    band = hz_to_band(qso.frequency_hz)
+    # SSTV contacts: MODE=SSTV + SUBMODE; anything else (imported FT8,
+    # SSB, …) under its own MODE — v0.6.14 audit C-M8.
+    adif_mode, adif_submode = adif_mode_fields(qso.mode)
+    record_parts.append(_adif_field("MODE", adif_mode))
+    record_parts.append(_adif_field("SUBMODE", adif_submode))
+    # Band + frequency.  BAND derives from FREQ when there is one, else
+    # it's the band stored from an import that had BAND but no FREQ.
+    band = hz_to_band(qso.frequency_hz) or (qso.band or None)
     if band:
         record_parts.append(_adif_field("BAND", band))
     mhz = hz_to_mhz_str(qso.frequency_hz)
@@ -333,8 +484,6 @@ def write_adif_file(
 # Import
 # ---------------------------------------------------------------------------
 
-_TAG_RE = re.compile(rb"<([A-Za-z_][A-Za-z0-9_]*)((?::-?\d+)?(?::[A-Za-z])?)>")
-
 
 def _tokenize(data: bytes) -> Iterator[tuple[str, str]]:
     """Yield ``(TAG_UPPER, value_str)`` tuples from raw ADIF bytes.
@@ -403,13 +552,29 @@ def _build_qso(record: dict[str, str], *, mode_table: Iterable[str] = ()) -> QSO
     mode_str = record.get("MODE", "").strip()
     if submode:
         mode = submode_to_mode(submode, table=mode_table)
+        # v0.6.14 sweep: only SUBMODE is stored, and export maps it back
+        # to its parent via the ADIF submode table (or to SSTV for
+        # anything unrecognised).  A non-SSTV parent with a submode that
+        # table doesn't know (MODE=PSK SUBMODE=PSK9999X) would therefore
+        # come back out as MODE=SSTV; store the parent MODE instead — the
+        # submode detail is optional in ADIF, the MODE is not.
+        parent = mode_str.upper()
+        if (
+            parent in ADIF_MODES
+            and parent != "SSTV"
+            and submode.upper() not in _SUBMODE_PARENT
+        ):
+            mode = parent
     else:
         mode = mode_str  # "SSTV" or whatever the source put
 
-    # Frequency: prefer FREQ (MHz), ignore BAND for now (band is
-    # derivable and rarely more precise than FREQ).
+    # Frequency: FREQ (MHz) when present and sane.  BAND is kept too
+    # (v0.6.14 audit C-M8: it used to be dropped, so a FREQ-less record
+    # lost its band on round-trip); a band derived from FREQ wins.
     freq_str = record.get("FREQ", "").strip()
     freq_hz = mhz_str_to_hz(freq_str) if freq_str else None
+    band_raw = record.get("BAND", "").strip().lower()
+    band = hz_to_band(freq_hz) or (band_raw if band_raw in BAND_NAMES else "")
 
     direction_raw = record.get("APP_OPENSSTV_DIRECTION", "TX").strip().upper()
     direction = direction_raw if direction_raw in DIRECTIONS else "TX"
@@ -420,6 +585,7 @@ def _build_qso(record: dict[str, str], *, mode_table: Iterable[str] = ()) -> QSO
         time_utc=time_utc,
         mode=mode,
         frequency_hz=freq_hz,
+        band=band,
         rsv_sent=_parse_rsv(record.get("RST_SENT", "")),
         rsv_received=_parse_rsv(record.get("RST_RCVD", "")),
         name=record.get("NAME", "").strip(),
@@ -466,12 +632,25 @@ def import_adif(
             data = data[eoh_idx + len(b"<EOH>"):]
 
     qsos: list[QSO] = []
+
+    def _add(record: dict[str, str]) -> None:
+        # v0.6.14 audit S-L8: one malformed record must cost only itself,
+        # never the whole import.
+        try:
+            qso = _build_qso(record, mode_table=mode_table)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning(
+                "skipping unreadable ADIF record (CALL=%r): %s",
+                record.get("CALL", ""), exc,
+            )
+            return
+        if qso is not None:
+            qsos.append(qso)
+
     current: dict[str, str] = {}
     for tag, value in _tokenize(data):
         if tag == "EOR":
-            qso = _build_qso(current, mode_table=mode_table)
-            if qso is not None:
-                qsos.append(qso)
+            _add(current)
             current = {}
             continue
         if tag == "EOH":
@@ -481,9 +660,7 @@ def import_adif(
         current[tag] = value
     # Trailing record without <EOR> — try to build it anyway.
     if current:
-        qso = _build_qso(current, mode_table=mode_table)
-        if qso is not None:
-            qsos.append(qso)
+        _add(current)
     return qsos
 
 

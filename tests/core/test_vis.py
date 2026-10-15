@@ -231,3 +231,29 @@ def test_detect_vis_against_real_pysstv_encoder(
     # the bulk of the image data.
     leader_plus_vis_samples = int((0.6 + 0.3) * 48_000)
     assert end_idx < leader_plus_vis_samples + int(0.05 * 48_000)
+
+
+
+def _header_without_leader(vis_code: int, lead_s: float, fs: int = 48_000) -> np.ndarray:
+    """Start bit + data + parity + stop, preceded by ``lead_s`` of leader."""
+    full = _synthesize_vis(vis_code, fs)
+    skip = int(round((2 * VIS_LEADER_DURATION_S + VIS_BREAK_DURATION_S - lead_s) * fs))
+    return full[skip:]
+
+
+@pytest.mark.parametrize("lead_s", [0.0, 0.003, 0.050])
+def test_detect_vis_rejects_header_without_room_for_leader(lead_s: float) -> None:
+    """v0.6.14 audit (VIS low): a start bit within the first few ms of the
+    buffer used to skip the leader check entirely (and a short window was
+    judged on a few ms of audio), so noise at the head of a freshly
+    trimmed IDLE buffer could pass as a VIS. No room for the 200 ms
+    leader window must now count as a failed leader check."""
+    assert detect_vis(_header_without_leader(0x3C, lead_s), 48_000) is None
+
+
+def test_detect_vis_accepts_header_with_only_second_leader_half() -> None:
+    """The check window is 200 ms of the 300 ms second leader half, so a
+    recording that clipped the first half still decodes."""
+    audio = _header_without_leader(0x3C, VIS_LEADER_DURATION_S)
+    result = detect_vis(audio, 48_000)
+    assert result is not None and result[0] == 0x3C

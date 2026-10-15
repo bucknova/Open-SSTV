@@ -391,3 +391,49 @@ class TestStarterDeletionSticks:
 
         assert [p.name for p in written] == [STARTER_TEMPLATE_FILENAMES[1]]
         assert edited.read_text(encoding="utf-8") == "# my edits\n"
+
+
+# ---------------------------------------------------------------------------
+# v0.6.14 audit C-M5: slug collisions never overwrite silently
+# ---------------------------------------------------------------------------
+
+
+class TestSlugCollisions:
+    def test_new_template_with_taken_slug_is_uniquified(self, tmp_path: Path) -> None:
+        first = save(_make_template("CQSSTV", "cq"), tmp_path)
+        second = save(_make_template("CQSSTV", "reply"), tmp_path)
+        assert first.name == "cqsstv.toml"
+        assert second.name == "cqsstv_2.toml"
+        assert load_template(first).role == "cq"  # original untouched
+        third = save(_make_template("CQSSTV"), tmp_path)
+        assert third.name == "cqsstv_3.toml"
+
+    def test_new_template_never_clobbers_a_starter(self, tmp_path: Path) -> None:
+        install_starter_pack(tmp_path)
+        before = (tmp_path / "cqsstv.toml").read_bytes()
+        path = save(_make_template("cqsstv", "custom"), tmp_path)
+        assert path.name != "cqsstv.toml"
+        assert (tmp_path / "cqsstv.toml").read_bytes() == before
+
+    def test_path_for_name_and_slugify(self, tmp_path: Path) -> None:
+        from open_sstv.templates.manager import path_for_name, slugify
+
+        assert slugify("Hello/World! 2024") == "hello_world_2024"
+        assert slugify("!!!") == "template"
+        assert path_for_name("My CQ", tmp_path) == tmp_path / "my_cq.toml"
+
+
+class TestStaleTempSweep:
+    def test_fsutil_temps_are_swept(self, tmp_path: Path) -> None:
+        """The sweep matched only the pre-fsutil ``name.toml.tmp`` shape."""
+        import os
+
+        stale = tmp_path / ".cqsstv.toml.abc123.tmp"
+        stale.write_text("partial")
+        old = 1_000_000_000
+        os.utime(stale, (old, old))
+        fresh = tmp_path / ".reply.toml.def456.tmp"
+        fresh.write_text("in flight")
+        list_templates(tmp_path)
+        assert not stale.exists()
+        assert fresh.exists(), "a save still in flight must not be swept"

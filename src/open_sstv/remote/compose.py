@@ -26,7 +26,8 @@ from typing import TYPE_CHECKING
 from open_sstv.core.modes import MODE_TABLE, Mode
 from open_sstv.security import MAX_IMAGE_PIXELS
 from open_sstv.templates import manager as template_manager
-from open_sstv.templates.model import QSOState, TXContext
+from open_sstv.templates.context import build_tx_context
+from open_sstv.templates.model import QSOState
 from open_sstv.templates.renderer import render_template
 
 if TYPE_CHECKING:
@@ -66,9 +67,12 @@ class ComposeService:
         self,
         config_getter: Callable[[], AppConfig],
         templates_dir: Path | None = None,
+        frequency_getter: Callable[[], int | None] | None = None,
     ) -> None:
         self._config_getter = config_getter
         self._templates_dir = templates_dir
+        #: Rig frequency for %f / %b (v0.6.14 audit C-M4); None = no rig.
+        self._frequency_getter = frequency_getter
         #: In-memory staged composed images (id → PIL image), for transmit.
         #: Nothing is written to disk; the control plane keys these directly.
         self._staged: OrderedDict[str, PIL.Image.Image] = OrderedDict()
@@ -134,6 +138,14 @@ class ComposeService:
                     pixels / 1e6, MAX_IMAGE_PIXELS / 1e6,
                 )
                 return None
+            # v0.6.14 audit S-L3: a phone JPEG is ~12 MP for a frame of at
+            # most 800x616.  Let the JPEG decoder downscale by 1/2..1/8 as it
+            # decodes (no-op for other formats) — a fraction of the memory
+            # and time.  A square target keeps both sides >= the frame's
+            # long edge whatever the EXIF orientation, so no quality is lost.
+            spec = MODE_TABLE[mode]
+            edge = max(spec.width, spec.display_height)
+            photo.draft(None, (edge, edge))
             photo.load()
             # Phone photos carry their orientation in an EXIF tag rather than
             # in the pixels; bake it in so the composited frame is upright
@@ -148,11 +160,11 @@ class ComposeService:
             tocall_name=(tokens.get("name") or "").strip(),
             note=(tokens.get("note") or "").strip(),
         )
-        spec = MODE_TABLE[mode]
-        ctx = TXContext(
-            mode_display_name=mode.value,
-            frame_size=(spec.width, spec.display_height),
-            photo_image=photo,
+        # Shared builder (v0.6.14 audit C-M3/C-M4): same photo policy and
+        # rig frequency as desktop TX, so remote compose matches it.
+        ctx = build_tx_context(
+            template, mode, photo,
+            frequency_hz=self._frequency_getter() if self._frequency_getter else None,
         )
         try:
             return render_template(template, qso, self._config_getter(), ctx)

@@ -52,7 +52,10 @@ class TestRejectKillsRigctld:
         mock_proc.pid = 12345
         mock_proc.wait.return_value = 0
 
-        with patch("subprocess.Popen", return_value=mock_proc):
+        with patch("subprocess.Popen", return_value=mock_proc), patch(
+            "open_sstv.radio.rigctld_launcher.find_rigctld_executable",
+            return_value="/usr/bin/rigctld",
+        ):
             # Simulate picking a radio model so the launch guard passes
             dialog._custom_model_id.setValue(1035)
             dialog._launch_rigctld()
@@ -72,7 +75,10 @@ class TestRejectKillsRigctld:
         mock_proc.pid = 12345
         mock_proc.wait.return_value = 0
 
-        with patch("subprocess.Popen", return_value=mock_proc):
+        with patch("subprocess.Popen", return_value=mock_proc), patch(
+            "open_sstv.radio.rigctld_launcher.find_rigctld_executable",
+            return_value="/usr/bin/rigctld",
+        ):
             dialog._custom_model_id.setValue(1035)
             dialog._launch_rigctld()
 
@@ -291,7 +297,7 @@ class TestIdentityGroupOnGeneralTab:
         self, dialog: SettingsDialog
     ) -> None:
         assert dialog._grid_square is not None
-        assert dialog._grid_square.maxLength() == 6
+        assert dialog._grid_square.maxLength() == 8  # extended square
 
     def test_qth_widget_exists(self, dialog: SettingsDialog) -> None:
         assert dialog._qth is not None
@@ -573,7 +579,7 @@ class TestRemoteTab:
     def test_qr_rendered_when_enabled_with_token(self, qtbot) -> None:
         cfg = AppConfig(
             callsign="W0AEZ", remote_enabled=True, remote_host="0.0.0.0",
-            remote_port=8730, remote_token="demo",
+            remote_port=8730, remote_token="a-long-enough-token-1234",
         )
         dlg = SettingsDialog(config=cfg, rig_connected=False)
         qtbot.addWidget(dlg)
@@ -609,6 +615,122 @@ class TestRemoteTab:
         qtbot.addWidget(dlg)
         assert dlg._remote_tx.isChecked() is False
         assert dlg.result_config().remote_tx_enabled is False
+
+    # --- v0.6.14 audit S-M2 / S-M3 ---
+
+    def test_short_token_ignored_while_remote_disabled(self, qtbot) -> None:
+        """v0.6.14 review: an upgrader's old short token mustn't block
+        saving unrelated settings while remote access is off."""
+        dlg = SettingsDialog(
+            config=AppConfig(callsign="W0AEZ", remote_token="demo"),
+            rig_connected=False,
+        )
+        qtbot.addWidget(dlg)
+        assert not dlg._remote_enabled.isChecked()
+        dlg.accept()
+        assert dlg.result() == dlg.DialogCode.Accepted
+
+    def test_short_token_refused_on_save(self, qtbot) -> None:
+        dlg = SettingsDialog(config=AppConfig(callsign="W0AEZ"), rig_connected=False)
+        qtbot.addWidget(dlg)
+        dlg._remote_enabled.setChecked(True)
+        dlg._remote_token.setText("demo")
+        dlg.accept()
+        assert dlg.result() != dlg.DialogCode.Accepted
+        assert not dlg._remote_token_error.isHidden()
+        # Fixing it clears the message and lets the dialog close.
+        dlg._remote_token.setText("x" * 16)
+        assert dlg._remote_token_error.isHidden()
+        dlg.accept()
+        assert dlg.result() == dlg.DialogCode.Accepted
+
+    def test_non_ascii_token_refused_on_save(self, qtbot) -> None:
+        """v0.6.14 sweep: a browser can't send a non-ASCII Bearer token."""
+        dlg = SettingsDialog(config=AppConfig(callsign="W0AEZ"), rig_connected=False)
+        qtbot.addWidget(dlg)
+        dlg._remote_enabled.setChecked(True)
+        dlg._remote_token.setText("schlüssel-sehr-lang-genug")
+        dlg.accept()
+        assert dlg.result() != dlg.DialogCode.Accepted
+        assert not dlg._remote_token_error.isHidden()
+        assert "ascii" in dlg._remote_token_error.text().lower()
+        pm = dlg._remote_qr.pixmap()
+        assert pm is None or pm.isNull()
+        assert "ascii" in dlg._remote_qr.text().lower()
+        dlg._remote_token.setText("schluessel-sehr-lang-genug")
+        assert dlg._remote_token_error.isHidden()
+        dlg.accept()
+        assert dlg.result() == dlg.DialogCode.Accepted
+
+    def test_short_token_message_mentions_length(self, qtbot) -> None:
+        dlg = SettingsDialog(config=AppConfig(callsign="W0AEZ"), rig_connected=False)
+        qtbot.addWidget(dlg)
+        dlg._remote_enabled.setChecked(True)
+        dlg._remote_token.setText("demo")
+        dlg.accept()
+        assert "too short" in dlg._remote_token_error.text().lower()
+
+    def test_blank_token_saves(self, qtbot) -> None:
+        dlg = SettingsDialog(config=AppConfig(callsign="W0AEZ"), rig_connected=False)
+        qtbot.addWidget(dlg)
+        dlg._remote_token.setText("")
+        dlg.accept()
+        assert dlg.result() == dlg.DialogCode.Accepted
+
+    def test_regenerate_fills_a_strong_token(self, qtbot) -> None:
+        dlg = SettingsDialog(config=AppConfig(callsign="W0AEZ"), rig_connected=False)
+        qtbot.addWidget(dlg)
+        dlg._remote_regen.click()
+        first = dlg._remote_token.text()
+        assert len(first) >= 16
+        dlg._remote_regen.click()
+        assert dlg._remote_token.text() != first
+
+    def test_short_token_gets_no_qr(self, qtbot) -> None:
+        cfg = AppConfig(callsign="W0AEZ", remote_enabled=True, remote_token="demo")
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        pm = dlg._remote_qr.pixmap()
+        assert pm is None or pm.isNull()
+        assert "short" in dlg._remote_qr.text().lower()
+
+    def test_qr_shown_for_generated_live_token(self, qtbot, monkeypatch) -> None:
+        from PySide6.QtGui import QPixmap
+
+        urls: list[str] = []
+
+        def fake_qr(url: str) -> QPixmap:
+            urls.append(url)
+            pm = QPixmap(8, 8)
+            pm.fill()
+            return pm
+
+        monkeypatch.setattr(SettingsDialog, "_render_qr", staticmethod(fake_qr))
+        cfg = AppConfig(callsign="W0AEZ", remote_enabled=True, remote_token="")
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        dlg.set_remote_live_token("live-generated-token-abc")
+        assert urls and urls[-1].endswith("?token=live-generated-token-abc")
+        assert not dlg._remote_qr.pixmap().isNull()
+        # Changing the port means Save restarts the server with a new random
+        # token, so the live one would be a wrong QR — don't show it.
+        dlg._remote_port.setValue(cfg.remote_port + 1)
+        pm = dlg._remote_qr.pixmap()
+        assert pm is None or pm.isNull()
+
+    def test_cleartext_warning_only_for_lan_plus_tx(self, qtbot) -> None:
+        cfg = AppConfig(callsign="W0AEZ", remote_enabled=True)
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        warn = dlg._remote_lan_tx_warning
+        assert warn.isHidden()
+        dlg._remote_tx.setChecked(True)
+        assert warn.isHidden()  # loopback only: no network exposure
+        dlg._remote_lan.setChecked(True)
+        assert not warn.isHidden()
+        assert "not encrypted" in warn.text()
+        dlg._remote_tx.setChecked(False)
+        assert warn.isHidden()
 
 
 class TestFlexRadioDirect:
@@ -859,3 +981,135 @@ class TestSettingsRoundTripPreservesEveryField:
             f"Settings save did not preserve {lost} — every field without a "
             f"widget must be passed through from self._config"
         )
+
+
+# ---------------------------------------------------------------------------
+# v0.6.14 audit
+# ---------------------------------------------------------------------------
+
+
+class TestV0614RigItems:
+    def test_rigctld_test_button_does_not_block_gui(
+        self, qtbot, dialog: SettingsDialog, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The rigctld Test button used to run open()+ping() on the GUI
+        thread (2–8 s freeze on an unreachable rig)."""
+        import threading
+        import time
+
+        release = threading.Event()
+        shown: list[str] = []
+
+        class _SlowClient:
+            def __init__(self, **_kw) -> None:
+                pass
+
+            def open(self) -> None:
+                release.wait(5)
+
+            def ping(self) -> None:
+                pass
+
+            def get_freq(self) -> int:
+                return 14_230_000
+
+            def get_mode(self) -> tuple[str, int]:
+                return ("USB", 2400)
+
+            def close(self) -> None:
+                pass
+
+        monkeypatch.setattr("open_sstv.ui.settings_dialog.RigctldClient", _SlowClient)
+        monkeypatch.setattr(
+            "open_sstv.ui.settings_dialog.QMessageBox.information",
+            lambda *a, **k: shown.append(a[1]),
+        )
+        t0 = time.monotonic()
+        dialog._test_connection()
+        assert time.monotonic() - t0 < 0.5, "Test must return immediately"
+        assert not dialog._test_btn.isEnabled()
+        release.set()
+        qtbot.waitUntil(lambda: shown == ["Connection successful"], timeout=3000)
+        assert dialog._test_btn.isEnabled()
+
+    def test_ptt_type_round_trips(self, qtbot) -> None:
+        dlg = SettingsDialog(config=AppConfig(rigctld_ptt_type="data"))
+        qtbot.addWidget(dlg)
+        assert dlg.result_config().rigctld_ptt_type == "data"
+
+    def test_unknown_ptt_type_falls_back(self) -> None:
+        assert AppConfig(rigctld_ptt_type="bogus").rigctld_ptt_type == "default"
+
+    def test_stop_rigctld_reaps(self, dialog: SettingsDialog) -> None:
+        import subprocess as _sp
+
+        proc = MagicMock()
+        proc.wait.side_effect = [_sp.TimeoutExpired("rigctld", 3), 0]
+        dialog._rigctld_proc = proc
+        dialog._stop_rigctld()
+        proc.kill.assert_called_once()
+        assert proc.wait.call_count == 2, "kill() must be followed by a reap"
+
+
+class TestRemoteExtraHosts:
+    """v0.6.14 audit S-L1: tailnet / local-DNS names reach the Host allowlist."""
+
+    def test_round_trips_comma_separated_names(self, qtbot) -> None:
+        cfg = AppConfig(remote_extra_hosts=["shack.tail1234.ts.net"])
+        dlg = SettingsDialog(cfg)
+        qtbot.addWidget(dlg)
+        assert dlg._remote_extra_hosts.text() == "shack.tail1234.ts.net"
+        dlg._remote_extra_hosts.setText(" shack.tail1234.ts.net , , radio.lan ")
+        assert dlg.result_config().remote_extra_hosts == [
+            "shack.tail1234.ts.net",
+            "radio.lan",
+        ]
+
+    def test_grid_square_accepts_eight_characters(self, dialog) -> None:
+        dialog._grid_square.setText("EM29qe78")
+        assert dialog._grid_square.text() == "EM29qe78"
+
+
+class TestDeviceHostApi:
+    """v0.6.14 audit T-L4 (review follow-up): the host API is saved and
+    preferred, so a WASAPI pick isn't reselected as its same-named MME twin."""
+
+    def test_saved_host_api_selected_and_round_tripped(self, qtbot, monkeypatch) -> None:
+        from open_sstv.audio.devices import AudioDevice
+        from open_sstv.ui import settings_dialog as mod
+
+        mme = AudioDevice(1, "USB Audio CODEC", "MME", 0, 2, 48000.0)
+        wasapi = AudioDevice(9, "USB Audio CODEC", "Windows WASAPI", 0, 2, 48000.0)
+        monkeypatch.setattr(mod, "list_output_devices", lambda: [mme, wasapi])
+        monkeypatch.setattr(mod, "list_input_devices", lambda: [])
+        monkeypatch.setattr(mod, "list_pipewire_sinks", lambda: [])
+        cfg = AppConfig(
+            audio_output_device="USB Audio CODEC",
+            audio_output_host_api="Windows WASAPI",
+        )
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        assert "WASAPI" in dlg._output_combo.currentText()
+        out = dlg.result_config()
+        assert out.audio_output_device == "USB Audio CODEC"
+        assert out.audio_output_host_api == "Windows WASAPI"
+
+
+class TestAbsentDeviceKeepsHostApi:
+    """v0.6.14 review: OK while the saved device is unplugged must not erase
+    its saved host API (the replug would then pick the MME twin)."""
+
+    def test_not_connected_entry_round_trips_host_api(self, qtbot, monkeypatch) -> None:
+        from open_sstv.ui import settings_dialog as mod
+
+        monkeypatch.setattr(mod, "list_output_devices", lambda: [])
+        monkeypatch.setattr(mod, "list_input_devices", lambda: [])
+        monkeypatch.setattr(mod, "list_pipewire_sinks", lambda: [])
+        cfg = AppConfig(
+            audio_output_device="USB Audio CODEC",
+            audio_output_host_api="Windows WASAPI",
+        )
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        assert "not connected" in dlg._output_combo.currentText()
+        assert dlg.result_config().audio_output_host_api == "Windows WASAPI"

@@ -9,6 +9,110 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+A full code and security review of v0.6.14
+(`docs/audit_opus_5.5_v0.6.14.md`), every finding fixed, then reviewed
+again. Each fix has a regression test.
+
+### Security
+
+- **Remote access is harder to attack.** Fixed tokens must be at least
+  16 plain-ASCII characters; a shorter one from an older version is replaced by a random
+  token for the session, with a status-bar note. Settings has a
+  **Regenerate** button and shows a QR code for the generated token too.
+  Repeated wrong tokens from one address are locked out for a growing time.
+- **The access token no longer reaches log files** (it was written at DEBUG
+  level) and is removed from the address bar once the remote page loads.
+- **DNS-rebinding protection.** The remote server only answers to IP
+  addresses, `localhost` and this computer's own name. If you reach your
+  station by another name (a Tailscale MagicDNS name, a local DNS name),
+  add it under Settings → Remote → **Extra hostnames**.
+- **The remote server can't be tied up** by slow or excessive connections,
+  photo uploads, or live-view streams, and remote transmissions have a short
+  cooldown between them.
+- Settings warns that the remote link is unencrypted when LAN access and
+  remote transmit are both on.
+- A shared template file with extreme values can no longer exhaust memory.
+- The update notice only ever links to the Open-SSTV releases page.
+- The macOS app drops two code-signing entitlements it didn't need, and
+  release builds run with read-only repository access, pinned build tools
+  and a published `SHA256SUMS` file.
+
+### Fixed — transmitting
+
+- **A failed key-up now always unkeys the radio.** If the "transmit" command
+  timed out but the radio keyed anyway, nothing sent PTT-off.
+- **The rigctld launched from Settings no longer freezes** after a while
+  (its error output was never read), which could stop PTT and CAT mid-TX.
+- **Disconnect stays locked until the radio is really unkeyed**, from the
+  moment you press Send, and an emergency unkey after a lost connection
+  now reaches the real radio.
+- **The transmit watchdog drops PTT itself**, and quitting with a stuck
+  transmission sends PTT-off within half a second.
+- **Unplugging the USB codec mid-TX unkeys within about 2 seconds**
+  instead of waiting for the watchdog.
+- A single missed reply from the radio during TX no longer aborts the
+  transmission; three in a row still do — including a radio that has gone
+  silent behind a still-running rigctld.
+- A Stop pressed just before a transmission starts is no longer lost.
+- After a USB re-plug, TX audio goes to the radio, not the speakers.
+- TCI: a second receiver no longer changes the shown frequency or S-meter,
+  and RX audio (at the right sample rate) survives a reconnect during unkey.
+- A rig that finishes connecting during a transmission is attached once the
+  transmission ends, and a connection that completes after its timeout no
+  longer leaves the serial port locked.
+- A second **Connect** after a timed-out one no longer hangs on
+  "Connecting…", and one missed rig poll no longer shows "Connection lost".
+
+### Fixed — receiving
+
+- **One missed sync pulse at the top of an image no longer loses the
+  image**, live or from a file.
+- **Robot 36 live decoding no longer picks the wrong format** after a missed
+  sync.
+- **Decoding a recording with noise after the image** no longer skews it.
+- **Scottie S1/S2/DX now use the exact spec timing**, removing the dark bar
+  other decoders showed at the right edge of our Scottie images, and
+  decoding other stations' Scottie images at full width.
+- 24-bit and 32-bit float WAV files can be decoded.
+- Long receives use far less CPU, and pressing OK in Settings no longer
+  throws away an image being received.
+- An empty or broken audio file no longer disables Decode Audio.
+
+### Fixed — settings, templates and logbook
+
+- **A typo in `config.toml` no longer stops Open-SSTV starting**; only the
+  bad setting is reset. A corrupt settings file shows its warning again
+  instead of the Welcome screen.
+- Unplugged audio devices are kept in Settings, and on Windows a WASAPI
+  choice is no longer swapped for the MME device with the same name.
+- **The template preview now matches what's transmitted**, a template
+  saved in the editor is used straight away, and `%f` / `%b` (frequency,
+  band) fill in.
+- Saving a template can't silently overwrite another, and the editor asks
+  before discarding unsaved changes.
+- The image editor's OK applies the crop, and text lands where you put it.
+- **ADIF export is correct for non-SSTV contacts** (an imported FT8 contact
+  went out as SSTV) and keeps BAND, while SSTV contacts imported from other
+  loggers ("Martin 1", "SC2-180") stay SSTV; one bad record no longer aborts
+  an import.
+- The logbook's **New…** can set the date, time, mode and frequency.
+- Plus many smaller fixes; see the audit document.
+
+### Changed
+
+- TX refuses to key when the configured output device is missing, instead
+  of playing into the system default.
+- Templates with a "contain" photo layer now letterbox on air, as the
+  preview always showed.
+- New settings: rigctld **PTT type** (default unchanged), remote **Extra
+  hostnames**. Grid squares can be 8 characters.
+
+### Removed
+
+- The unused v0.2 template system (old templates are still migrated).
+- The Robot 36 "line-pair without mid-sync" decoder, which matched no
+  transmitter.
+
 ---
 
 ## [0.6.15] — 2026-10-13

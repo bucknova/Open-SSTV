@@ -104,9 +104,20 @@ class UdpQsoLogger:
             data = build_logged_adif_message(_ADIF_MINI_HEADER + record + "\n")
         else:
             data = (record + "\n").encode("utf-8")
+        # v0.6.14 audit: AF_INET-only with no SO_BROADCAST, so an IPv6
+        # listener ("::1", a v6 LAN address) was unreachable and a
+        # broadcast target (192.168.1.255, a common logger setup) failed
+        # with EACCES.  Resolve through getaddrinfo and allow broadcast.
+        # (socket.gaierror is an OSError.)
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.sendto(data, (self._host, self._port))
+            infos = socket.getaddrinfo(
+                self._host, self._port, type=socket.SOCK_DGRAM
+            )
+            family, _type, _proto, _canon, addr = infos[0]
+            with socket.socket(family, socket.SOCK_DGRAM) as sock:
+                if family == socket.AF_INET:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                sock.sendto(data, addr)
         except OSError as exc:
             raise QsoLoggingError(
                 f"Could not send to {self._host}:{self._port}: {exc}"

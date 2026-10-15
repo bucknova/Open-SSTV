@@ -204,7 +204,16 @@ class UpdateCheckerWorker(QObject):
                 _log.debug("update check: unexpected response type %s", type(data).__name__)
                 return
             tag = data.get("tag_name", "")
-            url = data.get("html_url", _API_URL)
+            url = data.get("html_url", "")
+            # v0.6.14 audit S-L7: a non-string tag_name (null, a number)
+            # used to raise AttributeError in _write_last_check_ts, past
+            # every except below.  And the URL becomes a clickable link in
+            # the status bar, so apply the same releases-page fence the
+            # cache path already had — never link anywhere else.
+            if not isinstance(tag, str):
+                tag = ""
+            if not isinstance(url, str) or not url.startswith(_RELEASES_PREFIX):
+                url = _RELEASES_PREFIX + "latest"
             # Persist the timestamp *only* on a structurally-valid
             # response (we got a JSON dict from GitHub).  A rate-limit
             # response is a dict too — and treating that as "successful"

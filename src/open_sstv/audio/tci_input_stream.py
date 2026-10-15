@@ -27,6 +27,8 @@ import time
 import numpy as np
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
+from open_sstv.radio.tci import subscribe_rx_audio
+
 _log = logging.getLogger(__name__)
 
 _QUEUE_MAXSIZE: int = 256
@@ -65,6 +67,9 @@ class TciInputStreamWorker(QObject):
     stopped = Signal()
     error = Signal(str)
     stream_error = Signal(str)     # emitted on connection loss
+    #: Ends every ``stop()`` call, running or not — see the matching
+    #: signal on ``InputStreamWorker`` (v0.6.14 audit UI-M6).
+    stop_finished = Signal()
 
     def __init__(self, tci_rig: object, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -121,15 +126,10 @@ class TciInputStreamWorker(QObject):
         conn = self._rig.connection
         conn.register_audio_callback(self._audio_callback)
         try:
-            # Negotiate format before subscribing: 48 kHz, float32, mono.
-            # AetherSDR echoes each command back as confirmation.
-            conn.send("audio_samplerate:48000;")
-            conn.send("audio_stream_sample_type:float32;")
-            conn.send("audio_stream_channels:1;")
-            conn.send("audio_start:0;")
-            # H6: announce the subscription so TxWorker doesn't double-
-            # start (and double-leak) the RX stream on each transmission.
-            conn.mark_rx_audio_subscribed(True)
+            # Negotiate format (48 kHz, float32, mono), subscribe, and mark
+            # the subscription (H6).  Shared with the TX unkey-retry
+            # re-subscribe (v0.6.14 sweep).
+            subscribe_rx_audio(conn)
         except Exception as exc:  # noqa: BLE001
             conn.unregister_audio_callback(self._audio_callback)
             self._running = False
@@ -146,7 +146,17 @@ class TciInputStreamWorker(QObject):
 
     @Slot()
     def stop(self) -> None:
-        """Unsubscribe from TCI audio and flush pending chunks."""
+        """Unsubscribe from TCI audio and flush pending chunks.
+
+        Emits ``stopped`` only if a subscription was running, and
+        ``stop_finished`` always (v0.6.14 audit UI-M6).
+        """
+        try:
+            self._stop_subscription()
+        finally:
+            self.stop_finished.emit()
+
+    def _stop_subscription(self) -> None:
         if not self._running:
             return
 

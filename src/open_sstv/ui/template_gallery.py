@@ -50,16 +50,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from open_sstv.templates.context import build_tx_context
 from open_sstv.templates.manager import (
     last_skipped_templates,
     list_templates,
     load_by_path,
 )
-from open_sstv.templates.model import QSOState, Template, TXContext
+from open_sstv.templates.model import QSOState, Template
 from open_sstv.templates.renderer import render_template
 from open_sstv.ui.utils import pil_to_pixmap
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from PIL.Image import Image as PILImage
@@ -320,6 +322,10 @@ class TemplateGallery(QWidget):
         self._qso_state: QSOState = QSOState()
         self._mode: Mode | None = None
         self._selected_template: Template | None = None
+        #: File backing the selection.  Re-selection after a reload keys
+        #: on this, not the display name (two files can share a name).
+        self._selected_path: Path | None = None
+        self._frequency_getter: Callable[[], int | None] | None = None
         self._active_role: str | None = None  # None = All
         self._cards: list[_ThumbnailCard] = []
 
@@ -396,6 +402,21 @@ class TemplateGallery(QWidget):
         """Update the config used for token resolution."""
         self._app_config = cfg
 
+    def set_frequency_getter(self, getter: Callable[[], int | None] | None) -> None:
+        """Rig-frequency source for ``%f`` / ``%b`` in thumbnails (C-M4)."""
+        self._frequency_getter = getter
+
+    def select_path(self, path: Path) -> bool:
+        """Select the card loaded from *path* and emit ``template_selected``.
+
+        Returns False (selection unchanged) when no card has that path.
+        """
+        for card in self._cards:
+            if card.path == path:
+                self._on_card_clicked(card.template)
+                return True
+        return False
+
     def set_photo(self, photo: PILImage | None) -> None:
         """Update the base photo; re-renders every card's thumbnail."""
         self._photo = photo
@@ -446,6 +467,7 @@ class TemplateGallery(QWidget):
     def clear_selection(self) -> None:
         """Deselect the current template."""
         self._selected_template = None
+        self._selected_path = None
         for card in self._cards:
             card.set_selected(False)
         self.template_selected.emit(None)
@@ -460,8 +482,11 @@ class TemplateGallery(QWidget):
     @Slot(object)
     def _on_card_clicked(self, template: Template) -> None:
         self._selected_template = template
+        self._selected_path = None
         for card in self._cards:
             card.set_selected(card.template is template)
+            if card.template is template:
+                self._selected_path = card.path
         self.template_selected.emit(template)
 
     @Slot(object, object)
@@ -539,10 +564,10 @@ class TemplateGallery(QWidget):
             card.deleteLater()
         self._cards.clear()
 
-        prev_name = (
-            self._selected_template.name if self._selected_template else None
-        )
+        prev = self._selected_template
+        prev_path = self._selected_path
         self._selected_template = None
+        self._selected_path = None
 
         for t, p in templates:
             card = _ThumbnailCard(t, p, self._strip_widget)
@@ -551,9 +576,21 @@ class TemplateGallery(QWidget):
             card.context_menu_requested.connect(self._on_card_context_menu)
             self._strip_layout.addWidget(card)
             self._cards.append(card)
-            if t.name == prev_name:
+            matches = (
+                p == prev_path if prev_path is not None
+                else prev is not None and t.name == prev.name
+            )
+            if matches and self._selected_template is None:
                 self._selected_template = t
+                self._selected_path = p
                 card.set_selected(True)
+
+        # v0.6.14 audit C-M1 / UI-M4: a reload replaces every Template
+        # object.  Re-emit so the TX panel holds the *reloaded* template
+        # (an editor save is live immediately), or None if its file is
+        # gone (deleted/renamed) so the preview drops the composite.
+        if prev is not None:
+            self.template_selected.emit(self._selected_template)
 
         has_cards = bool(self._cards)
         self._no_templates_label.setVisible(not has_cards)
@@ -612,11 +649,11 @@ class TemplateGallery(QWidget):
         mode = self._mode or Mode("scottie_s1")
         spec = MODE_TABLE[mode]
         thumb_w = self._compute_thumb_w(spec.width, spec.display_height)
-        ctx = TXContext(
-            mode_display_name=mode.value,
-            frame_size=(spec.width, spec.display_height),
-            photo_image=self._photo,
-            rx_image=self._rx_image,
+        # Shared builder (v0.6.14 audit C-M3/C-M4): same photo policy and
+        # rig frequency as TX, so the thumbnail is what would go out.
+        ctx = build_tx_context(
+            card.template, mode, self._photo, self._rx_image,
+            frequency_hz=self._frequency_getter() if self._frequency_getter else None,
         )
         try:
             img = render_template(

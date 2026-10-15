@@ -11,6 +11,8 @@ the leader, so a strict equality check would fail.
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 from PIL import Image
@@ -210,3 +212,41 @@ class TestModeTableMatchesEncoder:
             f"encoder emits {per_line} ms/line — the decoder derives every "
             f"channel offset from the table value, so they must agree"
         )
+
+
+# === v0.6.14 audit D-L3: Scottie spec channel timing ===
+
+
+@pytest.mark.parametrize(
+    ("mode", "pixel_ms", "line_ms"),
+    [
+        (Mode.SCOTTIE_S1, 0.4320, 428.22),
+        (Mode.SCOTTIE_S2, 0.2752, 277.692),
+        (Mode.SCOTTIE_DX, 1.0800, 1050.3),
+        (Mode.SCOTTIE_S3, 0.4320, 428.22),
+        (Mode.SCOTTIE_S4, 0.2752, 277.692),
+    ],
+)
+def test_scottie_line_matches_spec_layout(mode: Mode, pixel_ms: float, line_ms: float) -> None:
+    """SEP 1.5 | G | SEP 1.5 | B | SYNC 9 | PORCH 1.5 | R, 320 px per
+    channel at the slowrx / Barber pixel time. PySSTV's split was 1.1 %
+    short per channel with an extra gap after each scan."""
+    from open_sstv.core.encoder import _PYSSTV_CLASSES  # noqa: PLC0415
+
+    cls = _PYSSTV_CLASSES[mode]
+    sstv = cls(Image.new("RGB", (cls.WIDTH, cls.HEIGHT)), 48_000, 16)
+    tuples = list(sstv.gen_image_tuples())
+    per_line = len(tuples) // cls.HEIGHT
+    line = tuples[:per_line]
+    assert per_line == 3 * 320 + 4  # 3 scans + SEP, SEP, SYNC, PORCH
+    assert line[0] == (1500, 1.5)
+    assert line[321] == (1500, 1.5)
+    assert line[642] == (1200, 9.0)
+    assert line[643] == (1500, 1.5)
+    pixels = [d for i, (_f, d) in enumerate(line) if i not in (0, 321, 642, 643)]
+    assert pixels == pytest.approx([pixel_ms] * 960)
+    assert sum(d for _f, d in line) == pytest.approx(line_ms, abs=1e-9)
+    assert MODE_TABLE[mode].line_time_ms == pytest.approx(line_ms, abs=1e-9)
+    # math.fsum: plain sum() over ~250k floats drifts ~1e-6 on Python 3.11
+    # (3.12+ sums with compensation), which failed CI on 3.11 only.
+    assert math.fsum(d for _f, d in tuples) == pytest.approx(line_ms * cls.HEIGHT, abs=1e-6)

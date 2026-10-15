@@ -57,6 +57,7 @@ from PySide6.QtWidgets import (
 
 from open_sstv.core.modes import MODE_TABLE, Mode
 from open_sstv.templates import manager
+from open_sstv.templates.context import build_tx_context
 from open_sstv.templates.fonts import list_available_fonts
 from open_sstv.templates.model import (
     GradientLayer,
@@ -69,12 +70,13 @@ from open_sstv.templates.model import (
     StrokeSpec,
     Template,
     TextLayer,
-    TXContext,
 )
 from open_sstv.templates.renderer import render_template
 from open_sstv.ui.utils import pil_to_pixmap
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from PIL.Image import Image as PILImage
 
     from open_sstv.config.schema import AppConfig
@@ -181,6 +183,36 @@ def _pick_color(
     return (out.red(), out.green(), out.blue(), out.alpha())
 
 
+def ask_overwrite_template(parent: QWidget | None, target: Path) -> str:
+    """Ask what to do when a save would land on an existing template file.
+
+    v0.6.14 audit C-M5: Save As / Rename onto a name whose file already
+    exists used to overwrite it silently (starter templates included).
+    Returns ``"overwrite"``, ``"keep"`` (save under a free ``_2`` name) or
+    ``"cancel"``.
+    """
+    existing = manager.load_by_path(target)
+    label = f"\"{existing.name}\"" if existing is not None else target.name
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Icon.Warning)
+    box.setWindowTitle("Template already exists")
+    box.setText(
+        f"A template named {label} already exists ({target.name}).\n\n"
+        "Replace it, or keep both?"
+    )
+    replace_btn = box.addButton("Replace", QMessageBox.ButtonRole.DestructiveRole)
+    keep_btn = box.addButton("Keep Both", QMessageBox.ButtonRole.AcceptRole)
+    box.addButton(QMessageBox.StandardButton.Cancel)
+    box.setDefaultButton(keep_btn)
+    box.exec()
+    clicked = box.clickedButton()
+    if clicked is replace_btn:
+        return "overwrite"
+    if clicked is keep_btn:
+        return "keep"
+    return "cancel"
+
+
 # ---------------------------------------------------------------------------
 # Main editor dialog
 # ---------------------------------------------------------------------------
@@ -226,6 +258,7 @@ class TemplateEditor(QDialog):
         templates_dir: Path | None = None,
         current_photo: PILImage | None = None,
         current_mode: Mode | None = None,
+        frequency_getter: Callable[[], int | None] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -244,6 +277,10 @@ class TemplateEditor(QDialog):
         self._templates_dir = templates_dir or manager.default_templates_dir()
         self._photo: PILImage | None = current_photo
         self._mode: Mode = current_mode or Mode("scottie_s1")
+        self._frequency_getter = frequency_getter
+        #: Last saved (or loaded) state — the dirty guard compares against
+        #: it on close (v0.6.14 audit C-M6).
+        self._clean_snapshot: Template = copy.deepcopy(self._template)
 
         # Sample QSO state for preview token resolution.  Pre-filled with
         # plausible values so a fresh editor immediately shows live text
@@ -1203,11 +1240,12 @@ class TemplateEditor(QDialog):
         self._preview_timer.start()
 
     def _render_preview(self) -> None:
-        spec = MODE_TABLE[self._mode]
-        ctx = TXContext(
-            mode_display_name=self._mode.value,
-            frame_size=(spec.width, spec.display_height),
-            photo_image=self._photo,
+        # Shared builder (v0.6.14 audit C-M3/C-M4): the same photo policy
+        # TX applies, so the preview is what transmits, plus the rig
+        # frequency for %f / %b.
+        ctx = build_tx_context(
+            self._template, self._mode, self._photo,
+            frequency_hz=self._frequency_getter() if self._frequency_getter else None,
         )
         try:
             img = render_template(
@@ -1249,6 +1287,7 @@ class TemplateEditor(QDialog):
         except OSError as exc:
             QMessageBox.critical(self, "Save failed", f"Could not write template:\n{exc}")
             return
+        self._clean_snapshot = copy.deepcopy(self._template)
         self.template_saved.emit(saved_path)
         self._save_btn.setText("Saved ✓")
         QTimer.singleShot(1500, self._restore_save_label)
@@ -1258,14 +1297,65 @@ class TemplateEditor(QDialog):
         if not self._template.name.strip():
             QMessageBox.warning(self, "Name required", "Please enter a template name before saving.")
             return
+        # v0.6.14 audit C-M5: Save As onto an existing name used to
+        # overwrite that file silently.  Ask; "Keep Both" picks a free slug.
+        target = manager.path_for_name(self._template.name, self._templates_dir)
+        filename: str | None = None
+        if target.exists():
+            choice = ask_overwrite_template(self, target)
+            if choice == "cancel":
+                return
+            if choice == "overwrite":
+                filename = target.name
         try:
-            saved_path = manager.save(self._template, self._templates_dir)
+            saved_path = manager.save(
+                self._template, self._templates_dir, filename=filename
+            )
         except OSError as exc:
             QMessageBox.critical(self, "Save failed", f"Could not write template:\n{exc}")
             return
         self._path = saved_path
+        self._clean_snapshot = copy.deepcopy(self._template)
         self.template_saved.emit(saved_path)
         QMessageBox.information(self, "Saved", f"Saved to {saved_path.name}.")
+
+    # === Dirty guard =========================================================
+
+    def is_dirty(self) -> bool:
+        """True when the template differs from its last saved state."""
+        return self._template != self._clean_snapshot
+
+    def _ask_save_changes(self) -> str:
+        """Ask Save / Discard / Cancel for unsaved edits."""
+        answer = QMessageBox.question(
+            self,
+            "Unsaved changes",
+            f"Save changes to \"{self._template.name}\" before closing?",
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save,
+        )
+        if answer == QMessageBox.StandardButton.Save:
+            return "save"
+        if answer == QMessageBox.StandardButton.Discard:
+            return "discard"
+        return "cancel"
+
+    def reject(self) -> None:  # noqa: D401 — Qt override
+        """Close / Esc / window-X all land here (QDialog.closeEvent calls
+        reject).  v0.6.14 audit C-M6: unsaved edits were discarded with no
+        prompt.  Returning without ``super().reject()`` keeps the dialog
+        open (closeEvent then ignores the close)."""
+        if self.is_dirty():
+            choice = self._ask_save_changes()
+            if choice == "cancel":
+                return
+            if choice == "save":
+                self._on_save_clicked()
+                if self.is_dirty():  # save failed or was refused
+                    return
+        super().reject()
 
     @Slot()
     def _restore_save_label(self) -> None:

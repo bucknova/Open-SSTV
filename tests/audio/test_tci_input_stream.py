@@ -99,3 +99,24 @@ class TestDropCounter:
         worker.start()
         worker.stop()  # clean session — no stale overflow report
         assert errors == []
+
+
+class TestStopAcknowledgement:
+    """v0.6.14 audit UI-M6: stop() always emits ``stop_finished``."""
+
+    def test_idle_stop_acknowledges(self, qtbot, worker) -> None:
+        stopped: list[bool] = []
+        done: list[bool] = []
+        worker.stopped.connect(lambda: stopped.append(True))
+        worker.stop_finished.connect(lambda: done.append(True))
+        worker.stop()
+        assert done == [True]
+        assert stopped == [], "stopped still means a subscription was stopped"
+
+    def test_running_stop_emits_stopped_then_finished(self, qtbot, worker) -> None:
+        events: list[str] = []
+        worker.stopped.connect(lambda: events.append("stopped"))
+        worker.stop_finished.connect(lambda: events.append("finished"))
+        worker.start()
+        worker.stop()
+        assert events == ["stopped", "finished"]

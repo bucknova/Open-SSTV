@@ -156,10 +156,10 @@ from open_sstv.audio.pipewire_route import PipeWireSink, find_pipewire_sink_by_n
 from open_sstv.audio.tci_input_stream import TciInputStreamWorker
 from open_sstv.config.schema import AppConfig
 from open_sstv.config.store import last_corrupt_backup, load_config, save_config
-from open_sstv.config.templates import load_templates
 from open_sstv.core.modes import Mode
 from open_sstv.fsutil import atomic_write_bytes
 from open_sstv.logbook import QSO, LogbookCoordinator, QsoLoggingError, UdpQsoLogger
+from open_sstv.logbook.coordinator import mode_display_name
 from open_sstv.radio.band_plan import (
     FLEX_PROTOCOL,
     RIGCTLD_PROTOCOL,
@@ -170,13 +170,17 @@ from open_sstv.radio.band_plan import (
 from open_sstv.radio.base import ManualRig, Rig, RigConnectionMode
 from open_sstv.radio.exceptions import RigCommandError, RigError
 from open_sstv.radio.rigctld import RigctldClient, is_safe_rigctld_arg
+from open_sstv.radio.rigctld_launcher import launch_rigctld, stop_rigctld
 from open_sstv.radio.serial_rig import create_serial_rig
 from open_sstv.remote import (
+    MIN_TOKEN_LEN,
     ComposeService,
     ControlPlane,
     EventHub,
     GalleryService,
     RemoteServer,
+    normalise_hosts,
+    token_is_strong,
 )
 from open_sstv.templates import TokenContext, build_autosave_filename, run_migration
 from open_sstv.ui.audio_level_strip import AudioLevelStrip
@@ -197,41 +201,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from PIL.Image import Image as PILImage
-
-
-def _drain_subprocess_stderr(proc: subprocess.Popen, name: str) -> None:
-    """Pump *proc*'s stderr into the app log on a daemon thread.
-
-    v0.4.0 audit high #2: a child launched with ``stderr=PIPE`` that
-    nobody reads wedges once the OS pipe buffer (~64 KB) fills — the
-    child blocks on ``write(2)`` and stops doing its real job.  For
-    rigctld that means the daemon stops servicing CAT commands, worst
-    case with PTT keyed.  The pump thread is a daemon so it can never
-    hold the interpreter open; it exits when the child closes stderr.
-
-    Qt-free and module-level so it's unit-testable without a window.
-    """
-    if proc.stderr is None:  # not launched with stderr=PIPE — nothing to do
-        return
-
-    def _pump() -> None:
-        try:
-            assert proc.stderr is not None
-            for raw in proc.stderr:
-                line = raw.decode("utf-8", errors="replace").rstrip()
-                if line:
-                    _log.info("%s: %s", name, line)
-        except Exception:  # noqa: BLE001 — the drain must never die loudly
-            pass
-        finally:
-            try:
-                proc.stderr.close()
-            except Exception:  # noqa: BLE001
-                pass
-
-    threading.Thread(
-        target=_pump, name=f"{name}-stderr-drain", daemon=True
-    ).start()
 
 
 class _RigPollWorker(QObject):
@@ -275,6 +244,17 @@ class _RigPollWorker(QObject):
         super().__init__()
         self._rig: Rig = ManualRig()
         self._consecutive_errors: int = 0
+        #: v0.6.14 audit (UI low): at most one poll queued or running.  The
+        #: 1 Hz timer used to queue a poll every second regardless, so a
+        #: slow rig (2 s CAT timeouts) piled them up — and the backlog kept
+        #: running after TX started, interleaving CAT reads with PTT on the
+        #: same port (the OP-47 failure).  ``claim_poll`` (GUI thread) and
+        #: the end of ``poll`` (this thread) hand the flag back and forth.
+        self._poll_lock = threading.Lock()
+        self._poll_pending: bool = False
+        #: Set from the GUI thread for the whole TX; a poll that was already
+        #: queued when TX began returns without touching the rig.
+        self._suspended = threading.Event()
         #: Latches once per rig so an unsupported S-meter is logged a single
         #: time instead of once per second.
         self._strength_unsupported: bool = False
@@ -285,9 +265,32 @@ class _RigPollWorker(QObject):
         self._consecutive_errors = 0
         self._strength_unsupported = False
 
+    def claim_poll(self) -> bool:
+        """Reserve the single poll slot; ``False`` if one is still pending."""
+        with self._poll_lock:
+            if self._poll_pending:
+                return False
+            self._poll_pending = True
+            return True
+
+    def set_suspended(self, suspended: bool) -> None:
+        """Suspend/resume polling for the duration of a TX. Thread-safe."""
+        if suspended:
+            self._suspended.set()
+        else:
+            self._suspended.clear()
+
     @Slot()
     def poll(self) -> None:
         """Read freq/mode/strength from the rig. Blocks; runs on worker thread."""
+        try:
+            if not self._suspended.is_set():
+                self._poll_once()
+        finally:
+            with self._poll_lock:
+                self._poll_pending = False
+
+    def _poll_once(self) -> None:
         try:
             freq = self._rig.get_freq()
             mode_name, _ = self._rig.get_mode()
@@ -528,6 +531,19 @@ class _RigConnectRelay(QObject):
     @Slot(object)
     def on_succeeded(self, rig: Rig) -> None:
         if self._cancel.is_set():
+            # v0.6.14 sweep: the worker saw no cancel and emitted, but the
+            # timeout / Cancel won the race before this queued slot ran.
+            # Nobody will adopt this rig — close it, or the port leaks (an
+            # exclusive COM handle on Windows blocks every later Connect).
+            # Off the GUI thread: a serial close can block on the backend.
+            def _close() -> None:
+                try:
+                    rig.close()
+                except Exception:  # noqa: BLE001 — abandoned; never raise
+                    pass
+
+            _log.info("rig connect succeeded after timeout/cancel — closing it")
+            threading.Thread(target=_close, name="sstv-rig-late-close", daemon=True).start()
             return
         self._cancel.set()  # prevent late timeout from also calling on_error
         self._timer.stop()
@@ -595,6 +611,8 @@ class MainWindow(QMainWindow):
     #: serialised with the 1 Hz ``poll`` slot on the same thread.
     # (freq_hz, rig_mode, passband_hz, mode_is_exact)
     _request_tune = Signal(int, str, int, bool)
+    #: GUI → rig-poll thread, emitted only when ``claim_poll`` succeeded.
+    _request_rig_poll = Signal()
     #: Triggers the one-shot update check on the update worker thread.
     _request_update_check = Signal()
 
@@ -605,6 +623,8 @@ class MainWindow(QMainWindow):
         input_device: AudioDevice | int | None = None,
         config: AppConfig | None = None,
         parent: QMainWindow | None = None,
+        *,
+        config_corrupt_backup: Path | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Open-SSTV")
@@ -636,9 +656,11 @@ class MainWindow(QMainWindow):
         # system default so we can surface a status-bar notice once the
         # status bar exists later in __init__.
         self._missing_devices: list[str] = []
+        explicit_output_device = output_device is not None
         if output_device is None:
             output_device = find_output_device_by_name(
-                self._config.audio_output_device
+                self._config.audio_output_device,
+                host_api=self._config.audio_output_host_api or None,
             )
             # Not a PortAudio/ALSA device by that name — try a PipeWire
             # sink (e.g. a user's virtual "Radio" routing sink). PortAudio
@@ -656,7 +678,8 @@ class MainWindow(QMainWindow):
                 )
         if input_device is None:
             input_device = find_input_device_by_name(
-                self._config.audio_input_device
+                self._config.audio_input_device,
+                host_api=self._config.audio_input_host_api or None,
             )
             if input_device is None and self._config.audio_input_device:
                 self._missing_devices.append(
@@ -720,7 +743,15 @@ class MainWindow(QMainWindow):
         #: Raw RX audio buffer set by ``_on_rx_audio_ready`` and consumed by
         #: ``_on_rx_image_complete``.  Both fire from the same worker ``_dispatch``
         #: call, so the audio is always available when the image handler runs.
-        self._pending_rx_audio: tuple | None = None  # (audio_f64, sample_rate)
+        #: v0.6.14 audit: tagged with the live decode's mode and VIS, and
+        #: only the live path consumes it, so an offline-decoded image that
+        #: lands in between can never be saved with the live recording.
+        self._pending_rx_audio: tuple | None = None  # (audio_f64, sample_rate, mode, vis)
+        #: Same streak logic as ``_autosave_failing``, for RX audio saves.
+        self._rx_audio_save_failing: bool = False
+        #: True between ``_on_tx_started`` raising the RX gate and
+        #: ``_schedule_rx_resume`` lifting it (v0.6.14 audit).
+        self._rx_gate_raised: bool = False
         #: OP-47: remembers whether the 1 Hz rig-poll timer was running when
         #: TX started, so ``_unlock_rig_controls`` can resume it only if the
         #: rig is still connected. The poll is *suspended* for the duration
@@ -751,7 +782,11 @@ class MainWindow(QMainWindow):
         #: v0.6 (Phase 4): server-side compositor + in-memory staging store.
         #: Created here (not in RemoteServer) so the stage endpoint and the
         #: transmit path below share the same staged images.
-        self._remote_compose = ComposeService(lambda: self._config)
+        self._remote_compose = ComposeService(
+            lambda: self._config,
+            # v0.6.14 audit C-M4: %f / %b in remote-composed templates.
+            frequency_getter=lambda: getattr(self, "_last_rig_freq_hz", None),
+        )
         #: Throttle for the live RX preview push (monotonic seconds).
         self._remote_last_preview_t = 0.0
         #: v0.6 (Phase 3c): remote-TX control plane — the reference monitor
@@ -777,7 +812,11 @@ class MainWindow(QMainWindow):
             # then keyed for the remote image with the plane reporting idle
             # — abort answering "busy", reclaim_local a no-op, and the
             # dead-man's-switch never armed.
-            tx_busy=lambda: not self._tx_worker.wait_for_idle(0.0),
+            # v0.6.14 sweep: also busy for a TX dispatched but not yet
+            # started (worker still idle, its queued slot not run) — read
+            # via the thread-safe Event mirror, as this runs on the HTTP
+            # thread.
+            tx_busy=self._remote_tx_busy,
         )
         self._remote_tx_request.connect(
             self._on_remote_tx_request, Qt.ConnectionType.QueuedConnection
@@ -845,6 +884,20 @@ class MainWindow(QMainWindow):
         #: radio keyed.  Finished by ``_finish_deferred_rig_teardown``
         #: from the TX completion/abort handlers.
         self._deferred_rig_teardown: Rig | None = None
+        #: v0.6.14 audit T-L3 / T-M1: transmissions dispatched to the TX
+        #: worker whose ``transmission_finished`` hasn't arrived yet.  Rig
+        #: controls lock when this goes above zero (at request time, not
+        #: at ``transmission_started``) and unlock only when it returns to
+        #: zero — i.e. when the worker is idle, unkey retries included.
+        #: A property: every write also updates ``_tx_in_flight_evt``.
+        self._tx_in_flight_evt = threading.Event()
+        self._tx_requests_in_flight = 0
+        #: Token for the 500 ms "let rigctld bind" delay after an auto-
+        #: launch; a Cancel or a second Connect invalidates it (UI low).
+        self._pending_rigctld_connect: object | None = None
+        #: closeEvent's early emergency-unkey thread (T-L1), joined before
+        #: the rig is finally closed.
+        self._close_unkey_thread: threading.Thread | None = None
 
         # --- Menu bar ---
         self._build_menu_bar()
@@ -857,6 +910,16 @@ class MainWindow(QMainWindow):
         self._connect_worker: _RigConnectWorker | None = None
         self._connect_timeout_timer: QTimer | None = None
         self._connect_relay: _RigConnectRelay | None = None
+        #: v0.6.14 sweep: (thread, worker, relay) of superseded attempts
+        #: whose thread is still blocked in open() — see
+        #: ``_retire_connect_attempt``.
+        self._retired_connects: list[tuple[QThread, object, object]] = []
+        #: v0.6.14 sweep: a connect that succeeded while a TX was in
+        #: flight, adopted once the TX worker is idle — see
+        #: ``_defer_success_during_tx``.
+        self._deferred_connect_success: (
+            tuple[Rig, Callable[[Rig], None]] | None
+        ) = None
 
         # In-flight offline encode/decode workers.  Stored as instance
         # attributes (not locals) for the same reason as _connect_worker:
@@ -894,12 +957,15 @@ class MainWindow(QMainWindow):
         # Push callsign and full config to TX panel so the gallery can render
         # token-resolved thumbnails on startup.
         self._tx_panel = TxPanel(
-            templates=load_templates(),
             default_mode=self._config.default_tx_mode,
             app_config=self._config,
             parent=self,
         )
         self._tx_panel.set_callsign(self._config.callsign)
+        # v0.6.14 audit C-M4: the rig-poll cache feeds %f / %b at render.
+        self._tx_panel.set_frequency_getter(
+            lambda: getattr(self, "_last_rig_freq_hz", None)
+        )
 
         # --- Panels inside a horizontal splitter ---
         self._rx_panel = RxPanel(self)
@@ -987,6 +1053,13 @@ class MainWindow(QMainWindow):
             self._config.test_tone_freq_lo,
             self._config.test_tone_freq_hi,
         )
+        # v0.6.14 audit T-M5: re-resolve the configured device by name at
+        # every TX start (not for an explicitly injected device).
+        if not explicit_output_device:
+            self._tx_worker.set_output_device_name(
+                self._config.audio_output_device,
+                host_api=self._config.audio_output_host_api or None,
+            )
         self._tx_worker.moveToThread(self._tx_thread)
         # Standard Qt cleanup pattern: when the thread finishes, schedule
         # the worker for deletion. Without this the worker is left as an
@@ -1022,6 +1095,14 @@ class MainWindow(QMainWindow):
         # that pushed it to the worker was ``_apply_config``, which
         # only fired when the user re-opened Settings.
         self._rx_worker.set_input_gain(self._config.audio_input_gain)
+        # v0.6.14 audit UI-M2: what the RxWorker was last told, so
+        # _apply_config only sends (and the worker only rebuilds its
+        # decoder for) values that actually changed.  _rx_decoder_rate is
+        # also the rate the capture stream runs at, which the waterfall
+        # needs for its frequency axis.
+        self._rx_applied_weak_signal: bool = self._config.rx_weak_signal_mode
+        self._rx_applied_incremental: bool = self._config.incremental_decode
+        self._rx_decoder_rate: int = self._config.sample_rate
         self._rx_worker.moveToThread(self._rx_thread)
         self._rx_thread.finished.connect(self._rx_worker.deleteLater)
         self._rx_thread.start()
@@ -1058,8 +1139,10 @@ class MainWindow(QMainWindow):
         self._tx_worker.transmission_aborted.connect(self._on_tx_aborted)
         # v0.6 (Phase 3c): whenever a transmission ends, return the remote
         # control plane to idle (a no-op unless a remote TX was in flight).
-        self._tx_worker.transmission_complete.connect(self._remote_tx_ended)
-        self._tx_worker.transmission_aborted.connect(self._remote_tx_ended)
+        # v0.6.14 audit UI-M7: on the one terminal signal, so a remote TX
+        # that fails before keying (only ``error``) can't leave the plane
+        # stuck TRANSMITTING.
+        self._tx_worker.transmission_finished.connect(self._on_tx_finished)
         # v0.2.8: stash the composited TX image (banner already applied) so
         # ``_on_tx_complete`` can auto-save it when ``autosave_tx`` is on.
         self._tx_worker.tx_image_prepared.connect(self._on_tx_image_prepared)
@@ -1176,9 +1259,10 @@ class MainWindow(QMainWindow):
         self._rig_poll_thread.start()
 
         # Queued connection: timeout fires on GUI thread → slot runs on poll thread.
-        self._rig_poll_timer.timeout.connect(self._rig_poll_worker.poll)
+        self._rig_poll_timer.timeout.connect(self._on_rig_poll_tick)
+        self._request_rig_poll.connect(self._rig_poll_worker.poll)
         self._rig_poll_worker.poll_result.connect(self._on_poll_result)
-        self._rig_poll_worker.poll_error.connect(self._radio_panel.set_connection_error)
+        self._rig_poll_worker.poll_error.connect(self._on_poll_error)
         self._rig_poll_worker.radio_disconnected.connect(self._on_radio_disconnected)
         self._rig_poll_worker.tune_failed.connect(self._on_tune_failed)
         # Band-plan tune relay: GUI thread emits _request_tune → rig-poll thread
@@ -1215,7 +1299,13 @@ class MainWindow(QMainWindow):
         # ``load_config`` now banishes the corpse to a ``.corrupt``
         # sibling; tell the user where it went so a hand-edit typo is
         # recoverable.  Deferred so the window paints first.
-        corrupt_backup = last_corrupt_backup() if loaded_config_from_disk else None
+        # v0.6.14 audit C-H2: ``app.main`` loads the config once and passes
+        # both the config and the backup path in; a second load here found
+        # no file (already moved to ``.corrupt``) and the warning never showed.
+        corrupt_backup = (
+            last_corrupt_backup() if loaded_config_from_disk
+            else config_corrupt_backup
+        )
         if corrupt_backup is not None:
             QTimer.singleShot(
                 0,
@@ -1281,11 +1371,16 @@ class MainWindow(QMainWindow):
         # must not count as a change, or the server would restart on every
         # settings save and churn the URL.
         srv = self._remote_server
-        token_changed = bool(cfg.remote_token) and srv is not None and srv.token != cfg.remote_token
+        # v0.6.14 audit S-M2: a too-short configured token is ignored by the
+        # server (it mints a random one), so treat it like blank here too —
+        # otherwise it never matches and every settings save restarts.
+        usable_token = cfg.remote_token if token_is_strong(cfg.remote_token) else ""
+        token_changed = bool(usable_token) and srv is not None and srv.token != usable_token
         if running and srv is not None and (
             not want
             or srv.host != cfg.remote_host
             or srv.port != cfg.remote_port
+            or srv.extra_hosts != normalise_hosts(cfg.remote_extra_hosts)
             or token_changed
         ):
             self._stop_remote_server()
@@ -1300,6 +1395,7 @@ class MainWindow(QMainWindow):
                 host=cfg.remote_host,
                 port=cfg.remote_port,
                 token=cfg.remote_token,
+                extra_hosts=cfg.remote_extra_hosts,
                 hub=self._remote_hub,
                 control=self._remote_control,
                 compose=self._remote_compose,
@@ -1318,9 +1414,19 @@ class MainWindow(QMainWindow):
         # bundled into diagnostics exports.  The token-bearing URL still
         # goes to the (ephemeral, on-screen) status bar and indicator.
         _log.info("remote gallery server started on %s:%d", cfg.remote_host, cfg.remote_port)
-        self.statusBar().showMessage(
-            f"Remote gallery server running — open {self._remote_server.url}", 10000
-        )
+        if self._remote_server.token_rejected:
+            # S-M2: don't silently break an existing install's short token —
+            # say why the link changed and where to fix it.
+            self.statusBar().showMessage(
+                f"Remote access token must be at least {MIN_TOKEN_LEN} plain-ASCII "
+                "characters, so a random one is in use this session — open "
+                f"Settings → Remote to set or regenerate it.  Link: {self._remote_server.url}",
+                30000,
+            )
+        else:
+            self.statusBar().showMessage(
+                f"Remote gallery server running — open {self._remote_server.url}", 10000
+            )
         self._show_remote_indicator(self._remote_server.url)
 
     def _show_remote_indicator(self, url: str) -> None:
@@ -1330,9 +1436,14 @@ class MainWindow(QMainWindow):
         this machine even when the server is bound to the LAN (0.0.0.0),
         while the tooltip shows the real bind URL for phones on the network.
         """
+        import html  # noqa: PLC0415
+
         local = url.replace("0.0.0.0", "127.0.0.1")
+        # v0.6.14 audit (Info): the URL embeds the operator-typed token —
+        # escape it before it lands in a rich-text href.
         self._remote_status_label.setText(
-            f'<a href="{local}" style="color:#2fa36b; text-decoration:none">'
+            f'<a href="{html.escape(local, quote=True)}" '
+            'style="color:#2fa36b; text-decoration:none">'
             "\N{LARGE GREEN CIRCLE} Remote on</a>"
         )
         self._remote_status_label.setToolTip(
@@ -1475,6 +1586,7 @@ class MainWindow(QMainWindow):
         _log.info("remote TX: transmitting %s in %s", what, mode)
         self._last_tx_was_test_tone = False
         self._last_tx_was_remote = True
+        self._begin_tx_request()
         self._request_transmit.emit(img, mode_enum)
 
     def _remote_tx_abandon(self) -> None:
@@ -1621,8 +1733,9 @@ class MainWindow(QMainWindow):
 
         UDP-only — never touches the local logbook database (that's
         ``save_draft``'s per-image auto-capture flow, a separate
-        concern).  Time is the moment of the click (UTC); mode is fixed
-        to "SSTV" since this bar only ever describes an SSTV contact.
+        concern).  Time is the moment of the click (UTC); mode is the TX
+        panel's selected SSTV mode (v0.6.14 audit C-M8: it was a bare
+        "SSTV", so loggers never got the SUBMODE).
         """
         qso_state = self._tx_panel.get_qso_state()
         callsign = qso_state.tocall.strip().upper()
@@ -1636,7 +1749,7 @@ class MainWindow(QMainWindow):
             direction="TX",
             callsign=callsign,
             time_utc=datetime.datetime.now(datetime.UTC),
-            mode="SSTV",
+            mode=mode_display_name(self._tx_panel.selected_mode()),
             frequency_hz=self._last_rig_freq_hz,
             rsv_sent=qso_state.rst,
             rsv_received=rst_received,
@@ -1854,9 +1967,17 @@ class MainWindow(QMainWindow):
     @Slot(str, str)
     def _on_update_available(self, version: str, url: str) -> None:
         """Show a persistent status-bar link when a newer release is found."""
+        import html  # noqa: PLC0415
+
         from PySide6.QtWidgets import QLabel
 
-        lbl = QLabel(f'<a href="{url}">Open-SSTV {version} available</a>')
+        # v0.6.14 audit S-L7: both values came off the network into a
+        # link-opening rich-text label — escape them (the worker also
+        # fences the URL to our releases page).
+        lbl = QLabel(
+            f'<a href="{html.escape(url, quote=True)}">'
+            f"Open-SSTV {html.escape(version)} available</a>"
+        )
         lbl.setOpenExternalLinks(True)
         lbl.setContentsMargins(0, 0, 8, 0)
         self.statusBar().addPermanentWidget(lbl)
@@ -1941,6 +2062,10 @@ class MainWindow(QMainWindow):
             tx_image=self._tx_panel.current_image,
             parent=self,
         )
+        # S-M2: let the Remote tab show a QR for the token the running server
+        # generated, so a blank (auto) token is scannable too.
+        if self._remote_server is not None:
+            dlg.set_remote_live_token(self._remote_server.token)
         # Route Test Tone from the dialog through the same path as the Radio
         # panel button (queued signal → TxWorker on its own thread).
         dlg.test_tone_requested.connect(self._on_test_tone_requested)
@@ -2311,13 +2436,26 @@ class MainWindow(QMainWindow):
         # with updated callsign / grid / op-name token values.
         self._tx_panel.set_app_config(self._config)
         new_output = find_output_device_by_name(
-            self._config.audio_output_device
+            self._config.audio_output_device,
+            host_api=self._config.audio_output_host_api or None,
         ) or find_pipewire_sink_by_name(self._config.audio_output_device)
         self._tx_worker.set_output_device(new_output)
+        self._tx_worker.set_output_device_name(
+            self._config.audio_output_device,
+            host_api=self._config.audio_output_host_api or None,
+        )
         self._tx_worker.set_output_gain(self._config.audio_output_gain)
         self._tx_worker.set_ptt_delay(self._config.ptt_delay_s)
-        new_input = find_input_device_by_name(self._config.audio_input_device)
+        new_input = find_input_device_by_name(
+            self._config.audio_input_device,
+            host_api=self._config.audio_input_host_api or None,
+        )
         self._input_device = new_input
+        if new_input is None and self._config.audio_input_device:
+            # v0.6.14 audit UI-M3: the saved device is unplugged (Settings
+            # now keeps it as "(not connected)").  Look it up again at the
+            # next capture start so plugging it back in is enough.
+            self._input_device_needs_relookup = True
         self._rx_worker.set_input_gain(self._config.audio_input_gain)
         # Keep the always-on audio strip in sync with a Settings save
         # (overdrive first so the TX ceiling is right before the clamp).
@@ -2327,12 +2465,20 @@ class MainWindow(QMainWindow):
         # Emit via queued signals so decoder rebuilds happen on the worker
         # thread, not the GUI thread (H-02 fix; OP-09 extended to cover
         # set_final_slant_correction too).
-        self._rx_weak_signal_changed.emit(self._config.rx_weak_signal_mode)
+        #
+        # v0.6.14 audit UI-M2: the two settings that rebuild the decoder
+        # are sent only when they changed.  Re-sending them on every OK
+        # destroyed whatever image was being received.
+        if self._config.rx_weak_signal_mode != self._rx_applied_weak_signal:
+            self._rx_applied_weak_signal = self._config.rx_weak_signal_mode
+            self._rx_weak_signal_changed.emit(self._config.rx_weak_signal_mode)
         self._rx_watchdog_timeout_changed.emit(self._config.rx_watchdog_timeout_s)
         self._rx_final_slant_correction_changed.emit(
             self._config.apply_final_slant_correction
         )
-        self._rx_incremental_decode_changed.emit(self._config.incremental_decode)
+        if self._config.incremental_decode != self._rx_applied_incremental:
+            self._rx_applied_incremental = self._config.incremental_decode
+            self._rx_incremental_decode_changed.emit(self._config.incremental_decode)
         self._tx_worker.set_tx_banner(
             self._config.tx_banner_enabled,
             self._config.callsign,
@@ -2355,7 +2501,14 @@ class MainWindow(QMainWindow):
         # encode/capture start).  Both go via queued signals so the
         # change lands on the receiving worker's own event loop (OP-09).
         self._tx_sample_rate_changed.emit(self._config.sample_rate)
-        self._rx_sample_rate_changed.emit(self._config.sample_rate)
+        # v0.6.14 audit UI-M2: the RX decoder must run at the rate the
+        # capture stream delivers.  Rebuilding it at the new rate while
+        # the stream kept the old one desynced every line.  With capture
+        # running, leave both alone: _begin_capture syncs the decoder
+        # before the next stream opens (the caller tells the user to
+        # restart capture).
+        if not self._capture_running:
+            self._sync_rx_sample_rate()
         # TX panel needs the rate too so the progress-bar elapsed/total
         # seconds label is correct at 44.1 kHz (OP-06).
         self._tx_panel.set_sample_rate(self._config.sample_rate)
@@ -2369,6 +2522,37 @@ class MainWindow(QMainWindow):
         # host/port/token changes are picked up on restart).
         self._apply_remote_server()
 
+    def _effective_rx_sample_rate(self) -> int:
+        """The rate the next capture stream will deliver.
+
+        PortAudio opens at the configured rate.  A TCI server dictates its
+        own (the worker negotiates 48 kHz), so the configured rate means
+        nothing for TCI input.
+        """
+        if isinstance(self._audio_worker, TciInputStreamWorker):
+            try:
+                return int(self._audio_worker.sample_rate)
+            except Exception:  # noqa: BLE001 — connection already gone
+                _log.debug("TCI sample rate unavailable", exc_info=True)
+        return int(self._config.sample_rate)
+
+    def _sync_rx_sample_rate(self) -> None:
+        """Bring the RX decoder and the waterfall to the capture rate.
+
+        Only call while no capture stream is running.  The rate change is
+        a queued signal to the RX thread.  Callers that reset the decoder
+        afterwards (``_begin_capture``, ``_swap_audio_worker``) emit it
+        first, so the rebuild lands before the reset and the first chunk.
+        (v0.6.14 audit UI-M2, and the waterfall Low: its rate was set once
+        at creation and never followed Settings or a switch to TCI.)
+        """
+        rate = self._effective_rx_sample_rate()
+        if rate != self._rx_decoder_rate:
+            self._rx_decoder_rate = rate
+            self._rx_sample_rate_changed.emit(rate)
+        if self._waterfall_window is not None:
+            self._waterfall_window.set_sample_rate(rate)
+
     # === TX slots ===
 
     @Slot(object, object)
@@ -2379,6 +2563,7 @@ class MainWindow(QMainWindow):
         self._remote_control.reclaim_local()
         self._last_tx_was_test_tone = False
         self._last_tx_was_remote = False
+        self._begin_tx_request()
         self._request_transmit.emit(image, mode)
 
     @Slot()
@@ -2387,6 +2572,7 @@ class MainWindow(QMainWindow):
         self._remote_control.reclaim_local()  # local keying wins over remote
         self._last_tx_was_test_tone = True
         self._last_tx_was_remote = False
+        self._begin_tx_request()
         self._request_test_tone.emit()
 
     @Slot()
@@ -2434,7 +2620,53 @@ class MainWindow(QMainWindow):
             self._tx_panel.set_status("Transmitting…")
             self.statusBar().showMessage("Transmitting")
         # Lock rig controls for the duration of the transmission so the user
-        # can't swap or disconnect the rig while PTT is keyed.
+        # can't swap or disconnect the rig while PTT is keyed.  Normally
+        # already locked at request time (T-L3); idempotent.
+        self._lock_rig_controls_for_tx()
+        # Gate the RX decoder to prevent self-decode through loopback (R-2).
+        self._rx_gate_raised = True  # v0.6.14 audit: see _schedule_rx_resume
+        self._request_rx_gate.emit(True)
+        self._rx_panel.set_status("RX paused during TX.")
+
+    @property
+    def _tx_requests_in_flight(self) -> int:
+        return self._tx_in_flight_count
+
+    @_tx_requests_in_flight.setter
+    def _tx_requests_in_flight(self, count: int) -> None:
+        # GUI thread only.  v0.6.14 sweep: mirror "> 0" into an Event so
+        # the remote control plane (HTTP thread) can read it safely.
+        self._tx_in_flight_count = count
+        if count > 0:
+            self._tx_in_flight_evt.set()
+        else:
+            self._tx_in_flight_evt.clear()
+
+    def _remote_tx_busy(self) -> bool:
+        """``ControlPlane.tx_busy``: called on the HTTP thread.
+
+        Busy while any TX is dispatched (GUI bookkeeping, via the Event
+        mirror) or the worker is not idle.  v0.6.14 sweep: the worker-idle
+        check alone answered "not busy" for a local TX whose queued
+        ``transmit`` slot hadn't started yet, so a remote request could be
+        granted and queue behind it.
+        """
+        return self._tx_in_flight_evt.is_set() or not self._tx_worker.wait_for_idle(0.0)
+
+    def _begin_tx_request(self) -> None:
+        """Bookkeeping for one TX dispatched to the worker (GUI thread).
+
+        v0.6.14 audit T-L3: lock Disconnect/Settings *now*, not at
+        ``transmission_started`` — the ``set_ptt(True)`` round-trip (up to
+        a 2 s CAT timeout) used to leave Disconnect clickable while the rig
+        was being keyed.  T-L2: tell the worker a request is queued so a
+        Stop pressed before the slot runs still cancels it.
+        """
+        self._tx_worker.note_tx_requested()
+        self._tx_requests_in_flight += 1
+        self._lock_rig_controls_for_tx()
+
+    def _lock_rig_controls_for_tx(self) -> None:
         self._radio_panel.set_tx_active(True)
         self._settings_action.setEnabled(False)
         # OP-47: suspend the 1 Hz rig-status poll while TX is active.
@@ -2448,12 +2680,37 @@ class MainWindow(QMainWindow):
         # error". RX works fine before this point because no concurrent
         # writer exists. Remember the pre-TX state so we only resume if
         # the rig was connected to begin with.
-        self._rig_poll_was_active = self._rig_poll_timer.isActive()
-        if self._rig_poll_was_active:
+        # Only *record* "was active" when it is: the lock now runs at both
+        # request and start, and the second call must not overwrite True.
+        if self._rig_poll_timer.isActive():
+            self._rig_poll_was_active = True
             self._rig_poll_timer.stop()
-        # Gate the RX decoder to prevent self-decode through loopback (R-2).
-        self._request_rx_gate.emit(True)
-        self._rx_panel.set_status("RX paused during TX.")
+        # v0.6.14 audit (UI low): a poll already queued on the poll thread
+        # must not run during TX either.
+        self._rig_poll_worker.set_suspended(True)
+
+    def _maybe_unlock_rig_controls(self) -> None:
+        """Unlock only once no dispatched TX is still in flight (T-M1).
+
+        complete / aborted / error can arrive while the worker is still
+        unkeying (error) or with another request queued behind them; the
+        final unlock comes from ``_on_tx_finished``.
+        """
+        if self._tx_requests_in_flight <= 0:
+            self._unlock_rig_controls()
+
+    @Slot()
+    def _on_tx_finished(self) -> None:
+        """The worker is idle: exactly one per dispatched TX (T-M1, UI-M7)."""
+        self._tx_requests_in_flight = max(0, self._tx_requests_in_flight - 1)
+        # An error with no following abort (encode / PTT / device refusal)
+        # must not swallow the *next* abort's status message.
+        self._tx_error_pending = False
+        self._maybe_unlock_rig_controls()
+        # Lift the RX gate here too — a no-op if complete/aborted already
+        # did, or if the TX never keyed (the gate was never raised).
+        self._schedule_rx_resume()
+        self._remote_tx_ended()
 
     def _unlock_rig_controls(self) -> None:
         """Re-enable rig UI after TX completes, aborts, or errors.
@@ -2472,6 +2729,7 @@ class MainWindow(QMainWindow):
         self._finish_deferred_rig_teardown()
         self._radio_panel.set_tx_active(False)
         self._settings_action.setEnabled(True)
+        self._rig_poll_worker.set_suspended(False)
         # Only resume polling if the rig is still a real backend. If the
         # user (or a disconnect handler) swapped back to ManualRig during
         # TX, restarting the timer would poll a no-op backend and also
@@ -2479,6 +2737,9 @@ class MainWindow(QMainWindow):
         if self._rig_poll_was_active and not isinstance(self._rig, ManualRig):
             self._rig_poll_timer.start()
         self._rig_poll_was_active = False
+        # v0.6.14 sweep: adopt a rig whose connect finished mid-TX.
+        if self._tx_requests_in_flight <= 0:
+            self._run_deferred_connect_success()
 
     def _schedule_rx_resume(self) -> None:
         """Lift the RX gate 50 ms after TX ends.
@@ -2488,9 +2749,27 @@ class MainWindow(QMainWindow):
         TX-period audio bleeds into the next RX attempt.  The gate-off
         also calls RxWorker.reset() so the counter and decoder start clean.
         """
-        # OP2-19: guard against post-close firing — isVisible() is False
-        # once closeEvent has run, so the callback becomes a no-op.
-        QTimer.singleShot(50, lambda: self.isVisible() and self._request_rx_gate.emit(False))
+        # v0.6.14 audit: lift the gate only if _on_tx_started raised it.
+        # A TX that failed before transmission_started never gated RX, and
+        # lifting anyway reset the decoder, destroying a decode in progress.
+        # The error and complete/abort paths may both get here; the flag
+        # makes the second call a no-op.
+        if not self._rx_gate_raised:
+            return
+        self._rx_gate_raised = False
+
+        def _lift() -> None:
+            # OP2-19: guard against post-close firing — isVisible() is False
+            # once closeEvent has run, so the callback becomes a no-op.
+            # And if a new TX raised the gate again within the 50 ms, leave
+            # it raised.
+            if self.isVisible() and not self._rx_gate_raised:
+                self._request_rx_gate.emit(False)
+
+        # ``self`` as the context object: Qt drops the callback if the
+        # window is destroyed within the 50 ms (a bare callable then ran on
+        # a deleted MainWindow and raised from the event loop).
+        QTimer.singleShot(50, self, _lift)
 
     @Slot(object, object)
     def _on_tx_image_prepared(self, image: object, mode: object) -> None:
@@ -2565,7 +2844,7 @@ class MainWindow(QMainWindow):
             self._last_tx_mode = None
             self._tx_panel.set_status("Transmission complete.")
             self.statusBar().showMessage("Ready")
-        self._unlock_rig_controls()
+        self._maybe_unlock_rig_controls()
         self._schedule_rx_resume()
 
     @Slot(float)
@@ -2609,7 +2888,7 @@ class MainWindow(QMainWindow):
             else:
                 self._tx_panel.set_status("Transmission aborted.")
             self.statusBar().showMessage("Ready")
-        self._unlock_rig_controls()
+        self._maybe_unlock_rig_controls()
         self._schedule_rx_resume()
 
     @Slot(str)
@@ -2623,8 +2902,12 @@ class MainWindow(QMainWindow):
         self._tx_panel.set_status(f"Error: {message}")
         self.statusBar().showMessage(message, 8000)
         self._tx_error_pending = True
-        self._unlock_rig_controls()
-        self._schedule_rx_resume()
+        # v0.6.14 audit T-M1: NOT a terminal signal — the worker may still
+        # be retrying the unkey.  Disconnect stays locked until
+        # ``transmission_finished`` (see _maybe_unlock_rig_controls), and
+        # RX stays gated until then too: resuming RX here decoded whatever
+        # the receiver heard while the rig was still keyed.
+        self._maybe_unlock_rig_controls()
 
     # === RX slots ===
 
@@ -2683,6 +2966,10 @@ class MainWindow(QMainWindow):
         # completed left two closures connected and started capture
         # twice ("already running").
         self._start_capture_armed = True
+        # v0.6.14 audit UI-M2: apply a sample-rate change deferred while
+        # the previous stream ran.  Emitted before the reset so both land
+        # on the RX thread, in order, ahead of the first chunk.
+        self._sync_rx_sample_rate()
         self._request_rx_reset.emit()
 
     # --- RX auto-resume after a device loss (2026-10 stability audit) -----
@@ -2711,6 +2998,7 @@ class MainWindow(QMainWindow):
         if n <= len(_AUDIO_RECOVERY_DELAYS_S) or n % 10 == 0:
             _log.info("RX audio recovery: attempt %d to restart capture", n)
         self._input_device_needs_relookup = True  # USB re-plug renumbers devices
+        self._tx_worker.mark_output_device_stale()  # ...TX's index too
         self._begin_capture()
         # Success shows up as _on_rx_started.  A failure arrives as
         # error + stopped, and _on_rx_stopped schedules the next attempt.
@@ -2743,7 +3031,10 @@ class MainWindow(QMainWindow):
         # (_on_audio_device_lost sets the flag): sd.query_devices() can
         # block for 50-500 ms on macOS Core Audio after a USB event.
         if self._input_device_needs_relookup and self._config.audio_input_device:
-            fresh = find_input_device_by_name(self._config.audio_input_device)
+            fresh = find_input_device_by_name(
+                self._config.audio_input_device,
+                host_api=self._config.audio_input_host_api or None,
+            )
             if fresh is not None:
                 self._input_device = fresh
             self._input_device_needs_relookup = False
@@ -2806,6 +3097,9 @@ class MainWindow(QMainWindow):
         # Signal _start_once that it must re-resolve the saved device
         # name on the next capture start.
         self._input_device_needs_relookup = True
+        # Same for TX: re-resolve the output device before the next key-up
+        # (v0.6.14 audit T-M5 — only after a loss, not on every TX).
+        self._tx_worker.mark_output_device_stale()
         # An involuntary loss: keep trying to restart capture once the
         # stream has stopped (_on_rx_stopped), rather than waiting for
         # someone to click Start.
@@ -2928,7 +3222,7 @@ class MainWindow(QMainWindow):
         on the GUI thread in order — the audio is always buffered by the time
         ``_on_rx_image_complete`` runs.
         """
-        self._pending_rx_audio = (audio, sample_rate)
+        self._pending_rx_audio = (audio, sample_rate, mode, vis_code)
 
     @Slot(object, object, int)
     def _on_rx_image_complete(
@@ -2942,8 +3236,15 @@ class MainWindow(QMainWindow):
         logging, and the capture dialog costs one Esc to dismiss when
         they aren't (noise trigger, test decode).
         """
-        pending_audio = self._pending_rx_audio
-        self._pending_rx_audio = None
+        # v0.6.14 audit: only a live completion takes the live recording,
+        # and only when it's for the same transmission (mode and VIS).
+        # Offline decodes never record audio, so they leave the slot alone.
+        pending_audio: tuple | None = None
+        if not offline:
+            pending = self._pending_rx_audio
+            self._pending_rx_audio = None
+            if pending is not None and pending[2] == mode and pending[3] == vis_code:
+                pending_audio = (pending[0], pending[1])
 
         pil_image: PILImage = image  # type: ignore[assignment]
         save_path: Path | None = None
@@ -3060,6 +3361,23 @@ class MainWindow(QMainWindow):
         if fmt not in ("wav", "flac"):
             fmt = "wav"
 
+        def _fail(message: str) -> None:
+            # v0.6.14 audit: follow _autosave_image — one modal per failure
+            # streak, then the status bar.  A full disk on an unattended
+            # station used to stack one dialog per decoded image.
+            # getattr: tests call this unbound on a minimal stand-in.
+            _log.error("RX audio save failed: %s", message)
+            if not getattr(self, "_rx_audio_save_failing", False):
+                self._rx_audio_save_failing = True
+                QMessageBox.warning(
+                    self,
+                    "Audio save failed",
+                    f"{message}\n\nFurther audio save failures will appear "
+                    "in the status bar until a save succeeds.",
+                )
+            else:
+                self.statusBar().showMessage(f"Audio save failed: {message}", 10_000)
+
         if alongside is not None:
             out_path = alongside.with_suffix(f".{fmt}")
         else:
@@ -3074,37 +3392,40 @@ class MainWindow(QMainWindow):
                     file_format=fmt,
                 )
             except OSError as exc:
-                QMessageBox.warning(self, "Audio save failed", str(exc))
+                _fail(str(exc))
                 return None
 
+        # v0.6.14 audit: encode in memory, then atomic_write_bytes, like the
+        # image auto-save.  Writing straight to the final path left a
+        # truncated WAV/FLAC beside the image on a full disk.  This also
+        # keeps H-4 (audit 4.7/v0.2.9) intact: the path never reaches
+        # wave/soundfile as a str, so non-ASCII Windows paths go through
+        # pathlib's wide-char API.
         try:
+            buf = io.BytesIO()
             if fmt == "wav":
                 pcm = (np.clip(arr, -1.0, 1.0) * 32767.0).astype(np.int16)
-                # H-4 (audit 4.7/v0.2.9): open via pathlib.Path.open so
-                # non-ASCII characters in *out_path* on Windows go through
-                # the wide-char OS API.  Passing ``str(out_path)`` directly
-                # to wave.open would encode through the active ANSI code
-                # page and mangle paths containing emoji or non-ANSI
-                # characters under non-UTF-8 locales.
-                with out_path.open("wb") as raw, wave.open(raw, "wb") as wf:
+                with wave.open(buf, "wb") as wf:
                     wf.setnchannels(1)
                     wf.setsampwidth(2)
                     wf.setframerate(sample_rate)
                     wf.writeframes(pcm.tobytes())
             else:
                 import soundfile as sf  # noqa: PLC0415 — lazy optional dep
-                sf.write(str(out_path), arr, sample_rate, subtype="PCM_16")
-        except OSError as exc:
-            QMessageBox.warning(self, "Audio save failed", str(exc))
-            return None
+                sf.write(buf, arr, sample_rate, subtype="PCM_16", format="FLAC")
+            atomic_write_bytes(out_path, buf.getvalue())
         except ImportError:
-            QMessageBox.warning(
-                self,
-                "Audio save failed",
+            _fail(
                 "FLAC recording requires the 'soundfile' package.\n"
-                'Install it with:  pip install "open-sstv[flac]"',
+                'Install it with:  pip install "open-sstv[flac]"'
             )
             return None
+        except (OSError, RuntimeError, ValueError, wave.Error) as exc:
+            # RuntimeError: soundfile's LibsndfileError used to escape the
+            # slot (v0.6.14 audit).
+            _fail(str(exc))
+            return None
+        self._rx_audio_save_failing = False
         self.statusBar().showMessage(f"Audio saved {out_path.name}", 3000)
         return out_path
 
@@ -3146,12 +3467,24 @@ class MainWindow(QMainWindow):
             "PNG (*.png);;JPEG (*.jpg *.jpeg);;All files (*)",
         )
         if path_str:
+            # v0.6.14 audit: PIL raised ValueError for an unknown extension
+            # and it escaped the slot; the write also went straight to the
+            # final path.  No extension means PNG (the first filter);
+            # encode in memory and replace atomically, like auto-save.
+            from PIL import Image  # noqa: PLC0415
+
+            path = Path(path_str)
+            if not path.suffix:
+                path = path.with_suffix(".png")
             try:
-                pil_image.save(path_str)
-                self.statusBar().showMessage(
-                    f"Saved {Path(path_str).name}", 3000
-                )
-            except OSError as exc:
+                fmt = Image.registered_extensions().get(path.suffix.lower())
+                if fmt is None:
+                    raise ValueError(f"unknown image format {path.suffix!r}")
+                buf = io.BytesIO()
+                pil_image.save(buf, format=fmt)
+                atomic_write_bytes(path, buf.getvalue())
+                self.statusBar().showMessage(f"Saved {path.name}", 3000)
+            except (OSError, ValueError) as exc:
                 QMessageBox.warning(self, "Save failed", str(exc))
 
     @Slot()
@@ -3215,6 +3548,18 @@ class MainWindow(QMainWindow):
         """
         mode = self._config.rig_connection_mode
 
+        # v0.6.14 audit UI-H2 / UI low: one connect attempt at a time.  A
+        # timed-out attempt's thread can still be blocked in open(); a
+        # second attempt started then had its state wiped by the first
+        # thread's ``finished`` (stuck "Connecting…", leaked open port).
+        # Likewise a double-click during the rigctld auto-launch delay.
+        if self._connect_in_progress():
+            self.statusBar().showMessage(
+                "A previous connection attempt is still finishing — "
+                "try again in a moment.", 5000,
+            )
+            return
+
         # OP-28: dispatch via RigConnectionMode rather than string literals
         # so a future enum rename can't silently break one of the three
         # call sites that used to carry bare strings.
@@ -3234,6 +3579,85 @@ class MainWindow(QMainWindow):
         else:
             self._connect_rigctld()
 
+    def _connect_in_progress(self) -> bool:
+        """True while the *current* connect attempt is live.
+
+        v0.6.14 sweep: this used to also refuse while any connect thread
+        was still running — so a timed-out attempt whose thread stayed
+        blocked in ``open()`` (a wedged serial driver, a black-holed TCP
+        connect) locked the operator out of Connect until it returned,
+        possibly forever.  A timed-out / cancelled attempt is over: its
+        late success is closed by ``_RigConnectRelay.on_succeeded``, its
+        ``finished`` is ignored by the sender check in
+        ``_on_connect_thread_finished``, and its objects are kept alive in
+        ``_retired_connects`` until its thread exits.
+        """
+        if (
+            self._pending_rigctld_connect is not None
+            or self._deferred_connect_success is not None
+        ):
+            return True
+        if self._connect_thread is None:
+            return False
+        cancel = self._connect_cancel
+        return cancel is None or not cancel.is_set()
+
+    def _defer_success_during_tx(
+        self, on_success: Callable[[Rig], None]
+    ) -> Callable[[Rig], None]:
+        """Wrap a connect success handler so it never runs mid-TX.
+
+        v0.6.14 sweep: a connect that completes while a transmission is
+        dispatched or on the air (e.g. Send pressed during the rigctld
+        auto-launch delay) used to adopt the rig immediately — swapping
+        ``tx_worker.set_rig`` / ``set_tci_connection`` and the RX audio
+        worker under a TX whose ``transmit`` slot may still be queued, and
+        restarting the rig poll that TX suspends (OP-47).  Adoption now
+        waits for ``_unlock_rig_controls`` (worker idle, unkey included).
+        """
+
+        def _guarded(rig: Rig) -> None:
+            if self._tx_requests_in_flight > 0:
+                _log.info("rig connected during TX — attaching it after the TX ends")
+                self._deferred_connect_success = (rig, on_success)
+                self.statusBar().showMessage(
+                    "Rig connected — it will be attached when the current "
+                    "transmission ends.", 5000,
+                )
+                return
+            on_success(rig)
+
+        return _guarded
+
+    def _run_deferred_connect_success(self) -> None:
+        pending = self._deferred_connect_success
+        self._deferred_connect_success = None
+        if pending is not None:
+            rig, on_success = pending
+            on_success(rig)
+
+    def _retire_connect_attempt(self) -> None:
+        """Park the current attempt's thread/worker/relay until it exits.
+
+        v0.6.14 sweep: a timed-out attempt's thread may still be inside
+        ``worker.run()``; dropping the Python refs would destroy the C++
+        worker mid-run (crash) and the relay before a queued late success
+        reaches it (port leak).  ``_on_connect_thread_finished`` releases
+        the entry when that thread exits.
+        """
+        thread = self._connect_thread
+        if thread is not None:
+            self._retired_connects.append(
+                (thread, self._connect_worker, self._connect_relay)
+            )
+        self._connect_thread = None
+        self._connect_cancel = None
+        self._connect_worker = None
+        self._connect_relay = None
+        if self._connect_timeout_timer is not None:
+            self._connect_timeout_timer.stop()
+            self._connect_timeout_timer = None
+
     def _start_rig_connect_thread(
         self,
         rig: Rig,
@@ -3252,6 +3676,11 @@ class MainWindow(QMainWindow):
         message if the rig never responds.  The cancel event lets the caller
         (cancel button, timeout, closeEvent) suppress any late emit.
         """
+        # v0.6.14 sweep: a timed-out attempt may still own a thread blocked
+        # in open(); park it rather than dropping its refs.
+        if self._connect_thread is not None:
+            self._retire_connect_attempt()
+        on_success = self._defer_success_during_tx(on_success)
         cancel = threading.Event()
         self._connect_cancel = cancel
 
@@ -3315,6 +3744,19 @@ class MainWindow(QMainWindow):
     def _on_connect_thread_finished(self) -> None:
         """Clear connect-thread state when the thread exits normally."""
         thread = self._connect_thread
+        # v0.6.14 audit UI-H2: only the *current* attempt's thread may
+        # clear the shared state — a stale thread finishing late must not
+        # wipe a newer attempt's worker/relay/timer.
+        sender = self.sender()
+        if isinstance(sender, QThread) and sender is not thread:
+            # A retired attempt's thread exited: release its objects.
+            for entry in [e for e in self._retired_connects if e[0] is sender]:
+                self._retired_connects.remove(entry)
+                try:
+                    sender.started.disconnect(entry[1].run)  # type: ignore[union-attr]
+                except (RuntimeError, TypeError, AttributeError):
+                    pass
+            return
         worker = self._connect_worker
         # Explicitly break thread.started → worker.run before releasing Python
         # refs.  This removes Qt's internal connection record (which holds a
@@ -3350,17 +3792,23 @@ class MainWindow(QMainWindow):
         edge case where a timeout fired and the user started a second attempt
         before the first thread finished its blocking C call.
         """
-        timer = self._connect_timeout_timer
         cancel = self._connect_cancel
-        self._connect_thread = None
-        self._connect_cancel = None
-        self._connect_timeout_timer = None
-        self._connect_relay = None
-
-        if timer is not None:
-            timer.stop()
+        self._pending_rigctld_connect = None  # cancels a pending auto-launch connect
+        # v0.6.14 sweep: park (not drop) the worker/relay — the thread may
+        # still be inside worker.run(), and the relay must stay alive to
+        # close a late success.  Released when the thread's finished fires.
+        self._retire_connect_attempt()  # also stops the timeout timer
         if cancel is not None:
             cancel.set()
+        # v0.6.14 sweep: a connect that succeeded mid-TX and is waiting to
+        # be adopted is abandoned too — close it so the port doesn't leak.
+        deferred = self._deferred_connect_success
+        self._deferred_connect_success = None
+        if deferred is not None:
+            try:
+                deferred[0].close()
+            except Exception:  # noqa: BLE001 — abandoned; never raise
+                pass
 
         for thread in self.findChildren(QThread):
             if thread.objectName() == "rig-connect-thread" and thread.isRunning():
@@ -3369,14 +3817,11 @@ class MainWindow(QMainWindow):
                     # Blocked in rig.open() (a serial open or TCP connect).
                     # Detach rather than terminate(): see
                     # _DETACHED_AT_SHUTDOWN.
-                    _detach_running_thread(
-                        thread, self._connect_worker, "rig connect thread"
+                    worker = next(
+                        (w for t, w, _r in self._retired_connects if t is thread),
+                        None,
                     )
-
-        # Drop the worker reference only after all threads have stopped.
-        # Clearing it earlier would destroy the C++ QObject while the worker
-        # thread might still be executing worker.run(), which crashes.
-        self._connect_worker = None
+                    _detach_running_thread(thread, worker, "rig connect thread")
 
     def _connect_serial(self) -> None:
         """Create a direct serial rig backend and start polling.
@@ -3464,33 +3909,16 @@ class MainWindow(QMainWindow):
                     8000,
                 )
                 return
-            cmd = [
-                "rigctld",
-                "-m", str(self._config.rig_model_id),
-                "-t", str(port),
-            ]
-            if self._config.rig_serial_port:
-                cmd += ["-r", self._config.rig_serial_port]
-            if self._config.rig_baud_rate:
-                cmd += ["-s", str(self._config.rig_baud_rate)]
             try:
-                # OP2-14: start_new_session=True on POSIX isolates the child
-                # into its own process group so a GUI crash/SIGKILL doesn't
-                # orphan rigctld holding the serial port.
-                self._rigctld_proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    start_new_session=True,
+                # v0.6.14 audit UI-H1: the shared launcher — PATH-only
+                # absolute executable, start_new_session (OP2-14), and the
+                # stderr drain (v0.4.0 audit high #2) every launch needs.
+                self._rigctld_proc = launch_rigctld(
+                    self._config.rig_model_id,
+                    port,
+                    self._config.rig_serial_port,
+                    self._config.rig_baud_rate,
                 )
-                # v0.4.0 audit high #2: the stderr pipe MUST be drained.
-                # hamlib chatters per-transaction errors on a flaky CAT
-                # cable; once the OS pipe buffer (~64 KB) fills, rigctld
-                # blocks on write(2) and stops servicing its TCP socket
-                # entirely — worst case while PTT is keyed.  Draining
-                # into our log also lands hamlib's diagnostics in the
-                # diagnostics zip, where they belong.
-                _drain_subprocess_stderr(self._rigctld_proc, "rigctld")
             except FileNotFoundError:
                 self.statusBar().showMessage(
                     "rigctld not found — install Hamlib, or switch to Direct Serial in Settings", 5000,
@@ -3500,9 +3928,22 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(f"Failed to launch rigctld: {exc}", 5000)
                 return
             # Give rigctld 500 ms to bind the port without freezing the GUI.
-            QTimer.singleShot(500, lambda: self._finish_rigctld_connect(host, port))
+            # Show "Connecting…" (with Cancel) from now, and tie the delayed
+            # connect to a token so Cancel / a second click can't race it.
+            self._radio_panel.set_connecting()
+            token = object()
+            self._pending_rigctld_connect = token
+            QTimer.singleShot(
+                500, lambda: self._finish_pending_rigctld_connect(token, host, port)
+            )
             return
 
+        self._finish_rigctld_connect(host, port)
+
+    def _finish_pending_rigctld_connect(self, token: object, host: str, port: int) -> None:
+        if self._pending_rigctld_connect is not token:
+            return  # cancelled (or superseded) during the launch delay
+        self._pending_rigctld_connect = None
         self._finish_rigctld_connect(host, port)
 
     def _finish_rigctld_connect(self, host: str, port: int) -> None:
@@ -3517,7 +3958,9 @@ class MainWindow(QMainWindow):
         """
         if not self.isVisible():
             return
-        client = RigctldClient(host=host, port=port)
+        client = RigctldClient(
+            host=host, port=port, ptt_type=self._config.rigctld_ptt_type
+        )
         self._radio_panel.set_connecting()
         self.statusBar().showMessage(f"Connecting to rigctld at {host}:{port}…")
 
@@ -3656,6 +4099,57 @@ class MainWindow(QMainWindow):
 
         self._start_rig_connect_thread(rig, _on_success, _on_error)
 
+    def _stop_audio_worker_bounded(self, worker: object, timeout_ms: int) -> bool:
+        """Run *worker*'s ``stop()`` on its own thread; wait at most
+        *timeout_ms* for it to finish.  Returns ``False`` on timeout.
+
+        H8: BlockingQueuedConnection would freeze the GUI forever if
+        stream.stop()/close() hangs, so this posts ``stop`` queued and
+        pumps a nested event loop until the worker acknowledges or the
+        timer fires.  Queued signals (and other housekeeping slots) keep
+        running meanwhile.
+
+        v0.6.14 audit UI-M6: the acknowledgement is ``stop_finished``,
+        which every ``stop()`` call emits.  Waiting on ``stopped`` (only
+        emitted when a stream was running) made every swap or quit with
+        capture idle sit out the whole budget and then log a false "wedged
+        worker" warning.  ``stop_finished`` also stays correct if a start
+        is still queued ahead of the stop: the queue is FIFO, so the
+        acknowledgement comes only after that stream has been stopped.
+        """
+        done_signal = getattr(worker, "stop_finished", None)
+        if done_signal is None:  # duck-typed worker without the ack
+            done_signal = worker.stopped  # type: ignore[attr-defined]
+        done = threading.Event()
+
+        def _on_done() -> None:
+            done.set()
+
+        loop = QEventLoop()
+        timer = QTimer()
+        timer.setSingleShot(True)
+        timer.timeout.connect(loop.quit)
+        for slot in (_on_done, loop.quit):
+            try:
+                done_signal.connect(slot, Qt.ConnectionType.QueuedConnection)
+            except Exception:  # noqa: BLE001 — worker already deleted
+                pass
+        QMetaObject.invokeMethod(
+            worker,  # type: ignore[arg-type]
+            "stop",
+            Qt.ConnectionType.QueuedConnection,
+        )
+        timer.start(timeout_ms)
+        if not done.is_set():
+            loop.exec()
+        timer.stop()
+        for slot in (_on_done, loop.quit):
+            try:
+                done_signal.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+        return done.is_set()
+
     def _swap_audio_worker(self, new_worker: object) -> None:
         """Hot-swap the audio input worker on the audio thread.
 
@@ -3696,43 +4190,7 @@ class MainWindow(QMainWindow):
         was_capturing = self._capture_running
 
         _SWAP_STOP_TIMEOUT_MS = 2000  # 2 s is generous for any real stop
-        _stop_completed = threading.Event()
-
-        def _on_swap_stop_done() -> None:
-            _stop_completed.set()
-
-        old.stopped.connect(  # type: ignore[union-attr]
-            _on_swap_stop_done, Qt.ConnectionType.QueuedConnection
-        )
-        QMetaObject.invokeMethod(
-            old,  # type: ignore[arg-type]
-            "stop",
-            Qt.ConnectionType.QueuedConnection,
-        )
-
-        # Pump events for up to _SWAP_STOP_TIMEOUT_MS while waiting for the
-        # worker to finish.  QEventLoop runs nested event processing on
-        # the GUI thread so queued ``stopped`` signals (and any other
-        # housekeeping slots) still fire; a QTimer enforces the hard cap.
-        _swap_loop = QEventLoop()
-        _swap_timer = QTimer()
-        _swap_timer.setSingleShot(True)
-        _swap_timer.timeout.connect(_swap_loop.quit)
-        old.stopped.connect(_swap_loop.quit, Qt.ConnectionType.QueuedConnection)  # type: ignore[union-attr]
-        _swap_timer.start(_SWAP_STOP_TIMEOUT_MS)
-        if not _stop_completed.is_set():
-            _swap_loop.exec()
-        _swap_timer.stop()
-        try:
-            old.stopped.disconnect(_on_swap_stop_done)  # type: ignore[union-attr]
-        except (RuntimeError, TypeError):
-            pass
-        try:
-            old.stopped.disconnect(_swap_loop.quit)  # type: ignore[union-attr]
-        except (RuntimeError, TypeError):
-            pass
-
-        if not _stop_completed.is_set():
+        if not self._stop_audio_worker_bounded(old, _SWAP_STOP_TIMEOUT_MS):
             _log.warning(
                 "Audio worker stop() did not complete within %d ms — "
                 "proceeding with teardown; the wedged worker will leak "
@@ -3799,6 +4257,9 @@ class MainWindow(QMainWindow):
         # the same one-shot _set_capture uses, so start_capture is ordered
         # after the reset instead of racing it on a second worker thread.
         self._start_capture_armed = bool(was_capturing)
+        # The new source may run at a different rate (TCI dictates 48 kHz
+        # whatever Settings says).  Rebuild the decoder before the reset.
+        self._sync_rx_sample_rate()
         self._request_rx_reset.emit()
 
     # === Waterfall ===
@@ -3809,7 +4270,9 @@ class MainWindow(QMainWindow):
         if checked:
             if self._waterfall_window is None:
                 self._waterfall_window = WaterfallWindow(self)
-                self._waterfall_window.set_sample_rate(self._config.sample_rate)
+                # The rate the RX stream actually runs at (TCI dictates
+                # its own), not the configured one.  v0.6.14 audit.
+                self._waterfall_window.set_sample_rate(self._rx_decoder_rate)
                 self._waterfall_window.closed.connect(
                     lambda: self._waterfall_action.setChecked(False)
                 )
@@ -3867,10 +4330,7 @@ class MainWindow(QMainWindow):
         self._rig_poll_timer.stop()
         # v0.4: no rig → no trustworthy frequency for logbook drafts.
         self._last_rig_freq_hz = None
-        try:
-            self._rig.close()
-        except RigError:
-            pass
+        old_rig = self._rig
         self._rig = ManualRig()
         self._tx_worker.set_rig(self._rig)
         self._tx_worker.set_tci_connection(None)
@@ -3879,8 +4339,19 @@ class MainWindow(QMainWindow):
         # If we were using TCI, swap the audio worker back to PortAudio.
         if isinstance(self._audio_worker, TciInputStreamWorker):
             self._swap_audio_worker(InputStreamWorker())
-        # Stop rigctld if we launched it
-        self._kill_rigctld()
+        if not self._tx_worker.wait_for_idle(0.0) and not isinstance(old_rig, ManualRig):
+            # v0.6.14 audit T-M1: a TX is still unwinding (e.g. retrying
+            # its unkey) on this backend.  Closing it / killing rigctld now
+            # destroys the unkey path — defer exactly like
+            # _on_radio_disconnected; _unlock_rig_controls finishes it.
+            self._deferred_rig_teardown = old_rig
+        else:
+            try:
+                old_rig.close()
+            except Exception:  # noqa: BLE001 — dead port raises OSError / termios.error
+                _log.warning("rig close on disconnect failed", exc_info=True)
+            # Stop rigctld if we launched it
+            self._kill_rigctld()
         self.statusBar().showMessage("Rig disconnected.", 3000)
 
     @Slot()
@@ -3959,24 +4430,32 @@ class MainWindow(QMainWindow):
         if self._rigctld_proc is None:
             return
         try:
-            self._rigctld_proc.terminate()
-            try:
-                self._rigctld_proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                try:
-                    self._rigctld_proc.kill()
-                    # v0.4.0 audit low #14: reap after kill().  Without
-                    # this wait the child lingers as a zombie and a
-                    # respawned rigctld can race the dying one for the
-                    # serial port and TCP listen port.
-                    self._rigctld_proc.wait(timeout=2)
-                except (ProcessLookupError, OSError, subprocess.TimeoutExpired):
-                    pass
-        except (ProcessLookupError, OSError):
-            # Already gone — nothing to do.
-            pass
+            # Shared helper: terminate, escalate to kill(), and reap after
+            # kill() (v0.4.0 audit low #14) so no zombie races a respawn.
+            stop_rigctld(self._rigctld_proc)
         finally:
             self._rigctld_proc = None
+
+    @Slot()
+    def _on_rig_poll_tick(self) -> None:
+        """1 Hz timer tick: queue a poll only if none is outstanding."""
+        if self._rig_poll_worker.claim_poll():
+            self._request_rig_poll.emit()
+
+    @Slot()
+    def _on_poll_error(self) -> None:
+        """One failed poll (v0.6.14 audit UI-M1).
+
+        Used to call ``set_connection_error`` directly, flipping the button
+        to "Connect Rig" / "Connection lost" while the rig was still
+        connected — and clicking it then *disconnected*.  A connected rig
+        now only shows a degraded status; the 3-strike
+        ``radio_disconnected`` path is what really disconnects.
+        """
+        if self._radio_panel.connected:
+            self._radio_panel.set_link_degraded()
+        else:
+            self._radio_panel.set_connection_error()
 
     @Slot(int, str, int)
     def _on_poll_result(self, freq: int, mode_name: str, strength: int) -> None:
@@ -4148,6 +4627,22 @@ class MainWindow(QMainWindow):
         # unwinds and unkeys on its own thread while the rest of the
         # teardown runs, and wait_for_idle() further down confirms it.
         self._tx_worker.request_stop()
+        # v0.6.14 audit T-L1: if the worker hasn't unwound within 0.5 s it
+        # may be wedged — send PTT-off directly now rather than after the
+        # remote-server / connect / offline-worker teardown below (which
+        # could make the closing fallback run ~19 s late).  Daemon thread:
+        # a dead-rig timeout can't hold the GUI; joined before rig.close().
+        if not self._tx_worker.wait_for_idle(0.5):
+            _log.warning(
+                "closeEvent: TX still unwinding 0.5 s after stop — sending "
+                "emergency PTT-off now"
+            )
+            self._close_unkey_thread = threading.Thread(
+                target=self._tx_worker.emergency_unkey,
+                name="sstv-app-emergency-unkey-early",
+                daemon=True,
+            )
+            self._close_unkey_thread.start()
         self._stop_remote_server()
 
         # Abort any in-flight rig connect first — the QThread is a child of
@@ -4203,41 +4698,11 @@ class MainWindow(QMainWindow):
         # event loop could exit without running stop() — leaving the
         # TCI ``audio_stop:0;`` unsent and the server still subscribed
         # when ``self._rig.close()`` ran below.  Mirror the H8 pattern:
-        # wait for the worker's ``stopped`` signal with a bounded event
-        # loop before letting the thread quit.
-        _stop_done = threading.Event()
-
-        def _on_close_stop_done() -> None:
-            _stop_done.set()
-
-        try:
-            self._audio_worker.stopped.connect(  # type: ignore[union-attr]
-                _on_close_stop_done, Qt.ConnectionType.QueuedConnection
-            )
-        except Exception:  # noqa: BLE001
-            pass
-        self._request_stop_capture.emit()
-
-        _close_loop = QEventLoop()
-        _close_timer = QTimer()
-        _close_timer.setSingleShot(True)
-        _close_timer.timeout.connect(_close_loop.quit)
-        try:
-            self._audio_worker.stopped.connect(  # type: ignore[union-attr]
-                _close_loop.quit, Qt.ConnectionType.QueuedConnection
-            )
-        except Exception:  # noqa: BLE001
-            pass
-        _close_timer.start(2000)
-        if not _stop_done.is_set():
-            _close_loop.exec()
-        _close_timer.stop()
-        for _slot in (_on_close_stop_done, _close_loop.quit):
-            try:
-                self._audio_worker.stopped.disconnect(_slot)  # type: ignore[union-attr]
-            except (RuntimeError, TypeError):
-                pass
-        if not _stop_done.is_set():
+        # wait for the worker to acknowledge with a bounded event loop
+        # before letting the thread quit.  (v0.6.14 audit UI-M6: the ack is
+        # ``stop_finished``, so an idle worker no longer costs 2 s and a
+        # false "did not complete" warning on every quit.)
+        if not self._stop_audio_worker_bounded(self._audio_worker, 2000):
             # Name the backend: this fires on every quit for some
             # Windows/MME setups, and the old message blamed TCI even for
             # PortAudio users, which sent at least one bug report down the
@@ -4340,6 +4805,8 @@ class MainWindow(QMainWindow):
         # completion signal was processed, finish it here — the TX
         # thread has joined (or been detached), so the unkey path is
         # no longer using the old rig.
+        if self._close_unkey_thread is not None:
+            self._close_unkey_thread.join(timeout=3.0)
         self._finish_deferred_rig_teardown()
 
         try:

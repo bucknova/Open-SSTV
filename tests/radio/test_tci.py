@@ -402,3 +402,148 @@ class TestStaleCacheAndSecondReceiver:
         rig.connection = _FakeConnection(alive=True)
         assert rig.get_freq() == 14_074_000
         assert rig.connection.sent == [], "a warm cache must not hit the wire"
+
+
+# ---------------------------------------------------------------------------
+# v0.6.14 audit
+# ---------------------------------------------------------------------------
+
+
+class TestSecondReceiverFiltering:
+    """T-M7: vfo: and rx_smeter: must filter on the TRX index too."""
+
+    def test_secondary_trx_vfo_is_ignored(self) -> None:
+        rig = _make_rig()
+        rig._on_text("vfo:0,0,14230000")
+        rig._on_text("vfo:1,0,7171000")
+        assert rig._last_freq == 14_230_000
+
+    def test_smeter_only_from_trx0_channel0(self) -> None:
+        rig = _make_rig()
+        rig._on_text("rx_smeter:0,0,-73")
+        rig._on_text("rx_smeter:1,0,-20")
+        rig._on_text("rx_smeter:0,1,-30")
+        assert rig._strength == -73
+
+    def test_malformed_smeter_is_ignored(self) -> None:
+        rig = _make_rig()
+        rig._on_text("rx_smeter:0,0,inf")
+        rig._on_text("rx_smeter:0")
+        assert rig._strength == 0
+
+
+class TestModeValidation:
+    """Security info: set_mode must not let a newline/semicolon inject a
+    second command into the TCI stream."""
+
+    def test_safe_mode_is_sent(self) -> None:
+        rig = _make_rig()
+        rig.connection = _FakeConnection(alive=True)
+        rig.set_mode("digu", 2700)
+        assert rig.connection.sent == ["modulation:0,DIGU;"]
+
+    @pytest.mark.parametrize("bad", ["USB;trx:0,true", "USB\ntrx:0,true", "", "U SB"])
+    def test_unsafe_mode_is_refused(self, bad: str) -> None:
+        from open_sstv.radio.exceptions import RigCommandError
+
+        rig = _make_rig()
+        rig.connection = _FakeConnection(alive=True)
+        with pytest.raises(RigCommandError):
+            rig.set_mode(bad, 2700)
+        assert rig.connection.sent == []
+
+
+class TestFrameSizeCap:
+    """S-L9: an oversized frame header is refused before its payload is
+    allocated, against websocket-client's real frame parser."""
+
+    def test_oversized_frame_rejected_at_header(self) -> None:
+        import struct as _struct
+
+        import websocket
+
+        from open_sstv.radio.tci import _MAX_FRAME_BYTES, _install_frame_size_cap
+
+        # Unmasked binary frame header declaring a 1 GB payload.
+        header = bytes([0x82, 127]) + _struct.pack("!Q", 1 << 30)
+        stream = [header]
+        reads: list[int] = []
+
+        def _recv(n: int) -> bytes:
+            reads.append(n)
+            return stream.pop(0) if stream else b"\x00" * n
+
+        ws = websocket.WebSocket()
+        ws.frame_buffer = websocket._abnf.frame_buffer(_recv, True)
+        _install_frame_size_cap(ws)
+        with pytest.raises(RigConnectionError):
+            ws.frame_buffer.recv_frame()
+        assert all(n <= 16384 for n in reads)
+        assert _MAX_FRAME_BYTES == 64 * 1024
+
+    def test_normal_frame_passes(self) -> None:
+        import websocket
+
+        from open_sstv.radio.tci import _install_frame_size_cap
+
+        payload = b"vfo:0,0,14230000;"
+        frame = bytes([0x81, len(payload)]) + payload
+        buf = [frame]
+
+        def _recv(n: int) -> bytes:
+            data = buf[0][:n]
+            buf[0] = buf[0][n:]
+            return data
+
+        ws = websocket.WebSocket()
+        ws.frame_buffer = websocket._abnf.frame_buffer(_recv, True)
+        _install_frame_size_cap(ws)
+        assert ws.frame_buffer.recv_frame().data == payload
+
+    @staticmethod
+    def _stream_ws(frames: list[bytes]):  # type: ignore[no-untyped-def]
+        import websocket
+
+        buf = [b"".join(frames)]
+
+        def _recv(n: int) -> bytes:
+            data = buf[0][:n]
+            buf[0] = buf[0][n:]
+            return data
+
+        ws = websocket.WebSocket()
+        ws.frame_buffer = websocket._abnf.frame_buffer(_recv, True)
+        return ws
+
+    @staticmethod
+    def _frame(opcode: int, payload: bytes, fin: bool) -> bytes:
+        import struct as _struct
+
+        first = (0x80 if fin else 0) | opcode
+        return bytes([first, 126]) + _struct.pack("!H", len(payload)) + payload
+
+    def test_fragmented_message_capped_in_total(self) -> None:
+        """v0.6.14 sweep: many small continuation frames, each under the
+        frame cap, must not reassemble past the message cap."""
+        from open_sstv.radio.tci import _MAX_MESSAGE_BYTES, _install_frame_size_cap
+
+        chunk = b"\x00" * 16_000
+        frames = [self._frame(0x2, chunk, fin=False)]
+        frames += [self._frame(0x0, chunk, fin=False) for _ in range(20)]
+        ws = self._stream_ws(frames)
+        _install_frame_size_cap(ws)
+        with pytest.raises(RigConnectionError):
+            ws.recv_data()
+        assert ws.cont_frame.cont_data is None
+        assert _MAX_MESSAGE_BYTES == 64 * 1024
+
+    def test_small_fragmented_message_passes(self) -> None:
+        from open_sstv.radio.tci import _install_frame_size_cap
+
+        frames = [
+            self._frame(0x1, b"vfo:0,0,", fin=False),
+            self._frame(0x0, b"14230000;", fin=True),
+        ]
+        ws = self._stream_ws(frames)
+        _install_frame_size_cap(ws)
+        assert ws.recv_data() == (0x1, b"vfo:0,0,14230000;")

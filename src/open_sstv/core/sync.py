@@ -7,16 +7,11 @@ value per audio sample). SSTV modes mark the start of each scan line with a
 9 ms for Robot 36 / Scottie S1). This module owns finding those sync pulses
 so the per-mode pixel decoder can slice the rest of the audio into rows.
 
-Two related operations live here:
-
-* ``find_leader`` — locates the *first* long sync region (the 30 ms VIS
-  start bit, which immediately follows the 600 ms 1900 Hz leader). Useful
-  when a higher level only needs to know "is there an SSTV header here?",
-  or to share leader-detection logic with ``vis.detect_vis``.
-
-* ``find_line_starts`` — locates the per-line sync pulses inside the image
-  body. The caller passes ``start_idx`` (typically ``vis.detect_vis``'s
-  ``end_idx``) so we don't accidentally re-detect the VIS start/stop bits.
+The entry point is ``find_sync_candidates`` (length-filtered 1200 Hz runs
+after the VIS), followed by ``walk_sync_grid`` (snap the candidates onto an
+evenly spaced line grid, filling missed lines) or, for one-shot decodes,
+``slant.slant_corrected_line_starts`` (least-squares fit through the
+same candidates).
 
 For modes with ``SyncPosition.LINE_START`` (Martin, Robot, PD …) the
 returned sync indices *are* line starts. For Scottie family modes
@@ -31,9 +26,7 @@ The line-sync detector treats the frequency track in three passes:
    noise on a narrow-band FM signal produces occasional large
    phase-slip "clicks" in the IF track, and a boxcar averages those
    clicks into the sync band while a median rejects them outright.
-   (The leader pass uses a different, narrower 2 ms boxcar — wide
-   enough to suppress sample-level jitter, narrow enough to keep the
-   10 ms mid-leader break distinct from the 30 ms VIS start bit.)
+   (VIS detection in ``core/vis.py`` uses its own narrower 2 ms boxcar.)
 2. An **adaptive threshold** is computed by rolling ``minimum_filter1d``
    and ``maximum_filter1d`` over ~2 line periods. At every sample,
    the threshold is ``local_min + 0.1 * (local_max - local_min)``, then
@@ -59,31 +52,25 @@ The line-sync detector treats the frequency track in three passes:
 
 Public API
 ----------
-find_leader(freq_track, fs) -> int | None
-    Sample index of the VIS start bit's leading edge, or ``None`` if no
-    leader was found.
-
 find_sync_candidates(freq_track, fs, sync_pulse_ms, line_period_samples, start_idx=0) -> list[int]
     All plausible per-line sync pulse start indices (length-filtered but
     **not** spacing-filtered). ``line_period_samples`` sizes the rolling
-    min/max window that drives the adaptive threshold; both callers
-    (``find_line_starts`` and the Robot 36 line-pair dispatcher in the
-    decoder) already have it on hand. Used by the decoder to detect
-    whether a Robot 36 WAV uses PySSTV's 150 ms per-line layout or the
-    canonical broadcast 290 ms line-pair layout before committing to a
-    grid walk.
+    min/max window that drives the adaptive threshold.
 
-find_line_starts(freq_track, fs, spec, start_idx=0) -> list[int]
-    Sample indices (into the original ``freq_track``, not the slice) of
-    each detected per-line sync pulse, anchored on the first valid
-    candidate at or after ``start_idx``. Returns up to ``spec.height``
-    indices.
+line0_sync_hint(spec, fs, vis_end) -> float
+    Where line 0's sync pulse should sit, given the VIS end. Passed to
+    the grid walk / slant fit so a missed sync on line 0 or 1 can be
+    extrapolated back to the right slot (v0.6.14 audit D-H1).
 
-walk_sync_grid(candidates, line_period_samples, max_lines) -> list[int]
+select_anchor(candidates, line_period_samples, tolerance, first_slot_hint=None) -> (int, int)
+    Pick the candidate the grid is anchored on and the line slot it sits
+    in. Shared by ``walk_sync_grid`` and ``slant.fit_line_timing`` so the
+    two agree on which candidate is line 0.
+
+walk_sync_grid(candidates, line_period_samples, max_lines, *, first_slot_hint=None) -> list[int]
     Walk a list of candidate sync indices into an evenly-spaced grid of
     ``line_period_samples`` apart, filling missing slots with the
-    predicted next index. Shared between ``find_line_starts`` and the
-    Robot 36 line-pair path in the decoder.
+    predicted next index.
 """
 from __future__ import annotations
 
@@ -92,6 +79,9 @@ from typing import TYPE_CHECKING
 import numpy as np
 from scipy.ndimage import maximum_filter1d, median_filter, minimum_filter1d
 
+from open_sstv.core.dsp_utils import find_runs
+from open_sstv.core.modes import SyncPosition
+
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
@@ -99,11 +89,6 @@ if TYPE_CHECKING:
 
 
 # === Internal constants ===
-
-#: Boxcar smoothing window for the leader/VIS-start search. 2 ms is wide
-#: enough to suppress sample-level jitter and narrow enough to keep the
-#: 10 ms mid-leader break distinct from the 30 ms VIS start bit.
-_LEADER_SMOOTH_S: float = 0.002
 
 #: Fraction of the mode's nominal sync pulse width used as the median
 #: filter window for per-line sync detection. Half the sync width is
@@ -156,54 +141,36 @@ _HARD_SYNC_UPPER_HZ: float = 1450.0
 #: noisy input. The 200 Hz gap to the 1500 Hz porch level is comfortable.
 _HARD_SYNC_LOWER_HZ: float = 1300.0
 
-#: Lower bound on a "VIS start bit" candidate run, in seconds. The mid-leader
-#: break is 10 ms, so 20 ms cleanly rejects it.
-_MIN_LEADER_RUN_S: float = 0.020
-
 #: Sync runs whose length is between this fraction and the corresponding
 #: ``_MAX_LINE_SYNC_RATIO`` of the mode's nominal sync length are accepted
 #: as line syncs.
 _MIN_LINE_SYNC_RATIO: float = 0.5
 _MAX_LINE_SYNC_RATIO: float = 2.0
 
+#: Systematic delay of the trailing-edge (sync → 1500 Hz porch) threshold
+#: crossing on the bandpassed IF track, added back when a sync start is
+#: inferred as ``run_end − nominal_length`` (see ``find_sync_candidates``).
+#: Measured on encoder audio across all mode families: −2 … −4.6 samples
+#: at 48 kHz before this correction.
+_TRAILING_EDGE_LAG_S: float = 0.00008
+
+#: Furthest the trailing-edge estimate may move a sync start ahead of its
+#: leading-edge threshold crossing. The leading edge is ≤ ~0.25 ms late on
+#: clean audio; anything beyond this means the pulse is not nominal length.
+_MAX_EDGE_BACKDATE_S: float = 0.0003
+
 #: Allowed slack on the inter-line spacing when validating consecutive
 #: candidates. 25 % is generous enough to absorb any plausible TX/RX clock
 #: drift while still rejecting spurious mid-line sync-band crossings.
 _LINE_SPACING_TOLERANCE: float = 0.25
 
-
-def find_leader(
-    freq_track: NDArray, fs: int
-) -> int | None:
-    """Locate the end of the SSTV leader (= start of the VIS start bit).
-
-    Returns the sample index of the first long-enough 1200 Hz run in
-    ``freq_track``, or ``None`` if no leader-shaped pattern was found.
-    Does **not** decode the VIS byte — call ``vis.detect_vis`` for that.
-
-    The returned index is roughly aligned to the *leading* edge of the
-    start bit (the 1900 → 1200 Hz transition under the leader smoother),
-    so callers can use it as the anchor for VIS bit slicing or as a
-    "we have an SSTV signal here" indicator.
-    """
-    arr = np.asarray(freq_track)
-    if arr.ndim != 1 or arr.size == 0:
-        return None
-
-    smooth_n = max(1, int(round(_LEADER_SMOOTH_S * fs)))
-    smooth = _boxcar(arr, smooth_n)
-
-    sync_mask = (smooth > 1100.0) & (smooth < 1300.0)
-    runs = _find_runs(sync_mask)
-    min_run = int(round(_MIN_LEADER_RUN_S * fs))
-
-    for run_start, run_end in runs:
-        if (run_end - run_start) >= min_run:
-            # Compensate for the leading-edge offset introduced by the
-            # boxcar smoother (see vis.detect_vis for the same correction).
-            return max(0, run_start - smooth_n // 2)
-
-    return None
+#: Largest outgoing gap, in line periods, that still qualifies a candidate
+#: as the grid anchor. 1 would mean "the next line's sync must be there";
+#: v0.6.14 audit D-H1 showed that one missed sync on line 1 then pushed
+#: the anchor down a row (and swapped Robot 36's Cr/Cb parity). A few
+#: periods is plenty to bridge a fade without letting random spacing
+#: between noise candidates qualify very often.
+_MAX_ANCHOR_GAP_LINES: int = 4
 
 
 def find_sync_candidates(
@@ -288,8 +255,8 @@ def find_sync_candidates(
     # their midpoint (with a hard 1450 Hz cap for the dark-body corner
     # case). Window clamped to the slice size so scipy's filter still
     # behaves on short synthetic test tracks; ``mode='nearest'`` pads
-    # edges with replicated values, which matches the boxcar/median
-    # helpers' ``mode='same'`` contract.
+    # edges with replicated values, which matches the median helper's
+    # 1:1 indexing contract.
     adapt_win = max(3, int(round(_ADAPTIVE_WIN_LINES * line_period_samples)))
     if adapt_win % 2 == 0:
         adapt_win += 1
@@ -300,30 +267,164 @@ def find_sync_candidates(
     threshold = np.clip(adaptive_thr, _HARD_SYNC_LOWER_HZ, _HARD_SYNC_UPPER_HZ)
 
     sync_mask = smooth < threshold
-    runs = _find_runs(sync_mask)
-
-    return [
-        start_idx + run_start
-        for run_start, run_end in runs
+    runs = [
+        (run_start, run_end)
+        for run_start, run_end in find_runs(sync_mask)
         if min_sync_run <= run_end - run_start <= max_sync_run
     ]
+    if not runs:
+        return []
+
+    # Where each sync *starts*. The threshold crossing of the leading
+    # edge is a biased estimate: the threshold sits near the sync floor
+    # (~1310 Hz) and the bandpassed IF falls slowly (~1 ms ramp), so it is
+    # crossed late — ~0.2 ms late when the edge comes down from image
+    # content (Scottie / Wraase B, PD Y1, Robot 36 chroma), ~0.03 ms when
+    # it comes down from a 1500 Hz porch (Martin). Every mode has a
+    # 1500 Hz porch *after* its sync, so the trailing edge (1200 → 1500)
+    # is the same shape everywhere: ``end − nominal_length`` lands within
+    # ~0.1 ms of the true start regardless of image content (measured SD
+    # 0.4–1.6 samples vs. 1–4 for the leading edge), and a fixed small
+    # correction removes the rest.
+    #
+    # The trailing estimate may only move a start *earlier* than the
+    # leading-edge crossing (which is never early on a clean edge), and by
+    # at most ``_MAX_EDGE_BACKDATE_S`` — so a transmitter whose sync is
+    # shorter or longer than nominal degrades to the old estimate instead
+    # of shifting the whole image.
+    #
+    # This matters for Scottie's spec layout (v0.6.14 audit D-L3), where
+    # B runs straight into the sync with no porch: a 0.2 ms-late grid
+    # read the sync into B's last pixel. It also fixes the v0.6.14 audit
+    # "live line-0 offset" (~0.3 ms, ~1 px on Martin M4): a run already in
+    # progress at ``start_idx`` — line 0 of a LINE_START mode abuts the
+    # 1200 Hz VIS stop bit — has no leading edge at all, so it now takes
+    # its start from the trailing edge like every other line.
+    lag = _TRAILING_EDGE_LAG_S * fs
+    back = _MAX_EDGE_BACKDATE_S * fs
+    starts: list[int] = []
+    for run_start, run_end in runs:
+        if run_end >= sliced.size:
+            # No trailing edge yet (run cut off by the buffer end).
+            starts.append(run_start)
+            continue
+        est = run_end - sync_samples + lag
+        if run_start == 0 and sync_mask[0]:
+            # Leading edge clipped by the slice start: trailing edge only.
+            starts.append(int(round(est)))
+            continue
+        est = max(run_start - back, est)
+        starts.append(int(round(min(float(run_start), est))))
+    return [start_idx + st for st in starts]
+
+
+def first_sync_offset_samples(spec: ModeSpec, fs: int) -> float:
+    """Distance from the start of a scan line to its sync pulse, in samples.
+
+    Zero for ``LINE_START`` modes. For Scottie (``BEFORE_RED``) the sync
+    follows separator + G + separator + B, so line 0's sync sits that far
+    after the VIS. Uses the spec layout (``scan = (line − sync − 3·sep)/3``);
+    PySSTV's old split put the same channel *starts* in the same places,
+    so this is right for audio from either encoder.
+    """
+    if spec.sync_position == SyncPosition.BEFORE_RED:
+        scan_ms = (
+            spec.line_time_ms - spec.sync_pulse_ms - 3.0 * spec.sync_porch_ms
+        ) / 3.0
+        return 2.0 * (spec.sync_porch_ms + scan_ms) / 1000.0 * fs
+    return 0.0
+
+
+def line0_sync_hint(spec: ModeSpec, fs: int, vis_end: float) -> float:
+    """Expected sample index of line 0's sync pulse, given the VIS end.
+
+    Feed this to ``walk_sync_grid`` / ``slant_corrected_line_starts`` as
+    ``first_slot_hint`` so a missed line-0/1 sync is extrapolated back
+    instead of shifting the whole image up (v0.6.14 audit D-H1).
+    """
+    return float(vis_end) + first_sync_offset_samples(spec, fs)
+
+
+def select_anchor(
+    candidates: list[int],
+    line_period_samples: float,
+    tolerance: float,
+    first_slot_hint: float | None = None,
+) -> tuple[int, int]:
+    """Choose the grid anchor: ``(candidate_index, line_slot)``.
+
+    The anchor is the first candidate whose outgoing gap is a whole
+    number ``k`` (1 ≤ k ≤ ``_MAX_ANCHOR_GAP_LINES``) of line periods, ±
+    ``tolerance`` samples. Accepting k > 1 means a single missed sync on
+    line 1 no longer drags the anchor down to line 2 (v0.6.14 audit D-H1).
+
+    ``line_slot`` is the anchor's line number. Without a hint it is 0 —
+    the old assumption that the anchor *is* line 0. With
+    ``first_slot_hint`` (from ``line0_sync_hint``) the anchor must sit on
+    the hinted lattice — ``hint + k·P`` for some k ≥ 0 — and its slot is
+    that k, so a missed line-0 sync is extrapolated back to the right row
+    (and Robot 36 keeps its even=Cr / odd=Cb parity). Candidates off the
+    lattice (VIS stop-bit residue, MMSSTV's Scottie "starting sync") are
+    skipped exactly as an outgoing-gap mismatch would skip them.
+
+    Falls back to the first on-lattice candidate; then, if nothing is on
+    the lattice at all, to the no-hint choice (first well-spaced pair at
+    slot 0) — the hint is built on the *nominal* period, so after a long
+    run of missed syncs under heavy TX/RX clock drift every candidate can
+    sit off it, and the old pair-anchored grid beats calling an arbitrary
+    candidate line 0.  Finally candidate 0, so a lone candidate still
+    yields a grid.
+    """
+    p = line_period_samples
+
+    def gap_ok(i: int) -> bool:
+        d = candidates[i + 1] - candidates[i]
+        k = int(round(d / p))
+        return 1 <= k <= _MAX_ANCHOR_GAP_LINES and abs(d - k * p) <= tolerance
+
+    def slot_of(c: int) -> int | None:
+        if first_slot_hint is None:
+            return 0
+        k = int(round((c - first_slot_hint) / p))
+        if k < 0 or abs(c - first_slot_hint - k * p) > tolerance:
+            return None
+        return k
+
+    for i in range(len(candidates) - 1):
+        if gap_ok(i):
+            slot = slot_of(candidates[i])
+            if slot is not None:
+                return i, slot
+    if first_slot_hint is not None:
+        for i, c in enumerate(candidates):
+            slot = slot_of(c)
+            if slot is not None:
+                return i, slot
+        for i in range(len(candidates) - 1):
+            if gap_ok(i):
+                return i, 0
+    return 0, 0
 
 
 def walk_sync_grid(
     candidates: list[int],
     line_period_samples: float,
     max_lines: int,
+    *,
+    first_slot_hint: float | None = None,
 ) -> list[int]:
     """Walk raw sync candidates into an evenly-spaced grid.
 
-    Finds the first candidate whose outgoing spacing matches the expected
-    line period within ±25 %, anchors the grid there, and walks forward.
+    Anchors the grid via ``select_anchor`` (first candidate whose outgoing
+    spacing is a whole number of line periods within ±25 %, on the
+    ``first_slot_hint`` lattice when one is given) and walks forward.
     Candidates before the anchor are discarded as spurious — this is how
     we skip things like VIS stop-bit residue that ``find_sync_candidates``
-    intentionally lets through, or PySSTV's Scottie "initial" pre-line
-    sync that sits one partial line before the real line-0 sync. Falls
-    back to ``candidates[0]`` if no pair matches, so well-formed inputs
-    with only one candidate still produce a best-effort grid.
+    intentionally lets through.
+
+    If the anchor sits on line slot k > 0 (its line-0 / line-1 syncs were
+    missed — v0.6.14 audit D-H1) the first k slots are extrapolated back
+    from it one period at a time, so the image starts on the right row.
 
     Gaps (missing or out-of-tolerance candidates) are filled with the
     predicted index so downstream decoders can still slice a plausible
@@ -336,25 +437,18 @@ def walk_sync_grid(
         return []
 
     tolerance = line_period_samples * _LINE_SPACING_TOLERANCE
+    anchor_idx, anchor_slot = select_anchor(
+        candidates, line_period_samples, tolerance, first_slot_hint
+    )
+    anchor = candidates[anchor_idx]
 
-    # Pick an anchor candidate whose distance to the next candidate
-    # matches the expected line period. This skips spurious leading
-    # candidates — the two we see in practice are (a) VIS stop-bit
-    # residue that leaked past ``start_idx`` and got chopped to a
-    # length-valid run, and (b) PySSTV's Scottie "initial" sync pulse,
-    # which precedes the line-0 mid-line sync by ~285 ms rather than a
-    # full 428 ms line period. Both confuse a naive ``[candidates[0]]``
-    # anchor, and both are trivially rejected by this pair-wise check.
-    anchor_idx = 0
-    for i in range(len(candidates) - 1):
-        if (
-            abs(candidates[i + 1] - candidates[i] - line_period_samples)
-            <= tolerance
-        ):
-            anchor_idx = i
-            break
-
-    line_starts: list[int] = [candidates[anchor_idx]]
+    line_starts: list[int] = [
+        int(round(anchor - (anchor_slot - j) * line_period_samples))
+        for j in range(min(anchor_slot, max_lines))
+    ]
+    if len(line_starts) >= max_lines:
+        return line_starts
+    line_starts.append(anchor)
     next_idx = anchor_idx + 1
     while len(line_starts) < max_lines and next_idx < len(candidates):
         expected = line_starts[-1] + line_period_samples
@@ -378,65 +472,12 @@ def walk_sync_grid(
     return line_starts
 
 
-def find_line_starts(
-    freq_track: NDArray,
-    fs: int,
-    spec: ModeSpec,
-    start_idx: int = 0,
-) -> list[int]:
-    """Find per-line sync pulse start indices.
-
-    Parameters
-    ----------
-    freq_track:
-        Per-sample instantaneous frequency in Hz, as produced by
-        ``demod.instantaneous_frequency``.
-    fs:
-        Sample rate the frequency track was computed at.
-    spec:
-        Mode specification — used for the expected sync pulse duration
-        (filtering out the 30 ms VIS start/stop bits as too long, and
-        sub-millisecond noise spikes as too short) and the expected line
-        spacing (rejecting candidates that fall outside ±25 % of the
-        anchored grid).
-    start_idx:
-        Index in ``freq_track`` to start searching from. Pass the
-        ``end_idx`` returned by ``vis.detect_vis`` so we don't re-detect
-        the VIS start/stop bits as candidate line syncs.
-
-    Returns
-    -------
-    list[int]
-        Up to ``spec.height`` sample indices into the original
-        ``freq_track`` (not into the post-``start_idx`` slice). Returns
-        an empty list if no plausible line syncs were found.
-    """
-    line_samples = spec.line_time_ms / 1000.0 * fs
-    candidates = find_sync_candidates(
-        freq_track,
-        fs,
-        spec.sync_pulse_ms,
-        line_period_samples=line_samples,
-        start_idx=start_idx,
-    )
-    return walk_sync_grid(candidates, line_samples, spec.height)
-
-
 # === Internal helpers ===
-
-
-def _boxcar(x: NDArray, n: int) -> NDArray:
-    """Centered boxcar smooth. ``mode='same'`` so the output indexes 1:1
-    with the input — important for keeping detected positions accurate."""
-    if n <= 1:
-        return np.asarray(x, dtype=np.float64)
-    kernel = np.ones(n, dtype=np.float64) / n
-    return np.convolve(x, kernel, mode="same")
 
 
 def _median_smooth(x: NDArray, n: int) -> NDArray:
     """Centered 1-D median filter. Edge-replicated so the output indexes
-    1:1 with the input (matching ``_boxcar``'s ``mode='same'`` contract).
+    1:1 with the input.
 
     Delegates to ``scipy.ndimage.median_filter`` which uses a histogram
     / rank-based algorithm — ~45 ms on a 1.7 M-sample Robot 36 track
@@ -450,26 +491,10 @@ def _median_smooth(x: NDArray, n: int) -> NDArray:
     )
 
 
-def _find_runs(mask: NDArray[np.bool_]) -> list[tuple[int, int]]:
-    """Return ``[(start, end), …]`` for each maximal True run in ``mask``.
-
-    ``end`` is exclusive (slice-friendly). Empty input returns an empty list.
-    """
-    if mask.size == 0:
-        return []
-    diff = np.diff(mask.astype(np.int8))
-    starts = (np.where(diff == 1)[0] + 1).tolist()
-    ends = (np.where(diff == -1)[0] + 1).tolist()
-    if mask[0]:
-        starts.insert(0, 0)
-    if mask[-1]:
-        ends.append(int(mask.size))
-    return list(zip(starts, ends, strict=True))
-
-
 __all__ = [
-    "find_leader",
-    "find_line_starts",
     "find_sync_candidates",
+    "first_sync_offset_samples",
+    "line0_sync_hint",
+    "select_anchor",
     "walk_sync_grid",
 ]

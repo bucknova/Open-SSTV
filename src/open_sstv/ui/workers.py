@@ -86,8 +86,14 @@ from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 _log = logging.getLogger(__name__)
 
 from open_sstv.audio import output_stream
-from open_sstv.audio.devices import AudioDevice
-from open_sstv.audio.pipewire_route import PipeWireSink
+from open_sstv.audio.devices import (
+    AudioDevice,
+    find_output_device_by_name,
+    invalidate_device_cache,
+    list_output_devices,
+    portaudio_generation,
+)
+from open_sstv.audio.pipewire_route import PipeWireSink, find_pipewire_sink_by_name
 from open_sstv.core.cw import make_cw
 from open_sstv.core.decoder import (
     DecodeError,
@@ -100,7 +106,8 @@ from open_sstv.core.decoder import (
 from open_sstv.core.encoder import DEFAULT_SAMPLE_RATE, encode
 from open_sstv.core.modes import MODE_TABLE, Mode
 from open_sstv.radio.base import ManualRig, Rig
-from open_sstv.radio.exceptions import RigError
+from open_sstv.radio.exceptions import RigCommandError
+from open_sstv.radio.tci import subscribe_rx_audio
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -287,6 +294,23 @@ _UNKEY_RETRY_DELAY_S: float = 1.0
 #: Matches the ~1 s cadence the old inline periodic_check had.
 _RIG_HEALTH_INTERVAL_S: float = 1.0
 
+#: How many *consecutive* failed health pings mean the rig link is dead.
+#: v0.6.14 audit T-M4: one failure used to abort the TX and disconnect the
+#: rig, so a single missed CI-V reply or a slow rigctld answer during a
+#: long image threw the whole transmission away.  Three in a row at the
+#: 1 s cadence still catches a real unplug within a few seconds.
+_RIG_HEALTH_FAIL_THRESHOLD: int = 3
+
+#: Hamlib ``RPRT`` codes that mean "rigctld is up but has lost the radio"
+#: — v0.6.14 sweep.  A rigctld whose radio was unplugged or powered off
+#: answers every ping with ``RPRT -5`` (RIG_ETIMEOUT) or ``-6``
+#: (RIG_EIO), so treating every coded reply as "link alive" meant a dead
+#: radio was never detected during TX.  These count as health strikes:
+#: -5 ETIMEOUT, -6 EIO, -8 EPROTO, -13 EBUSERROR, -14 EBUSBUSY.  Every
+#: other code (-1 EINVAL, -4 ENIMPL, -9 ERJCTED, -11 ENAVAIL, Flex's
+#: positive 0x5000xxxx errors, ...) is a rejection from a live radio.
+_RIG_LINK_DOWN_RPRT: frozenset[int] = frozenset({-5, -6, -8, -13, -14})
+
 #: How long to wait for the health-monitor thread to finish at TX end.
 #: One blocked CAT round-trip is at most ~2 s (rigctld socket timeout),
 #: so 3 s lets a wedged ping drain before we touch the rig to unkey.
@@ -304,9 +328,15 @@ class _RigHealthMonitor:
     own daemon thread; the write loop's ``periodic_check`` merely reads
     the failure flag, which is instant.
 
-    The monitor stops pinging after the first failure — once the link
-    is dead there is nothing more to learn, and the unkey path needs
-    the (serial) backend lock free.
+    The monitor stops pinging once the link is judged dead — there is
+    nothing more to learn, and the unkey path needs the (serial) backend
+    lock free.  v0.6.14 audit T-M4: "dead" means
+    ``_RIG_HEALTH_FAIL_THRESHOLD`` consecutive failures, and a
+    ``RigCommandError`` that carries an ``rprt`` code does not count — the
+    backend answered (``RPRT -9``, a Flex error code), so the link is up
+    even if that one read was refused.  v0.6.14 sweep: except the
+    link-down codes in ``_RIG_LINK_DOWN_RPRT`` (``RPRT -5`` / ``-6`` from
+    a rigctld that has lost the radio), which are strikes.
     """
 
     def __init__(self, rig: Rig) -> None:
@@ -326,16 +356,37 @@ class _RigHealthMonitor:
         self._thread.join(timeout=_RIG_HEALTH_JOIN_TIMEOUT_S)
 
     def _run(self) -> None:
+        consecutive = 0
         while not self._stop.wait(_RIG_HEALTH_INTERVAL_S):
             try:
                 self._rig.get_ptt()
+            except RigCommandError as exc:
+                if exc.rprt is not None and exc.rprt not in _RIG_LINK_DOWN_RPRT:
+                    # The backend replied with a clean rejection code:
+                    # the link is alive.  Not a strike.  (Link-down codes
+                    # such as RPRT -5/-6 fall through — v0.6.14 sweep.)
+                    _log.debug("rig health: ping refused (%s) — link alive", exc)
+                    consecutive = 0
+                    continue
+                consecutive += 1
+                last: Exception = exc
             except Exception as exc:  # noqa: BLE001
-                # Anything raised here means the link is unusable for
-                # monitoring — RigError/OSError on unplug, but also any
+                # Anything else raised here means the link may be unusable
+                # for monitoring — RigError/OSError on unplug, but also any
                 # unexpected parse error.  Catching narrowly would let
                 # an oddball exception kill this thread silently and
                 # leave TX running unmonitored.
-                self.failure = exc
+                consecutive += 1
+                last = exc
+            else:
+                consecutive = 0
+                continue
+            _log.warning(
+                "rig health ping failed (%d/%d): %s",
+                consecutive, _RIG_HEALTH_FAIL_THRESHOLD, last,
+            )
+            if consecutive >= _RIG_HEALTH_FAIL_THRESHOLD:
+                self.failure = last
                 return
 
 
@@ -459,6 +510,13 @@ class TxWorker(QObject):
     #: fixed encode-stage budget if the encoder wedged).
     watchdog_fired = Signal(float)
     error = Signal(str)
+    #: v0.6.14 audit T-M1 / UI-M7: emitted exactly once per ``transmit`` /
+    #: ``transmit_test_tone`` call, *after* the worker is idle — unkey
+    #: retries included.  ``error`` alone is not terminal (it can arrive
+    #: while the unkey is still being retried, or be the only signal on an
+    #: encode/PTT failure), so the GUI unlocks rig controls and returns the
+    #: remote control plane to idle on this, never on ``error``.
+    transmission_finished = Signal()
     #: Emitted when the rig's serial/TCP link dies during TX (USB unplug
     #: mid-transmission).  Delivered to the GUI thread so ``_on_radio_disconnected``
     #: can update the radio panel immediately, without waiting for TX to finish.
@@ -523,6 +581,47 @@ class TxWorker(QObject):
         #: worker was still mid-unkey when the thread was quit.
         self._idle_event = threading.Event()
         self._idle_event.set()
+        #: v0.6.14 audit T-L2: stop requests vs. queued transmit slots.
+        #: ``transmit`` is a queued slot, so a Stop pressed after the GUI
+        #: dispatched a transmission but before the slot ran used to be
+        #: wiped by the ``_stop_event.clear()`` at TX entry — the image
+        #: then keyed anyway.  The GUI calls :meth:`note_tx_requested` when
+        #: it dispatches; :meth:`request_stop` records how many requests
+        #: had been issued; a slot whose sequence number is covered by
+        #: that mark aborts before keying.  All three counters are guarded
+        #: by ``_stop_lock`` (GUI, timer and worker threads touch them).
+        self._stop_lock = threading.Lock()
+        self._tx_requests_issued: int = 0
+        self._tx_slots_run: int = 0
+        self._stop_covers_upto: int = 0
+        #: v0.6.14 audit T-M3: the backend actually keyed by the TX in
+        #: flight.  ``emergency_unkey`` targets this, not ``self._rig``,
+        #: which an involuntary disconnect swaps to ``ManualRig`` mid-TX
+        #: (its ``set_ptt(False)`` is a no-op — the real radio stayed
+        #: keyed).  Guarded by ``_rig_lock``.
+        self._keyed_rig: Rig | None = None
+        #: v0.6.14 audit T-M5: the configured output device *name*.  When
+        #: set, the device is re-resolved by name at the start of every
+        #: TX, so a USB replug (which renumbers PortAudio indices once RX
+        #: recovery re-initialises PortAudio) can't send TX audio to
+        #: whatever device inherited the old index — e.g. the speakers,
+        #: with the rig keyed.  ``None`` keeps the device object as given.
+        self._output_device_name: str | None = None
+        #: Set (from any thread) when the device list is known to have
+        #: changed — USB loss, PortAudio reset.  Re-resolving costs a
+        #: PortAudio query (and pactl on Linux), so it runs only then, or
+        #: while the configured device is missing (v0.6.14 review).
+        self._output_device_stale: bool = False
+        #: v0.6.14 sweep: the configured host API (``audio_output_host_api``)
+        #: — preferred over the current device's when re-resolving, so a
+        #: device that was missing at launch resolves to the operator's
+        #: WASAPI pick rather than its MME twin.
+        self._output_host_api: str | None = None
+        #: v0.6.14 sweep: ``devices.portaudio_generation()`` as of the last
+        #: resolve.  A PortAudio reset by any path (not just the ones the
+        #: GUI flags via ``mark_output_device_stale``) bumps the
+        #: generation and forces a re-resolve before the next key-up.
+        self._resolved_generation: int = portaudio_generation()
         #: Latches after the first MME warning so the advice is logged once
         #: per worker rather than on every transmission.
         self._mme_warned: bool = False
@@ -576,6 +675,104 @@ class TxWorker(QObject):
     def set_output_device(self, device: AudioDevice | PipeWireSink | int | None) -> None:
         """Change the output device at runtime (e.g. after settings save)."""
         self._output_device = device
+
+    def set_output_device_name(
+        self, name: str | None, host_api: str | None = None
+    ) -> None:
+        """Record the configured output device name for per-TX re-resolution.
+
+        v0.6.14 audit T-M5.  An empty name means "system default" and
+        disables re-resolution, as does ``None`` (the default).  *host_api*
+        is the configured ``audio_output_host_api`` (v0.6.14 sweep); empty
+        or ``None`` means "no preference".
+        """
+        self._output_device_name = name or None
+        self._output_host_api = host_api or None
+
+    def mark_output_device_stale(self) -> None:
+        """The device list changed (USB loss / PortAudio reset): re-resolve
+        the output device by name before the next TX.  Thread-safe (a bool
+        store)."""
+        self._output_device_stale = True
+
+    @staticmethod
+    def _query_output_device(
+        name: str, host_api: str | None
+    ) -> tuple[AudioDevice | None, bool, int]:
+        """PortAudio lookup of *name*: ``(device, enumerated_any, generation)``.
+
+        v0.6.14 sweep: runs under ``output_stream._tx_state_lock`` — the
+        lock ``run_if_tx_idle`` holds across ``_pa_reset``'s
+        ``sd._terminate()`` / ``sd._initialize()`` — so the query can never
+        overlap a PortAudio teardown, and the generation read here is the
+        one the returned indices belong to.  The lock is not re-entrant;
+        nothing below takes it, and the caller is not yet inside
+        ``play_blocking``.  pactl lookups stay outside the lock so a slow
+        subprocess can't block ``output_stream.stop()``.
+        """
+        with output_stream._tx_state_lock:
+            generation = portaudio_generation()
+            invalidate_device_cache()
+            if not list_output_devices():
+                return None, False, generation
+            return find_output_device_by_name(name, host_api=host_api), True, generation
+
+    def _resolve_output_device(self) -> AudioDevice | PipeWireSink | int | None:
+        """Re-look-up the configured output device by name (T-M5 / T-L4).
+
+        Runs only when the device list may have changed — the PortAudio
+        generation moved since the last resolve, or
+        :meth:`mark_output_device_stale` was called (v0.6.14 sweep) — or
+        the configured device is currently missing.  Returns the fresh
+        device, or raises ``LookupError`` when a device name is configured
+        but no such device exists right now — the caller refuses to key
+        rather than let PortAudio fall back to the system default (the
+        speakers) while the rig is transmitting.  Prefers the configured
+        host API, then that of the previously resolved device, so a
+        WASAPI pick doesn't silently become its MME twin (T-L4).
+
+        An *empty* enumeration means PortAudio itself failed (it is logged
+        and swallowed in ``devices``), not that the device is gone — keep
+        the current device then rather than refusing every TX.
+        """
+        name = self._output_device_name
+        current = self._output_device
+        if not name:
+            return current
+        if (
+            current is not None
+            and not self._output_device_stale
+            and portaudio_generation() == self._resolved_generation
+        ):
+            return current
+        # Clear before querying so a mark that lands mid-query is kept.
+        self._output_device_stale = False
+        host_api = self._output_host_api or getattr(current, "host_api", None)
+        generation = portaudio_generation()
+        fresh: AudioDevice | PipeWireSink | None
+        if isinstance(current, PipeWireSink):
+            fresh = find_pipewire_sink_by_name(name)
+            if fresh is None:
+                fresh, _, generation = self._query_output_device(name, host_api)
+        else:
+            fresh, enumerated, generation = self._query_output_device(name, host_api)
+            if not enumerated and current is not None:
+                self._output_device_stale = True  # retry on the next TX
+                _log.warning(
+                    "TX output device re-resolution skipped: audio device "
+                    "enumeration returned nothing — keeping %r", current,
+                )
+                return current
+            if fresh is None:
+                fresh = find_pipewire_sink_by_name(name)
+        if fresh is None:
+            self._output_device_stale = True
+            raise LookupError(name)
+        if fresh != current:
+            _log.info("TX output device re-resolved: %r -> %r", current, fresh)
+        self._output_device = fresh
+        self._resolved_generation = generation
+        return fresh
 
     def set_output_gain(self, gain: float) -> None:
         """Set the software output gain (1.0 = unity). Thread-safe."""
@@ -698,9 +895,52 @@ class TxWorker(QObject):
         """
         try:
             with self._rig_lock:
-                self._rig.set_ptt(False)
+                # v0.6.14 audit T-M3: the rig keyed for the TX in flight,
+                # if any — after an involuntary disconnect ``self._rig``
+                # is already a no-op ManualRig.
+                rig = self._keyed_rig if self._keyed_rig is not None else self._rig
+                rig.set_ptt(False)
         except Exception as exc:  # noqa: BLE001
             self.error_occurred.emit("emergency_unkey", exc)
+
+    def note_tx_requested(self) -> None:
+        """Record that the GUI has dispatched one queued transmit request.
+
+        Call immediately before emitting the queued signal that runs
+        :meth:`transmit` / :meth:`transmit_test_tone`.  Thread-safe.
+        v0.6.14 audit T-L2 — see ``_stop_covers_upto``.
+        """
+        with self._stop_lock:
+            self._tx_requests_issued += 1
+
+    def _begin_tx_slot(self) -> bool:
+        """Claim this slot's sequence number; ``False`` if already stopped.
+
+        Clears ``_stop_event`` for the new transmission *only* when no
+        stop covers it, atomically with respect to ``request_stop``.
+
+        v0.6.14 sweep: also advances ``_tx_id`` under ``_tx_id_lock``, which
+        ``_watchdog_fire`` holds from its stale check through its stop.  A
+        watchdog for the previous TX therefore either finishes before this
+        slot clears ``_stop_event`` (so the clear wins) or sees the new id
+        and stands down — it can no longer stop a TX that started in
+        between.  Lock order: ``_tx_id_lock`` → ``_stop_lock`` /
+        ``_rig_lock``, never the reverse.
+        """
+        with self._tx_id_lock:
+            self._tx_id += 1
+            with self._stop_lock:
+                self._tx_slots_run += 1
+                if self._tx_slots_run <= self._stop_covers_upto:
+                    return False
+                self._stop_event.clear()
+                return True
+
+    def _end_tx_slot(self) -> None:
+        with self._rig_lock:
+            self._keyed_rig = None
+        self._idle_event.set()
+        self.transmission_finished.emit()
 
     @Slot(object, object)
     def transmit(self, image: PILImage, mode: Mode) -> None:
@@ -713,9 +953,13 @@ class TxWorker(QObject):
         """
         self._idle_event.clear()
         try:
+            if not self._begin_tx_slot():
+                _log.info("TX stop requested before the transmission started — not keying")
+                self.transmission_aborted.emit()
+                return
             self._transmit_impl(image, mode)
         finally:
-            self._idle_event.set()
+            self._end_tx_slot()
 
     def _transmit_impl(self, image: PILImage, mode: Mode) -> None:
         """Encode and transmit one image (body of :meth:`transmit`).
@@ -746,7 +990,7 @@ class TxWorker(QObject):
         from a prior transmission cannot race the next ``transmit()``
         call's ``_stop_event.clear()``.
         """
-        self._stop_event.clear()
+        # ``_stop_event`` was cleared by ``_begin_tx_slot`` (T-L2).
         self._watchdog_triggered = False
         # Advance the TX id so any in-flight watchdog from a previous
         # transmission becomes "stale" and no-ops if it fires now.
@@ -921,9 +1165,13 @@ class TxWorker(QObject):
         """
         self._idle_event.clear()
         try:
+            if not self._begin_tx_slot():
+                _log.info("test tone stop requested before it started — not keying")
+                self.transmission_aborted.emit()
+                return
             self._test_tone_impl()
         finally:
-            self._idle_event.set()
+            self._end_tx_slot()
 
     def _test_tone_impl(self) -> None:
         """Two-tone test signal (body of :meth:`transmit_test_tone`).
@@ -939,7 +1187,7 @@ class TxWorker(QObject):
         budget rather than the literal 6 s the formula would otherwise
         produce).
         """
-        self._stop_event.clear()
+        # ``_stop_event`` was cleared by ``_begin_tx_slot`` (T-L2).
         self._watchdog_triggered = False
         with self._tx_id_lock:
             self._tx_id += 1
@@ -1211,14 +1459,37 @@ class TxWorker(QObject):
             PTT key failed; ``error`` signal already emitted.  The caller
             should return immediately without emitting complete/aborted.
         """
+        # --- Resolve the output device (PortAudio path only) ---
+        # v0.6.14 audit T-M5: before keying, so a vanished device is a
+        # refusal, never a keyed rig playing into the system default.
+        if self._tci_connection is None:
+            try:
+                self._resolve_output_device()
+            except LookupError as exc:
+                self.error.emit(
+                    f"TX output device {exc.args[0]!r} is not available — "
+                    "reconnect it or choose another in Settings → Audio. "
+                    "Not transmitting."
+                )
+                return None
+
         # --- Key the rig ---
+        with self._rig_lock:
+            self._keyed_rig = rig
         try:
             rig.set_ptt(True)
-        except RigError as exc:
+        except Exception as exc:  # noqa: BLE001
             # User explicitly wanted rig control and it failed — abort
             # before any audio leaves the soundcard.  ManualRig never
             # raises so this only fires for real backends.
+            #
+            # v0.6.14 audit T-H1: a failed key is NOT proof the rig is
+            # unkeyed.  rigctld answering ``T 1`` after its 2 s timeout, a
+            # lost CI-V OK frame, or a Flex reply timeout all raise here
+            # with the transmitter already on the air — and a non-RigError
+            # (raw OSError) used to escape entirely.  Always send PTT-off.
             self.error.emit(f"Could not key rig: {exc}")
+            self._unkey_with_retry(rig)
             return None
 
         self.transmission_started.emit()
@@ -1376,8 +1647,24 @@ class TxWorker(QObject):
         operator knows to check the radio.
         """
         first_exc: Exception | None = None
+        # v0.6.14 audit T-L8: a TCI reconnect here starts a fresh session
+        # with no RX audio subscription, so RX went silent after a
+        # recovered unkey.  Remember whether RX was subscribed (the flag
+        # survives until close()) and re-send ``audio_start`` afterwards.
+        tci_conn = getattr(rig, "connection", None)
+        rx_was_subscribed = False
+        if tci_conn is not None:
+            try:
+                rx_was_subscribed = bool(tci_conn.is_rx_audio_subscribed())
+            except Exception:  # noqa: BLE001
+                rx_was_subscribed = False
         for attempt in range(_UNKEY_ATTEMPTS):
             if attempt:
+                if tci_conn is not None and not rx_was_subscribed:
+                    try:
+                        rx_was_subscribed = bool(tci_conn.is_rx_audio_subscribed())
+                    except Exception:  # noqa: BLE001
+                        pass
                 try:
                     rig.close()
                 except Exception:  # noqa: BLE001
@@ -1419,6 +1706,18 @@ class TxWorker(QObject):
                     "reconnect",
                     attempt + 1,
                 )
+                if rx_was_subscribed:
+                    # Re-subscribe only once the rig is unkeyed (v0.6.14
+                    # sweep: unkey first — four sends no longer delay it),
+                    # and send the full setup (rate / format / channels +
+                    # audio_start) rather than a bare audio_start: a fresh
+                    # server session otherwise streams RX audio in its
+                    # default format.
+                    try:
+                        subscribe_rx_audio(tci_conn)
+                        _log.info("TCI reconnected during unkey — RX audio re-subscribed")
+                    except Exception as exc:  # noqa: BLE001
+                        _log.warning("TCI RX audio re-subscribe after reconnect failed: %s", exc)
             return
         self.error.emit(
             f"Could not unkey rig after {_UNKEY_ATTEMPTS} attempts: "
@@ -1427,14 +1726,25 @@ class TxWorker(QObject):
             "rig's TX time-out timer as a backstop)."
         )
 
-    def request_stop(self) -> None:
+    def request_stop(self, cancel_queued: bool = True) -> None:
         """Abort an in-flight transmission. Safe to call from any thread.
 
         Sets the stop flag and yanks PortAudio out of ``sd.wait()`` so
         the playback unwinds immediately. The worker thread then drops
         PTT and emits ``transmission_aborted``.
+
+        *cancel_queued* (the default, for the operator's Stop) also
+        cancels every transmission dispatched but not yet started (T-L2).
+        The playback watchdog passes ``False`` (v0.6.14 sweep): it is
+        about the *current* TX overrunning its budget, and must not
+        silently swallow a separately queued next transmission.
         """
-        self._stop_event.set()
+        with self._stop_lock:
+            if cancel_queued:
+                # T-L2: also cancel every transmission already dispatched
+                # but whose queued slot hasn't run yet.
+                self._stop_covers_upto = self._tx_requests_issued
+            self._stop_event.set()
         output_stream.stop()
 
     def wait_for_stop(self, timeout: float) -> bool:
@@ -1492,17 +1802,26 @@ class TxWorker(QObject):
         display a persistent watchdog message that isn't immediately
         clobbered by the subsequent ``transmission_aborted`` signal.
         """
+        # Held from the stale check through the stop (v0.6.14 sweep): a new
+        # slot bumps ``_tx_id`` under this lock before clearing
+        # ``_stop_event``, so it can't start in between and be stopped.
         with self._tx_id_lock:
             current = self._tx_id
-        if tx_id != 0 and tx_id != current:
-            _log.debug(
-                "stale TX watchdog fire ignored (timer tx_id=%d, current=%d)",
-                tx_id, current,
-            )
-            return
-        self._watchdog_triggered = True
-        self.watchdog_fired.emit(float(duration_s))
-        self.request_stop()
+            if tx_id != 0 and tx_id != current:
+                _log.debug(
+                    "stale TX watchdog fire ignored (timer tx_id=%d, current=%d)",
+                    tx_id, current,
+                )
+                return
+            self._watchdog_triggered = True
+            self.watchdog_fired.emit(float(duration_s))
+            # v0.6.14 audit T-M2: drop PTT directly first, like the remote
+            # dead-man's-switch.  A watchdog fire means playback is already
+            # overdue — possibly wedged where request_stop() can't reach it —
+            # so trusting the worker's own unwind to unkey is not enough.
+            self.emergency_unkey()
+            # v0.6.14 sweep: stop only the overrunning TX, not a queued next one.
+            self.request_stop(cancel_queued=False)
 
 
 class RxWorker(QObject):
@@ -1593,15 +1912,10 @@ class RxWorker(QObject):
         # Legacy ``flush_samples`` override (explicit int) still wins
         # for back-compat with tests that pin a tight flush size.
         self._flush_samples_override: int | None = flush_samples
-        self._flush_samples_incremental_idle: int = int(
-            _DECODE_FLUSH_INTERVAL_S_INCREMENTAL_IDLE * sample_rate
-        )
-        self._flush_samples_incremental_decoding: int = int(
-            _DECODE_FLUSH_INTERVAL_S_INCREMENTAL_DECODING * sample_rate
-        )
-        self._flush_samples_batch: int = int(
-            _DECODE_FLUSH_INTERVAL_S_BATCH * sample_rate
-        )
+        self._flush_samples_incremental_idle: int = 0
+        self._flush_samples_incremental_decoding: int = 0
+        self._flush_samples_batch: int = 0
+        self._compute_flush_thresholds()
         # Legacy public attribute: many existing tests read this
         # directly to assert the configured threshold.  It now
         # reflects the IDLE threshold of the active path, which is
@@ -1644,17 +1958,13 @@ class RxWorker(QObject):
         happens on the worker's own event loop (never racing with
         ``feed_chunk``).
         """
+        # v0.6.14 audit UI-M2: Settings OK used to re-send every value,
+        # so an unrelated settings change rebuilt the decoder and threw
+        # away the image being received.  Rebuild only on a real change.
+        if enabled == self._weak_signal:
+            return
         self._weak_signal = enabled
-        self._decoder = Decoder(
-            self._sample_rate,
-            weak_signal=enabled,
-            incremental_decode=self._incremental_decode,
-        )
-        self._decoder.set_cancel_event(self._cancel_event)
-        # OP2-16: discard pre-toggle audio so the new decoder doesn't see
-        # stale samples from the old decoder's time window.
-        self._scratch.clear()
-        self._scratch_samples = 0
+        self._rebuild_decoder()
 
     @Slot(int)
     def set_watchdog_timeout(self, seconds: int) -> None:
@@ -1677,16 +1987,10 @@ class RxWorker(QObject):
         Decorated ``@Slot(bool)`` so the GUI thread can dispatch this via a
         queued signal, guaranteeing the rebuild happens on the worker thread.
         """
+        if enabled == self._incremental_decode:
+            return  # v0.6.14 audit UI-M2: no-op when unchanged
         self._incremental_decode = enabled
-        self._decoder = Decoder(
-            self._sample_rate,
-            weak_signal=self._weak_signal,
-            incremental_decode=enabled,
-        )
-        self._decoder.set_cancel_event(self._cancel_event)
-        # OP2-16: discard pre-toggle audio (matches set_sample_rate pattern).
-        self._scratch.clear()
-        self._scratch_samples = 0
+        self._rebuild_decoder()
 
     @Slot(bool)
     def set_final_slant_correction(self, enabled: bool) -> None:
@@ -1731,9 +2035,10 @@ class RxWorker(QObject):
         """Update the sample rate and reconstruct the internal Decoder.
 
         Should be called only when capture is not running — the new
-        Decoder discards any in-flight buffered audio. The caller
-        (``MainWindow._apply_config``) shows a status-bar notice asking
-        the user to restart capture when the rate changes mid-session.
+        Decoder discards any in-flight buffered audio, and the decoder
+        must run at the rate the stream delivers.  ``MainWindow`` defers
+        a mid-capture change to the next capture start (v0.6.14 audit
+        UI-M2) and asks the user to restart capture.
 
         Decorated ``@Slot(int)`` so the GUI thread can dispatch this via a
         queued signal, guaranteeing the rebuild happens on the worker thread.
@@ -1741,20 +2046,64 @@ class RxWorker(QObject):
         OP-12: ``_total_samples`` is also zeroed so the "Xs buffered"
         status label isn't briefly off-by-rate after a mid-session change.
         """
+        if sample_rate == self._sample_rate:
+            return  # v0.6.14 audit UI-M2: no-op when unchanged
         self._sample_rate = sample_rate
-        self._decoder = Decoder(
-            sample_rate,
-            weak_signal=self._weak_signal,
-            incremental_decode=self._incremental_decode,
-        )
-        self._decoder.set_cancel_event(self._cancel_event)
-        self._scratch.clear()
-        self._scratch_samples = 0
-        self._total_samples = 0
+        # v0.6.14 audit UI-M2: the flush thresholds are sample counts
+        # derived from the rate.  They were computed once in __init__ and
+        # never followed a rate change.
+        self._compute_flush_thresholds()
+        self._rebuild_decoder()
 
     @property
     def sample_rate(self) -> int:
         return self._sample_rate
+
+    def _compute_flush_thresholds(self) -> None:
+        """(Re)derive the per-state flush sample counts from the rate."""
+        rate = self._sample_rate
+        self._flush_samples_incremental_idle = int(
+            _DECODE_FLUSH_INTERVAL_S_INCREMENTAL_IDLE * rate
+        )
+        self._flush_samples_incremental_decoding = int(
+            _DECODE_FLUSH_INTERVAL_S_INCREMENTAL_DECODING * rate
+        )
+        self._flush_samples_batch = int(_DECODE_FLUSH_INTERVAL_S_BATCH * rate)
+
+    def _rebuild_decoder(self) -> None:
+        """Replace the Decoder after a configuration change.
+
+        Shared by ``set_weak_signal``, ``set_incremental_decode`` and
+        ``set_sample_rate``.  Any partial decode dies with the old Decoder,
+        so the worker's own decode state is dropped with it.
+
+        v0.6.14 audit UI-M2: ``_decoding`` and the watchdog fields used to
+        survive the rebuild.  The new Decoder was IDLE but the worker still
+        thought it was mid-image, so a few seconds later the watchdog
+        "timed out" and emitted the stale partial as a finished image.
+        That triggered auto-save and the logbook prompt for a decode that
+        had in fact been thrown away.
+        """
+        was_decoding = self._decoding
+        self._decoder = Decoder(
+            self._sample_rate,
+            weak_signal=self._weak_signal,
+            incremental_decode=self._incremental_decode,
+        )
+        self._decoder.set_cancel_event(self._cancel_event)
+        # OP2-16: discard pre-change audio so the new decoder doesn't see
+        # stale samples from the old decoder's time window.
+        self._scratch.clear()
+        self._scratch_samples = 0
+        # OP-12: zero the counter so the "Xs buffered" label isn't off.
+        self._total_samples = 0
+        self._decoding = False
+        self._reset_watchdog_state()
+        self._flush_samples = self._current_flush_samples()
+        if was_decoding:
+            self.status_update.emit(
+                "Decoder settings changed — partial image discarded."
+            )
 
     # === slots ===
 
@@ -2201,17 +2550,18 @@ class RxWorker(QObject):
                 # with clock drift; harmful for weak/noisy signals where
                 # false-positive syncs corrupt the polyfit.
                 #
-                # Robot 36 is explicitly excluded: the incremental path uses
-                # the slowrx color pipeline (direct integer YCbCr→RGB matrix)
-                # while decode_wav/_decode_robot36 uses the older median+PIL
-                # path.  Substituting the batch result would silently swap
-                # pipelines, producing visibly different colors.  Users who
-                # need slant correction for Robot 36 should use a hardware or
-                # software sample-rate lock instead.
+                # Robot 36 is excluded because the re-decode would gain
+                # nothing: decode_wav builds Robot 36's grid with the same
+                # walk (no least-squares slant fit, OP2-15) and the same
+                # slowrx sampler / colour matrix (core.robot36_dsp) as the
+                # live path (v0.6.14 audit nit: this comment used to claim
+                # a different colour pipeline).  Users who need slant
+                # correction for Robot 36 should use a hardware or software
+                # sample-rate lock instead.
                 if event.mode == Mode.ROBOT_36:
                     _log.debug(
                         "slant-correction re-decode skipped for Robot 36 "
-                        "(batch and incremental paths use different color pipelines)"
+                        "(decode_wav does not slant-fit Robot 36)"
                     )
                 elif self._cancel_event.is_set():
                     # Stop / RX-reset was requested while the worker was

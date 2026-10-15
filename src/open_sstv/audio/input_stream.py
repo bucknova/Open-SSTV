@@ -57,7 +57,7 @@ from PySide6.QtCore import QObject, QTimer, Signal, Slot
 _log = logging.getLogger(__name__)
 
 from open_sstv.audio import macos_permissions
-from open_sstv.audio.devices import AudioDevice
+from open_sstv.audio.devices import AudioDevice, bump_portaudio_generation
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -138,6 +138,14 @@ class InputStreamWorker(QObject):
     stopped = Signal()
     error = Signal(str)
     stream_error = Signal(str)  # emitted on device-loss; triggers clean stop
+    #: Emitted at the end of EVERY ``stop()`` call, after ``stopped`` when
+    #: a stream was running and on its own when there was nothing to stop.
+    #: ``stopped`` keeps meaning "capture ended" for the UI; this is the
+    #: acknowledgement MainWindow's bounded swap/quit waits listen for.
+    #: Without it an idle worker answered nothing, and every swap or quit
+    #: with capture off sat out the 2 s budget and logged a false "wedged
+    #: worker" warning (v0.6.14 audit UI-M6).
+    stop_finished = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -316,8 +324,16 @@ class InputStreamWorker(QObject):
         """Stop the PortAudio stream and flush any buffered chunks.
 
         Idempotent: calling ``stop`` on an already-stopped worker is
-        a no-op and does not emit ``stopped`` a second time.
+        a no-op and does not emit ``stopped`` a second time.  It does
+        emit ``stop_finished``, which every call ends with (v0.6.14
+        audit UI-M6).
         """
+        try:
+            self._stop_stream()
+        finally:
+            self.stop_finished.emit()
+
+    def _stop_stream(self) -> None:
         if self._stream is None:
             return
 
@@ -631,6 +647,11 @@ class InputStreamWorker(QObject):
                 )
             except Exception as exc:  # noqa: BLE001
                 _log.warning("PortAudio _initialize() failed: %s", exc)
+            # v0.6.14 sweep: every device index may have moved.  Bumped
+            # unconditionally (still under the TX-state lock) so the TX
+            # worker re-resolves its output device before the next key-up,
+            # even when one of the calls above failed half-way.
+            bump_portaudio_generation()
 
         if not run_if_tx_idle(_do_reset):
             _log.warning(
