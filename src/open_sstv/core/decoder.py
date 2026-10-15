@@ -375,7 +375,7 @@ def _decode_scottie_rgb(
     scan_ms = (spec.line_time_ms - sync_ms - 3 * porch_ms) / 3
 
     # Offsets relative to the detected SYNC position. (Channel *starts*
-    # are where PySSTV's old split put them too, so pre-v0.6.15 Open-SSTV
+    # are where PySSTV's old split put them too, so pre-v0.6.16 Open-SSTV
     # audio still decodes — minus ~3.5 px of porch at each channel end.)
     g_offset_ms = -(scan_ms + porch_ms + scan_ms)
     b_offset_ms = -scan_ms

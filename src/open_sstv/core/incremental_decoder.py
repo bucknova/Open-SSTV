@@ -1102,7 +1102,7 @@ class Robot36IncrementalDecoder(IncrementalDecoderBase):
         return rgb[0].copy()
 
 
-#: Back-compat alias for the pre-v0.6.15 name of the per-line backend.
+#: Back-compat alias for the pre-v0.6.16 name of the per-line backend.
 _Robot36PerLineIncrementalDecoder = Robot36IncrementalDecoder
 
 

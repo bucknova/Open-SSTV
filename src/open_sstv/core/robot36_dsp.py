@@ -72,7 +72,7 @@ if TYPE_CHECKING:
 #
 # Every line has its own sync (150 ms period); even lines carry Cr (R-Y),
 # odd lines Cb (B-Y).  This is the layout of the Robot 36 spec, slowrx,
-# MMSSTV, QSSTV, PySSTV and our own encoder.  (Before v0.6.15 the decoders
+# MMSSTV, QSSTV, PySSTV and our own encoder.  (Before v0.6.16 the decoders
 # also accepted a 290.5 ms "line pair" layout with no sync on odd lines;
 # no spec or reference implementation emits that, and its auto-detection
 # misfired on a single missed sync — v0.6.14 audit D-H2 — so it is gone.)
