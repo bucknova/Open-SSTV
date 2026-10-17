@@ -29,7 +29,7 @@ classifiers = [
     "Topic :: Multimedia :: Sound/Audio",
 ]
 dependencies = [
-    "PySide6>=6.6,<7",       # Qt 6 bindings (LGPL-3) — official Qt project
+    "PySide6>=6.6,<6.12",    # Qt 6 bindings (LGPL-3); <6.12: 6.12.0 + Python 3.11 aborts (none_dealloc)
     "numpy>=1.26,<3",        # DSP arrays (1.26 = first wheel with py3.12 macOS arm64)
     "scipy>=1.11,<2",        # signal.hilbert, butter, sosfiltfilt, resample_poly
     "sounddevice>=0.4.6,<1",   # PortAudio I/O (MIT)
