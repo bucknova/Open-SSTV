@@ -1812,13 +1812,10 @@ class TestRemoteStatusIndicator:
 class TestUpdateNotice:
     def test_version_and_url_escaped(self, window: MainWindow) -> None:
         # v0.6.14 audit S-L7: both values come off the network.
-        from PySide6.QtWidgets import QLabel
-
         window._on_update_available(
             "9<b>x</b>", 'https://github.com/bucknova/Open-SSTV/releases/"x'
         )
-        texts = [w.text() for w in window.statusBar().findChildren(QLabel)]
-        notice = next(t for t in texts if "available" in t)
+        notice = window._update_banner.message()
         assert "<b>x</b>" not in notice and "9&lt;b&gt;x&lt;/b&gt;" in notice
         assert '/"x' not in notice
 
@@ -1957,3 +1954,12 @@ class TestAudioLevelStrip:
         window._apply_config()
         assert window._level_strip._tx_slider.maximum() == 200
         assert window._level_strip._tx_slider.value() == 180
+
+
+def test_update_available_shows_banner(window: MainWindow) -> None:
+    assert window._update_banner.isHidden()
+    window._on_update_available(
+        "9.9.9", "https://github.com/bucknova/Open-SSTV/releases/latest"
+    )
+    assert not window._update_banner.isHidden()
+    assert "9.9.9" in window._update_banner.message()

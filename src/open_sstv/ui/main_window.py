@@ -193,6 +193,7 @@ from open_sstv.ui.radio_panel import RadioPanel
 from open_sstv.ui.rx_panel import RxPanel
 from open_sstv.ui.settings_dialog import SettingsDialog
 from open_sstv.ui.tx_panel import TxPanel
+from open_sstv.ui.update_banner import UpdateBanner
 from open_sstv.ui.update_checker import UpdateCheckerWorker
 from open_sstv.ui.waterfall_widget import WaterfallWindow
 from open_sstv.ui.workers import RxWorker, TxWorker
@@ -1011,6 +1012,9 @@ class MainWindow(QMainWindow):
         central_layout = QVBoxLayout(central)
         central_layout.setContentsMargins(0, 0, 0, 0)
         central_layout.setSpacing(0)
+        # Hidden until the update checker finds a newer release.
+        self._update_banner = UpdateBanner(central)
+        central_layout.addWidget(self._update_banner)
         central_layout.addWidget(self._radio_panel)
         central_layout.addWidget(splitter, stretch=1)
         self.setCentralWidget(central)
@@ -1966,21 +1970,11 @@ class MainWindow(QMainWindow):
 
     @Slot(str, str)
     def _on_update_available(self, version: str, url: str) -> None:
-        """Show a persistent status-bar link when a newer release is found."""
-        import html  # noqa: PLC0415
-
-        from PySide6.QtWidgets import QLabel
-
+        """Show the top-of-window banner when a newer release is found."""
         # v0.6.14 audit S-L7: both values came off the network into a
-        # link-opening rich-text label — escape them (the worker also
-        # fences the URL to our releases page).
-        lbl = QLabel(
-            f'<a href="{html.escape(url, quote=True)}">'
-            f"Open-SSTV {html.escape(version)} available</a>"
-        )
-        lbl.setOpenExternalLinks(True)
-        lbl.setContentsMargins(0, 0, 8, 0)
-        self.statusBar().addPermanentWidget(lbl)
+        # link-opening rich-text label; the banner escapes them (and the
+        # worker fences the URL to our releases page).
+        self._update_banner.show_update(version, url)
 
     @Slot()
     def _show_first_launch_dialog(self) -> None:
