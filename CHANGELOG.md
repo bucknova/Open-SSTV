@@ -11,6 +11,34 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.6.17] — 2026-10-20
+
+### Fixed
+
+- **The Linux x86_64 AppImage no longer crashes about a minute after you
+  start receiving.** v0.6.16 was built with Qt for Python (PySide6)
+  6.12.0, which has a reference-counting bug on Python 3.11, the version
+  the release builds use. The level meter's redraws triggered it, and the
+  app stopped with `Fatal Python error: none_dealloc`. Releases now use
+  PySide6 6.11 until a fixed version is out. The Windows and macOS builds
+  also shipped 6.12.0 and get the same fix; the Linux ARM64 build was
+  never affected. Thanks to David Horvath
+  ([#84](https://github.com/bucknova/Open-SSTV/pull/84)), who tracked it
+  down.
+
+### Changed
+
+- **New releases are easier to notice.** A blue banner across the top of
+  the window now announces a new version, with a link to the download
+  and release notes. Closing it hides it for that version only; the
+  next release shows it again. The small link at the bottom right of the
+  window stays as a reminder once the banner is closed. The banner
+  follows the system's light or dark theme. Thanks to David Horvath
+  ([#85](https://github.com/bucknova/Open-SSTV/issues/85),
+  [#86](https://github.com/bucknova/Open-SSTV/pull/86)).
+
+---
+
 ## [0.6.16] — 2026-10-15
 
 A full code and security review of v0.6.14

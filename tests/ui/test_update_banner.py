@@ -52,3 +52,31 @@ def test_dark_theme_colours(qtbot) -> None:  # type: ignore[no-untyped-def]
     sheet = banner.styleSheet()
     assert "#12324f" in sheet and "#d6e8fa" in sheet and "#2a5a86" in sheet
     assert "#8cc4ff" in banner.message()
+
+
+def test_follows_theme_switch_while_shown(qtbot) -> None:  # type: ignore[no-untyped-def]
+    # Once styled, the banner's own palette reports the banner colours, so
+    # the light/dark choice has to follow the parent's palette.
+    from PySide6.QtWidgets import QVBoxLayout, QWidget
+
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    QVBoxLayout(parent)
+
+    def set_window(color: str) -> None:
+        pal = parent.palette()
+        pal.setColor(QPalette.ColorRole.Window, QColor(color))
+        parent.setPalette(pal)
+
+    set_window("#f0f0f0")
+    banner = UpdateBanner(parent)
+    parent.layout().addWidget(banner)
+    banner.show_update("9.9.9", "https://github.com/bucknova/Open-SSTV/releases/latest")
+    assert "#e8f1fb" in banner.styleSheet()
+
+    set_window("#202020")
+    assert "#12324f" in banner.styleSheet()
+    assert "#8cc4ff" in banner.message()
+
+    set_window("#f0f0f0")
+    assert "#e8f1fb" in banner.styleSheet()

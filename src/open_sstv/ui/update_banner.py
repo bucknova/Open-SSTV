@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import html
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QToolButton, QWidget
 
 #: (background, text, link, bottom border) per theme.
@@ -27,7 +27,8 @@ def _is_dark(widget: QWidget) -> bool:
     return widget.palette().window().color().lightness() < 128
 
 
-def banner_stylesheet(dark: bool) -> str:
+def banner_stylesheet(dark: bool) -> tuple[str, str]:
+    """Return (stylesheet, link colour) for the light or dark theme."""
     bg, fg, link, border = _DARK if dark else _LIGHT
     return (
         f"#updateBanner {{ background-color: {bg};"
@@ -50,6 +51,8 @@ class UpdateBanner(QWidget):
         self.setObjectName("updateBanner")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._version = ""
+        self._url = ""
+        self._dark: bool | None = None
         self._label = QLabel(self)
         self._label.setOpenExternalLinks(True)
         self._label.setWordWrap(True)
@@ -63,18 +66,38 @@ class UpdateBanner(QWidget):
         layout.addWidget(self._label, stretch=1)
         layout.addWidget(self._close)
         self.hide()
+        # Once styled, the banner's own palette reports the banner colours
+        # and Qt stops sending it palette events, so follow a light/dark
+        # switch through the parent's palette instead.
+        if parent is not None:
+            parent.installEventFilter(self)
 
     def show_update(self, version: str, url: str) -> None:
         """Announce ``version``; both values came off the network, so escape."""
         self._version = version
-        sheet, link = banner_stylesheet(_is_dark(self))
+        self._url = url
+        self._apply_theme()
+        self.show()
+
+    def _apply_theme(self) -> None:
+        self._dark = _is_dark(self.parentWidget() or self)
+        sheet, link = banner_stylesheet(self._dark)
         self.setStyleSheet(sheet)
+        version, url = self._version, self._url
         self._label.setText(
             f"New release available: Open-SSTV {html.escape(version)} — "
             f'<a href="{html.escape(url, quote=True)}" '
             f'style="color:{link}">Download / release notes</a>'
         )
-        self.show()
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if (
+            event.type() == QEvent.Type.PaletteChange
+            and self._version
+            and _is_dark(self.parentWidget() or self) != self._dark
+        ):
+            self._apply_theme()
+        return False
 
     def message(self) -> str:
         return self._label.text()
