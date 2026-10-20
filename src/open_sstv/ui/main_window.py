@@ -1014,6 +1014,10 @@ class MainWindow(QMainWindow):
         central_layout.setSpacing(0)
         # Hidden until the update checker finds a newer release.
         self._update_banner = UpdateBanner(central)
+        self._update_banner.dismissed.connect(self._on_update_banner_dismissed)
+        # Status-bar fallback: shown whenever the banner is not, so the
+        # notice never disappears completely.  Built lazily on first update.
+        self._update_link: QLabel | None = None
         central_layout.addWidget(self._update_banner)
         central_layout.addWidget(self._radio_panel)
         central_layout.addWidget(splitter, stretch=1)
@@ -1970,11 +1974,41 @@ class MainWindow(QMainWindow):
 
     @Slot(str, str)
     def _on_update_available(self, version: str, url: str) -> None:
-        """Show the top-of-window banner when a newer release is found."""
-        # v0.6.14 audit S-L7: both values came off the network into a
-        # link-opening rich-text label; the banner escapes them (and the
-        # worker fences the URL to our releases page).
-        self._update_banner.show_update(version, url)
+        """Announce a newer release: banner, plus a status-bar fallback link.
+
+        The banner is skipped for a version the operator already closed;
+        the status-bar link then remains as the quiet notice.
+        """
+        import html  # noqa: PLC0415
+
+        # v0.6.14 audit S-L7: both values came off the network into
+        # link-opening rich-text labels — escape them (the worker also
+        # fences the URL to our releases page).
+        if self._update_link is None:
+            self._update_link = QLabel()
+            self._update_link.setOpenExternalLinks(True)
+            self._update_link.setContentsMargins(0, 0, 8, 0)
+            self.statusBar().addPermanentWidget(self._update_link)
+        self._update_link.setText(
+            f'<a href="{html.escape(url, quote=True)}">'
+            f"Open-SSTV {html.escape(version)} available</a>"
+        )
+        if self._config.dismissed_update_version == version:
+            self._update_link.show()
+        else:
+            self._update_link.hide()
+            self._update_banner.show_update(version, url)
+
+    @Slot(str)
+    def _on_update_banner_dismissed(self, version: str) -> None:
+        """Remember the dismissed version and fall back to the status link."""
+        if self._update_link is not None:
+            self._update_link.show()
+        self._config.dismissed_update_version = version
+        try:
+            save_config(self._config)
+        except OSError as exc:
+            _log.debug("could not persist dismissed update version: %s", exc)
 
     @Slot()
     def _show_first_launch_dialog(self) -> None:

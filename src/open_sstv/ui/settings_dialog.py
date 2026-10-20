@@ -2548,6 +2548,7 @@ class SettingsDialog(QDialog):
             tx_banner_text_color=self._banner_text_color,
             tx_banner_size=self._banner_size.currentData() or "small",
             check_for_updates=self._check_updates_setting.isChecked(),
+            dismissed_update_version=self._config.dismissed_update_version,
             first_launch_seen=self._config.first_launch_seen,
             # v0.4 logbook + logging.  logbook_db_path has no UI (it's
             # an advanced hand-edit-the-TOML override) but must be
