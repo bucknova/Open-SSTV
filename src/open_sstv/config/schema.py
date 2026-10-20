@@ -246,6 +246,9 @@ class AppConfig:
     # v0.2.16: when True, a background HTTPS GET to the GitHub releases API
     # runs once at startup. No data is sent — it is a read-only request.
     check_for_updates: bool = True
+    # Release version whose update banner the operator closed.  Only that
+    # version stays hidden; the next release shows the banner again.
+    dismissed_update_version: str = ""
 
     # --- Identity ---
     callsign: str = ""

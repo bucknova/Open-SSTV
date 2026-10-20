@@ -1810,17 +1810,54 @@ class TestRemoteStatusIndicator:
 
 
 class TestUpdateNotice:
+    URL = "https://github.com/bucknova/Open-SSTV/releases/latest"
+
+    @pytest.fixture(autouse=True)
+    def _no_disk(self, monkeypatch: pytest.MonkeyPatch) -> list:
+        saved: list = []
+        monkeypatch.setattr(
+            "open_sstv.ui.main_window.save_config", lambda cfg: saved.append(cfg)
+        )
+        return saved
+
     def test_version_and_url_escaped(self, window: MainWindow) -> None:
         # v0.6.14 audit S-L7: both values come off the network.
-        from PySide6.QtWidgets import QLabel
-
         window._on_update_available(
             "9<b>x</b>", 'https://github.com/bucknova/Open-SSTV/releases/"x'
         )
-        texts = [w.text() for w in window.statusBar().findChildren(QLabel)]
-        notice = next(t for t in texts if "available" in t)
-        assert "<b>x</b>" not in notice and "9&lt;b&gt;x&lt;/b&gt;" in notice
-        assert '/"x' not in notice
+        for notice in (window._update_banner.message(), window._update_link.text()):
+            assert "<b>x</b>" not in notice and "9&lt;b&gt;x&lt;/b&gt;" in notice
+            assert '/"x' not in notice
+
+    def test_banner_appears_when_update_found(self, window: MainWindow) -> None:
+        assert window._update_banner.isHidden()
+        window._on_update_available("9.9.9", self.URL)
+        assert not window._update_banner.isHidden()
+        assert "9.9.9" in window._update_banner.message()
+        # The fallback link is only for once the banner is gone.
+        assert window._update_link.isHidden()
+
+    def test_closing_banner_keeps_status_link(
+        self, window: MainWindow, _no_disk: list
+    ) -> None:
+        window._on_update_available("9.9.9", self.URL)
+        window._update_banner._close.click()
+        assert window._update_banner.isHidden()
+        assert not window._update_link.isHidden()
+        assert "9.9.9" in window._update_link.text()
+        assert window._config.dismissed_update_version == "9.9.9"
+        assert _no_disk, "dismissal must be persisted"
+
+    def test_dismissed_version_does_not_return(self, window: MainWindow) -> None:
+        window._config.dismissed_update_version = "9.9.9"
+        window._on_update_available("9.9.9", self.URL)
+        assert window._update_banner.isHidden()
+        assert not window._update_link.isHidden()
+
+    def test_next_release_shows_banner_again(self, window: MainWindow) -> None:
+        window._config.dismissed_update_version = "9.9.9"
+        window._on_update_available("9.9.10", self.URL)
+        assert not window._update_banner.isHidden()
 
 
 class TestRemoteTxWiring:
@@ -1957,3 +1994,4 @@ class TestAudioLevelStrip:
         window._apply_config()
         assert window._level_strip._tx_slider.maximum() == 200
         assert window._level_strip._tx_slider.value() == 180
+
