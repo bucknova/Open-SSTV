@@ -9,6 +9,9 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Radio model list (#90).** Settings → Radio → "Radio model" now lists every radio the installed Hamlib supports (from `rigctld -l`), so rigs like the Yaesu FT-450D appear. Without rigctld it falls back to a built-in list. That built-in list previously had the wrong Hamlib ID for 21 of its 24 radios (e.g. "Icom IC-7300" launched rigctld as a Yaesu FT-991), which broke CAT through "Auto-launch rigctld". **If you picked your radio from the old list, re-select it.** Setups that connect to a rigctld you start yourself were not affected.
+
 ---
 
 ## [0.6.17] — 2026-10-20

@@ -537,15 +537,15 @@ The following radios have been tested or have built-in presets in the settings d
 
 **Via FlexRadio direct**: the 6000 series — FLEX-6300/6400/6500/6600/6700 and the 6400M/6600M — over the SmartSDR TCP API.
 
-**Via rigctld (Hamlib)**: Hundreds of additional models — any radio supported by Hamlib. Run `rigctld --list` in a terminal for the full list. Common models included in the Open-SSTV dropdown are (Hamlib model IDs as of v4.5+):
+**Via rigctld (Hamlib)**: Hundreds of additional models — any radio supported by Hamlib. When rigctld is installed, the Open-SSTV "Radio model" dropdown lists every radio your Hamlib version supports (it runs `rigctld -l` for you); type the first letters of the manufacturer to jump through it. Without rigctld it shows a short built-in list. Common Hamlib model IDs:
 
-- Icom IC-7300 = **1035**, IC-7610 = **1036**, IC-9700 = **1037**, IC-705 = **1039**, IC-7100 = **1029**, IC-7200 = **1034**
-- Kenwood TS-590SG = **3073**, TS-890S = **3085**, TS-480 = **3077**, TS-2000 = **3061**
-- Yaesu FT-991A = **2057**, FT-891 = **2055**, FTDX10 = **2063**, FT-710 = **2053**, FTDX101 = **2060**, FT-817/818 = **2028**, FT-950 = **2040**
-- Elecraft K3 = **4010**, KX3 = **4013**, KX2 = **4014**, K4 = **4015**
+- Icom IC-7300 = **3073**, IC-7610 = **3078**, IC-9700 = **3081**, IC-705 = **3085**, IC-7100 = **3070**, IC-7200 = **3061**
+- Kenwood TS-590SG = **2037**, TS-890S = **2041**, TS-480 = **2028**, TS-2000 = **2014**
+- Yaesu FT-991/991A = **1035**, FT-891 = **1036**, FTDX10 = **1042**, FT-710 = **1049**, FTDX101D = **1040**, FTDX101MP = **1044**, FT-817 = **1020**, FT-818 = **1041**, FT-857 = **1022**, FT-897 = **1023**, FT-950 = **1028**, FT-450 = **1027**, FT-450D = **1046**
+- Elecraft K3 = **2029**, KX3 = **2045**, KX2 = **2044**, K4 = **2047**
 - Hamlib Dummy (for testing without hardware) = **1**, NET rigctl (for daemon-to-daemon) = **2**
 
-If your radio isn't in the Open-SSTV preset list, enter the Hamlib model number directly in the "Custom Model ID" field.
+If your radio still isn't listed, enter its Hamlib model number (from `rigctld -l`) directly in the "Custom Model ID" field.
 
 **PTT-only serial**: Works with any radio that has a serial PTT interface — no CAT protocol required.
 
