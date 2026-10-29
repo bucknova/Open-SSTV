@@ -1113,3 +1113,37 @@ class TestAbsentDeviceKeepsHostApi:
         qtbot.addWidget(dlg)
         assert "not connected" in dlg._output_combo.currentText()
         assert dlg.result_config().audio_output_host_api == "Windows WASAPI"
+
+
+class TestRadioModelCombo:
+    """Issue #90: the Radio model combo lists what Hamlib supports, and a
+    pick lands in the model ID that is saved and passed to rigctld -m."""
+
+    def test_combo_uses_hamlib_list(self, qtbot, monkeypatch) -> None:
+        from open_sstv.radio.rig_models import NO_RIG, RigModel
+        from open_sstv.ui import settings_dialog as mod
+
+        ft450d = RigModel(1046, "Yaesu", "FT-450D")
+        monkeypatch.setattr(mod, "available_rig_models", lambda: ((NO_RIG, ft450d), True))
+        dlg = SettingsDialog(config=AppConfig(), rig_connected=False)
+        qtbot.addWidget(dlg)
+        combo = dlg._rig_model_combo
+        assert [combo.itemText(i) for i in range(combo.count())] == [
+            "None / Manual (0)",
+            "Yaesu FT-450D (1046)",
+        ]
+        combo.setCurrentIndex(1)
+        assert dlg.result_config().rig_model_id == 1046
+
+    def test_saved_model_is_selected(self, qtbot, monkeypatch) -> None:
+        from open_sstv.radio import rig_models
+
+        rig_models.available_rig_models.cache_clear()
+        monkeypatch.setattr(rig_models, "find_rigctld_executable", lambda: None)
+        try:
+            dlg = SettingsDialog(config=AppConfig(rig_model_id=1046), rig_connected=False)
+            qtbot.addWidget(dlg)
+            assert dlg._rig_model_combo.currentText() == "Yaesu FT-450D (1046)"
+            assert "built-in list" in dlg._rig_model_combo.toolTip()
+        finally:
+            rig_models.available_rig_models.cache_clear()

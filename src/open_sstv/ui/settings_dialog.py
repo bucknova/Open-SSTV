@@ -59,6 +59,7 @@ from open_sstv.core.modes import Mode
 from open_sstv.radio.band_plan import DATA_MODE_BY_PROTOCOL
 from open_sstv.radio.base import RigConnectionMode
 from open_sstv.radio.exceptions import RigError
+from open_sstv.radio.rig_models import available_rig_models
 from open_sstv.radio.rigctld import RigctldClient, is_safe_rigctld_arg
 from open_sstv.radio.rigctld_launcher import launch_rigctld, stop_rigctld
 from open_sstv.radio.serial_rig import (
@@ -71,35 +72,6 @@ from open_sstv.templates import TokenContext
 
 #: Combo item role carrying a device's host API (v0.6.14 audit T-L4).
 _HOST_API_ROLE = Qt.ItemDataRole.UserRole + 1
-
-
-#: Common Hamlib radio models (model_id, display_name).
-_COMMON_RIG_MODELS: list[tuple[int, str]] = [
-    (0, "None / Manual"),
-    (1, "Hamlib Dummy"),
-    (2, "Hamlib NET rigctl"),
-    (1035, "Icom IC-7300"),
-    (1036, "Icom IC-7610"),
-    (1037, "Icom IC-9700"),
-    (1039, "Icom IC-705"),
-    (3073, "Kenwood TS-590SG"),
-    (3085, "Kenwood TS-890S"),
-    (2057, "Yaesu FT-991A"),
-    (2055, "Yaesu FT-891"),
-    (2063, "Yaesu FTDX10"),
-    (2053, "Yaesu FT-710"),
-    (2060, "Yaesu FTDX101"),
-    (2028, "Yaesu FT-817/818"),
-    (4010, "Elecraft K3"),
-    (4013, "Elecraft KX3"),
-    (4014, "Elecraft KX2"),
-    (4015, "Elecraft K4"),
-    (1029, "Icom IC-7100"),
-    (1034, "Icom IC-7200"),
-    (2040, "Yaesu FT-950"),
-    (3077, "Kenwood TS-480"),
-    (3061, "Kenwood TS-2000"),
-]
 
 # M1 (v0.3 audit): the canonical list lives in the schema so config
 # validation and this combo can't drift.
@@ -1378,9 +1350,20 @@ class SettingsDialog(QDialog):
         rigctld_form.addRow("", self._test_btn)
 
         # Radio model combo (for auto-launching rigctld)
+        # Issue #90: the list comes from the installed Hamlib (rigctld -l),
+        # falling back to a built-in list when rigctld isn't installed.
         self._rig_model_combo = QComboBox()
-        for model_id, name in _COMMON_RIG_MODELS:
-            self._rig_model_combo.addItem(f"{name} ({model_id})", model_id)
+        self._rig_model_combo.setMaxVisibleItems(20)
+        rig_models, from_hamlib = available_rig_models()
+        for rig in rig_models:
+            self._rig_model_combo.addItem(rig.label, rig.model_id)
+        self._rig_model_combo.setToolTip(
+            "Every radio your installed Hamlib supports.  Type to jump."
+            if from_hamlib
+            else "rigctld wasn't found, so this is a short built-in list.\n"
+            "Install Hamlib for every supported radio, or enter the\n"
+            "model number below."
+        )
         idx = self._rig_model_combo.findData(self._config.rig_model_id)
         if idx >= 0:
             self._rig_model_combo.setCurrentIndex(idx)
