@@ -9,8 +9,26 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.6.18] — 2026-10-29
+
 ### Fixed
-- **Radio model list (#90).** Settings → Radio → "Radio model" now lists every radio the installed Hamlib supports (from `rigctld -l`), so rigs like the Yaesu FT-450D appear. Without rigctld it falls back to a built-in list. That built-in list previously had the wrong Hamlib ID for 21 of its 24 radios (e.g. "Icom IC-7300" launched rigctld as a Yaesu FT-991), which broke CAT through "Auto-launch rigctld". **If you picked your radio from the old list, re-select it.** Setups that connect to a rigctld you start yourself were not affected.
+
+- **Your radio now shows up in the Radio model list.** Settings → Radio
+  → "Radio model" used to be a short built-in list, so radios like the
+  Yaesu FT-450D weren't there. When rigctld is installed, the list now
+  comes from your Hamlib itself (`rigctld -l`) and includes every radio
+  it supports. Without rigctld you get a corrected built-in list, which
+  now includes the FT-450 and FT-450D.
+- **The built-in radio list had the wrong Hamlib model numbers.** 21 of
+  its 24 radios were mislabelled; for example, "Icom IC-7300" started
+  rigctld as a Yaesu FT-991. If you use "Auto-launch rigctld" and picked
+  your radio from the old list, **open Settings and re-select it**. If
+  you start rigctld yourself, you weren't affected. The model numbers in
+  the User Guide are corrected too. Thanks to Konstantinos Konstas,
+  SV1ONW ([#90](https://github.com/bucknova/Open-SSTV/issues/90),
+  [#91](https://github.com/bucknova/Open-SSTV/pull/91)).
 
 ---
 
