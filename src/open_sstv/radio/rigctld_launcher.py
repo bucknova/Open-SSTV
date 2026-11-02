@@ -32,6 +32,48 @@ _log = logging.getLogger(__name__)
 
 RIGCTLD_EXECUTABLE = "rigctld"
 
+#: Issue #90: serial-line settings, keyed by ``AppConfig`` attribute, with
+#: the values Hamlib accepts for each.  The first entry ("" or 0) means
+#: "don't pass it — use the backend's default".
+SERIAL_CONF_CHOICES: dict[str, tuple] = {
+    "rig_serial_handshake": ("", "None", "XONXOFF", "Hardware"),
+    "rig_data_bits": (0, 7, 8),
+    "rig_stop_bits": (0, 1, 2),
+    "rig_serial_parity": ("", "None", "Odd", "Even", "Mark", "Space"),
+    "rig_rts_state": ("", "ON", "OFF"),
+    "rig_dtr_state": ("", "ON", "OFF"),
+}
+
+#: ``AppConfig`` attribute → Hamlib conf parameter name.
+_HAMLIB_CONF_NAMES: dict[str, str] = {
+    "rig_serial_handshake": "serial_handshake",
+    "rig_data_bits": "data_bits",
+    "rig_stop_bits": "stop_bits",
+    "rig_serial_parity": "serial_parity",
+    "rig_rts_state": "rts_state",
+    "rig_dtr_state": "dtr_state",
+}
+
+
+def serial_conf_from(source: object) -> dict[str, str]:
+    """Hamlib ``-C`` params for the serial-line settings on *source*.
+
+    *source* is anything with the ``SERIAL_CONF_CHOICES`` attributes (an
+    ``AppConfig``, or a namespace built from the Settings dialog).
+    Default ("" / 0) and unknown values are left out, so Hamlib keeps its
+    own default for them.  RTS is also left out when the handshake is
+    Hardware: Hamlib then owns the RTS line and refuses ``rts_state``.
+    """
+    conf: dict[str, str] = {}
+    for attr, choices in SERIAL_CONF_CHOICES.items():
+        value = getattr(source, attr, choices[0])
+        if value in ("", 0) or value not in choices:
+            continue
+        conf[_HAMLIB_CONF_NAMES[attr]] = str(value)
+    if conf.get("serial_handshake") == "Hardware":
+        conf.pop("rts_state", None)
+    return conf
+
 
 def find_rigctld_executable(name: str = RIGCTLD_EXECUTABLE) -> str | None:
     """Absolute path of *name* found on ``PATH``, never the current directory.
@@ -63,11 +105,14 @@ def build_rigctld_argv(
     tcp_port: int,
     serial_port: str = "",
     baud_rate: int = 0,
+    serial_conf: dict[str, str] | None = None,
 ) -> list[str]:
     """The rigctld command line.  Raises ``ValueError`` for an unsafe port.
 
     OP-13: a serial-port value starting with ``-`` would be read by rigctld
-    as a flag, so it is refused here for both launch paths.
+    as a flag, so it is refused here for both launch paths.  *serial_conf*
+    (from :func:`serial_conf_from`) is checked against the known Hamlib
+    names and values for the same reason.
     """
     if not is_safe_rigctld_arg(serial_port):
         raise ValueError(
@@ -79,6 +124,18 @@ def build_rigctld_argv(
         cmd += ["-r", serial_port]
     if baud_rate:
         cmd += ["-s", str(int(baud_rate))]
+    if serial_conf:
+        allowed = {
+            _HAMLIB_CONF_NAMES[attr]: {str(c) for c in choices if c not in ("", 0)}
+            for attr, choices in SERIAL_CONF_CHOICES.items()
+        }
+        for name, value in serial_conf.items():
+            if value not in allowed.get(name, ()):
+                raise ValueError(
+                    f"refusing to launch rigctld with serial setting "
+                    f"{name}={value!r}"
+                )
+        cmd += ["-C", ",".join(f"{k}={v}" for k, v in serial_conf.items())]
     return cmd
 
 
@@ -123,6 +180,7 @@ def launch_rigctld(
     tcp_port: int,
     serial_port: str = "",
     baud_rate: int = 0,
+    serial_conf: dict[str, str] | None = None,
 ) -> subprocess.Popen:
     """Start rigctld with its stderr drained.  The one launch path.
 
@@ -133,7 +191,9 @@ def launch_rigctld(
     exe = find_rigctld_executable()
     if exe is None:
         raise FileNotFoundError("rigctld not found on PATH")
-    cmd = build_rigctld_argv(exe, model_id, tcp_port, serial_port, baud_rate)
+    cmd = build_rigctld_argv(
+        exe, model_id, tcp_port, serial_port, baud_rate, serial_conf
+    )
     _log.info("launching rigctld: %s", " ".join(cmd))
     # OP2-14: start_new_session=True on POSIX isolates the child into its
     # own process group so a GUI crash/SIGKILL doesn't orphan rigctld
@@ -174,9 +234,11 @@ def stop_rigctld(proc: subprocess.Popen | None, timeout_s: float = 3.0) -> None:
 
 
 __all__ = [
+    "SERIAL_CONF_CHOICES",
     "build_rigctld_argv",
     "drain_subprocess_stderr",
     "find_rigctld_executable",
     "launch_rigctld",
+    "serial_conf_from",
     "stop_rigctld",
 ]

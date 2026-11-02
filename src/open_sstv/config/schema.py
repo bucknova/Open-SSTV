@@ -178,6 +178,18 @@ class AppConfig:
     rig_serial_port: str = ""
     rig_baud_rate: int = 9600
     auto_launch_rigctld: bool = False
+    #: Issue #90: serial-line settings handed to an auto-launched rigctld
+    #: as ``-C`` conf params.  Empty / 0 means "leave it to the Hamlib
+    #: backend's default", which is how every earlier version behaved.
+    #: The FT-450D backend defaults to hardware (RTS/CTS) handshake, which
+    #: times out on cables or radio menus that don't wire/assert RTS.
+    #: Valid values: see ``radio.rigctld_launcher.SERIAL_CONF_CHOICES``.
+    rig_serial_handshake: str = ""
+    rig_data_bits: int = 0
+    rig_stop_bits: int = 0
+    rig_serial_parity: str = ""
+    rig_rts_state: str = ""
+    rig_dtr_state: str = ""
 
     # --- Direct serial rig control ---
     # Protocol: "PTT Only (DTR/RTS)", "Icom CI-V", "Kenwood / Elecraft", "Yaesu CAT"
@@ -737,6 +749,23 @@ class AppConfig:
                 self.rig_tune_mode_policy, list(_VALID_TUNE_MODE_POLICIES),
             )
             self.rig_tune_mode_policy = "voice"
+
+        # Issue #90: rigctld serial-line conf.  These end up on the
+        # rigctld command line, so anything outside the known Hamlib
+        # values falls back to "backend default" rather than passing through.
+        from open_sstv.radio.rigctld_launcher import (  # noqa: PLC0415
+            SERIAL_CONF_CHOICES,
+        )
+        for attr, choices in SERIAL_CONF_CHOICES.items():
+            value = getattr(self, attr)
+            if value not in choices:
+                default = 0 if isinstance(choices[0], int) else ""
+                _log.warning(
+                    "AppConfig: unknown %s %r (valid: %s) — falling back to "
+                    "the Hamlib default",
+                    attr, value, [c for c in choices if c not in ("", 0)],
+                )
+                setattr(self, attr, default)
 
         if self.rigctld_ptt_type not in ("default", "mic", "data"):
             _log.warning(

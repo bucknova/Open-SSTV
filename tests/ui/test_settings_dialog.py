@@ -1147,3 +1147,44 @@ class TestRadioModelCombo:
             assert "built-in list" in dlg._rig_model_combo.toolTip()
         finally:
             rig_models.available_rig_models.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# Issue #90: rigctld serial-line settings
+# ---------------------------------------------------------------------------
+
+
+class TestRigctldSerialLine:
+    def test_combos_load_and_save_config(self, qtbot) -> None:
+        cfg = AppConfig(rig_serial_handshake="None", rig_stop_bits=2)
+        dlg = SettingsDialog(config=cfg, rig_connected=False)
+        qtbot.addWidget(dlg)
+        combos = dlg._serial_conf_combos
+        assert combos["rig_serial_handshake"].currentText() == "None"
+        assert combos["rig_stop_bits"].currentText() == "2"
+        assert combos["rig_serial_parity"].currentText() == "Default"
+
+        combos["rig_dtr_state"].setCurrentIndex(combos["rig_dtr_state"].findData("OFF"))
+        out = dlg.result_config()
+        assert out.rig_serial_handshake == "None"
+        assert out.rig_stop_bits == 2
+        assert out.rig_dtr_state == "OFF"
+        assert out.rig_data_bits == 0
+
+    def test_rts_disabled_under_hardware_handshake(self, dialog: SettingsDialog) -> None:
+        handshake = dialog._serial_conf_combos["rig_serial_handshake"]
+        rts = dialog._serial_conf_combos["rig_rts_state"]
+        assert rts.isEnabled()
+        handshake.setCurrentIndex(handshake.findData("Hardware"))
+        assert not rts.isEnabled()
+        handshake.setCurrentIndex(handshake.findData("None"))
+        assert rts.isEnabled()
+
+    def test_launch_button_passes_serial_conf(self, dialog: SettingsDialog) -> None:
+        handshake = dialog._serial_conf_combos["rig_serial_handshake"]
+        handshake.setCurrentIndex(handshake.findData("None"))
+        dialog._custom_model_id.setValue(1046)
+        with patch("open_sstv.ui.settings_dialog.launch_rigctld") as launch:
+            launch.return_value.pid = 1
+            dialog._launch_rigctld()
+        assert launch.call_args.args[-1] == {"serial_handshake": "None"}
