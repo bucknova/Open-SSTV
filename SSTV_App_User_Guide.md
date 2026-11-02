@@ -624,7 +624,7 @@ Open the settings dialog via **File > Settings** (or the menu shortcut). It has 
 
 **Apply slant correction to final image:** After a complete image is received, the app normally uses the progressive decode result as-is. With this option enabled, a second single-pass decode runs over the full retained audio buffer and applies a global least-squares timing correction (slant correction) to compensate for slight clock-drift between the transmitting station's soundcard and yours. This can straighten images that arrive slightly skewed. However, on weak or noisy signals the correction algorithm has no outlier rejection — false-positive sync detections corrupt the timing fit and produce a result *worse* than the progressive image. Leave this off unless you are receiving strong, clean signals from a station with a known timing drift problem.
 
-**Per-line incremental decode (all modes):** The default decoder since v0.1.24. Instead of reprocessing the full growing audio buffer on every flush (O(N²) CPU), this path decodes each scan line as soon as its sync pulse arrives — roughly 50× less CPU on long modes like Martin M1. All 22 supported modes are covered: Scottie, Martin, PD, Wraase SC2, Pasokon, and Robot 36. Robot 36 additionally benefits from linear (mean) chroma sampling and linear inter-row chroma upsampling, which produces softer, more accurate colour edges than the batch decoder's median + nearest-neighbour copy. The legacy batch decoder is still available as a fallback — uncheck this box if a decode looks wrong and file a bug with the saved audio.
+**Per-line incremental decode (all modes):** The default decoder since v0.1.24. Instead of reprocessing the full growing audio buffer on every flush (O(N²) CPU), this path decodes each scan line as soon as its sync pulse arrives — roughly 50× less CPU on long modes like Martin M1. All 22 supported modes are covered: Scottie, Martin, PD, Wraase SC2, Pasokon, and Robot 36. Robot 36 uses the shared `core.robot36_dsp` sampling and colour-conversion helpers, which are also used by the buffered decoder. The streaming and buffered paths still differ in how they acquire and process the signal. The legacy batch decoder is still available as a fallback — uncheck this box if a decode looks wrong and file a bug with the saved audio.
 
 ![Audio settings tab](docs/screenshots/settings-audio.png)
 
@@ -971,7 +971,7 @@ open-sstv-decode recording.wav -o decoded_image.png
 
 The decoder auto-detects the SSTV mode from the VIS header. If no valid VIS header is found, it exits with code 1 and prints an error to stderr.
 
-> **Note:** `open-sstv-decode` uses the batch decoder (median + PIL colour pipeline for Robot 36). The GUI uses the newer incremental decoder with slowrx-style integer YCbCr → RGB matrix, so Robot 36 colours may differ slightly between `open-sstv-decode` output and the GUI's live decode. Other modes produce bit-identical results across both paths.
+> **Note:** `open-sstv-decode` uses the buffered decoder, while the GUI normally decodes incrementally. Both Robot 36 paths use the shared sampling and colour-conversion helpers in `core.robot36_dsp`; the CLI does not use a separate median + PIL colour pipeline. Signal acquisition, timing and correction settings can still affect the result, so do not assume pixel-identical output from every CLI/GUI comparison.
 
 ---
 
