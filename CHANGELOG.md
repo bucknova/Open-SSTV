@@ -9,6 +9,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.6.19] — 2026-11-02
+
 ### Added
 
 - **Serial-line settings for rigctld.** Settings → Radio now has
