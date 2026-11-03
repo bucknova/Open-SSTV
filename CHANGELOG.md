@@ -9,6 +9,17 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Serial-line settings for rigctld.** Settings → Radio now has
+  Handshake, Data bits, Stop bits, Parity, RTS and DTR, passed to a
+  rigctld that Open-SSTV launches. Before, it only got the port and baud
+  rate, so radios whose Hamlib backend defaults to hardware (RTS/CTS)
+  handshake, such as the Yaesu FT-450D, could time out with no way to
+  fix it in the app. Everything defaults to **Default** (Hamlib's own
+  setting), so existing setups are unchanged. Thanks to Konstantinos
+  Konstas, SV1ONW ([#90](https://github.com/bucknova/Open-SSTV/issues/90)).
+
 ---
 
 ## [0.6.18] — 2026-10-29

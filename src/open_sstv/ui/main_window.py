@@ -170,7 +170,11 @@ from open_sstv.radio.band_plan import (
 from open_sstv.radio.base import ManualRig, Rig, RigConnectionMode
 from open_sstv.radio.exceptions import RigCommandError, RigError
 from open_sstv.radio.rigctld import RigctldClient, is_safe_rigctld_arg
-from open_sstv.radio.rigctld_launcher import launch_rigctld, stop_rigctld
+from open_sstv.radio.rigctld_launcher import (
+    launch_rigctld,
+    serial_conf_from,
+    stop_rigctld,
+)
 from open_sstv.radio.serial_rig import create_serial_rig
 from open_sstv.remote import (
     MIN_TOKEN_LEN,
@@ -3946,6 +3950,7 @@ class MainWindow(QMainWindow):
                     port,
                     self._config.rig_serial_port,
                     self._config.rig_baud_rate,
+                    serial_conf_from(self._config),
                 )
             except FileNotFoundError:
                 self.statusBar().showMessage(

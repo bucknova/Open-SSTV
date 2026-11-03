@@ -445,6 +445,7 @@ Select **"rigctld (Hamlib daemon)"** for the most flexible rig control option. T
 4. Select your **Radio Model** from the dropdown. The list includes popular models from Icom, Kenwood, Yaesu, and Elecraft. If your model isn't listed, enter its Hamlib model number in the "Custom Model ID" field (consult `rigctld --list` for all models).
 5. Set the **Serial Port** to the port your radio is connected to (for example, `/dev/cu.usbserial-1420` on macOS, `/dev/ttyUSB0` on Linux, or `COM3` on Windows).
 6. Set the **Baud Rate** to match your radio's configuration (common values: 9600, 19200, 38400, 115200).
+   - **Serial line** (Handshake, Data bits, Stop bits, Parity, RTS, DTR) is normally left on **Default**, which keeps Hamlib's setting for your radio. Change these only if the radio times out; see Troubleshooting. They apply when Open-SSTV launches rigctld, not to a rigctld you start yourself.
 7. Optionally check **Auto-launch rigctld** to have the app start the daemon for you when you click Connect Rig.
 8. Alternatively, click **Launch rigctld Now** to start the daemon immediately from the settings dialog. The status label will confirm if it started successfully. Use **Stop rigctld** to terminate it.
 9. Click **Test rigctld Connection** to verify the connection. If successful, the dialog will display your radio's current frequency and mode.
@@ -643,6 +644,7 @@ Open the settings dialog via **File > Settings** (or the menu shortcut). It has 
 | rigctld Port | TCP port for rigctld | 4532 |
 | Radio Model | Hamlib model for rigctld (dropdown of common models) | (none) |
 | Custom Model ID | Numeric Hamlib model ID for unlisted radios | 0 |
+| Serial line | Handshake, data bits, stop bits, parity, RTS and DTR for a rigctld this app launches | Default (Hamlib's) |
 | Auto-launch rigctld | Start the daemon automatically when connecting | Off |
 | PTT Delay | Seconds to wait after keying PTT before playing audio (0–2 s) | 0.2 s |
 | Callsign | Your amateur radio callsign (displayed in the toolbar and used in templates) | (empty) |
@@ -1049,6 +1051,7 @@ If either file is missing or empty, the app creates it with default values on fi
 - Check that the host and port in Settings match where rigctld is listening (default: localhost:4532).
 - Use the "Test rigctld Connection" button in Settings to diagnose. The error message will indicate whether it is a connection refused (daemon not running), timeout (wrong host/port), or command error (wrong model or baud rate).
 - On Linux, make sure your user has permission to access the serial port: `sudo usermod -aG dialout $USER` (then log out and back in).
+- If rigctld starts but every command times out, the serial line may not match. Some Hamlib backends (for example the Yaesu FT-450D) default to hardware (RTS/CTS) handshake. In Settings → Radio → **Serial line**, try **Handshake: None**, and match the radio's CAT menu (for example CAT RTS on Yaesu). You can test from a terminal first: `rigctl -m MODEL -r /dev/ttyUSB0 -s 38400 --set-conf=serial_handshake=None f` should print the VFO frequency.
 
 **Rig not connecting (direct serial)**
 

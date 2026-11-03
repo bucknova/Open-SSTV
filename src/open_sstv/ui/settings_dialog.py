@@ -17,6 +17,7 @@ import logging
 import subprocess
 import threading
 from collections.abc import Callable
+from types import SimpleNamespace
 
 import serial.tools.list_ports
 
@@ -33,6 +34,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -61,7 +63,12 @@ from open_sstv.radio.base import RigConnectionMode
 from open_sstv.radio.exceptions import RigError
 from open_sstv.radio.rig_models import available_rig_models
 from open_sstv.radio.rigctld import RigctldClient, is_safe_rigctld_arg
-from open_sstv.radio.rigctld_launcher import launch_rigctld, stop_rigctld
+from open_sstv.radio.rigctld_launcher import (
+    SERIAL_CONF_CHOICES,
+    launch_rigctld,
+    serial_conf_from,
+    stop_rigctld,
+)
 from open_sstv.radio.serial_rig import (
     ICOM_ADDRESSES,
     SERIAL_RIG_PROTOCOLS,
@@ -1400,6 +1407,45 @@ class SettingsDialog(QDialog):
             self._rigctld_baud_combo.setCurrentIndex(idx)
         rigctld_form.addRow("Baud rate:", self._rigctld_baud_combo)
 
+        # Issue #90: serial-line settings.  "Default" passes nothing, so
+        # Hamlib keeps the backend's own value (the pre-#90 behaviour).
+        # Some backends default to RTS/CTS handshake (e.g. FT-450D),
+        # which times out unless the cable and radio menu agree.
+        serial_line = QWidget()
+        serial_grid = QGridLayout(serial_line)
+        serial_grid.setContentsMargins(0, 0, 0, 0)
+        self._serial_conf_combos: dict[str, QComboBox] = {}
+        for i, (attr, label) in enumerate((
+            ("rig_serial_handshake", "Handshake"),
+            ("rig_data_bits", "Data bits"),
+            ("rig_stop_bits", "Stop bits"),
+            ("rig_serial_parity", "Parity"),
+            ("rig_rts_state", "RTS"),
+            ("rig_dtr_state", "DTR"),
+        )):
+            combo = QComboBox()
+            for choice in SERIAL_CONF_CHOICES[attr]:
+                combo.addItem(
+                    "Default" if choice in ("", 0) else str(choice), choice
+                )
+            idx = combo.findData(getattr(self._config, attr))
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+            row, col = divmod(i, 3)
+            serial_grid.addWidget(QLabel(f"{label}:"), row, col * 2)
+            serial_grid.addWidget(combo, row, col * 2 + 1)
+            self._serial_conf_combos[attr] = combo
+        serial_line.setToolTip(
+            "Serial-line settings rigctld uses when this app launches it.\n"
+            "Default keeps the Hamlib backend's own setting.  If the radio\n"
+            "times out, try Handshake: None and match the radio's CAT menu\n"
+            "(e.g. CAT RTS on Yaesu).  RTS is ignored with Hardware handshake."
+        )
+        handshake = self._serial_conf_combos["rig_serial_handshake"]
+        handshake.currentIndexChanged.connect(self._sync_rts_combo)
+        self._sync_rts_combo()
+        rigctld_form.addRow("Serial line:", serial_line)
+
         self._auto_launch = QCheckBox("Auto-launch rigctld on Connect")
         self._auto_launch.setChecked(self._config.auto_launch_rigctld)
         rigctld_form.addRow(self._auto_launch)
@@ -2074,6 +2120,25 @@ class SettingsDialog(QDialog):
 
         self._run_test_in_background(self._flex_test_btn, _work, _done)
 
+    def _sync_rts_combo(self) -> None:
+        """RTS is Hamlib's to drive under Hardware handshake — grey it out."""
+        hardware = (
+            self._serial_conf_combos["rig_serial_handshake"].currentData()
+            == "Hardware"
+        )
+        self._serial_conf_combos["rig_rts_state"].setEnabled(not hardware)
+
+    def _serial_conf_values(self) -> dict[str, object]:
+        """The serial-line combos as ``AppConfig`` attribute values."""
+        return {
+            attr: combo.currentData()
+            for attr, combo in self._serial_conf_combos.items()
+        }
+
+    def _serial_conf(self) -> dict[str, str]:
+        """Hamlib ``-C`` params for the serial-line combos."""
+        return serial_conf_from(SimpleNamespace(**self._serial_conf_values()))
+
     def _launch_rigctld(self) -> None:
         """Spawn a rigctld process with the current radio settings."""
         model_id = self._custom_model_id.value()
@@ -2108,7 +2173,8 @@ class SettingsDialog(QDialog):
             # path from PATH (never the CWD), stderr drained so the daemon
             # can't wedge on a full pipe after MainWindow adopts it.
             self._rigctld_proc = launch_rigctld(
-                model_id, tcp_port, serial_port, baud_rate or 0
+                model_id, tcp_port, serial_port, baud_rate or 0,
+                self._serial_conf(),
             )
             self._rigctld_status.setText(f"rigctld launched (PID {self._rigctld_proc.pid})")
             self._rigctld_status.setStyleSheet("color: green;")
@@ -2499,6 +2565,7 @@ class SettingsDialog(QDialog):
             rig_serial_port=serial_port,
             rig_baud_rate=baud_rate,
             auto_launch_rigctld=self._auto_launch.isChecked(),
+            **self._serial_conf_values(),
             rig_serial_protocol=self._serial_protocol_combo.currentText(),
             rig_civ_address=self._civ_address_spin.value(),
             rig_ptt_line=self._ptt_line_combo.currentData() or "DTR",
